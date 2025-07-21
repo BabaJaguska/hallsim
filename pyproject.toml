@@ -1,0 +1,23 @@
+[build-system]
+requires      = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "hallsim"
+version         = "0.1.0"
+description     = "HallSim: cell-agent simulator of Hallmarks of Aging"
+readme          = "README.md"
+requires-python = ">=3.9"
+dependencies    = [
+  "numpy",
+  "click",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "black", "pre-commit", "flake8"]
+
+[project.urls]
+Documentation = "https://github.com/your‑org/HallSim#readme"
+
+[project.scripts]
+simulate = "hallsim.cli:simulate"
