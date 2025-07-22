@@ -1,15 +1,34 @@
 {
-    "mito_damage": 0.3,
-    "mito_function": 2.1,
-    "mito_enzymes": 0.9,
-    "glycolysis": 1.8,
-    "glycolytic_enzymes": 0.8,
-    "mTOR_integrator_c": 0.1,
-    "mTOR": 0.2,
-    "p53_integrator_c": 0.1,
-    "p53": 0.3,
-    "ros_integrator_c": 0.0,
-    "ROS": 0.4,
-    "AMPK": 0.05
-  }
-  
+  "mito_damage": 0.0,
+  "mito_function": 1.0,
+  "mito_enzymes": 1.0,
+  "glycolysis": 1.0,
+  "glycolytic_enzymes": 1.0,
+  "ATPm": 1.0,
+  "ATPg": 1.0,
+  "ATPr": 1.0,
+  "glucose_uptake": 1.0,
+  "pyruvate": 1.0,
+  "HIF": 0.0,
+
+  "mTOR_integrator_c": 0.0,
+  "mTOR": 1.0,
+  "p53_integrator_c": 0.0,
+  "p53": 0.0,
+  "ros_integrator_c": 0.0,
+  "ROS": 0.0,
+
+  "AMPK": 0.0,
+  "PTEN": 1.0,
+  "AKT": 1.0,
+  "NAD_ratio": 1.0,
+  "SIRT": 1.0,
+  "FOXO": 0.0,
+  "PGC1a": 0.0,
+  "P53a": 0.0,
+  "P53s": 0.0,
+  "NFkB": 0.0,
+
+  "AUTOPHAGY": 0.0,
+  "radical_driver": 0.0
+}
