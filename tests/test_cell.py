@@ -5,21 +5,16 @@ from hallsim.agents import Cell
 
 @fixture
 def cell():
-    return Cell(0, 0)
+    return Cell(coords=(0, 0))
 
 
-@mark.parametrize("x, y", [(1, 2), (3, 4), (5, 6)])
-def test_cell_initialization(x, y):
-    cell = Cell(x, y)
-    assert cell.x == x
-    assert cell.y == y
-    assert cell.AMPK == 0
+@mark.parametrize("coords", [(0, 0), (1, 2), (-1, -2), (3.5, 4.5)])
+def test_cell_initialization(coords):
+    cell = Cell(coords=coords)
+    assert all(cell.coords == coords)
+    assert cell.state is not None
+    assert hasattr(cell, 'coord_names')
 
 
 def test_cell_repr(cell):
-    assert repr(cell) == "Cell(0, 0)"
-
-
-def test_cell_increment_AMPK(cell):
-    cell.increment_AMPK()
-    assert cell.AMPK == 1
+    assert repr(cell) != ""

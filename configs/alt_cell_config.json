@@ -1,0 +1,15 @@
+{
+    "mito_damage": 0.3,
+    "mito_function": 2.1,
+    "mito_enzymes": 0.9,
+    "glycolysis": 1.8,
+    "glycolytic_enzymes": 0.8,
+    "mTOR_integrator_c": 0.1,
+    "mTOR": 0.2,
+    "p53_integrator_c": 0.1,
+    "p53": 0.3,
+    "ros_integrator_c": 0.0,
+    "ROS": 0.4,
+    "AMPK": 0.05
+  }
+  
