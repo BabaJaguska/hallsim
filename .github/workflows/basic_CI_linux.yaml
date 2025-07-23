@@ -22,7 +22,7 @@ jobs:
           node-version: '14'
 
       - name: Install dependencies
-        run: make install
+        run: make install-dev
 
       - name: Run formatter
         run: make format

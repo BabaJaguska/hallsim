@@ -9,7 +9,10 @@ black==25.1.0
 cfgv==3.4.0
     # via pre-commit
 click==8.2.1
-    # via black
+    # via
+    #   -c requirements.txt
+    #   black
+    #   hallsim (pyproject.toml)
 distlib==0.4.0
     # via virtualenv
 filelock==3.18.0
