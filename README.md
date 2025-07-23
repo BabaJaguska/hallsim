@@ -33,9 +33,12 @@ Inspired by conceptual frameworks like [Cohen et al. (2022)](https://pubmed.ncbi
 
 
 
-```make install``` or ```make install-dev``` for developers.
+`make install` or `make install-dev` for developers.
 
-```make test``` will run a series of pytest tests.
+`make test` will run a series of pytest tests.
+
+`make run` will run the default (dummy) simulation, or you can do `simulate basic -n 10`
+cli.py is the where you control the CLI and what options it offers. Right now it's just `simulate basic` and `simulate dummy`.
 
 ---
 
