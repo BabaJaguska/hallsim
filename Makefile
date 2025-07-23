@@ -7,6 +7,7 @@ install:
 install-dev:
 	pip install --upgrade pip
 	pip install -r requirements_dev.txt
+	pip install -e .
 
 format:
 	black --line-length 79 src/
