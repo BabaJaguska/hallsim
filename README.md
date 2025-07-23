@@ -41,15 +41,15 @@ Inspired by conceptual frameworks like [Cohen et al. (2022)](https://pubmed.ncbi
 
 ## 🧰 Dev Instructions
 
-...
+pyproject.toml is the single source of dependendies, compiled when you run `make update`.
 
 ---
 
 ## 🛋️ Roadmap
 
 * [x] JSON-based CellState initialization
-* [...] Structured output (phenotypes?)
-* [...] Port ERiQ to JAX
+* [ ] Structured output (phenotypes?)
+* [ ] Port ERiQ to JAX
 * [ ] Add more models as submodules from literature
 * [ ] Spatial diffusion & ECM modelling
 * [ ] SDE noise terms
