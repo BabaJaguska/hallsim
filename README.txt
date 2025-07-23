@@ -1,4 +1,5 @@
 # HallSim: A Modular, Multi-Scale Simulator for Aging Biology
+[![Basic CI/CD Workflow](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml/badge.svg)](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml)
 
 
 ## 🧬 Background & Motivation
