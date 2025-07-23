@@ -6,7 +6,7 @@ distlib==0.4.0
 equinox==0.13.0
 filelock==3.18.0
 flake8==7.3.0
--e git+https://github.com/BabaJaguska/HallSim.git@abd709c7928a40035eb184b64631c7787c02f9af#egg=hallsim
+-e git+https://github.com/BabaJaguska/HallSim.git@aed4b2f49ad0330b2b6846805c38b5766e367e83#egg=hallsim
 identify==2.6.12
 iniconfig==2.1.0
 jax==0.6.2

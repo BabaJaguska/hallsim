@@ -19,9 +19,9 @@ class CellState:
     mito_enzymes: float  # mitochondrial enzyme levels
     glycolysis: float  # glycolytic flux
     glycolytic_enzymes: float  # glycolytic enzyme levels
-    ATPm: float  # ATP from mitochondria
-    ATPg: float  # ATP from glycolysis
-    ATPr: float  # total ATP available
+    ATP_mito: float  # ATP from mitochondria
+    ATP_gly: float  # ATP from glycolysis
+    ATP_total: float  # total ATP available
     glucose_uptake: float  # extracellular glucose availability
     pyruvate: float  # glycolysis output
     HIF: float  # hypoxia-inducible factor, response to low oxygen
@@ -29,10 +29,13 @@ class CellState:
     # -- Feedback integrators and core nodes --
     mTOR_integrator_c: float
     mTOR: float  # mechanistic target of rapamycin (growth signal)
+    mTOR_activity: float  # mTOR activity level
     p53_integrator_c: float
     p53: float  # tumor suppressor protein, stress response
-    ros_integrator_c: float
+    p53_activity: float
+    ROS_integrator_c: float
     ROS: float  # reactive oxygen species
+    ROS_activity: float  # ROS activity level
 
     # -- Regulatory signals --
     AMPK: float  # cellular energy sensor

@@ -2,8 +2,11 @@ from hallsim.agents import Cell
 from math import isqrt
 import logging
 import click
+import os
 
 logfile = "logs/hallsim.log"
+if not os.path.exists("logs"):
+    os.makedirs("logs")
 logging.basicConfig(
     filename=logfile,
     level=logging.INFO,
@@ -18,7 +21,7 @@ def simulate_basic(n_steps: int = 5):
     logger.info(f"Starting basic simulation for {n_steps} steps.")
     cell = Cell(coords=(0, 0))
     for step in range(n_steps):
-        logger.info("Step {step + 1}:")
+        logger.info(f"Step {step + 1}:")
         logger.info(cell)
         cell.step(step)
 
@@ -44,7 +47,9 @@ def simulate_dummy(num_cells: int = 16):
         f"Created {n_cells} cells in a grid of {n_rows} rows and {n_cols} columns."
     )
 
-    click.echo(f"Grid representation of cells:\n{_ascii_grid(n_rows, n_cols, n_cells)}")
+    click.echo(
+        f"Grid representation of cells:\n{_ascii_grid(n_rows, n_cols, n_cells)}"
+    )
 
 
 def _ascii_grid(rows: int, cols: int, total: int) -> str:

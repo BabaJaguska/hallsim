@@ -57,5 +57,5 @@ pytest==8.4.1
     # via hallsim (pyproject.toml)
 pyyaml==6.0.2
     # via pre-commit
-virtualenv==20.31.2
+virtualenv==20.32.0
     # via pre-commit

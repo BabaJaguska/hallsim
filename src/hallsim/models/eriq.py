@@ -1,4 +1,6 @@
 from hallsim.submodel import Submodel, register_submodel
+import json
+import os
 
 
 @register_submodel("eriq")
@@ -8,8 +10,28 @@ class ERiQ(Submodel):
     Simulates ROS, ATP stress, and mitochondrial dynamics.
     """
 
-    # Maybe add parameters here later
-    # my_param: float = eqx.field()
+    def __init__(self, config_file: str = "configs/eriq_config.json"):
+        super().__init__()
+        self.config_file = config_file
+        self.params = self.read_config()
+
+    def read_config(self) -> dict:
+        """
+        Read the ERiQ configuration from a JSON file.
+        """
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "../../../")
+        )
+        config_path = os.path.join(project_root, self.config_file)
+
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            return config
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Configuration file {config_path} not found."
+            )
 
     def inputs(self) -> set[str]:
         return {
@@ -18,6 +40,7 @@ class ERiQ(Submodel):
             "ROS",
             "glycolysis",
             "glycolytic_enzymes",
+            "ATP_total",
         }
 
     def outputs(self) -> set[str]:
@@ -30,16 +53,13 @@ class ERiQ(Submodel):
             "glycolytic_enzymes",
             # Feedback integrators
             "mTOR",
-            "mTOR_integrator_c",
             "p53",
-            "p53_integrator_c",
             "ROS",
-            "ros_integrator_c",
             # Energy sensors and shared nodes
             "AMPK",
-            "ATPm",
-            "ATPg",
-            "ATPr",
+            "ATP_mito",
+            "ATP_gly",
+            "ATP_total",
             "PGC1a",
             "SIRT",
             "NAD_ratio",
@@ -62,3 +82,9 @@ class ERiQ(Submodel):
         # dummy implementation
         deltas = {key: 0.01 for key in self.outputs()}
         return deltas
+
+    def __repr__(self):
+        return "ERiQ Submodel: Simulates ROS, ATP stress, and mitochondrial dynamics"
+
+    def __str__(self):
+        return "ERiQ Submodel - A model for simulating cellular stress and mitochondrial function"

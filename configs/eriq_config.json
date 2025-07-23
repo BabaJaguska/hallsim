@@ -1,0 +1,22 @@
+{
+    "AKT_SA": 1.0,
+    "AMPK_SA": 1.0,
+    "AUTOPHAGY_SA": 1.0,
+    "FOXO_SA": 1.0,
+    "FREERAD_SA": 1.0,
+    "GLU_SA": 1.0,
+    "GLYCOL_SA": 1.0,
+    "MITO_DMG_RATE_SA": 1.0,
+    "HIF_SA": 1.0,
+    "MDAMAGE_SA": 1.0,
+    "MTOR_SA": 1.0,
+    "NAD_RATE_SA": 1.0,
+    "NFKB_SA": 1.0,
+    "P53_SA": 1.0,
+    "PGC1a_SA": 1.0,
+    "PTEN_SA": 1.0,
+    "PYR_SA": 1.0,
+    "ROS_SA": 1.0,
+    "SIRT_SA": 1.0
+  }
+  
