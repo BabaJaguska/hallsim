@@ -59,13 +59,14 @@ class CellState:
             f"ROS={self.ROS:.3f}, mTOR={self.mTOR:.3f})"
         )
 
-    def apply_updates(self, updates):
+    def apply_updates(self, updates, dt=1.0):
         """
         Apply a dictionary of updates (deltas) to the cell's state.
         """
         for key, value in updates.items():
             if hasattr(self, key):
-                setattr(self, key, getattr(self, key) + value)
+                setattr(self, key, getattr(self, key) + value * dt)
+                # This is a simple forward Euler update; more complex schemes should be implemented
             else:
                 raise AttributeError(f"CellState has no attribute '{key}'")
 
@@ -129,4 +130,6 @@ class Cell:
             delta = model(t, self.state)
             updates.append(delta)
         merged = merge_state_updates(updates, method=method)
-        self.state.apply_updates(merged)
+        # Here we should actually have an ODE solver integrating over time
+        # Currently patched with Euler step
+        self.state.apply_updates(merged, dt=1.0)
