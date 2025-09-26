@@ -33,9 +33,5 @@ class Submodel(ABC):
         pass
 
     @abstractmethod
-    def inputs(self) -> set[str]:
-        pass
-
-    @abstractmethod
     def outputs(self) -> set[str]:
         pass

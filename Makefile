@@ -14,8 +14,8 @@ format:
 	black --line-length 79 tests/
 
 lint:
-	flake8 --ignore E501,E402 src/
-	flake8 --ignore E501,E402 tests/
+	flake8 --ignore E501,E402,W504,W503 src/
+	flake8 --ignore E501,E402,W504,W503 tests/
 
 test:
 	pytest tests/

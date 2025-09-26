@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.StreamHandler())  # Also log to console
 
 
-def simulate_basic(n_steps: int = 50, dt: float = 0.5, keep_trajectory: bool = True):
+def simulate_basic(
+    n_steps: int = 50, dt: float = 0.5, keep_trajectory: bool = True
+):
     """Run a basic simulation for a number of steps."""
     logger.info(f"Starting basic simulation for {n_steps} steps at dt={dt}.")
     logger.info(f"Saving trajectory is set to {keep_trajectory}.")
@@ -28,10 +30,14 @@ def simulate_basic(n_steps: int = 50, dt: float = 0.5, keep_trajectory: bool = T
     cell.step(t0, t1, dt, keep_trajectory=keep_trajectory)
     # logger.info(f"Final cell state after {n_steps} steps: {cell}")
 
-    attributes_to_plot = ["mito_damage", "ATP_mito", "glycolytic_enzymes"]
+    attributes_to_plot = ["mito_damage", "mito_function", "glycolytic_enzymes", 
+                          "glycolisis", "mTOR_activity", "p53_activity", "ROS_activity"]
+    x_to_plot, y_to_plot = "mito_damage", "mito_function"
+    x1_to_plot, y1_to_plot = "p53_activity", "ROS_activity"
     # plot the trajectory of AMPK if available
     if keep_trajectory:
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(18, 6))
+        plt.subplot(1,3,1)
         time_points = [i * dt for i in range(n_steps + 1)]
         for attr in attributes_to_plot:
             if hasattr(cell.state, attr):
@@ -42,12 +48,22 @@ def simulate_basic(n_steps: int = 50, dt: float = 0.5, keep_trajectory: bool = T
         plt.title("Cell State Trajectories")
         plt.legend()
         plt.grid()
+        plt.subplot(1,3,2)
+        plt.plot(getattr(cell.state, x_to_plot), getattr(cell.state, y_to_plot), marker='o')
+        plt.xlabel(x_to_plot)
+        plt.ylabel(y_to_plot)
+        plt.title(f"{y_to_plot} vs {x_to_plot}")
+        plt.grid()
+        plt.subplot(1,3,3)
+        plt.plot(getattr(cell.state, x1_to_plot), getattr(cell.state, y1_to_plot), marker='o', color='orange')
+        plt.xlabel(x1_to_plot)
+        plt.ylabel(y1_to_plot)
+        plt.title(f"{y1_to_plot} vs {x1_to_plot}")
+        plt.grid()
         plt.savefig("cell_trajectory.png")
         plt.show()
     else:
         logger.warning("Trajectory not kept; no plots to display.")
-
-    
 
 
 def simulate_dummy(num_cells: int = 16):

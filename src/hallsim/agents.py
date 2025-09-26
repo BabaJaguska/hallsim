@@ -190,12 +190,13 @@ class Cell:
             self.solver,
             t0=t0,
             t1=t1,
-            dt0=1.0,  # no idea where to start
+            dt0=1e-3,  # initial step size guess
             y0=self.state_dev,
             args=None,
             # save at every integer time step
             saveat=saveat,
-            stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+            stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-6),
+            max_steps=400_000,  # increase if needed for stiff problems
         )
         self.state_dev = tree_map(
             lambda a: jnp.squeeze(jnp.asarray(a)), sol.ys
