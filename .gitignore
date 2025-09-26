@@ -198,3 +198,12 @@ cython_debug/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.bmp
+*.tiff

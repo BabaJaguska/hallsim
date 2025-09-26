@@ -22,6 +22,20 @@ def test_cell_repr(cell):
 
 def test_cell_step(cell):
     initial_state = deepcopy(cell.state)
-    cell.step(t=0.0)
-    assert cell.state != initial_state  # State should change after step
+    cell.step(t0=0.0, t1=10.0, keep_trajectory=False)
+    print(cell.state)  # so this is now arrays for each key
     assert hasattr(cell, "step")  # Ensure step method exists
+    assert cell.state != initial_state  # State should change after step
+
+
+def test_cell_step_trajectory(cell):
+    cell.step(t0=0.0, t1=10.0, keep_trajectory=True)
+    cell_state = cell.state
+    # assure the states are vectors of the same size
+    lengths = [
+        len(getattr(cell_state, key))
+        for key in cell_state.__dataclass_fields__
+    ]
+    assert all(
+        length == lengths[0] for length in lengths
+    ), "All state attributes should have the same length"

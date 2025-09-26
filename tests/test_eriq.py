@@ -23,7 +23,7 @@ def test_eriq_init(eriq_model):
 def test_eriq_call(eriq_model, cell):
     """Test calling the ERiQ model with a Cell instance."""
     t = 2.0  # Example time step
-    state = cell.state
+    state = cell.state.state_to_pytree()
     result = eriq_model(t, state)
     assert isinstance(
         result, dict

@@ -21,7 +21,7 @@ test:
 	pytest tests/
 
 run:
-	simulate basic -n 10
+	simulate basic
 
 update:
 	pip freeze > requirements_freeze.txt

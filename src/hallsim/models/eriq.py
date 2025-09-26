@@ -45,17 +45,14 @@ class ERiQ(Submodel):
 
     def outputs(self) -> set[str]:
         return {
-            # Core mitochondrial and glycolytic states
             "mito_damage",
             "mito_function",
             "mito_enzymes",
             "glycolysis",
             "glycolytic_enzymes",
-            # Feedback integrators
             "mTOR",
             "p53",
             "ROS",
-            # Energy sensors and shared nodes
             "AMPK",
             "ATP_mito",
             "ATP_gly",
@@ -75,16 +72,19 @@ class ERiQ(Submodel):
             "pyruvate",
         }
 
-    def __call__(self, t, state, args=None):
-        """
-        Compute deltas for relevant cell states at time t.
-        """
-        # dummy implementation
-        deltas = {key: 0.01 for key in self.outputs()}
-        return deltas
+    def __call__(self, _t, state, args=None):
+        rate = 0.1
+        return {k: rate * state[k] for k in self.outputs() if k in state}
 
     def __repr__(self):
         return "ERiQ Submodel: Simulates ROS, ATP stress, and mitochondrial dynamics"
 
     def __str__(self):
-        return "ERiQ Submodel - A model for simulating cellular stress and mitochondrial function"
+        out = """
+        ERiQ Submodel - A model for simulating cellular stress and mitochondrial function.
+        Adapted from the MATLAB implementation provided in
+        [Alfego, D., & Kriete, A. (2017).
+        Simulation of cellular energy restriction in quiescence (ERiQ)—a theoretical model for aging.
+        Biology, 6(4), 44.]
+        """
+        return out

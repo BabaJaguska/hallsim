@@ -3,6 +3,7 @@ from math import isqrt
 import logging
 import click
 import os
+from matplotlib import pyplot as plt
 
 logfile = "logs/hallsim.log"
 if not os.path.exists("logs"):
@@ -16,14 +17,37 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.StreamHandler())  # Also log to console
 
 
-def simulate_basic(n_steps: int = 5):
+def simulate_basic(n_steps: int = 50, dt: float = 0.5, keep_trajectory: bool = True):
     """Run a basic simulation for a number of steps."""
-    logger.info(f"Starting basic simulation for {n_steps} steps.")
+    logger.info(f"Starting basic simulation for {n_steps} steps at dt={dt}.")
+    logger.info(f"Saving trajectory is set to {keep_trajectory}.")
+    t0 = 0.0
+    t1 = n_steps * dt
     cell = Cell(coords=(0, 0))
-    for step in range(n_steps):
-        logger.info(f"Step {step + 1}:")
-        logger.info(cell)
-        cell.step(step)
+    logger.info(f"Initial cell state: {cell}")
+    cell.step(t0, t1, dt, keep_trajectory=keep_trajectory)
+    # logger.info(f"Final cell state after {n_steps} steps: {cell}")
+
+    attributes_to_plot = ["mito_damage", "ATP_mito", "glycolytic_enzymes"]
+    # plot the trajectory of AMPK if available
+    if keep_trajectory:
+        plt.figure(figsize=(10, 6))
+        time_points = [i * dt for i in range(n_steps + 1)]
+        for attr in attributes_to_plot:
+            if hasattr(cell.state, attr):
+                values = getattr(cell.state, attr)
+                plt.plot(time_points, values, label=attr)
+        plt.xlabel("Time (step units)")
+        plt.ylabel("Levels")
+        plt.title("Cell State Trajectories")
+        plt.legend()
+        plt.grid()
+        plt.savefig("cell_trajectory.png")
+        plt.show()
+    else:
+        logger.warning("Trajectory not kept; no plots to display.")
+
+    
 
 
 def simulate_dummy(num_cells: int = 16):

@@ -2,8 +2,15 @@ import numpy as np
 import json
 import os
 from dataclasses import dataclass
-from hallsim.submodel import SUBMODEL_REGISTRY, merge_state_updates
+from hallsim.submodel import SUBMODEL_REGISTRY
 from hallsim.models import eriq  # noqa: F401
+import jax
+import jax.numpy as jnp
+from jax.tree_util import tree_map
+import diffrax as dfx
+
+jax.config.update("jax_enable_x64", False)
+# Enable 64-bit precision if needed for stability in ODE solving
 
 
 @dataclass
@@ -53,22 +60,40 @@ class CellState:
     AUTOPHAGY: float  # cleanup/recycling activity
     radical_driver: float  # free radical generator input
 
-    def __repr__(self):
-        return (
-            f"CellState(AMPK={self.AMPK:.3f}, p53={self.p53:.3f}, "
-            f"ROS={self.ROS:.3f}, mTOR={self.mTOR:.3f})"
-        )
+    def state_to_pytree(self):
+        """
+        Convert CellState to a PyTree-compatible structure for jax/diffrax.
+        """
+        return {
+            field: jnp.asarray(getattr(self, field))
+            for field in self.__dataclass_fields__
+        }
 
-    def apply_updates(self, updates, dt=1.0):
+    def pytree_to_state(self, pytree):
         """
-        Apply a dictionary of updates (deltas) to the cell's state.
+        Update CellState from a PyTree-compatible structure.
         """
-        for key, value in updates.items():
+        for key, value in pytree.items():
             if hasattr(self, key):
-                setattr(self, key, getattr(self, key) + value * dt)
-                # This is a simple forward Euler update; more complex schemes should be implemented
+                setattr(self, key, value)
             else:
                 raise AttributeError(f"CellState has no attribute '{key}'")
+
+    def broadcast_to_full_derivative(self, partial_deriv):
+        """
+        Given a partial derivative dictionary, broadcast it to a full derivative
+        dictionary matching all CellState fields, filling missing fields with zeros.
+        """
+        full_deriv = {
+            field: jnp.zeros_like(getattr(self, field))
+            for field in self.__dataclass_fields__
+        }
+        for key, value in partial_deriv.items():
+            if key in full_deriv:
+                full_deriv[key] = value
+            else:
+                raise AttributeError(f"CellState has no attribute '{key}'")
+        return full_deriv
 
 
 class Cell:
@@ -80,6 +105,12 @@ class Cell:
         self.coords = np.array(coords, dtype=float)
         self.coord_names = ["x", "y"]
         self.state = self.init_cell_state(state_file)
+        self.state_dev = self.state.state_to_pytree()
+        self.zero_template = tree_map(jnp.zeros_like, self.state_dev)
+        self.solver = dfx.Tsit5()
+        self.models = {
+            name: SUBMODEL_REGISTRY[name]() for name in SUBMODEL_REGISTRY
+        }
 
     def init_cell_state(self, state_file):
         """
@@ -111,25 +142,77 @@ class Cell:
         )
         return f"Cell at ({coord_str}) with {self.state}"
 
-    def step(self, t: float, model_names: list[str] = None, method="add"):
+    def step(
+        self,
+        t0: float,
+        t1: float,
+        dt: float = 1.0,
+        model_names: list[str] = None,
+        keep_trajectory=False,
+    ):
         """
         Executes one simulation step for a single cell.
 
         Args:
             t: current time step (float)
-            model_names: list of submodel names to apply (default: all registered)
-            method: merge strategy for variable updates ("add" or "mean")
+            model_names: list of submodel names to apply. If None, applies all available models.
         """
-        model_names = model_names or list(SUBMODEL_REGISTRY)
-        updates = []
+        if model_names is None:
+            model_names = list(self.models.keys())
+        model_fns = [self.models[name].__call__ for name in model_names]
 
-        # Parallelize?
-        for name in model_names:
-            model_cls = SUBMODEL_REGISTRY[name]
-            model = model_cls()
-            delta = model(t, self.state)
-            updates.append(delta)
-        merged = merge_state_updates(updates, method=method)
-        # Here we should actually have an ODE solver integrating over time
-        # Currently patched with Euler step
-        self.state.apply_updates(merged, dt=1.0)
+        def rhs(t, y, args=None):
+            parts = []
+            for f in model_fns:
+                partial = f(
+                    t, y, args
+                )  # must return dict[str, jnp.ndarray] = derivatives (not dt-scaled)
+                # pad missing keys with zeros so shapes match y
+                full = {
+                    k: (
+                        jnp.asarray(partial[k], dtype=y[k].dtype)
+                        if k in partial
+                        else self.zero_template[k]
+                    )
+                    for k in y
+                }
+                parts.append(full)
+            return tree_map(lambda *xs: sum(xs), *parts)
+
+        if keep_trajectory:
+            saveat = dfx.SaveAt(ts=jnp.arange(t0, t1 + dt, dt))
+        else:
+            saveat = dfx.SaveAt(t1=True)
+
+        term = dfx.ODETerm(rhs)
+        sol = dfx.diffeqsolve(
+            term,
+            self.solver,
+            t0=t0,
+            t1=t1,
+            dt0=1.0,  # no idea where to start
+            y0=self.state_dev,
+            args=None,
+            # save at every integer time step
+            saveat=saveat,
+            stepsize_controller=dfx.PIDController(rtol=1e-5, atol=1e-5),
+        )
+        self.state_dev = tree_map(
+            lambda a: jnp.squeeze(jnp.asarray(a)), sol.ys
+        )
+        self.state.pytree_to_state(
+            self.state_dev
+        )  # mirror back only when you actually need host values
+        # otherwise keep everything on device
+
+
+def apply_kick(state_dict, kick_dict):
+    full = {
+        k: (
+            jnp.asarray(kick_dict[k], dtype=state_dict[k].dtype)
+            if k in kick_dict
+            else jnp.zeros_like(state_dict[k])
+        )
+        for k in state_dict
+    }
+    return tree_map(jnp.add, state_dict, full)

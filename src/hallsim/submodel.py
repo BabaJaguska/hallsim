@@ -39,31 +39,3 @@ class Submodel(ABC):
     @abstractmethod
     def outputs(self) -> set[str]:
         pass
-
-
-def merge_state_updates(
-    state_updates: list[dict], method: str = "add"
-) -> dict:
-    """
-    Merges updates to cell state variables from multiple submodels
-    in case of parallel execution or multiple updates to the same state variables.
-    Each update is a dict mapping variable names to their >> deltas <<.
-    Supported methods: "add" (default), "mean"
-    """
-    merged = {}
-    contributions = {}
-
-    for update in state_updates:
-        for k, v in update.items():
-            if k not in merged:
-                merged[k] = v
-                contributions[k] = 1
-            else:
-                merged[k] += v
-                contributions[k] += 1
-
-    if method == "mean":
-        for k in merged:
-            merged[k] /= contributions[k]
-
-    return merged
