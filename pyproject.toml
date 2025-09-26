@@ -11,6 +11,8 @@ requires-python = ">=3.9"
 dependencies    = [
   "numpy",
   "click",
+  "jax",
+  "diffrax"
 ]
 
 [project.optional-dependencies]

@@ -6,5 +6,59 @@
 #
 click==8.2.1
     # via hallsim (pyproject.toml)
-numpy==2.3.1
+diffrax==0.7.0
     # via hallsim (pyproject.toml)
+equinox==0.13.1
+    # via
+    #   diffrax
+    #   lineax
+    #   optimistix
+jax==0.7.2
+    # via
+    #   diffrax
+    #   equinox
+    #   hallsim (pyproject.toml)
+    #   lineax
+    #   optimistix
+jaxlib==0.7.2
+    # via jax
+jaxtyping==0.3.2
+    # via
+    #   diffrax
+    #   equinox
+    #   lineax
+    #   optimistix
+lineax==0.0.8
+    # via
+    #   diffrax
+    #   optimistix
+ml-dtypes==0.5.3
+    # via
+    #   jax
+    #   jaxlib
+numpy==2.3.1
+    # via
+    #   hallsim (pyproject.toml)
+    #   jax
+    #   jaxlib
+    #   ml-dtypes
+    #   scipy
+opt-einsum==3.4.0
+    # via jax
+optimistix==0.0.10
+    # via diffrax
+scipy==1.16.2
+    # via
+    #   jax
+    #   jaxlib
+typing-extensions==4.15.0
+    # via
+    #   diffrax
+    #   equinox
+    #   lineax
+    #   optimistix
+wadler-lindig==0.1.7
+    # via
+    #   diffrax
+    #   equinox
+    #   jaxtyping
