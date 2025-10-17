@@ -190,10 +190,9 @@ class Cell:
             self.solver,
             t0=t0,
             t1=t1,
-            dt0=1e-3,  # initial step size guess
+            dt0=1e-3,
             y0=self.state_dev,
             args=None,
-            # save at every integer time step
             saveat=saveat,
             stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-6),
             max_steps=400_000,  # increase if needed for stiff problems
@@ -207,13 +206,16 @@ class Cell:
         # otherwise keep everything on device
 
 
-def apply_kick(state_dict, kick_dict):
-    full = {
-        k: (
-            jnp.asarray(kick_dict[k], dtype=state_dict[k].dtype)
-            if k in kick_dict
-            else jnp.zeros_like(state_dict[k])
-        )
-        for k in state_dict
-    }
-    return tree_map(jnp.add, state_dict, full)
+    def apply_kick(self, kick_dict):
+        state_dict = self.state.state_to_pytree()
+        full = {
+            k: (
+                jnp.asarray(kick_dict[k], dtype=state_dict[k].dtype)
+                if k in kick_dict
+                else jnp.zeros_like(state_dict[k])
+            )
+            for k in state_dict
+        }
+        new_state = tree_map(lambda a, b: a + b, state_dict, full)
+        self.state.pytree_to_state(new_state)
+

@@ -103,7 +103,7 @@ class ERiQ(Submodel):
         # P53
         P53a_SA = params["P53_SA"]
         P53_Base = params["P53_base"]
-        P53_Act = params["P53_Act"]
+        P53_Act = params["P53_Act"] # p53 activator; change between 0.4 and 4
         P53s = 0.3 * (P53_Base - AKT - NFkB + 0.5 * ROS) * P53_Act
         P53a = state["p53_activity"] - P53s
         P53 = P53a_SA * (P53a + P53s)
@@ -141,7 +141,7 @@ class ERiQ(Submodel):
 
         # mitochondrial damage drive
         MITO_DMG_RATE_SA = params["MITO_DMG_RATE_SA"]
-        MDR = params["MDR"]
+        MDR = params["MDR"] # mito damage rate, vary between 1.5*1e-3 and 2.6*1e-3.
         MD = MITO_DMG_RATE_SA * (
             abs(ATP_mito + ROS) * MDR + 0.0001 * (ROS - 0.8)
         )
@@ -189,9 +189,11 @@ class ERiQ(Submodel):
         ROS_integrator_c = state["ROS_integrator_c"]
         p53_activity = state["p53_activity"]
 
-        gain2 = 0.05
+        gain2 = 0.01 # speed of response; mitochnodria respond slower than glycolysis
+        # original says 0.05, but that makes mitochnodria behave erratically
         ry = 0.0
         rx = 0.0
+        k3 = 1.0
 
         # Dynamics
         MDAMAGE_SA = self.params["MDAMAGE_SA"]
@@ -200,8 +202,8 @@ class ERiQ(Submodel):
             gain2 * (obs["r2"] + mito_enzymes) - 0.02 * obs["SIRT"]
         )
         dMito_enzymes = (
-            -obs["ATP_mito"] - (obs["r2"] - mito_damage) * mito_enzymes
-        )
+            -k3 * obs["ATP_mito"] - (obs["r2"] - mito_damage) * mito_enzymes
+        ) # change of mito enzymes is proportional to mitochnodrial damage (?)
 
         GLYCOL_SA = self.params["GLYCOL_SA"]
         dGlycolysis = GLYCOL_SA * (
