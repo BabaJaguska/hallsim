@@ -205,7 +205,6 @@ class Cell:
         )  # mirror back only when you actually need host values
         # otherwise keep everything on device
 
-
     def apply_kick(self, kick_dict):
         state_dict = self.state.state_to_pytree()
         full = {
@@ -218,4 +217,3 @@ class Cell:
         }
         new_state = tree_map(lambda a, b: a + b, state_dict, full)
         self.state.pytree_to_state(new_state)
-

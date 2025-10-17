@@ -31,15 +31,21 @@ def simulate_basic(
 
     # logger.info(f"Final cell state after {n_steps} steps: {cell}")
 
-    attributes_to_plot = ["mito_damage", "mito_function",
-                          "p53_activity", "ROS_activity",
-                          "mito_enzymes", "glycolysis", "mTOR_activity"]
+    attributes_to_plot = [
+        "mito_damage",
+        "mito_function",
+        "p53_activity",
+        "ROS_activity",
+        "mito_enzymes",
+        "glycolysis",
+        "mTOR_activity",
+    ]
     x_to_plot, y_to_plot = "mito_damage", "mito_function"
     x1_to_plot, y1_to_plot = "p53_activity", "ROS_activity"
-   
+
     if keep_trajectory:
         plt.figure(figsize=(18, 9))
-        plt.subplot(2,3,1)
+        plt.subplot(2, 3, 1)
         time_points = [i * dt for i in range(n_steps + 1)]
         for attr in attributes_to_plot:
             if hasattr(cell.state, attr):
@@ -50,32 +56,56 @@ def simulate_basic(
         plt.title("Cell State Trajectories")
         plt.legend()
         plt.grid()
-        plt.subplot(2,3,2)
-        plt.plot(getattr(cell.state, x_to_plot), getattr(cell.state, y_to_plot), marker='o')
+        plt.subplot(2, 3, 2)
+        plt.plot(
+            getattr(cell.state, x_to_plot),
+            getattr(cell.state, y_to_plot),
+            marker="o",
+        )
         plt.xlabel(x_to_plot)
         plt.ylabel(y_to_plot)
         plt.title(f"{y_to_plot} vs {x_to_plot}")
         plt.grid()
-        plt.subplot(2,3,3)
-        plt.plot(getattr(cell.state, x1_to_plot), getattr(cell.state, y1_to_plot), marker='o', color='orange')
+        plt.subplot(2, 3, 3)
+        plt.plot(
+            getattr(cell.state, x1_to_plot),
+            getattr(cell.state, y1_to_plot),
+            marker="o",
+            color="orange",
+        )
         plt.xlabel(x1_to_plot)
         plt.ylabel(y1_to_plot)
         plt.title(f"{y1_to_plot} vs {x1_to_plot}")
         plt.grid()
-        plt.subplot(2,3,4)
-        plt.plot(getattr(cell.state, "mito_function"), getattr(cell.state, "glycolysis"), marker='o', color='green')
+        plt.subplot(2, 3, 4)
+        plt.plot(
+            getattr(cell.state, "mito_function"),
+            getattr(cell.state, "glycolysis"),
+            marker="o",
+            color="green",
+        )
         plt.xlabel("mito_function")
         plt.ylabel("glycolysis")
         plt.title("glycolysis vs mito_function")
         plt.grid()
-        plt.subplot(2,3,5)
-        plt.plot(getattr(cell.state, "mTOR_activity"), getattr(cell.state, "glycolysis"), marker='o', color='red')
+        plt.subplot(2, 3, 5)
+        plt.plot(
+            getattr(cell.state, "mTOR_activity"),
+            getattr(cell.state, "glycolysis"),
+            marker="o",
+            color="red",
+        )
         plt.xlabel("mTOR_activity")
         plt.ylabel("glycolysis")
         plt.title("glycolysis vs mTOR_activity")
         plt.grid()
-        plt.subplot(2,3,6)
-        plt.plot(getattr(cell.state, "mito_function"), getattr(cell.state, "mito_enzymes"), marker='o', color='purple')
+        plt.subplot(2, 3, 6)
+        plt.plot(
+            getattr(cell.state, "mito_function"),
+            getattr(cell.state, "mito_enzymes"),
+            marker="o",
+            color="purple",
+        )
         plt.xlabel("mito_function")
         plt.ylabel("mito_enzymes")
         plt.title("mito_enzymes vs mito_function")

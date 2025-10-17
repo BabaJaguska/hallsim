@@ -30,6 +30,7 @@ class Func(eqx.Module):
     def __call__(self, t, y, args):
         return self.out_scale * self.mlp(y)
 
+
 class NeuralODE(eqx.Module):
     func: Func
 
@@ -43,29 +44,30 @@ class NeuralODE(eqx.Module):
             diffrax.Tsit5(),
             t0=ts[0],
             t1=ts[-1],
-            dt0=ts[1]-ts[0],
+            dt0=ts[1] - ts[0],
             y0=y0,
             stepsize_controller=diffrax.PIDController(rtol=1e-3, atol=1e-6),
             saveat=diffrax.SaveAt(ts=ts),
         )
         return solution.ys
-    
+
+
 # toy dataset of nonlinear oscillators
-def _get_data(ts, * , key):
+def _get_data(ts, *, key):
     y0 = jrandom.uniform(key, (2,), minval=0.1, maxval=1)
 
-    def f(_t,y,args):
-        x = y / (1+y**2)
+    def f(_t, y, args):
+        x = y / (1 + y**2)
         # x = jnp.sin(y)
-        # x  = 1/(y**2+1) 
+        # x  = 1/(y**2+1)
         out = jnp.stack([x[1], -x[0]], axis=-1)
         # lotka voltera
         # out1 = 0.5 * y[0] - 0.2 * y[0] * y[1]
         # out2 = -0.5 * y[1] + 0.2 * y[0] * y[1]
         # out = jnp.stack([out1, out2], axis=-1)
-        
+
         return out
-    
+
     solver = diffrax.Tsit5()
     dt0 = 0.1
     saveat = diffrax.SaveAt(ts=ts)
@@ -80,16 +82,19 @@ def _get_data(ts, * , key):
     )
     return sol.ys
 
+
 def get_data(dataset_size, *, key):
     ts = jnp.linspace(0, 10, 200)
     key = jrandom.split(key, dataset_size)
     ys = jax.vmap(lambda key: _get_data(ts, key=key))(key)
     return ts, ys
-    
+
 
 def dataloader(arrays, batch_size, *, key):
     dataset_size = arrays[0].shape[0]
-    assert all(array.shape[0] == dataset_size for array in arrays), "All arrays must have the same first dimension size."
+    assert all(
+        array.shape[0] == dataset_size for array in arrays
+    ), "All arrays must have the same first dimension size."
     indices = jnp.arange(dataset_size)
     while True:
         perm = jrandom.permutation(key, indices)
@@ -102,17 +107,18 @@ def dataloader(arrays, batch_size, *, key):
             start = end
             end = start + batch_size
 
+
 def main(
-        dataset_size=256,
-        batch_size=64,
-        lr=1e-3,
-        steps_strategy=(500, 500),
-        length_strategy=(0.1, 1),
-        width_size=64,
-        depth=2,
-        seed=12345,
-        plot=True,
-        print_every=100,
+    dataset_size=256,
+    batch_size=64,
+    lr=1e-3,
+    steps_strategy=(500, 500),
+    length_strategy=(0.1, 1),
+    width_size=64,
+    depth=2,
+    seed=12345,
+    plot=True,
+    print_every=100,
 ):
     key = jrandom.PRNGKey(seed)
     data_key, model_key, loader_key = jrandom.split(key, 3)
@@ -127,16 +133,16 @@ def main(
 
     @eqx.filter_value_and_grad
     def grad_loss(model, ti, yi):
-        y_pred = jax.vmap(model, in_axes=(None, 0))(ti, yi[:,0])
-        return jnp.mean((y_pred - yi)**2)
-    
+        y_pred = jax.vmap(model, in_axes=(None, 0))(ti, yi[:, 0])
+        return jnp.mean((y_pred - yi) ** 2)
+
     @eqx.filter_jit
     def make_step(ti, yi, model, opt_state):
         loss, grads = grad_loss(model, ti, yi)
         updates, opt_state = optimizer.update(grads, opt_state)
         model = eqx.apply_updates(model, updates)
         return loss, model, opt_state
-    
+
     for steps, length in zip(steps_strategy, length_strategy):
         opt_state = optimizer.init(eqx.filter(model, eqx.is_inexact_array))
         _ts = ts[: int(length * length_size)]
@@ -149,7 +155,7 @@ def main(
             loss, model, opt_state = make_step(_ts, yi, model, opt_state)
             end = time.time()
             if step % print_every == 0:
-                print(f"step {step}, loss {loss}, time {end-start}")
+                print(f"step {step}, loss {loss}, time {end - start}")
 
     if plot:
         plt.plot(ts, ys[0, :, 0], c="dodgerblue", label="Real")
@@ -165,12 +171,10 @@ def main(
     return ts, ys, model
 
 
-
 if __name__ == "__main__":
-    ts, ys, model = main(steps_strategy=(500, 500), 
-                         length_strategy=(0.1, 1),
-                         print_every=100)
-    
+    ts, ys, model = main(
+        steps_strategy=(500, 500), length_strategy=(0.1, 1), print_every=100
+    )
 
     ts_long = jnp.linspace(0, 20, 200)
     y_hat_long = model(ts_long, ys[0, 0])
