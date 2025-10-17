@@ -1,5 +1,5 @@
 import click
-from hallsim.simulate import simulate_basic, simulate_dummy
+from hallsim.simulate import simulate_basic, simulate_dummy, simulate_with_kick
 import inspect
 
 
@@ -31,6 +31,18 @@ def basic(num_steps):
 
 
 @simulate.command()
-def lol():
-    """A placeholder command for future use."""
-    print("LOL command executed. This is a placeholder.")
+def ls():
+    """List all available simulation commands."""
+    commands = simulate.commands.keys()
+    click.echo("Available simulation commands:")
+    for cmd in commands:
+        click.echo(f"- {cmd}")
+
+
+@simulate.command()
+@click.option(
+    "--num-steps", "-n", type=int, default=_DEFAULT_STEPS, show_default=True
+)
+def kick(num_steps):
+    """Simulate with perturbation (kick)."""
+    simulate_with_kick()

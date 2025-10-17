@@ -142,24 +142,32 @@ class Cell:
         )
         return f"Cell at ({coord_str}) with {self.state}"
 
-    def step(
+    def integrate(
         self,
         t0: float,
         t1: float,
         dt: float = 1.0,
+        y0: dict = None,
         model_names: list[str] = None,
         keep_trajectory=False,
     ):
         """
-        Executes one simulation step for a single cell.
+        Executes a simulation from time t0 to t1 for a single cell.
 
         Args:
-            t: current time step (float)
+            t0: start time (float)
+            t1: end time (float)
+            dt: time step for saving trajectory (float)
+            y0: initial state as a PyTree (dict of jnp.ndarrays)
             model_names: list of submodel names to apply. If None, applies all available models.
+            keep_trajectory: whether to save the full trajectory or just the final state.
         """
         if model_names is None:
             model_names = list(self.models.keys())
         model_fns = [self.models[name].__call__ for name in model_names]
+
+        if y0 is None:
+            y0 = self.state_dev
 
         def rhs(t, y, args=None):
             parts = []
@@ -191,29 +199,115 @@ class Cell:
             t0=t0,
             t1=t1,
             dt0=1e-3,
-            y0=self.state_dev,
+            y0=y0,
             args=None,
             saveat=saveat,
             stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-6),
             max_steps=400_000,  # increase if needed for stiff problems
         )
-        self.state_dev = tree_map(
-            lambda a: jnp.squeeze(jnp.asarray(a)), sol.ys
+
+        return sol.ts, sol.ys
+
+    def integrate_with_kick(
+        self,
+        t0: float,
+        t1: float,
+        tk: float,
+        kick_dict: dict,
+        dt: float = 1.0,
+        model_names: list[str] = None,
+        keep_trajectory=False,
+    ):
+        """
+        Executes a simulation for a single cell with an instantaneous kick at time tk.
+
+        Args:
+            t0: start time (float)
+            t1: end time (float)
+            tk: time of the kick (float)
+            kick_dict: dictionary of state variable >> changes << to apply at time tk
+            model_names: list of submodel names to apply. If None, applies all available models.
+            keep_trajectory: whether to save the full trajectory or just the final state.
+        """
+        ts1, ys1 = self.integrate(
+            t0,
+            tk,
+            dt,
+            model_names=model_names,
+            keep_trajectory=keep_trajectory,
         )
+
+        state1 = tree_map(lambda a: jnp.squeeze(jnp.asarray(a)), ys1)
+
+        state1_last = tree_map(lambda a: jnp.squeeze(jnp.asarray(a[-1])), ys1)
+
+        print("State before kick at time tk:", state1_last)
+        print(
+            f"Shape and type of state1_last: {type(state1_last)}, {state1_last.keys()}"
+        )
+
+        # apply kick at time tk
+        new_state = apply_kick(state1_last, kick_dict)
+        ts2, ys2 = self.integrate(
+            tk,
+            t1,
+            dt,
+            y0=new_state,
+            model_names=model_names,
+            keep_trajectory=keep_trajectory,
+        )
+
+        state2 = tree_map(lambda a: jnp.squeeze(jnp.asarray(a)), ys2)
+
+        # concatenate states
+        if keep_trajectory:
+            ts = jnp.concatenate([ts1, ts2[1:]])
+            ys = tree_map(
+                lambda a, b: jnp.concatenate([a, b[1:]]), state1, state2
+            )
+        else:
+            ts = jnp.array([ts1[0], ts2[-1]])
+            ys = tree_map(
+                lambda a, b: jnp.array([a[-1], b[-1]]), state1, state2
+            )
+
+        return ts, ys
+
+    def evolve(self, ts, ys):
+        """
+        Update the cell state based on the results of integration.
+
+        Args:
+            ts: time points (jnp.ndarray)
+            ys: states at each time point (PyTree of jnp.ndarrays)
+        """
+
+        self.ts = ts
+        self.state_dev = tree_map(lambda a: jnp.squeeze(jnp.asarray(a)), ys)
+
         self.state.pytree_to_state(
             self.state_dev
-        )  # mirror back only when you actually need host values
-        # otherwise keep everything on device
+        )  # only now mirroring back to cell.state
 
-    def apply_kick(self, kick_dict):
-        state_dict = self.state.state_to_pytree()
-        full = {
-            k: (
-                jnp.asarray(kick_dict[k], dtype=state_dict[k].dtype)
-                if k in kick_dict
-                else jnp.zeros_like(state_dict[k])
-            )
-            for k in state_dict
-        }
-        new_state = tree_map(lambda a, b: a + b, state_dict, full)
-        self.state.pytree_to_state(new_state)
+
+def apply_kick(state_dict, kick_dict):
+    """
+    Apply an instantaneous kick to the cell state.
+    Args:
+        state_dict: current cell state as a PyTree (dict of jnp.ndarrays), instantaneous
+        kick_dict: dictionary of state variable >> changes << to apply
+
+    Returns:
+        new_state: updated cell state after applying the kick
+    """
+
+    full = {
+        k: (
+            jnp.asarray(kick_dict[k], dtype=state_dict[k].dtype)
+            if k in kick_dict
+            else jnp.zeros_like(state_dict[k])
+        )
+        for k in state_dict
+    }
+    new_state = tree_map(lambda a, b: a + b, state_dict, full)
+    return new_state

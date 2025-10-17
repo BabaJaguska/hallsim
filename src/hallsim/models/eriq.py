@@ -191,7 +191,7 @@ class ERiQ(Submodel):
         ROS_integrator_c = state["ROS_integrator_c"]
         p53_activity = state["p53_activity"]
 
-        gain2 = 0.01  # speed of response; mitochnodria respond slower than glycolysis
+        gain2 = 0.02  # speed of response; mitochnodria respond slower than glycolysis
         # original says 0.05, but that makes mitochnodria behave erratically
         ry = 0.0
         rx = 0.0

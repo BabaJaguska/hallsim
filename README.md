@@ -35,7 +35,8 @@ Traditional approaches to modeling aging have been reductionist. Inspired by con
 
 `make test` will run a series of pytest tests.
 
-`make run` will run the default (dummy) simulation, or you can do `simulate basic`
+`make run` will run the default simulation, or you can do `simulate basic` (mitochondrial damage sim)
+or `simulate kick` to add a step perturbation to the basic simulation.
 cli.py is your entry point, where you control the CLI and what options it offers.
 
 ---
