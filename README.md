@@ -54,7 +54,7 @@ pyproject.toml is the single source of dependendies, compiled when you run `make
 * [x] Make a model factory and cell agent wrapper
 * [x] Port ERiQ to JAX
 * [x] Allow generic NeuralODE training 
-* [ ] Add more models as submodules from literature
+* [ ] Add more models as submodules from literature, and/or make EriQ quantitative
 * [ ] Enable SBML and other standardized format support
 * [ ] Expose higher level input (hallmarks) and output (phenotypes)
 * [ ] Add SDE noise terms
@@ -68,7 +68,13 @@ This project is licensed under the MIT License.
 
 ---
 
-## 🙏 Acknowledgments
+## 🙏 References
+
+Alfego, D., & Kriete, A. (2017). Simulation of cellular energy restriction in quiescence (ERiQ)—a theoretical model for aging. Biology, 6(4), 44.
+
+Cohen, Alan A., et al. "A complex systems approach to aging biology." Nature aging 2.7 (2022): 580-591.
+
+
 
 
 
