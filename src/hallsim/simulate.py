@@ -18,7 +18,7 @@ logger.addHandler(logging.StreamHandler())  # Also log to console
 
 
 def simulate_basic(
-    n_steps: int = 300, dt: float = 0.5, keep_trajectory: bool = True
+    n_steps: int = 250, dt: float = 0.5, keep_trajectory: bool = True
 ):
     """Run a basic simulation for a number of steps."""
     logger.info(f"Starting basic simulation for {n_steps} steps at dt={dt}.")
@@ -71,11 +71,11 @@ def plot_trajectory(cell: Cell, n_steps: int, dt: float):
     attributes_to_plot = [
         "mito_damage",
         "mito_function",
-        "p53_activity",
+        # "p53_activity",
         "ROS_activity",
         "mito_enzymes",
         "glycolysis",
-        "mTOR_activity",
+        # "mTOR_activity",
         # "test_field1",
         # "test_field2",
     ]
@@ -102,13 +102,13 @@ def plot_trajectory_and_relations(cell: Cell, n_steps: int, dt: float):
     attributes_to_plot = [
         "mito_damage",
         "mito_function",
-        "p53_activity",
+        # "p53_activity",
         "ROS_activity",
         "mito_enzymes",
         "glycolysis",
-        "mTOR_activity",
-        # "test_field1",
-        # "test_field2",
+        # "mTOR_activity",
+        "test_field1",
+        "test_field2",
     ]
     x_to_plot, y_to_plot = "mito_damage", "mito_function"
     x1_to_plot, y1_to_plot = "p53_activity", "ROS_activity"
@@ -119,7 +119,15 @@ def plot_trajectory_and_relations(cell: Cell, n_steps: int, dt: float):
     for attr in attributes_to_plot:
         if hasattr(cell.state, attr):
             values = getattr(cell.state, attr)
-            plt.plot(time_points, values, label=attr)
+            if attr == "test_field1" or attr == "test_field2":
+                plt.plot(
+                    time_points,
+                    values + 1.2,
+                    label=attr,
+                    linestyle="--",
+                )
+            else:
+                plt.plot(time_points, values, label=attr)
     plt.xlabel("Time (step units)")
     plt.ylabel("Levels")
     plt.title("Cell State Trajectories")

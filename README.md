@@ -12,10 +12,10 @@ Traditional approaches to modeling aging have been reductionist. Inspired by con
 ## 🌟 Project Goals
 
 * Build a modular, multi-scale agent-based simulator
-* Allow plug-and-play modules (ODE/SBML) with exposed high level abstractions corresponding to 12 hallmarks of aging
+* Allow plug-and-play modules with exposed high level abstractions corresponding to 12 hallmarks of aging
 * Incorporate an LLM layer helping integrate new modules in a semi-automated way
 * Enable simulation of aging trajectories, interventions, and emergent phenotypes
-* Eventually serve as an in-silico testbed for perturbations (radiation, caloric restriction, therapies, etc.)
+* Serve as an in-silico testbed for perturbations (radiation, caloric restriction, therapies, etc.)
 
 ---
 

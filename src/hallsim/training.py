@@ -6,7 +6,6 @@ import optax
 import equinox as eqx
 from hallsim.models.neuralode import NeuralODESubModel
 import diffrax
-import pickle
 from matplotlib import pyplot as plt
 
 
@@ -73,14 +72,16 @@ def train_neural_ode(
     width_size=64,
     depth=2,
     lr=1e-3,
-    steps_strategy=(500, 500),
+    steps_strategy=(500, 1000),
     length_strategy=(0.1, 1),
     batch_size=64,
     seed=123,
 ):
     key = jax.random.PRNGKey(seed)
     model_key, loader_key = jax.random.split(key)
-    model_temp = NeuralODESubModel(fields, width_size, depth, key=model_key)
+    model_temp = NeuralODESubModel(
+        fields, width_size, depth, key=model_key, load_weights=False
+    )
     model = NeuralODEArray(model_temp)
     optimizer = optax.adam(lr)
 
@@ -130,15 +131,6 @@ def save_model(model, path="trained_neuralode.pkl"):
     eqx.tree_serialise_leaves(path, model.func)
 
 
-def load_model(
-    path="trained_neuralode.pkl", fields=["mito_damage", "mito_function"]
-):
-    with open(path, "rb") as f:
-        leaves = pickle.load(f)
-    dummy = NeuralODESubModel(fields)
-    return eqx.tree_deserialise_leaves(dummy, leaves)
-
-
 if __name__ == "__main__":
     ts = jnp.linspace(0, 10, 100)
     key = jax.random.PRNGKey(42)
@@ -156,9 +148,12 @@ if __name__ == "__main__":
     save_model(trained_model)
 
     # Test it
-    y_pred = trained_model(ts, ys[0, 0])
-    plt.plot(ts, ys[0, :, 0], label="true")
-    plt.plot(ts, y_pred[:, 0], label="predicted", linestyle="--")
-    plt.legend()
-    plt.savefig("training_result.png")
+    ts_longer = jnp.linspace(0, 20, 200)
+    ys0 = jnp.array([0.5, 0.5])
+    y_pred = trained_model(ts_longer, ys0)
+    plt.plot(ts_longer, y_pred)
+    plt.title("Trained Neural ODE Prediction")
+    plt.xlabel("Time")
+    plt.ylabel("Variables")
+    plt.legend(["Var 1", "Var 2"])
     plt.show()

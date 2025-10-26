@@ -31,7 +31,12 @@ class NeuralODESubModel(Submodel):
     fields: list
 
     def __init__(
-        self, fields=None, width_size=64, depth=2, key=jax.random.PRNGKey(0)
+        self,
+        fields=None,
+        width_size=64,
+        depth=2,
+        key=jax.random.PRNGKey(0),
+        load_weights=True,
     ):
         if fields is None:
             # Default to a small subset of cell state
@@ -39,9 +44,8 @@ class NeuralODESubModel(Submodel):
         self.fields = fields
         self.key = key
         self.func = Func(len(fields), width_size, depth, key=key)
-        # print("Before loading weights:", jax.tree_util.tree_leaves(self.func.mlp))
-        # self.load_weights("trained_neuralode.pkl")
-        # print("After loading weights:", jax.tree_util.tree_leaves(self.func.mlp))
+        if load_weights:
+            self.load_weights("trained_neuralode.pkl")
 
     def __call__(
         self, t: float, state: Dict[str, float], args=None
@@ -59,6 +63,4 @@ class NeuralODESubModel(Submodel):
         return output_set
 
     def load_weights(self, weights_path):
-        self.func.mlp = eqx.tree_deserialise_leaves(
-            weights_path, self.func.mlp
-        )
+        self.func = eqx.tree_deserialise_leaves(weights_path, self.func)
