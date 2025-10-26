@@ -3,13 +3,18 @@ import json
 import os
 from dataclasses import dataclass
 from hallsim.submodel import SUBMODEL_REGISTRY
-from hallsim.models import eriq  # noqa: F401
+from hallsim.models import eriq, neuralode  # noqa: F401
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_map
 import diffrax as dfx
+import logging
 
+logger = logging.getLogger(__name__)
 jax.config.update("jax_enable_x64", False)
+logger.addHandler(logging.StreamHandler())
+
+
 # Enable 64-bit precision if needed for stability in ODE solving
 
 
@@ -59,6 +64,8 @@ class CellState:
     # -- System-wide effects --
     AUTOPHAGY: float  # cleanup/recycling activity
     radical_driver: float  # free radical generator input
+    test_field1: float  # placeholder for testing
+    test_field2: float  # placeholder for testing
 
     def state_to_pytree(self):
         """
@@ -111,6 +118,9 @@ class Cell:
         self.models = {
             name: SUBMODEL_REGISTRY[name]() for name in SUBMODEL_REGISTRY
         }
+        logger.info(
+            f"Initialized Cell with models: {list(self.models.keys())}"
+        )
 
     def init_cell_state(self, state_file):
         """

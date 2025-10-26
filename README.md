@@ -22,9 +22,10 @@ Traditional approaches to modeling aging have been reductionist. Inspired by con
 ### 🛠️ Architecture:
 
 * Each Cell has a `CellState` representing internal biology
-* Multiple Submodels (e.g., ERiQ) plug into a Cell
+* Multiple Submodels (e.g., ERiQ, neuralode) plug into a Cell
 * Cells reside on a 2D grid (expandable to 3D, need to add spatial dynamics)
-* Simulation operates through `Diffrax` ODE integration                           |
+* Simulation operates through `Diffrax` ODE integration
+* Models of unknown dynamics or surrogate models can be trained as a NeuralODE using `optax` and `equinox`
 
 ---
 
@@ -50,13 +51,14 @@ pyproject.toml is the single source of dependendies, compiled when you run `make
 ## 🛋️ Roadmap
 
 * [x] JSON-based CellState initialization
+* [x] Make a model factory and cell agent wrapper
 * [x] Port ERiQ to JAX
+* [x] Allow generic NeuralODE training 
 * [ ] Add more models as submodules from literature
-* [ ] Spatial diffusion & ECM modelling
-* [ ] Structured input (hallmarks) and output (phenotypes)
-* [ ] SDE noise terms
-* [ ] Add SBML support
-* [ ] Add 3D support, perhaps through PysiCell/CAX integration
+* [ ] Enable SBML and other standardized format support
+* [ ] Expose higher level input (hallmarks) and output (phenotypes)
+* [ ] Add SDE noise terms
+* [ ] Add 3D support for spatial diffusion & ECM modelling (CAX or PhysiCell integration? Vertex models?)
 
 ---
 

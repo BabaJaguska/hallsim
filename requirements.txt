@@ -4,6 +4,12 @@
 #
 #    pip-compile --output-file=requirements.txt pyproject.toml
 #
+absl-py==2.3.1
+    # via
+    #   chex
+    #   optax
+chex==0.1.91
+    # via optax
 click==8.2.1
     # via hallsim (pyproject.toml)
 diffrax==0.7.0
@@ -11,17 +17,23 @@ diffrax==0.7.0
 equinox==0.13.1
     # via
     #   diffrax
+    #   hallsim (pyproject.toml)
     #   lineax
     #   optimistix
 jax==0.7.2
     # via
+    #   chex
     #   diffrax
     #   equinox
     #   hallsim (pyproject.toml)
     #   lineax
+    #   optax
     #   optimistix
 jaxlib==0.7.2
-    # via jax
+    # via
+    #   chex
+    #   jax
+    #   optax
 jaxtyping==0.3.2
     # via
     #   diffrax
@@ -38,21 +50,28 @@ ml-dtypes==0.5.3
     #   jaxlib
 numpy==2.3.1
     # via
+    #   chex
     #   hallsim (pyproject.toml)
     #   jax
     #   jaxlib
     #   ml-dtypes
+    #   optax
     #   scipy
 opt-einsum==3.4.0
     # via jax
+optax==0.2.6
+    # via hallsim (pyproject.toml)
 optimistix==0.0.10
     # via diffrax
 scipy==1.16.2
     # via
     #   jax
     #   jaxlib
+toolz==1.1.0
+    # via chex
 typing-extensions==4.15.0
     # via
+    #   chex
     #   diffrax
     #   equinox
     #   lineax

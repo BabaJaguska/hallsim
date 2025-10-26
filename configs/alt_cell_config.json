@@ -33,5 +33,7 @@
   "NFkB": 0.0,
 
   "AUTOPHAGY": 0.0,
-  "radical_driver": 0.0
+  "radical_driver": 0.0,
+  "test_field1": 4,
+  "test_field2": 10
 }

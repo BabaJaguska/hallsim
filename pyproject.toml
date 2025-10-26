@@ -12,7 +12,9 @@ dependencies    = [
   "numpy",
   "click",
   "jax",
-  "diffrax"
+  "diffrax",
+  "optax",
+  "equinox"
 ]
 
 [project.optional-dependencies]

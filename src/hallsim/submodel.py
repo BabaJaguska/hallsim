@@ -10,6 +10,7 @@ def register_submodel(name):
     """
     Decorator to register a submodel class under a given name.
     Enables plugin-style discovery and dynamic construction.
+    Registers a model when the module is imported.
     """
 
     def wrapper(cls):

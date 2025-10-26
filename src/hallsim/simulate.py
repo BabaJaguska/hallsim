@@ -76,6 +76,8 @@ def plot_trajectory(cell: Cell, n_steps: int, dt: float):
         "mito_enzymes",
         "glycolysis",
         "mTOR_activity",
+        # "test_field1",
+        # "test_field2",
     ]
 
     plt.figure(figsize=(18, 9))
@@ -84,6 +86,10 @@ def plot_trajectory(cell: Cell, n_steps: int, dt: float):
         if hasattr(cell.state, attr):
             values = getattr(cell.state, attr)
             plt.plot(time_points, values, label=attr)
+        else:
+            logger.warning(
+                f"Cell state does not have attribute '{attr}' to plot."
+            )
     plt.xlabel("Time (step units)")
     plt.ylabel("Levels")
     plt.title("Cell State Trajectories")
@@ -101,6 +107,8 @@ def plot_trajectory_and_relations(cell: Cell, n_steps: int, dt: float):
         "mito_enzymes",
         "glycolysis",
         "mTOR_activity",
+        # "test_field1",
+        # "test_field2",
     ]
     x_to_plot, y_to_plot = "mito_damage", "mito_function"
     x1_to_plot, y1_to_plot = "p53_activity", "ROS_activity"
