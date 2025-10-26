@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import equinox as eqx
 from hallsim.submodel import Submodel, register_submodel
 from typing import Dict
+import os
 
 
 class Func(eqx.Module):
@@ -37,6 +38,7 @@ class NeuralODESubModel(Submodel):
         depth=2,
         key=jax.random.PRNGKey(0),
         load_weights=True,
+        weights_path=None,
     ):
         if fields is None:
             # Default to a small subset of cell state
@@ -45,7 +47,14 @@ class NeuralODESubModel(Submodel):
         self.key = key
         self.func = Func(len(fields), width_size, depth, key=key)
         if load_weights:
-            self.load_weights("trained_neuralode.pkl")
+            if weights_path is None:
+                weights_path = "trained_neuralode.pkl"
+            if os.path.exists(weights_path):
+                self.load_weights(weights_path)
+            else:
+                print(
+                    f"Warning: Weights file {weights_path} not found. Using randomly initialized weights."
+                )
 
     def __call__(
         self, t: float, state: Dict[str, float], args=None
