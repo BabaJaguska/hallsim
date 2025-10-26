@@ -3,26 +3,26 @@
 
 ## 🧬 Background & Motivation
 
-Aging is a complex, network-level phenomenon. Its "hallmarks" — such as mitochondrial dysfunction, genomic instability, and altered intercellular communication — do not act in isolation. Instead, they form dense webs of feedback and crosstalk.
+Aging is a complex, network-level phenomenon. Its hallmarks — such as mitochondrial dysfunction, genomic instability, and altered intercellular communication — do not act in isolation. Instead, they form dense webs of feedback and crosstalk.
 
-Traditional approaches to modeling aging have been reductionist. Inspired by conceptual frameworks like [Cohen et al. (2022)](https://pubmed.ncbi.nlm.nih.gov/37117782/), HallSim aims to embrace complex systems theory and explore emergent properties of aging arising from loss of resilience across multiple sub-systems.
+Traditional approaches to modeling aging have been reductionist. Inspired by conceptual frameworks like Cohen et al. (2022) [1], HallSim aims to embrace complex systems theory and explore emergent properties of aging arising from loss of resilience across multiple sub-systems.
 
 ---
 
 ## 🌟 Project Goals
 
 * Build a modular, multi-scale agent-based simulator
-* Allow plug-and-play modules with exposed high level abstractions corresponding to 12 hallmarks of aging
+* Allow plug-and-play modules with exposed high level abstractions corresponding to 12 hallmarks of aging [2]
 * Incorporate an LLM layer helping integrate new modules in a semi-automated way
 * Enable simulation of aging trajectories, interventions, and emergent phenotypes
 * Serve as an in-silico testbed for perturbations (radiation, caloric restriction, therapies, etc.)
 
 ---
 
-### 🛠️ Architecture:
+## 🛠️ Architecture:
 
 * Each Cell has a `CellState` representing internal biology
-* Multiple Submodels (e.g., ERiQ, neuralode) plug into a Cell
+* Multiple Submodels (e.g., ERiQ, neuralode) plug into a Cell [3]
 * Cells reside on a 2D grid (expandable to 3D, need to add spatial dynamics)
 * Simulation operates through `Diffrax` ODE integration
 * Models of unknown dynamics or surrogate models can be trained as a NeuralODE using `optax` and `equinox`
@@ -68,11 +68,11 @@ This project is licensed under the MIT License.
 
 ---
 
-## 🙏 References
+## References
 
-Alfego, D., & Kriete, A. (2017). Simulation of cellular energy restriction in quiescence (ERiQ)—a theoretical model for aging. Biology, 6(4), 44.
-
-Cohen, Alan A., et al. "A complex systems approach to aging biology." Nature aging 2.7 (2022): 580-591.
+1. Cohen, Alan A., et al. "A complex systems approach to aging biology." Nature aging 2.7 (2022): 580-591.
+2. López-Otín, Carlos, et al. "Hallmarks of aging: An expanding universe." Cell 186.2 (2023): 243-278.
+3. Alfego, D., & Kriete, A. (2017). Simulation of cellular energy restriction in quiescence (ERiQ)—a theoretical model for aging. Biology, 6(4), 44.
 
 
 
