@@ -65,3 +65,28 @@ def test_hallmark_effect_on_model_params(sample_cell):
     print("New Parameters:", new_parameters)
     assert original_parameters != new_parameters
     # assert original_parameters == new_parameters  # This line is intended to fail for testing purposes
+
+
+@mark.parametrize("hallmark_name", list(HALLMARK_REGISTRY.keys()))
+@mark.parametrize("delta", [-0.4, 0.3])
+def test_intervene(sample_cell, hallmark_name, delta):
+    """Test the intervene method on hallmarks within a cell."""
+    cell = sample_cell
+    hallmark = cell.hallmarks[hallmark_name]
+    original_handle = hallmark.handle
+
+    # Intervene to increase handle
+    new_hallmark = hallmark.intervene(delta)
+    assert new_hallmark.handle == min(1.0, original_handle + delta)
+
+    original_parameters = {}
+    for model in cell.models.values():
+        original_parameters[model] = deepcopy(model.params)
+
+    cell.apply_hallmarks()
+    new_parameters = {}
+    for model in cell.models.values():
+        new_parameters[model] = model.params
+
+    assert original_parameters != new_parameters
+    # Intervene to decrease handle
