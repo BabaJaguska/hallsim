@@ -108,13 +108,19 @@ class Cell:
     An individual cell agent with spatial coordinates and internal biological state.
     """
 
-    def __init__(self, coords=(0, 0), state_file="default_cell_config.json"):
+    def __init__(
+        self,
+        coords=(0, 0),
+        state_file="default_cell_config.json",
+        hallmarks=None,
+    ):
         self.coords = np.array(coords, dtype=float)
         self.coord_names = ["x", "y"]
         self.state = self.init_cell_state(state_file)
         self.state_dev = self.state.state_to_pytree()
         self.zero_template = tree_map(jnp.zeros_like, self.state_dev)
         self.solver = dfx.Tsit5()
+        self.hallmarks = hallmarks if hallmarks is not None else {}
         self.models = {
             name: SUBMODEL_REGISTRY[name]() for name in SUBMODEL_REGISTRY
         }
@@ -298,6 +304,21 @@ class Cell:
         self.state.pytree_to_state(
             self.state_dev
         )  # only now mirroring back to cell.state
+
+    def apply_hallmarks(self):
+        """
+        Update model parameters based on current hallmark states.
+        """
+
+        merged_params = {}
+
+        for hallmark_name, hallmark in self.hallmarks.items():
+            params = hallmark.get_parameter_values()
+            for key, value in params.items():
+                merged_params[key] = value
+
+        for model in self.models.values():
+            model.update_parameters(**merged_params)
 
 
 def apply_kick(state_dict, kick_dict):

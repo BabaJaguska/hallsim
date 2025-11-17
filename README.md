@@ -15,7 +15,8 @@ Traditional approaches to modeling aging have been reductionist. Inspired by con
 * Allow plug-and-play modules with exposed high level abstractions corresponding to 12 hallmarks of aging [2]
 * Incorporate an LLM layer helping integrate new modules in a semi-automated way
 * Enable simulation of aging trajectories, interventions, and emergent phenotypes
-* Serve as an in-silico testbed for perturbations (radiation, caloric restriction, therapies, etc.)
+* Serve as an educational tool
+* Somewhere down the road become an in-silico testbed for perturbations (radiation, caloric restriction, therapies, etc.)
 
 ---
 
@@ -26,6 +27,7 @@ Traditional approaches to modeling aging have been reductionist. Inspired by con
 * Cells reside on a 2D grid (expandable to 3D, need to add spatial dynamics)
 * Simulation operates through `Diffrax` ODE integration
 * Models of unknown dynamics or surrogate models can be trained as a NeuralODE using `optax` and `equinox`
+* Hallmarks are a high level input, allowing a directional interface through a 0-1 handle specifying the level to which a hallmark is activated
 
 ---
 
@@ -54,9 +56,10 @@ pyproject.toml is the single source of dependendies, compiled when you run `make
 * [x] Make a model factory and cell agent wrapper
 * [x] Port ERiQ to JAX
 * [x] Allow generic NeuralODE training 
+* [x] Expose higher level input (hallmarks) 
 * [ ] Add more models as submodules from literature, and/or make EriQ quantitative
 * [ ] Enable SBML and other standardized format support
-* [ ] Expose higher level input (hallmarks) and output (phenotypes)
+* [ ] Expose higher level output (phenotypes)
 * [ ] Add SDE noise terms
 * [ ] Add 3D support for spatial diffusion & ECM modelling (CAX or PhysiCell integration? Vertex models?)
 

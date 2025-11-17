@@ -4,6 +4,7 @@ import equinox as eqx
 from hallsim.submodel import Submodel, register_submodel
 from typing import Dict
 import os
+import json
 
 
 class Func(eqx.Module):
@@ -30,6 +31,7 @@ class Func(eqx.Module):
 class NeuralODESubModel(Submodel):
     func: Func
     fields: list
+    model_name: str = "NeuralODE"
 
     def __init__(
         self,
@@ -39,12 +41,15 @@ class NeuralODESubModel(Submodel):
         key=jax.random.PRNGKey(0),
         load_weights=True,
         weights_path=None,
+        config_file=None,
     ):
         if fields is None:
             # Default to a small subset of cell state
             fields = ["test_field1", "test_field2"]
         self.fields = fields
         self.key = key
+        self.config_file = config_file
+        self.params = self.read_config()
         self.func = Func(len(fields), width_size, depth, key=key)
         if load_weights:
             if weights_path is None:
@@ -55,6 +60,23 @@ class NeuralODESubModel(Submodel):
                 print(
                     f"Warning: Weights file {weights_path} not found. Using randomly initialized weights."
                 )
+
+    def read_config(self):
+        if self.config_file is None:
+            return {}
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "../../../")
+        )
+        config_path = os.path.join(project_root, self.config_file)
+
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            return config
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Configuration file {config_path} not found."
+            )
 
     def __call__(
         self, t: float, state: Dict[str, float], args=None

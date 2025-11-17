@@ -14,6 +14,7 @@ class ERiQ(Submodel):
         super().__init__()
         self.config_file = config_file
         self.params = self.read_config()
+        self.model_name = "ERiQ"
 
     def read_config(self) -> dict:
         """

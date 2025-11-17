@@ -1,4 +1,8 @@
 from abc import ABC, abstractmethod
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Global registry for all known submodels
 # ⚠️ Populated automatically via the @register_submodel decorator at import time.
@@ -36,3 +40,41 @@ class Submodel(ABC):
     @abstractmethod
     def outputs(self) -> set[str]:
         pass
+
+    def update_parameters(self, **params):
+        """
+        Required for making hallmark handles effective.
+        Update model parameters dynamically.
+        Supports both dict-style and attribute-style params.
+        """
+        if isinstance(getattr(self, "params", None), dict):
+            for key, value in params.items():
+                if key in self.params:
+                    logging.info(f"Updating parameter {key} to {value}")
+                    self.params[key] = value
+                else:
+                    logging.warning(
+                        f"Parameter {key} not found in model {self.model_name} parameters."
+                    )
+                    logging.info(
+                        "Available parameters: "
+                        + ", ".join(self.params.keys())
+                    )
+        else:
+            for key, value in params.items():
+                if hasattr(self.params, key):
+                    logging.info(f"Updating parameter {key} to {value}")
+                    setattr(self.params, key, value)
+                else:
+                    available = (
+                        self.params.__dict__.keys()
+                        if hasattr(self.params, "__dict__")
+                        else dir(self.params)
+                    )
+                    logging.warning(
+                        f"Parameter {key} not found in model {self.model_name} parameters."
+                    )
+                    logging.info(
+                        "Available parameters: "
+                        + ", ".join(map(str, available))
+                    )
