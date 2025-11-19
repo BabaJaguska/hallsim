@@ -53,7 +53,7 @@ class NeuralODESubModel(Submodel):
         self.func = Func(len(fields), width_size, depth, key=key)
         if load_weights:
             if weights_path is None:
-                weights_path = "trained_neuralode.pkl"
+                weights_path = "trained_neuralode_example.pkl"
             if os.path.exists(weights_path):
                 self.load_weights(weights_path)
             else:

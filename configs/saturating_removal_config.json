@@ -1,0 +1,5 @@
+{
+    "eta_damage_production_rate": 2,      
+    "beta_max_repair_capacity": 0.1,       
+    "K_SR": 1.0
+}

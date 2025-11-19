@@ -3,7 +3,7 @@ import json
 import os
 from dataclasses import dataclass
 from hallsim.submodel import SUBMODEL_REGISTRY
-from hallsim.models import eriq, neuralode  # noqa: F401
+from hallsim.models import eriq, neuralode, saturating_removal  # noqa: F401
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_map
@@ -66,6 +66,7 @@ class CellState:
     radical_driver: float  # free radical generator input
     test_field1: float  # placeholder for testing
     test_field2: float  # placeholder for testing
+    damage_D: float  # accumulated cellular damage (Uri Alon model)
 
     def state_to_pytree(self):
         """
@@ -222,6 +223,8 @@ class Cell:
             max_steps=400_000,  # increase if needed for stiff problems
         )
 
+        self._evolve(sol.ts, sol.ys)
+
         return sol.ts, sol.ys
 
     def integrate_with_kick(
@@ -287,9 +290,11 @@ class Cell:
                 lambda a, b: jnp.array([a[-1], b[-1]]), state1, state2
             )
 
+        self._evolve(ts, ys)
+
         return ts, ys
 
-    def evolve(self, ts, ys):
+    def _evolve(self, ts, ys):
         """
         Update the cell state based on the results of integration.
 

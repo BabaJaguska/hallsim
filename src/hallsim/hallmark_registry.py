@@ -138,11 +138,38 @@ def create_nutrient_sensing_dysregulation_hallmark(
     )
 
 
+def create_cellular_senescence_hallmark(handle: float = 0.0) -> Hallmark:
+    """
+    Factory function to create a genomic instability hallmark.
+
+    This hallmark increases DNA damage production rate in the damage_repair model.
+
+    Args:
+        handle: Severity level [0, 1]. 0 = healthy, 1 = severe instability
+
+    Returns:
+        Hallmark instance configured for genomic instability
+    """
+    return hallmark_factory(
+        name="Genomic Instability",
+        handle=handle,
+        description="DNA damage accumulation due to genomic instability",
+        parameter_mappings={
+            # Increase damage production rate (alpha) with hallmark severity
+            "eta_damage_rate": lambda h: 0.5
+            + h * 2.0,  # ranges from 0.5 to 2.5
+        },
+        state_associations={"damage_D"},
+        # eta comes from saturating_removal model which is sorta generic damage removal
+    )
+
+
 # Registry of all defined hallmarks
 HALLMARK_REGISTRY = {
     "Mitochondrial Dysfunction": create_mitochondrial_dysfunction_hallmark,
     "Disabled Autophagy": create_disabled_autophagy_hallmark,
     "Deregulated Nutrient Sensing": create_nutrient_sensing_dysregulation_hallmark,
+    "Genomic Instability": create_cellular_senescence_hallmark,
 }
 
 

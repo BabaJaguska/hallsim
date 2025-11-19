@@ -46,7 +46,13 @@ cli.py is your entry point, where you control the CLI and what options it offers
 
 ## 🧰 Dev Instructions
 
-pyproject.toml is the single source of dependendies, compiled when you run `make update`.
+- `pyproject.toml` is the single source of dependencies. These are compiled when you run `make update`.
+
+- To add a model, create a new `.py` file in `src/hallsim/models/`. Optionally, add its dedicated JSON config file under `configs/`.
+
+- If the model introduces new state variables, add them both to `default_cell_config.json` and to the `Cell` class.
+
+Note: Models are aggregated on an additive basis in the ODE rhs. If your model's effect is supposed to be multiplicative with other models, well, there's gonna be more work.  
 
 ---
 

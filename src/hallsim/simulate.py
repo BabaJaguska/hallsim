@@ -27,8 +27,7 @@ def simulate_basic(
     t1 = n_steps * dt
     cell = Cell(coords=(0, 0))
     logger.info(f"Initial cell state: {cell}")
-    ts, ys = cell.integrate(t0, t1, dt, keep_trajectory=keep_trajectory)
-    cell.evolve(ts, ys)
+    cell.integrate(t0, t1, dt, keep_trajectory=keep_trajectory)
     # logger.info(f"Final cell state after {n_steps} steps: {cell}")
     if keep_trajectory:
         plot_trajectory_and_relations(cell, n_steps, dt)
@@ -56,10 +55,9 @@ def simulate_with_kick(
     }
 
     logger.info(f"Initial cell state: {cell}")
-    ts, ys = cell.integrate_with_kick(
+    cell.integrate_with_kick(
         t0, t1, tk, kick_dict, dt, keep_trajectory=keep_trajectory
     )
-    cell.evolve(ts, ys)
     # logger.info(f"Final cell state after {n_steps} steps: {cell}")
     if keep_trajectory:
         plot_trajectory(cell, n_steps, dt)
@@ -70,7 +68,8 @@ def simulate_with_kick(
 def plot_trajectory(cell: Cell, n_steps: int, dt: float):
     attributes_to_plot = [
         "mito_damage",
-        "mito_function",
+        # "mito_function",
+        "damage_D",
         # "p53_activity",
         "ROS_activity",
         "mito_enzymes",
@@ -106,12 +105,13 @@ def plot_trajectory_and_relations(cell: Cell, n_steps: int, dt: float):
         "ROS_activity",
         "mito_enzymes",
         "glycolysis",
+        "damage_D",
         # "mTOR_activity",
         "test_field1",
         "test_field2",
     ]
     x_to_plot, y_to_plot = "mito_damage", "mito_function"
-    x1_to_plot, y1_to_plot = "p53_activity", "ROS_activity"
+    x1_to_plot, y1_to_plot = "ROS_activity", "p53_activity"
 
     plt.figure(figsize=(18, 9))
     plt.subplot(2, 3, 1)

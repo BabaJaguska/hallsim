@@ -35,5 +35,7 @@
   "AUTOPHAGY": 0.0,
   "radical_driver": 0.0,
   "test_field1": 0.1,
-  "test_field2": 0.6
+  "test_field2": 0.6,
+
+  "damage_D": 0.5
 }
