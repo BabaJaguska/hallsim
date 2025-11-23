@@ -29,6 +29,7 @@ Traditional approaches to modeling aging have been reductionist. Inspired by con
 * Models of unknown dynamics or surrogate models can be trained as a NeuralODE using `optax` and `equinox`
 * Hallmarks are a high level input, allowing a directional interface through a 0-1 handle specifying the level to which a hallmark is activated
 
+![HallSim Architecture](https://github.com/BabaJaguska/hallsim/blob/master/hallsim_architecture.png?raw=true)
 ---
 
 ## 🚀 Getting Started
