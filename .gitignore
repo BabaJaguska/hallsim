@@ -211,3 +211,6 @@ cython_debug/
 
 *.pkl
 *.mp4
+
+# Allow specific image
+!hallsim_architecture.png
