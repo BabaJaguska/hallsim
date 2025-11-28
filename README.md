@@ -7,6 +7,10 @@ Aging is a complex, network-level phenomenon. Its hallmarks — such as mitochon
 
 Traditional approaches to modeling aging have been reductionist. Inspired by conceptual frameworks like Cohen et al. (2022) [1], HallSim aims to embrace complex systems theory and explore emergent properties of aging arising from loss of resilience across multiple sub-systems.
 
+Existing bio simulation tools and model repositories provide standardized formats and simulation capabilities for individual dynamical models, but they generally lack support for composable model libraries — i.e., reusable modules with defined high-level interfaces that can be assembled into heterogeneous larger multi-scale dynamical systems.
+
+HallSim’s goal is to enable compositional co-simulation of reusable systems-biology modules, with a focus on aging biology.
+
 ---
 
 ## 🌟 Project Goals
@@ -30,6 +34,7 @@ Traditional approaches to modeling aging have been reductionist. Inspired by con
 * Hallmarks are a high level input, allowing a directional interface through a 0-1 handle specifying the level to which a hallmark is activated
 
 ![HallSim Architecture](https://github.com/BabaJaguska/hallsim/blob/master/hallsim_architecture.png?raw=true)
+
 ---
 
 ## 🚀 Getting Started
@@ -64,10 +69,11 @@ Note: Models are aggregated on an additive basis in the ODE rhs. If your model's
 * [x] Port ERiQ to JAX
 * [x] Allow generic NeuralODE training 
 * [x] Expose higher level input (hallmarks) 
-* [ ] Add more models as submodules from literature, and/or make EriQ quantitative
+* [x] Add more models as submodules from literature
 * [ ] Enable SBML and other standardized format support
 * [ ] Expose higher level output (phenotypes)
-* [ ] Add SDE noise terms
+* [ ] Define composability formalisms and improve integration layer
+* [ ] Potentially repackage models to encourage reusability
 * [ ] Add 3D support for spatial diffusion & ECM modelling (CAX or PhysiCell integration? Vertex models?)
 
 ---
