@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from hallsim.process import Port, PortRole, Process
+from hallsim.process import Port, PortRole, Process, ProcessKind
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +165,56 @@ def validate_topology(
                     errors.append(
                         f"Exclusive conflict: store path {store_path!r} is EXCLUSIVE "
                         f"in {exclusive_owners[store_path]!r} but EVOLVED in {proc_name!r}"
+                    )
+
+    # Check process kind / port role compatibility
+    for proc_name, proc in processes.items():
+        topo = topology.get(proc_name, {})
+        for port_name, port in proc.ports_schema().items():
+            # Continuous processes must not write to LATCHED ports
+            if proc.kind == ProcessKind.CONTINUOUS and port.role == PortRole.LATCHED:
+                errors.append(
+                    f"Process {proc_name!r} is CONTINUOUS but port {port_name!r} "
+                    f"is LATCHED. Only DISCRETE/EVENT processes may write LATCHED ports."
+                )
+            # Discrete/event processes must not write to EVOLVED/EXCLUSIVE ports
+            if proc.kind in (ProcessKind.DISCRETE, ProcessKind.EVENT):
+                if port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
+                    errors.append(
+                        f"Process {proc_name!r} is {proc.kind.value.upper()} but port "
+                        f"{port_name!r} is {port.role.value.upper()}. "
+                        f"DISCRETE/EVENT processes should use LATCHED ports for output."
+                    )
+
+    # Check that DISCRETE processes declare dt_step
+    for proc_name, proc in processes.items():
+        if proc.kind == ProcessKind.DISCRETE and proc.dt_step is None:
+            errors.append(
+                f"Process {proc_name!r} is DISCRETE but has no dt_step. "
+                f"Set dt_step to the interval between update calls (in seconds)."
+            )
+
+    # Check LATCHED port conflicts: no continuous process writes, but also
+    # check that LATCHED paths are not mixed with EVOLVED/EXCLUSIVE
+    latched_paths: dict[str, str] = {}  # store_path → proc_name
+    for proc_name, proc in processes.items():
+        topo = topology.get(proc_name, {})
+        for port_name, port in proc.ports_schema().items():
+            if port.role == PortRole.LATCHED:
+                store_path = topo.get(port_name, port_name)
+                latched_paths[store_path] = proc_name
+
+    for proc_name, proc in processes.items():
+        topo = topology.get(proc_name, {})
+        for port_name, port in proc.ports_schema().items():
+            if port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
+                store_path = topo.get(port_name, port_name)
+                if store_path in latched_paths:
+                    errors.append(
+                        f"Store path {store_path!r} is LATCHED by "
+                        f"{latched_paths[store_path]!r} but "
+                        f"{port.role.value.upper()} by {proc_name!r}. "
+                        f"LATCHED paths cannot also be EVOLVED/EXCLUSIVE."
                     )
 
     return errors

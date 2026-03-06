@@ -129,8 +129,8 @@ def _store_port_map(
 
 
 def _writers(entries: list[_PortEntry]) -> list[_PortEntry]:
-    """Entries whose role produces derivatives."""
-    return [e for e in entries if e.port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)]
+    """Entries whose role produces derivatives or deltas."""
+    return [e for e in entries if e.port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -315,7 +315,7 @@ class GraphAnalyzer:
             topo = topology.get(proc_name, {})
             for port_name, port in proc.ports_schema().items():
                 sp = topo.get(port_name, port_name)
-                if port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
+                if port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED):
                     path_writers.setdefault(sp, []).append(proc_name)
                 if port.role == PortRole.INPUT:
                     path_readers.setdefault(sp, []).append(proc_name)
@@ -382,7 +382,7 @@ class GraphAnalyzer:
         for proc_name, proc in processes.items():
             topo = topology.get(proc_name, {})
             for port_name, port in proc.ports_schema().items():
-                if port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
+                if port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED):
                     all_written.add(topo.get(port_name, port_name))
 
         for proc_name, proc in processes.items():

@@ -30,24 +30,32 @@ HallSim has two layers: a **legacy cell-agent system** and a new **composable ar
 
 ### Composable Architecture (v2)
 
-The composable layer reimplements key ideas from Vivarium (ports, topology, stores) natively in JAX for GPU acceleration, differentiability, and explicit composition semantics.
+The composable layer reimplements key ideas from Vivarium [3] (ports, topology, stores) natively in JAX for GPU acceleration, differentiability, and explicit composition semantics.
 
 **Core concepts:**
 
 | Concept       | Description |
 |---------------|-------------|
-| **Process**   | Equinox module (`eqx.Module`) — declares typed ports, computes `derivative(t, state)`. Parameters are JAX arrays: differentiable, JIT-compilable, vmappable. |
-| **Port**      | Named connection point with a role (`INPUT` / `EVOLVED` / `EXCLUSIVE`), default value, units, description, and ontology annotation. |
+| **Process**   | Equinox module (`eqx.Module`) — declares typed ports and a `kind` (CONTINUOUS / DISCRETE / EVENT). Parameters are JAX arrays: differentiable, JIT-compilable, vmappable. |
+| **Port**      | Named connection point with a role (`INPUT` / `EVOLVED` / `EXCLUSIVE` / `LATCHED`), default value, units, description, and ontology annotation. |
 | **Topology**  | Static wiring map `{proc_name: {port_name: store_path}}`. Defined at composition time, not inside processes. |
-| **Composite** | Bundles processes + topology. `build_rhs()` returns a JAX-compatible `f(t, y) -> dy/dt` that sums additive (EVOLVED) contributions and enforces exclusive ownership. |
-| **Simulator** | Diffrax wrapper with adaptive Tsit5 solver, perturbation support, and trajectory recording. |
+| **Composite** | Bundles processes + topology. `build_rhs()` / `build_group_rhs()` return JAX-compatible ODE right-hand sides. Auto-groups continuous processes by timescale. |
+| **Simulator** | Diffrax wrapper for single-group continuous solves. Retained for simple cases. |
+| **Scheduler** | Multi-rate orchestrator: groups continuous processes by timescale (Lie splitting), dispatches discrete processes at intervals, checks event conditions at sync points. See [design doc](docs/design-multiscale-scheduler.md). |
 | **Store**     | Flat `dict[str, jnp.ndarray]` with path-like keys (e.g., `"cytoplasm/ROS"`). A valid JAX PyTree. |
+
+**Process kinds:**
+
+- `CONTINUOUS` (default) — computes `derivative(t, state) -> dy/dt`, solved by Diffrax ODE integrator.
+- `DISCRETE` — computes `update(t, state) -> delta`, called every `dt_step` seconds by the Scheduler.
+- `EVENT` — declares `condition(t, state) -> bool` and `handler(t, state) -> delta`, fires on False-to-True crossing.
 
 **Port roles:**
 
 - `INPUT` — read-only, process uses this value but doesn't write a derivative.
 - `EVOLVED` — additive: multiple processes can contribute derivatives to the same store path (summed).
 - `EXCLUSIVE` — sole ownership: only one process may write to this store path (validated at composition time).
+- `LATCHED` — written by discrete/event processes, read as constant by continuous processes within a macro step.
 
 **Validation layer** (optional, runs at composition time):
 
@@ -63,7 +71,7 @@ Validation is warnings-by-default (not errors). Use `strict=True` to promote war
 ### Legacy Cell-Agent System
 
 * Each Cell has a `CellState` representing internal biology
-* Multiple Submodels (e.g., ERiQ, NeuralODE) plug into a Cell [3]
+* Multiple Submodels (e.g., ERiQ, NeuralODE) plug into a Cell [4]
 * Cells reside on a 2D grid (expandable to 3D)
 * Models of unknown dynamics can be trained as a NeuralODE using `optax` and `equinox`
 * Hallmarks are a high level input, allowing a directional interface through a 0-1 handle
@@ -101,7 +109,7 @@ make test
 .venv_hallsim/bin/python -m pytest tests/ -v
 ```
 
-82 tests: 24 legacy + 31 composition + 27 validation.
+148 tests: 24 legacy + 31 composition + 27 validation + 66 multi-timescale/scheduler.
 
 ### Python API
 
@@ -149,6 +157,62 @@ result = sim.run_with_perturbation(
 )
 ```
 
+### Multi-timescale with Scheduler
+
+```python
+from hallsim.process import ProcessKind
+from hallsim.scheduler import Scheduler
+
+# Discrete process: fires every dt_step seconds
+class CellDivision(Process):
+    kind: ProcessKind = ProcessKind.DISCRETE
+    dt_step: float = 86400.0  # once per day
+
+    def ports_schema(self):
+        return {
+            "count": Port(role=PortRole.LATCHED, default=1.0, units="cells"),
+            "damage": Port(role=PortRole.INPUT, default=0.0),
+        }
+
+    def update(self, t, state):
+        can_divide = state["damage"] < 0.8
+        return {"count": jnp.where(can_divide, state["count"], 0.0)}
+
+# Event process: fires once when condition crosses True
+class SenescenceEntry(Process):
+    kind: ProcessKind = ProcessKind.EVENT
+
+    def ports_schema(self):
+        return {
+            "p53": Port(role=PortRole.INPUT, default=0.0, units="uM"),
+            "senescent": Port(role=PortRole.LATCHED, default=0.0),
+        }
+
+    def condition(self, t, state):
+        return state["p53"] > 0.9
+
+    def handler(self, t, state):
+        return {"senescent": 1.0 - state["senescent"]}
+
+# Mix all three kinds in one composite
+composite = Composite(
+    processes={
+        "decay": Decay(), "growth": Growth(),
+        "division": CellDivision(), "senescence": SenescenceEntry(),
+    },
+    topology={
+        "decay": {"x": "pool/x"}, "growth": {"x": "pool/x"},
+        "division": {"count": "pop/count", "damage": "pool/x"},
+        "senescence": {"p53": "pool/x", "senescent": "cell/senescent"},
+    },
+)
+
+# Scheduler handles multi-rate orchestration
+scheduler = Scheduler()
+result = scheduler.run(composite, t_span=(0.0, 86400.0), macro_dt=3600.0)
+print(result.events)  # log of fired events
+```
+
 Parameters are JAX arrays, so you can differentiate through entire simulations:
 
 ```python
@@ -181,10 +245,11 @@ grad = jax.grad(loss)(0.1)  # d(loss)/d(rate)
 
 ```
 src/hallsim/
-  process.py      — Process base class, Port, PortRole
+  process.py      — Process base class, Port, PortRole, ProcessKind
   store.py        — Store utilities (build, extract, route, validate)
-  composite.py    — Composite: wires Processes via Topology
-  simulator.py    — Diffrax-based ODE solver wrapper
+  composite.py    — Composite: wires Processes via Topology, auto-grouping
+  simulator.py    — Diffrax-based ODE solver wrapper (single-group)
+  scheduler.py    — Multi-rate Scheduler (continuous groups + discrete + events)
   validation.py   — Semantic validation layer (4 subsystems)
   cli.py          — CLI entry points (simulate command group)
 ```
@@ -192,6 +257,8 @@ src/hallsim/
 ---
 
 ## Roadmap
+
+### Done
 
 * [x] JSON-based CellState initialization
 * [x] Make a model factory and cell agent wrapper
@@ -201,9 +268,25 @@ src/hallsim/
 * [x] Add more models as submodules from literature
 * [x] Define composability formalisms (Process/Port/Topology/Composite)
 * [x] Semantic validation layer (units, ontology, graph analysis, coupling audit)
+
+### Multi-Timescale Scheduler (see [design doc](docs/design-multiscale-scheduler.md))
+
+The multi-rate Scheduler replaces the monolithic single-ODE-solve architecture. It supports continuous, discrete, and event-driven processes at different timescales. Design borrows scheduling concepts from Vivarium's Engine [3] and Ptolemy II's Directors [5], implemented natively on JAX.
+
+* [x] Process taxonomy: CONTINUOUS / DISCRETE / EVENT kinds
+* [x] LATCHED port role for discrete-to-continuous communication
+* [x] Timescale declaration & auto-grouping of continuous processes
+* [x] Scheduler with macro-step loop, Lie operator splitting
+* [x] Discrete process dispatch & event detection at sync points
+* [x] Validation extensions (LATCHED/EVOLVED conflicts, timescale checks)
+* [x] Backward compatibility (single-group Scheduler = current Simulator)
+
+### Later
+
 * [ ] Port ERiQ as a composable Process
 * [ ] Enable SBML auto-import (stub exists)
-* [ ] Multi-timescale support (per-process timesteps)
+* [ ] Multi-cell / spatial: vmap over populations, inter-cell communication
+* [ ] Stochastic process support (Gillespie-type discrete events)
 * [ ] Expose higher level output (phenotypes)
 * [ ] Add 3D support for spatial diffusion & ECM modelling
 * [ ] LLM-assisted model composition
@@ -220,4 +303,6 @@ This project is licensed under the MIT License.
 
 1. Cohen, Alan A., et al. "A complex systems approach to aging biology." Nature aging 2.7 (2022): 580-591.
 2. Lopez-Otin, Carlos, et al. "Hallmarks of aging: An expanding universe." Cell 186.2 (2023): 243-278.
-3. Alfego, D., & Kriete, A. (2017). Simulation of cellular energy restriction in quiescence (ERiQ)—a theoretical model for aging. Biology, 6(4), 44.
+3. Agmon, Eran, et al. "Vivarium: an interface and engine for integrative multiscale modeling in computational biology." Bioinformatics 38.7 (2022): 1972-1979.
+4. Alfego, D., & Kriete, A. (2017). Simulation of cellular energy restriction in quiescence (ERiQ)—a theoretical model for aging. Biology, 6(4), 44.
+5. Ptolemaeus, C. (Ed.). "System Design, Modeling, and Simulation using Ptolemy II." Ptolemy.org, 2014. (Heterogeneous models of computation, Director abstraction.)

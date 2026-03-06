@@ -35,7 +35,7 @@ from typing import Any
 import equinox as eqx
 import jax.numpy as jnp
 
-from hallsim.process import Port, PortRole, Process
+from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.store import (
     build_initial_store,
     extract_port_view,
@@ -173,3 +173,101 @@ class Composite(eqx.Module):
             name: proc.metadata()
             for name, proc in self.processes.items()
         }
+
+    # -----------------------------------------------------------------
+    # Process kind filtering
+    # -----------------------------------------------------------------
+
+    def continuous_processes(self) -> dict[str, Process]:
+        """All CONTINUOUS kind processes."""
+        return {n: p for n, p in self.processes.items() if p.kind == ProcessKind.CONTINUOUS}
+
+    def discrete_processes(self) -> dict[str, Process]:
+        """All DISCRETE kind processes."""
+        return {n: p for n, p in self.processes.items() if p.kind == ProcessKind.DISCRETE}
+
+    def event_processes(self) -> dict[str, Process]:
+        """All EVENT kind processes."""
+        return {n: p for n, p in self.processes.items() if p.kind == ProcessKind.EVENT}
+
+    # -----------------------------------------------------------------
+    # Group-level RHS building
+    # -----------------------------------------------------------------
+
+    def build_group_rhs(self, proc_names: list[str]):
+        """Build a JAX-compatible RHS for a subset of continuous processes.
+
+        Only the named processes contribute derivatives.  All other store
+        paths get zero derivatives.  The returned function has the same
+        signature as ``build_rhs()``: ``f(t, y, args=None) -> dy/dt``.
+        """
+        proc_items = [(n, self.processes[n]) for n in proc_names]
+        topo = self.topology
+
+        def rhs(t, y, args=None):
+            accum = zeros_like_store(y)
+            for proc_name, proc in proc_items:
+                proc_topo = topo[proc_name]
+                view = extract_port_view(y, proc_topo)
+                raw_derivs = proc.derivative(t, view)
+                routed = route_derivatives(raw_derivs, proc_topo)
+                for store_path, dval in routed.items():
+                    accum[store_path] = accum[store_path] + dval
+            return accum
+
+        return rhs
+
+    # -----------------------------------------------------------------
+    # Timescale auto-grouping
+    # -----------------------------------------------------------------
+
+    def auto_groups(self, max_ratio: float = 100.0) -> dict[str, list[str]]:
+        """Partition continuous processes into timescale groups.
+
+        Processes within ``max_ratio`` of each other share a group.
+        Processes without a declared timescale go into a default group.
+
+        Returns
+        -------
+        ``{group_name: [proc_name, ...]}``
+        """
+        continuous = self.continuous_processes()
+        if not continuous:
+            return {}
+
+        # Separate declared vs undeclared timescales
+        with_ts: list[tuple[str, float]] = []
+        without_ts: list[str] = []
+        for name, proc in continuous.items():
+            if proc.timescale is not None:
+                with_ts.append((name, proc.timescale))
+            else:
+                without_ts.append(name)
+
+        if not with_ts:
+            # All undeclared → single group
+            return {"default": list(continuous.keys())}
+
+        # Sort by timescale and cluster
+        with_ts.sort(key=lambda x: x[1])
+        groups: dict[str, list[str]] = {}
+        group_idx = 0
+        current_group: list[str] = [with_ts[0][0]]
+        current_min_ts = with_ts[0][1]
+
+        for name, ts in with_ts[1:]:
+            if ts / current_min_ts <= max_ratio:
+                current_group.append(name)
+            else:
+                groups[f"group_{group_idx}"] = current_group
+                group_idx += 1
+                current_group = [name]
+                current_min_ts = ts
+
+        groups[f"group_{group_idx}"] = current_group
+
+        # Add undeclared to default group
+        if without_ts:
+            groups["default"] = without_ts
+
+        return groups

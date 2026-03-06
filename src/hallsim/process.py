@@ -2,8 +2,17 @@
 
 A Process is an Equinox module that computes time derivatives for a subset
 of state variables.  It declares typed *ports* — named connection points
-with roles (input, evolved, exclusive) — and implements a ``derivative``
-method that receives only the port values it declared.
+with roles (input, evolved, exclusive, latched) — and implements a
+``derivative`` method that receives only the port values it declared.
+
+Three process kinds are supported:
+
+- **CONTINUOUS** (default): computes ``derivative(t, state) -> dy/dt``.
+- **DISCRETE**: computes ``update(t, state) -> delta_state``, called at
+  fixed intervals specified by ``dt_step``.
+- **EVENT**: declares a ``condition(t, state) -> bool`` and a
+  ``handler(t, state) -> delta_state``, fired when condition crosses
+  from False to True.
 
 Because Process is an Equinox module, its parameters are JAX arrays by
 default and can be differentiated, JIT-compiled, and vmapped.
@@ -33,8 +42,30 @@ import jax.numpy as jnp
 # Port role enum
 # ---------------------------------------------------------------------------
 
+class ProcessKind(enum.Enum):
+    """What kind of update rule a process uses.
+
+    CONTINUOUS
+        Computes ``derivative(t, state) -> dy/dt``.  Solved by an ODE
+        integrator (Diffrax).  This is the default.
+
+    DISCRETE
+        Computes ``update(t, state) -> delta_state``.  Called at fixed
+        intervals specified by ``dt_step``.  Returns an additive delta.
+
+    EVENT
+        Declares ``condition(t, state) -> bool`` and
+        ``handler(t, state) -> delta_state``.  The handler fires once
+        when the condition crosses from False to True.  Returns a delta.
+    """
+
+    CONTINUOUS = "continuous"
+    DISCRETE = "discrete"
+    EVENT = "event"
+
+
 class PortRole(enum.Enum):
-    """How a port participates in the ODE system.
+    """How a port participates in the simulation.
 
     INPUT
         Read-only.  The process reads this value but does not contribute
@@ -49,11 +80,17 @@ class PortRole(enum.Enum):
     EXCLUSIVE
         This process is the sole owner of this variable's derivative.
         No other process may contribute.  Validated at composition time.
+
+    LATCHED
+        Written by discrete or event processes.  Continuous processes may
+        read a LATCHED value but treat it as constant within a macro step.
+        Only discrete/event processes may write to a LATCHED port.
     """
 
     INPUT = "input"
     EVOLVED = "evolved"
     EXCLUSIVE = "exclusive"
+    LATCHED = "latched"
 
 
 # ---------------------------------------------------------------------------
@@ -110,13 +147,32 @@ class Process(eqx.Module):
 
     Subclasses must implement:
     - ``ports_schema()`` — declare named ports.
-    - ``derivative(t, state)`` — compute dy/dt for evolved/exclusive ports.
+
+    Depending on ``kind``:
+    - CONTINUOUS: implement ``derivative(t, state)`` — compute dy/dt.
+    - DISCRETE: implement ``update(t, state)`` — compute delta at intervals.
+    - EVENT: implement ``condition(t, state)`` and ``handler(t, state)``.
 
     Optionally override:
     - ``metadata()`` — structured info for LLM-assisted composition.
+
+    Attributes
+    ----------
+    kind:
+        Process kind (class-level). Default: ``ProcessKind.CONTINUOUS``.
+    timescale:
+        Characteristic timescale in seconds (class-level, optional).
+        Used by the Scheduler to auto-group continuous processes.
+        Processes within ~100x of each other share a group.
+    dt_step:
+        For DISCRETE processes: interval between update calls (seconds).
     """
 
-    # --- Interface -----------------------------------------------------------
+    kind: ProcessKind = ProcessKind.CONTINUOUS
+    timescale: float | None = None
+    dt_step: float | None = None
+
+    # --- Interface: CONTINUOUS -----------------------------------------------
 
     def ports_schema(self) -> dict[str, Port]:
         """Return a dict of ``{port_name: Port(...)}``.
@@ -126,22 +182,64 @@ class Process(eqx.Module):
         raise NotImplementedError
 
     def derivative(self, t: float, state: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
-        """Compute time derivatives.
+        """Compute time derivatives (CONTINUOUS processes).
 
         Parameters
         ----------
         t:
             Current simulation time.
         state:
-            Dict mapping port names → current values (only ports declared
+            Dict mapping port names -> current values (only ports declared
             in ``ports_schema`` are provided).
 
         Returns
         -------
-        Dict mapping port names → dy/dt values.  Only evolved and exclusive
+        Dict mapping port names -> dy/dt values.  Only evolved and exclusive
         ports should appear in the output.
         """
         raise NotImplementedError
+
+    # --- Interface: DISCRETE -------------------------------------------------
+
+    def update(self, t: float, state: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
+        """Compute a state delta (DISCRETE processes).
+
+        Called every ``dt_step`` seconds by the Scheduler.  Returns an
+        additive delta: ``new_state = old_state + delta``.
+
+        Parameters
+        ----------
+        t:
+            Current simulation time.
+        state:
+            Dict mapping port names -> current values.
+
+        Returns
+        -------
+        Dict mapping port names -> delta values to add.
+        """
+        raise NotImplementedError
+
+    # --- Interface: EVENT ----------------------------------------------------
+
+    def condition(self, t: float, state: dict[str, jnp.ndarray]) -> bool:
+        """Event trigger condition (EVENT processes).
+
+        Returns ``True`` when the event should fire.  The Scheduler
+        tracks the previous value and only fires the handler on a
+        False -> True transition.
+        """
+        raise NotImplementedError
+
+    def handler(self, t: float, state: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
+        """Event handler (EVENT processes).
+
+        Called once when ``condition`` crosses from False to True.
+        Returns an additive delta.
+        """
+        raise NotImplementedError
+
+    # --- Metadata ------------------------------------------------------------
 
     def metadata(self) -> dict[str, Any]:
         """Structured metadata for discovery and LLM-assisted composition.
@@ -149,8 +247,9 @@ class Process(eqx.Module):
         Override to provide pathway IDs, GO terms, species descriptions,
         SBML annotations, coupling documentation, etc.
         """
-        return {
+        meta = {
             "name": type(self).__name__,
+            "kind": self.kind.value,
             "ports": {
                 name: {
                     "role": port.role.value,
@@ -161,6 +260,11 @@ class Process(eqx.Module):
                 for name, port in self.ports_schema().items()
             },
         }
+        if self.timescale is not None:
+            meta["timescale"] = self.timescale
+        if self.dt_step is not None:
+            meta["dt_step"] = self.dt_step
+        return meta
 
     # --- Helpers -------------------------------------------------------------
 
@@ -176,9 +280,13 @@ class Process(eqx.Module):
         """Ports with role INPUT."""
         return {k: v for k, v in self.ports_schema().items() if v.role == PortRole.INPUT}
 
+    def latched_ports(self) -> dict[str, Port]:
+        """Ports with role LATCHED."""
+        return {k: v for k, v in self.ports_schema().items() if v.role == PortRole.LATCHED}
+
     def output_port_names(self) -> set[str]:
-        """Names of ports that produce derivatives (evolved + exclusive)."""
+        """Names of ports that produce derivatives or deltas."""
         return {
             k for k, v in self.ports_schema().items()
-            if v.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
+            if v.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)
         }

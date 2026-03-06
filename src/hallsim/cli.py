@@ -315,6 +315,137 @@ def validate_demo(strict):
                     f"{len(report.interaction_graph.get('links', []))}")
 
 
+@simulate.command("multiscale")
+@click.option("--t1", type=float, default=100.0, help="End time (seconds)")
+@click.option("--macro-dt", type=float, default=5.0, help="Macro step interval")
+def multiscale(t1, macro_dt):
+    """Demo: multi-timescale simulation with continuous + discrete + event processes.
+
+    Runs three process kinds together via the Scheduler:
+    - CONTINUOUS: ROS production (fast) + slow drift
+    - DISCRETE: counter incrementing every 20s
+    - EVENT: alarm fires when ROS exceeds threshold
+
+    Shows the Scheduler orchestrating multi-rate execution.
+    """
+    import jax.numpy as jnp
+
+    from hallsim.composite import Composite
+    from hallsim.process import Port, PortRole, Process, ProcessKind
+    from hallsim.scheduler import Scheduler
+
+    # ── Continuous: ROS production ─────────────────────────────
+    class ROSProduction(Process):
+        kind: ProcessKind = ProcessKind.CONTINUOUS
+        timescale: float = 1.0
+        rate: float = 0.5
+
+        def ports_schema(self):
+            return {"ros": Port(role=PortRole.EVOLVED, default=0.0, units="uM")}
+
+        def derivative(self, t, state):
+            return {"ros": jnp.array(self.rate)}
+
+    # ── Continuous: slow decay ─────────────────────────────────
+    class SlowDecay(Process):
+        kind: ProcessKind = ProcessKind.CONTINUOUS
+        timescale: float = 100.0
+        rate: float = 0.01
+
+        def ports_schema(self):
+            return {"ros": Port(role=PortRole.EVOLVED, default=0.0, units="uM")}
+
+        def derivative(self, t, state):
+            return {"ros": -self.rate * state["ros"]}
+
+    # ── Discrete: periodic counter ─────────────────────────────
+    class HeartbeatCounter(Process):
+        kind: ProcessKind = ProcessKind.DISCRETE
+        dt_step: float = 20.0
+
+        def ports_schema(self):
+            return {"beats": Port(role=PortRole.LATCHED, default=0.0, units="dimensionless")}
+
+        def update(self, t, state):
+            return {"beats": jnp.array(1.0)}
+
+    # ── Event: ROS alarm ───────────────────────────────────────
+    class ROSAlarm(Process):
+        kind: ProcessKind = ProcessKind.EVENT
+        threshold: float = 30.0
+
+        def ports_schema(self):
+            return {
+                "ros": Port(role=PortRole.INPUT, default=0.0, units="uM"),
+                "alarm": Port(role=PortRole.LATCHED, default=0.0, units="dimensionless"),
+            }
+
+        def condition(self, t, state):
+            return state["ros"] > self.threshold
+
+        def handler(self, t, state):
+            return {"alarm": 1.0 - state["alarm"]}
+
+    # ── Wire and run ───────────────────────────────────────────
+    composite = Composite(
+        processes={
+            "ros_prod": ROSProduction(),
+            "slow_decay": SlowDecay(),
+            "heartbeat": HeartbeatCounter(),
+            "alarm": ROSAlarm(),
+        },
+        topology={
+            "ros_prod":   {"ros": "cell/ROS"},
+            "slow_decay": {"ros": "cell/ROS"},
+            "heartbeat":  {"beats": "state/heartbeats"},
+            "alarm":      {"ros": "cell/ROS", "alarm": "state/alarm"},
+        },
+    )
+
+    click.echo("Multi-Timescale Demo")
+    click.echo("=" * 50)
+    click.echo()
+    click.echo("Processes:")
+    click.echo("  ros_prod    [CONTINUOUS, ts=1s]    ROS production (rate=0.5 uM/s)")
+    click.echo("  slow_decay  [CONTINUOUS, ts=100s]  first-order decay (rate=0.01/s)")
+    click.echo("  heartbeat   [DISCRETE, dt=20s]     increments counter every 20s")
+    click.echo("  alarm       [EVENT]                fires when ROS > 30 uM")
+    click.echo()
+
+    groups = composite.auto_groups()
+    click.echo(f"Auto-groups: {json.dumps({k: v for k, v in groups.items()})}")
+    click.echo()
+
+    scheduler = Scheduler()
+    result = scheduler.run(composite, t_span=(0.0, t1), macro_dt=macro_dt)
+
+    # Print trajectory
+    ts = result.ts
+    ros = result.ys["cell/ROS"]
+    beats = result.ys["state/heartbeats"]
+    alarm = result.ys["state/alarm"]
+
+    click.echo(f"{'t':>8s}  {'ROS (uM)':>10s}  {'beats':>6s}  {'alarm':>6s}")
+    click.echo(f"{'─'*8}  {'─'*10}  {'─'*6}  {'─'*6}")
+
+    for i in range(len(ts)):
+        click.echo(
+            f"{float(ts[i]):8.1f}  {float(ros[i]):10.4f}  "
+            f"{int(float(beats[i])):6d}  {int(float(alarm[i])):6d}"
+        )
+
+    click.echo()
+    click.echo(f"Events fired: {len(result.events)}")
+    for ev in result.events:
+        click.echo(f"  t={ev.time:.1f}: {ev.process} -> {ev.delta}")
+
+    click.echo()
+    # Steady state for production + decay: ROS_ss = rate/decay = 0.5/0.01 = 50
+    click.echo(f"Final ROS: {float(ros[-1]):.2f} uM (steady state: {0.5/0.01:.0f} uM)")
+    click.echo(f"Final heartbeats: {int(float(beats[-1]))}")
+    click.echo(f"Alarm triggered: {'yes' if float(alarm[-1]) > 0.5 else 'no'}")
+
+
 @simulate.command("info")
 def info():
     """Show info about the composable architecture."""
@@ -322,11 +453,17 @@ def info():
     click.echo("================================")
     click.echo()
     click.echo("Core concepts:")
-    click.echo("  Process   — Equinox module declaring ports + computing derivatives")
-    click.echo("  Port      — Named connection point (INPUT / EVOLVED / EXCLUSIVE)")
+    click.echo("  Process   — Equinox module declaring ports + computing derivatives/updates")
+    click.echo("  Port      — Named connection point (INPUT / EVOLVED / EXCLUSIVE / LATCHED)")
     click.echo("  Topology  — Wires process ports to shared store paths")
-    click.echo("  Composite — Bundles processes + topology into a single ODE RHS")
-    click.echo("  Simulator — Diffrax-based ODE solver (adaptive Tsit5)")
+    click.echo("  Composite — Bundles processes + topology, auto-groups by timescale")
+    click.echo("  Simulator — Diffrax-based single-group ODE solver (adaptive Tsit5)")
+    click.echo("  Scheduler — Multi-rate orchestrator (Lie splitting + discrete + events)")
+    click.echo()
+    click.echo("Process kinds:")
+    click.echo("  CONTINUOUS — derivative(t, state) -> dy/dt, solved by Diffrax ODE")
+    click.echo("  DISCRETE   — update(t, state) -> delta, called every dt_step seconds")
+    click.echo("  EVENT      — condition + handler, fires on False->True crossing")
     click.echo()
     click.echo("Validation layer:")
     click.echo("  UnitChecker      — pint-based dimensional analysis")
@@ -337,11 +474,12 @@ def info():
     click.echo("CLI commands:")
     click.echo("  simulate compose          — demo: ROS production + antioxidant defense")
     click.echo("  simulate compose-kick     — demo: perturbation + recovery")
+    click.echo("  simulate multiscale       — demo: continuous + discrete + event scheduling")
     click.echo("  simulate validate-demo    — demo: validation catching unit/semantic issues")
     click.echo("  simulate info             — this help")
     click.echo()
     click.echo("Python usage:")
-    click.echo("  from hallsim.process import Process, Port, PortRole")
+    click.echo("  from hallsim.process import Process, Port, PortRole, ProcessKind")
     click.echo("  from hallsim.composite import Composite")
-    click.echo("  from hallsim.simulator import Simulator")
+    click.echo("  from hallsim.scheduler import Scheduler")
     click.echo("  from hallsim.validation import CompositeValidator")
