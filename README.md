@@ -15,22 +15,17 @@ HallSim's goal is to enable compositional co-simulation of reusable systems-biol
 
 ## Project Goals
 
-* Build a modular, multi-scale agent-based simulator
-* Allow plug-and-play modules with exposed high level abstractions corresponding to 12 hallmarks of aging [2]
-* Incorporate an LLM layer helping integrate new modules in a semi-automated way
+* Build a modular, multi-scale simulator for aging biology
+* Allow plug-and-play modules with exposed high-level abstractions corresponding to 12 hallmarks of aging [2]
 * Enable simulation of aging trajectories, interventions, and emergent phenotypes
-* Serve as an educational tool
-* Somewhere down the road become an in-silico testbed for perturbations (radiation, caloric restriction, therapies, etc.)
+* Validate simulations against real experimental data (ssGSEA pathway scores from scRNA-seq)
+* Serve as an educational tool and in-silico testbed for perturbations (rapamycin, caloric restriction, etc.)
 
 ---
 
 ## Architecture
 
-HallSim has two layers: a **legacy cell-agent system** and a new **composable architecture** built on JAX/Equinox/Diffrax.
-
-### Composable Architecture (v2)
-
-The composable layer reimplements key ideas from Vivarium [3] (ports, topology, stores) natively in JAX for GPU acceleration, differentiability, and explicit composition semantics.
+HallSim is built on a **composable architecture** using JAX/Equinox/Diffrax. Design borrows composition semantics from Vivarium [3] and scheduling concepts from Ptolemy II [5], implemented natively on JAX for GPU acceleration and differentiability.
 
 **Core concepts:**
 
@@ -68,13 +63,49 @@ The composable layer reimplements key ideas from Vivarium [3] (ports, topology, 
 
 Validation is warnings-by-default (not errors). Use `strict=True` to promote warnings to errors.
 
-### Legacy Cell-Agent System
+### Included Models
 
-* Each Cell has a `CellState` representing internal biology
-* Multiple Submodels (e.g., ERiQ, NeuralODE) plug into a Cell [4]
-* Cells reside on a 2D grid (expandable to 3D)
-* Models of unknown dynamics can be trained as a NeuralODE using `optax` and `equinox`
-* Hallmarks are a high level input, allowing a directional interface through a 0-1 handle
+| Model | Module | Description |
+|-------|--------|-------------|
+| **ERiQ** | `hallsim.models.eriq` | Energy Restriction in Quiescence [4] — decomposed into 3 composable Processes: EnergyMetabolism (4 ODEs), OxidativeStress (3 ODEs), Signaling (4 ODEs). 11 state variables, ~20 algebraic intermediates. |
+| **SaturatingRemoval** | `hallsim.models.saturating_removal` | Uri Alon's damage accumulation with Michaelis-Menten repair. |
+| **NeuralODE** | `hallsim.models.neuralode` | MLP-parameterized dynamics — trainable surrogate or unknown-dynamics learner. Includes training infrastructure. |
+| **SBML Import** | `hallsim.sbml_import` | Auto-generate Process from BioModels SBML via `sbmltoodejax`. |
+
+### Hallmark Handles
+
+Each of the 12 hallmarks of aging is represented as a 0-1 severity handle that modulates parameters across processes:
+
+```python
+from hallsim.hallmarks import apply_hallmarks
+from hallsim.models.eriq import build_eriq_composite
+
+comp = build_eriq_composite()
+modified_procs = apply_hallmarks(comp.processes, {
+    "Mitochondrial Dysfunction": 0.7,
+    "Deregulated Nutrient Sensing": 0.5,
+})
+# Hallmark severity is differentiable: jax.grad through the whole pipeline
+```
+
+### Data Validation (ssGSEA)
+
+Compare simulated trajectories against experimental pathway scores:
+
+```python
+from hallsim.data_validation import validate_against_data, MeasuredScores, ERIQ_PATHWAY_MAPPINGS
+
+result = validate_against_data(
+    sim_baseline=baseline_state,
+    sim_perturbed=rapamycin_state,
+    measured=MeasuredScores(
+        condition="rapamycin_100nM",
+        pathway_scores={"REACTOME_MTOR_SIGNALLING": -0.5, ...},
+    ),
+    mappings=ERIQ_PATHWAY_MAPPINGS,
+)
+print(result)  # directional concordance analysis
+```
 
 ---
 
@@ -89,16 +120,12 @@ make install        # or make install-dev for development
 ### Run demos
 
 ```bash
-# Composable architecture demos
 simulate compose              # ROS production + antioxidant defense ODE
-simulate compose-kick          # Same system + mid-run perturbation
-simulate validate-demo         # Validation layer catching unit/semantic issues
+simulate compose-kick         # Same system + mid-run perturbation
+simulate multiscale           # Continuous + discrete + event scheduling
+simulate validate-demo        # Validation layer catching unit/semantic issues
 simulate validate-demo --strict # Strict mode: warnings become errors
-simulate info                  # Architecture overview
-
-# Legacy demos
-simulate basic                 # Mitochondrial damage simulation
-simulate kick                  # Perturbation demo
+simulate info                 # Architecture overview
 ```
 
 ### Run tests
@@ -109,7 +136,7 @@ make test
 .venv_hallsim/bin/python -m pytest tests/ -v
 ```
 
-148 tests: 24 legacy + 31 composition + 27 validation + 66 multi-timescale/scheduler.
+165 tests: 31 composition + 27 validation + 66 multi-timescale/scheduler + 21 ERiQ + 20 models.
 
 ### Python API
 
@@ -149,12 +176,21 @@ composite = Composite(
 sim = Simulator()
 result = sim.run(composite, t_span=(0.0, 100.0), dt=1.0)
 print(result.ts.shape, result.ys["pool/x"].shape)
+```
 
-# 4. Perturbation
-result = sim.run_with_perturbation(
-    composite, t_span=(0.0, 100.0),
-    kick_time=50.0, kick_dict={"pool/x": 5.0},
-)
+### ERiQ Model
+
+```python
+from hallsim.models.eriq import build_eriq_composite
+from hallsim.simulator import Simulator
+
+# Build the 3-process ERiQ composite (11 state variables)
+comp = build_eriq_composite()
+sim = Simulator()
+result = sim.run(comp, t_span=(0.0, 1000.0), dt=1.0)
+
+# Mitochondrial damage accumulates over time
+print(result.ys["eriq/mito_damage"][-1])
 ```
 
 ### Multi-timescale with Scheduler
@@ -177,35 +213,6 @@ class CellDivision(Process):
     def update(self, t, state):
         can_divide = state["damage"] < 0.8
         return {"count": jnp.where(can_divide, state["count"], 0.0)}
-
-# Event process: fires once when condition crosses True
-class SenescenceEntry(Process):
-    kind: ProcessKind = ProcessKind.EVENT
-
-    def ports_schema(self):
-        return {
-            "p53": Port(role=PortRole.INPUT, default=0.0, units="uM"),
-            "senescent": Port(role=PortRole.LATCHED, default=0.0),
-        }
-
-    def condition(self, t, state):
-        return state["p53"] > 0.9
-
-    def handler(self, t, state):
-        return {"senescent": 1.0 - state["senescent"]}
-
-# Mix all three kinds in one composite
-composite = Composite(
-    processes={
-        "decay": Decay(), "growth": Growth(),
-        "division": CellDivision(), "senescence": SenescenceEntry(),
-    },
-    topology={
-        "decay": {"x": "pool/x"}, "growth": {"x": "pool/x"},
-        "division": {"count": "pop/count", "damage": "pool/x"},
-        "senescence": {"p53": "pool/x", "senescent": "cell/senescent"},
-    },
-)
 
 # Scheduler handles multi-rate orchestration
 scheduler = Scheduler()
@@ -238,20 +245,27 @@ grad = jax.grad(loss)(0.1)  # d(loss)/d(rate)
 ## Dev Instructions
 
 - `pyproject.toml` is the single source of dependencies.
-- To add a model, create a new `.py` file in `src/hallsim/models/` (legacy) or define a new `Process` subclass (composable).
+- To add a model, define a new `Process` subclass in `src/hallsim/models/`.
 - Models are aggregated on an additive basis in the ODE RHS via EVOLVED ports. If your model's effect is supposed to be multiplicative, consider using a separate store path and an INPUT port to read the other variable.
 
-### Key files (composable architecture)
+### Key files
 
 ```
 src/hallsim/
-  process.py      — Process base class, Port, PortRole, ProcessKind
-  store.py        — Store utilities (build, extract, route, validate)
-  composite.py    — Composite: wires Processes via Topology, auto-grouping
-  simulator.py    — Diffrax-based ODE solver wrapper (single-group)
-  scheduler.py    — Multi-rate Scheduler (continuous groups + discrete + events)
-  validation.py   — Semantic validation layer (4 subsystems)
-  cli.py          — CLI entry points (simulate command group)
+  process.py           — Process base class, Port, PortRole, ProcessKind
+  store.py             — Store utilities (build, extract, route, validate)
+  composite.py         — Composite: wires Processes via Topology, auto-grouping
+  simulator.py         — Diffrax-based ODE solver wrapper (single-group)
+  scheduler.py         — Multi-rate Scheduler (continuous groups + discrete + events)
+  validation.py        — Semantic validation layer (4 subsystems)
+  hallmarks.py         — Hallmark handles (0-1 severity → parameter modulation)
+  data_validation.py   — ssGSEA data validation (simulated vs measured)
+  sbml_import.py       — SBML auto-import via sbmltoodejax
+  cli.py               — CLI entry points (simulate command group)
+  models/
+    eriq.py            — ERiQ model decomposed into 3 Processes
+    saturating_removal.py — Uri Alon damage model
+    neuralode.py       — NeuralODE Process + training infrastructure
 ```
 
 ---
@@ -260,36 +274,24 @@ src/hallsim/
 
 ### Done
 
-* [x] JSON-based CellState initialization
-* [x] Make a model factory and cell agent wrapper
-* [x] Port ERiQ to JAX
-* [x] Allow generic NeuralODE training
-* [x] Expose higher level input (hallmarks)
-* [x] Add more models as submodules from literature
 * [x] Define composability formalisms (Process/Port/Topology/Composite)
 * [x] Semantic validation layer (units, ontology, graph analysis, coupling audit)
+* [x] Multi-timescale Scheduler (Lie splitting, discrete dispatch, event detection)
+* [x] ERiQ decomposed into 3 composable Processes (EnergyMetabolism, OxidativeStress, Signaling)
+* [x] SaturatingRemoval Process (Uri Alon damage model)
+* [x] NeuralODE Process + training infrastructure
+* [x] Hallmark handles v2 (immutable parameter modifier, differentiable)
+* [x] SBML auto-import (`process_from_sbml` via sbmltoodejax)
+* [x] Data validation layer (ssGSEA pathway concordance analysis)
 
-### Multi-Timescale Scheduler (see [design doc](docs/design-multiscale-scheduler.md))
+### Next
 
-The multi-rate Scheduler replaces the monolithic single-ODE-solve architecture. It supports continuous, discrete, and event-driven processes at different timescales. Design borrows scheduling concepts from Vivarium's Engine [3] and Ptolemy II's Directors [5], implemented natively on JAX.
-
-* [x] Process taxonomy: CONTINUOUS / DISCRETE / EVENT kinds
-* [x] LATCHED port role for discrete-to-continuous communication
-* [x] Timescale declaration & auto-grouping of continuous processes
-* [x] Scheduler with macro-step loop, Lie operator splitting
-* [x] Discrete process dispatch & event detection at sync points
-* [x] Validation extensions (LATCHED/EVOLVED conflicts, timescale checks)
-* [x] Backward compatibility (single-group Scheduler = current Simulator)
-
-### Later
-
-* [ ] Port ERiQ as a composable Process
-* [ ] Enable SBML auto-import (stub exists)
+* [ ] Validate ERiQ against rapamycin scRNA-seq dataset (ssGSEA scores)
+* [ ] PINNs: physics-informed loss for NeuralODE training
 * [ ] Multi-cell / spatial: vmap over populations, inter-cell communication
 * [ ] Stochastic process support (Gillespie-type discrete events)
-* [ ] Expose higher level output (phenotypes)
-* [ ] Add 3D support for spatial diffusion & ECM modelling
 * [ ] LLM-assisted model composition
+* [ ] 3D spatial diffusion & ECM modelling
 
 ---
 

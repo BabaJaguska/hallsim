@@ -1,133 +1,212 @@
-"""
-Hallmark abstraction layer.
-Provides explicit handles for biological hallmarks of aging.
+"""Hallmark handles — high-level control interface for aging biology.
+
+Each of the 12 hallmarks of aging (Lopez-Otin et al., 2023) is
+represented as a 0-1 severity handle that modulates parameters across
+one or more Processes.
+
+    severity = 0.0  ->  healthy / optimal
+    severity = 1.0  ->  severely impaired
+
+Because Process instances are immutable Equinox modules, hallmark
+handles work by constructing *new* Process instances with modified
+parameters.  This means hallmark severity is differentiable:
+
+    jax.grad(lambda s: simulate(apply_hallmark(composite, s)).loss)(0.5)
+
+Usage
+-----
+>>> from hallsim.hallmarks import HallmarkHandle, HALLMARK_REGISTRY
+>>> handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
+>>> modified_procs = handle.apply(composite.processes, severity=0.7)
+>>> new_composite = Composite(modified_procs, composite.topology)
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Dict, Callable, Optional, Any
-import jax.numpy as jnp
+from typing import Any, Callable
+
+import equinox as eqx
+
+from hallsim.process import Process
 
 
 @dataclass
-class Hallmark:
-    """
-    Represents a hallmark of aging as an explicit control handle.
+class ParameterMapping:
+    """Maps a hallmark severity to a process parameter value.
 
-    Attributes:
-        name: Human-readable name (e.g., "Mitochondrial Dysfunction")
-        handle: Normalized severity level, typically ∈ [0, 1]
-                0 = healthy/optimal, 1 = severely impaired
-        description: Brief description of the hallmark
-        parameter_mappings: Dict mapping parameter names to callables
-                           that transform the handle into parameter values.
-                           Example: {"MITO_DMG_RATE_SA": lambda h: 1.0 + h * 2.0}
-        state_associations: Set of CellState variables associated with this hallmark
+    Attributes
+    ----------
+    process_name:
+        Name of the target process in the composite.
+    param_name:
+        Name of the Process field to modify.
+    transform:
+        Function ``severity -> param_value``.
+    description:
+        Human-readable description of what this mapping does.
+    """
+
+    process_name: str
+    param_name: str
+    transform: Callable[[float], float]
+    description: str = ""
+
+
+@dataclass
+class HallmarkHandle:
+    """A control knob for one hallmark of aging.
+
+    Attributes
+    ----------
+    name:
+        Human-readable name (e.g., "Mitochondrial Dysfunction").
+    description:
+        Brief description of the biology.
+    mappings:
+        List of ParameterMapping defining how severity affects processes.
+    category:
+        "Primary", "Antagonistic", or "Integrative" (Lopez-Otin taxonomy).
+    references:
+        Literature references supporting the parameter mappings.
     """
 
     name: str
-    handle: float = 0.0
     description: str = ""
-    parameter_mappings: Dict[str, Callable[[float], float]] = field(
-        default_factory=dict
-    )
-    state_associations: set = field(default_factory=set)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    mappings: list[ParameterMapping] = field(default_factory=list)
+    category: str = ""
+    references: list[str] = field(default_factory=list)
 
-    def __post_init__(self):
-        """Validate hallmark handle is in reasonable range."""
-        if not (0.0 <= self.handle <= 1.0):
-            raise ValueError(
-                f"Hallmark handle should be in [0, 1], got {self.handle} for {self.name}"
+    def apply(
+        self,
+        processes: dict[str, Process],
+        severity: float,
+    ) -> dict[str, Process]:
+        """Return new process dict with parameters modified by severity.
+
+        Processes not targeted by any mapping are returned unchanged.
+        Target processes get new instances with updated parameter values
+        via ``eqx.tree_at``.
+
+        Parameters
+        ----------
+        processes:
+            ``{name: Process}`` from a Composite.
+        severity:
+            Hallmark severity in [0, 1].
+
+        Returns
+        -------
+        New dict with modified Process instances.
+        """
+        result = dict(processes)
+        for mapping in self.mappings:
+            pname = mapping.process_name
+            if pname not in result:
+                continue
+            proc = result[pname]
+            new_val = mapping.transform(severity)
+            # Use eqx.tree_at to create a new Process with the modified param
+            result[pname] = eqx.tree_at(
+                lambda p: getattr(p, mapping.param_name),
+                proc,
+                new_val,
             )
+        return result
 
-    def intervene(self, delta: float) -> "Hallmark":
-        """
-        Modify the hallmark handle by delta.
-        Returns a new Hallmark instance with updated handle.
-
-        Args:
-            delta: Change in handle value (can be negative)
-
-        Returns:
-            New Hallmark instance with updated handle (clipped to [0, 1])
-        """
-        new_handle = jnp.clip(self.handle + delta, 0.0, 1.0)
-        return Hallmark(
-            name=self.name,
-            handle=float(new_handle),
-            description=self.description,
-            parameter_mappings=self.parameter_mappings,
-            state_associations=self.state_associations,
-            metadata=self.metadata,
-        )
-
-    def set_handle(self, value: float) -> "Hallmark":
-        """
-        Set the hallmark handle to a specific value.
-        Returns a new Hallmark instance.
-
-        Args:
-            value: New handle value (will be clipped to [0, 1])
-
-        Returns:
-            New Hallmark instance with updated handle
-        """
-        new_handle = jnp.clip(value, 0.0, 1.0)
-        return Hallmark(
-            name=self.name,
-            handle=float(new_handle),
-            description=self.description,
-            parameter_mappings=self.parameter_mappings,
-            state_associations=self.state_associations,
-            metadata=self.metadata,
-        )
-
-    def get_parameter_values(self) -> Dict[str, float]:
-        """
-        Compute parameter values based on current handle.
-
-        Returns:
-            Dictionary of parameter names to values
-        """
+    def summary(self, severity: float) -> dict[str, Any]:
+        """Show what parameters would be set at a given severity."""
         return {
-            param_name: mapping_fn(self.handle)
-            for param_name, mapping_fn in self.parameter_mappings.items()
+            f"{m.process_name}.{m.param_name}": m.transform(severity)
+            for m in self.mappings
         }
 
-    def __repr__(self):
-        return f"Hallmark(name='{self.name}', handle={self.handle:.3f})"
 
+def apply_hallmarks(
+    processes: dict[str, Process],
+    hallmarks: dict[str, float],
+    registry: dict[str, HallmarkHandle] | None = None,
+) -> dict[str, Process]:
+    """Apply multiple hallmark severities to a process dict.
 
-def hallmark_factory(
-    name: str,
-    handle: float = 0.0,
-    description: str = "",
-    parameter_mappings: Optional[Dict[str, Callable]] = None,
-    state_associations: Optional[set] = None,
-    **metadata,
-) -> Hallmark:
+    Parameters
+    ----------
+    processes:
+        ``{name: Process}`` from a Composite.
+    hallmarks:
+        ``{hallmark_name: severity}`` — which hallmarks to apply.
+    registry:
+        Hallmark registry to look up handles. Defaults to
+        ``HALLMARK_REGISTRY``.
+
+    Returns
+    -------
+    New process dict with all hallmark effects applied.
     """
-    Factory function to create a Hallmark instance.
-    Convenient for initialization with metadata.
-    """
-    return Hallmark(
-        name=name,
-        handle=handle,
-        description=description,
-        parameter_mappings=parameter_mappings or {},
-        state_associations=state_associations or set(),
-        metadata=metadata,
-    )
+    if registry is None:
+        registry = HALLMARK_REGISTRY
+    result = dict(processes)
+    for hname, severity in hallmarks.items():
+        handle = registry[hname]
+        result = handle.apply(result, severity)
+    return result
 
 
-"""
-# Example usage:
-# mito_dysfunction = hallmark_factory(
-#   name="Mitochondrial Dysfunction",
-#  handle=0.3,
-# description="Impairment in mitochondrial function",
-# parameter_mappings={
-#   "MITO_DMG_RATE_SA": lambda h: 1.0 + h * 2.0,
-# "ATP_PROD_RATE_SA": lambda h: 1.0 - h * 0.5
-# }
-# """
+# ── Registry ────────────────────────────────────────────────────────────
+
+# Hallmark definitions for ERiQ-based processes.
+# Process names match those in build_eriq_composite().
+
+HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
+    "Mitochondrial Dysfunction": HallmarkHandle(
+        name="Mitochondrial Dysfunction",
+        description=(
+            "Impairment in mitochondrial function leading to reduced ATP "
+            "production, increased ROS generation, and accumulation of "
+            "mitochondrial damage."
+        ),
+        category="Primary",
+        references=["Lopez-Otin et al. 2023", "Alfego & Kriete 2017"],
+        mappings=[
+            ParameterMapping(
+                process_name="oxidative_stress",
+                param_name="MDAMAGE_SA",
+                transform=lambda h: 1.0 + h * 2.0,  # 1.0 -> 3.0
+                description="Damage accumulation rate increases with dysfunction",
+            ),
+        ],
+    ),
+
+    "Deregulated Nutrient Sensing": HallmarkHandle(
+        name="Deregulated Nutrient Sensing",
+        description=(
+            "Imbalance in nutrient-sensing pathways (mTOR, AMPK, sirtuins). "
+            "Chronic mTOR activation, impaired AMPK response, declining NAD+."
+        ),
+        category="Primary",
+        references=["Lopez-Otin et al. 2023", "Alfego & Kriete 2017"],
+        mappings=[
+            ParameterMapping(
+                process_name="energy",
+                param_name="GLYCOL_SA",
+                transform=lambda h: 1.0 + h * 0.5,  # 1.0 -> 1.5
+                description="Glycolytic flux increases with nutrient dysregulation",
+            ),
+        ],
+    ),
+
+    "Genomic Instability": HallmarkHandle(
+        name="Genomic Instability",
+        description="DNA damage accumulation due to genomic instability.",
+        category="Primary",
+        references=["Lopez-Otin et al. 2023"],
+        mappings=[
+            ParameterMapping(
+                process_name="damage_repair",
+                param_name="eta",
+                transform=lambda h: 0.5 + h * 2.0,  # 0.5 -> 2.5
+                description="Damage production rate increases with instability",
+            ),
+        ],
+    ),
+}

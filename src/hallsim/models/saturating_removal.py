@@ -1,87 +1,57 @@
-from hallsim.submodel import Submodel, register_submodel
-import json
-import os
+"""SaturatingRemoval — Uri Alon's damage accumulation model.
+
+Simple ODE for generic damage (D) with saturating repair:
+
+    dD/dt = eta * tau - beta * D / (K + D)
+
+Where:
+- eta: damage production rate
+- beta: maximum repair capacity
+- K: Michaelis-Menten constant (damage level at half-max repair)
+- tau: age-scaled time (converts simulation time to years)
+
+Reference: Uri Alon, "An Introduction to Systems Biology" (2006).
+"""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+
+from hallsim.process import Port, PortRole, Process
 
 
-@register_submodel("saturating_removal")
-class SaturatingRemoval(Submodel):
+class SaturatingRemoval(Process):
+    """Damage accumulation with saturating (Michaelis-Menten) repair.
+
+    Parameters
+    ----------
+    eta:
+        Damage production rate.
+    beta:
+        Maximum repair capacity.
+    K:
+        Michaelis-Menten constant for repair.
+    tau_scale:
+        Time-to-years conversion factor (default: 1/(24*365) for hours→years).
     """
-    Simple ODE model for damage (D) and repair machinery.
-    Based on Uri Alon's saturating damage removal model.
 
-    dD/dt = eta * Tau - beta * D / (K + D) + gaussian_noise
-    # Tau is age, to denote difference in timescales of t and Tau
+    eta: float = 0.5
+    beta: float = 1.0
+    K: float = 0.1
+    tau_scale: float = 1.0 / (24.0 * 365.0)
 
-    Where:
-    - eta: damage production rate
-    - beta: maximum repair capacity
-    - K: Michaelis-Menten constant for repair; concentration of D (e.g. senescent cells)
-      at which half of the maximum removal rate is reached.
-    """
-
-    def __init__(
-        self, config_file: str = "configs/saturating_removal_config.json"
-    ):
-        super().__init__()
-        self.config_file = config_file
-        self.params = self.read_config()
-        self.model_name = "saturating_removal"
-
-    def read_config(self) -> dict:
-        """
-        Read the damage repair configuration from a JSON file.
-        """
-        project_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "../../../")
-        )
-        config_path = os.path.join(project_root, self.config_file)
-
-        try:
-            with open(config_path, "r") as f:
-                config = json.load(f)
-            return config
-        except FileNotFoundError:
-            # Return default parameters if config not found
-            return {
-                "eta_damage_production_rate": 0.5,
-                "beta_max_repair_capacity": 1.0,
-                "K_SR": 0.1,
-            }
-
-    def outputs(self) -> set[str]:
+    def ports_schema(self):
         return {
-            "damage_D",
+            "damage": Port(
+                role=PortRole.EXCLUSIVE,
+                default=0.0,
+                units="dimensionless",
+                description="Accumulated cellular damage",
+            ),
         }
 
-    def __call__(self, _t, state, args=None):
-        """
-        Compute derivatives for damage and repair machinery.
-        """
-        # Extract state variables
-        D = state.get("damage_D", 0.0)
-
-        # Extract parameters
-        eta = self.params.get("eta_damage_production_rate", 0.5)
-        beta = self.params.get("beta_max_repair_capacity", 1.0)
-        K = self.params.get("K_SR", 0.1)
-
-        # Compute derivatives
-        tau_scale = 1.0 / (24.0 * 365)  # scale time to years if _t is in hours
-        Tau = _t * tau_scale
-        dD = eta * Tau - (beta * D) / (K + D)
-
-        return {
-            "damage_D": dD,
-        }
-
-    def __repr__(self):
-        return (
-            "DamageRepair Submodel: Simulates damage accumulation and repair"
-        )
-
-    def __str__(self):
-        out = """
-        DamageRepair Submodel
-        Based on Uri Alon's saturating damage removal model.
-        """
-        return out
+    def derivative(self, t, state):
+        D = state["damage"]
+        tau = t * self.tau_scale
+        dD = self.eta * tau - (self.beta * D) / (self.K + D)
+        return {"damage": dD}

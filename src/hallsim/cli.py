@@ -1,56 +1,12 @@
-import inspect
 import json
 
 import click
 
-from hallsim.simulate import simulate_basic, simulate_dummy, simulate_with_kick
-
 
 @click.group()
 def simulate():
-    """HallSim simulation commands (legacy + composable)."""
+    """HallSim simulation commands."""
     pass
-
-
-# ── Legacy commands ──────────────────────────────────────────────────────
-
-@simulate.command()
-@click.option(
-    "--num-cells", "-n", default=16, help="Number of cells to create"
-)
-def dummy(num_cells):
-    simulate_dummy(num_cells)
-
-
-_DEFAULT_STEPS = (
-    inspect.signature(simulate_basic).parameters["n_steps"].default
-)
-
-
-@simulate.command()
-@click.option(
-    "--num-steps", "-n", type=int, default=_DEFAULT_STEPS, show_default=True
-)
-def basic(num_steps):
-    simulate_basic(num_steps)
-
-
-@simulate.command()
-def ls():
-    """List all available simulation commands."""
-    commands = simulate.commands.keys()
-    click.echo("Available simulation commands:")
-    for cmd in commands:
-        click.echo(f"- {cmd}")
-
-
-@simulate.command()
-@click.option(
-    "--num-steps", "-n", type=int, default=_DEFAULT_STEPS, show_default=True
-)
-def kick(num_steps):
-    """Simulate with perturbation (kick)."""
-    simulate_with_kick()
 
 
 # ── Composable architecture commands ─────────────────────────────────────
@@ -71,9 +27,7 @@ def compose(t1, dt, validate):
     from hallsim.process import Port, PortRole, Process
     from hallsim.simulator import Simulator
 
-    # ── Define two processes ───────────────────────────────────
     class ROSProduction(Process):
-        """Mitochondrial ROS production (constant rate)."""
         rate: float = 0.05
 
         def ports_schema(self):
@@ -90,7 +44,6 @@ def compose(t1, dt, validate):
             return {"ros": jnp.array(self.rate)}
 
     class AntioxidantDefense(Process):
-        """First-order ROS scavenging."""
         scavenge_rate: float = 0.02
 
         def ports_schema(self):
@@ -106,7 +59,6 @@ def compose(t1, dt, validate):
         def derivative(self, t, state):
             return {"ros": -self.scavenge_rate * state["ros"]}
 
-    # ── Wire them together ─────────────────────────────────────
     processes = {
         "ros_prod": ROSProduction(),
         "antioxidant": AntioxidantDefense(),
@@ -131,14 +83,12 @@ def compose(t1, dt, validate):
 
     click.echo(f"\nStore paths: {composite.store_paths()}")
 
-    # ── Solve ──────────────────────────────────────────────────
     sim = Simulator()
     result = sim.run(composite, t_span=(0.0, t1), dt=dt)
 
     click.echo(f"\nSimulation t=[0, {t1}], dt={dt}")
     click.echo(f"Time points: {len(result.ts)}")
 
-    # Print first/last few values
     ts = result.ts
     ros = result.ys["cytoplasm/ROS"]
     click.echo(f"\n{'t':>8s}  {'ROS (uM)':>10s}")
@@ -152,9 +102,8 @@ def compose(t1, dt, validate):
         click.echo(f"{float(ts[i]):8.1f}  {float(ros[i]):10.4f}")
         prev = i
 
-    # Steady state
     ss = float(ros[-1])
-    expected_ss = 0.05 / 0.02  # rate / scavenge_rate = 2.5 uM
+    expected_ss = 0.05 / 0.02
     click.echo(f"\nSteady state ROS: {ss:.4f} uM (expected: {expected_ss:.1f} uM)")
 
 
@@ -163,11 +112,7 @@ def compose(t1, dt, validate):
 @click.option("--kick-time", type=float, default=50.0, help="Time of perturbation")
 @click.option("--kick-ros", type=float, default=5.0, help="ROS delta at kick")
 def compose_kick(t1, kick_time, kick_ros):
-    """Demo: composable simulation with a mid-run perturbation.
-
-    Runs ROS production + antioxidant defense, then applies an additive
-    kick to ROS at kick_time and continues. Shows resilience/recovery.
-    """
+    """Demo: composable simulation with a mid-run perturbation."""
     import jax.numpy as jnp
 
     from hallsim.composite import Composite
@@ -217,7 +162,6 @@ def compose_kick(t1, kick_time, kick_ros):
     click.echo(f"\n{'t':>8s}  {'ROS (uM)':>10s}")
     click.echo(f"{'─'*8}  {'─'*10}")
 
-    # Show key points: start, pre-kick, post-kick, recovery, end
     key_times = [0, kick_time - 1, kick_time, kick_time + 1, t1]
     for target in key_times:
         idx = int(jnp.argmin(jnp.abs(ts - target)))
@@ -232,11 +176,7 @@ def compose_kick(t1, kick_time, kick_ros):
 @simulate.command("validate-demo")
 @click.option("--strict", is_flag=True, help="Promote warnings to errors")
 def validate_demo(strict):
-    """Demo: show the semantic validation layer catching issues.
-
-    Composes processes with intentional unit mismatches, missing
-    ontology, and feedback loops, then prints the validation report.
-    """
+    """Demo: show the semantic validation layer catching issues."""
     import jax.numpy as jnp
 
     from hallsim.process import Port, PortRole, Process
@@ -266,22 +206,16 @@ def validate_demo(strict):
             return {
                 "x": Port(
                     role=PortRole.EVOLVED, default=1.0,
-                    units="nM",  # Different scale from ProcessA!
+                    units="nM",
                     description="ROS concentration from oxidative stress",
                 ),
-                "y": Port(
-                    role=PortRole.EVOLVED, default=0.5,
-                    units="uM",
-                ),
+                "y": Port(role=PortRole.EVOLVED, default=0.5, units="uM"),
             }
 
         def derivative(self, t, state):
             return {"x": -self.rate * state["x"], "y": jnp.array(0.01)}
 
-    processes = {
-        "proc_a": ProcessA(),
-        "proc_b": ProcessB(),
-    }
+    processes = {"proc_a": ProcessA(), "proc_b": ProcessB()}
     topology = {
         "proc_a": {"x": "pool/ROS", "y": "pool/signal"},
         "proc_b": {"x": "pool/ROS", "y": "pool/signal"},
@@ -319,22 +253,13 @@ def validate_demo(strict):
 @click.option("--t1", type=float, default=100.0, help="End time (seconds)")
 @click.option("--macro-dt", type=float, default=5.0, help="Macro step interval")
 def multiscale(t1, macro_dt):
-    """Demo: multi-timescale simulation with continuous + discrete + event processes.
-
-    Runs three process kinds together via the Scheduler:
-    - CONTINUOUS: ROS production (fast) + slow drift
-    - DISCRETE: counter incrementing every 20s
-    - EVENT: alarm fires when ROS exceeds threshold
-
-    Shows the Scheduler orchestrating multi-rate execution.
-    """
+    """Demo: multi-timescale simulation with continuous + discrete + event processes."""
     import jax.numpy as jnp
 
     from hallsim.composite import Composite
     from hallsim.process import Port, PortRole, Process, ProcessKind
     from hallsim.scheduler import Scheduler
 
-    # ── Continuous: ROS production ─────────────────────────────
     class ROSProduction(Process):
         kind: ProcessKind = ProcessKind.CONTINUOUS
         timescale: float = 1.0
@@ -346,7 +271,6 @@ def multiscale(t1, macro_dt):
         def derivative(self, t, state):
             return {"ros": jnp.array(self.rate)}
 
-    # ── Continuous: slow decay ─────────────────────────────────
     class SlowDecay(Process):
         kind: ProcessKind = ProcessKind.CONTINUOUS
         timescale: float = 100.0
@@ -358,7 +282,6 @@ def multiscale(t1, macro_dt):
         def derivative(self, t, state):
             return {"ros": -self.rate * state["ros"]}
 
-    # ── Discrete: periodic counter ─────────────────────────────
     class HeartbeatCounter(Process):
         kind: ProcessKind = ProcessKind.DISCRETE
         dt_step: float = 20.0
@@ -369,7 +292,6 @@ def multiscale(t1, macro_dt):
         def update(self, t, state):
             return {"beats": jnp.array(1.0)}
 
-    # ── Event: ROS alarm ───────────────────────────────────────
     class ROSAlarm(Process):
         kind: ProcessKind = ProcessKind.EVENT
         threshold: float = 30.0
@@ -386,7 +308,6 @@ def multiscale(t1, macro_dt):
         def handler(self, t, state):
             return {"alarm": 1.0 - state["alarm"]}
 
-    # ── Wire and run ───────────────────────────────────────────
     composite = Composite(
         processes={
             "ros_prod": ROSProduction(),
@@ -419,7 +340,6 @@ def multiscale(t1, macro_dt):
     scheduler = Scheduler()
     result = scheduler.run(composite, t_span=(0.0, t1), macro_dt=macro_dt)
 
-    # Print trajectory
     ts = result.ts
     ros = result.ys["cell/ROS"]
     beats = result.ys["state/heartbeats"]
@@ -440,7 +360,6 @@ def multiscale(t1, macro_dt):
         click.echo(f"  t={ev.time:.1f}: {ev.process} -> {ev.delta}")
 
     click.echo()
-    # Steady state for production + decay: ROS_ss = rate/decay = 0.5/0.01 = 50
     click.echo(f"Final ROS: {float(ros[-1]):.2f} uM (steady state: {0.5/0.01:.0f} uM)")
     click.echo(f"Final heartbeats: {int(float(beats[-1]))}")
     click.echo(f"Alarm triggered: {'yes' if float(alarm[-1]) > 0.5 else 'no'}")
