@@ -14,14 +14,16 @@ dependencies    = [
   "jax",
   "diffrax",
   "optax",
-  "equinox"
+  "equinox",
+  "pint",
+  "networkx"
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "black", "pre-commit", "flake8"]
 
 [project.urls]
-Documentation = "https://github.com/your‑org/HallSim#readme"
+Documentation = "https://github.com/BabaJaguska/HallSim#readme"
 
 [project.scripts]
 simulate = "hallsim.cli:simulate"

@@ -1,4 +1,4 @@
-.PHONY: install format lint test run update help all
+.PHONY: install format lint test run run-compose run-validate update help all
 
 install:
 	pip install --upgrade pip
@@ -23,6 +23,12 @@ test:
 run:
 	simulate basic
 
+run-compose:
+	simulate compose
+
+run-validate:
+	simulate validate-demo
+
 update:
 	pip freeze > requirements_freeze.txt
 	@echo "Updated requirements_freeze.txt with current dependencies."
@@ -41,5 +47,7 @@ help:
 	@echo "  make format  - Format the code using black"
 	@echo "  make lint    - Lint the code using flake8"
 	@echo "  make test    - Run tests using pytest"
-	@echo "  make run     - Run the main script"
-	@echo "  make help    - Show this help message"
+	@echo "  make run          - Run the legacy simulation"
+	@echo "  make run-compose  - Run the composable architecture demo"
+	@echo "  make run-validate - Run the semantic validation demo"
+	@echo "  make help         - Show this help message"

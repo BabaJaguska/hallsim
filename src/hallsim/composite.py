@@ -68,6 +68,7 @@ class Composite(eqx.Module):
         topology: dict[str, dict[str, str]],
         *,
         validate: bool = True,
+        semantic_validation: bool | dict = False,
     ) -> None:
         self.processes = processes
         self.topology = topology
@@ -76,6 +77,24 @@ class Composite(eqx.Module):
             if errors:
                 raise ValueError(
                     "Topology validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+                )
+        if semantic_validation:
+            import warnings
+
+            from hallsim.validation import CompositeValidator
+
+            if isinstance(semantic_validation, dict):
+                validator = CompositeValidator(**semantic_validation)
+            else:
+                validator = CompositeValidator()
+            report = validator.validate(processes, topology)
+            if report.errors:
+                raise ValueError(f"Semantic validation failed:\n{report}")
+            if report.warnings:
+                warnings.warn(
+                    f"Semantic validation warnings:\n{report}",
+                    UserWarning,
+                    stacklevel=2,
                 )
 
     # -----------------------------------------------------------------
