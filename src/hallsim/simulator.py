@@ -106,7 +106,9 @@ class Simulator:
         term = dfx.ODETerm(rhs)
 
         if keep_trajectory:
-            saveat = dfx.SaveAt(ts=jnp.arange(t0, t1 + dt, dt))
+            ts = jnp.arange(t0, t1 + dt, dt)
+            ts = ts[ts <= t1]  # clip to avoid floating-point overshoot
+            saveat = dfx.SaveAt(ts=ts)
         else:
             saveat = dfx.SaveAt(t1=True)
 

@@ -16,7 +16,9 @@ dependencies    = [
   "optax",
   "equinox",
   "pint",
-  "networkx"
+  "networkx",
+  "sbmltoodejax",
+  "tqdm",
 ]
 
 [project.optional-dependencies]

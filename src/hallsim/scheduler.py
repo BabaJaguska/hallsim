@@ -186,6 +186,13 @@ class Scheduler:
         # Per-group stats
         stats: dict[str, Any] = {gname: {"num_macro_steps": 0} for gname in groups}
 
+        n_macro = int((t1 - t0) / macro_dt) + 1
+        try:
+            from tqdm import tqdm
+            pbar = tqdm(total=n_macro, desc="Scheduler", unit="step", leave=False)
+        except ImportError:
+            pbar = None
+
         t = t0
         while t < t1 - 1e-12:
             t_next = min(t + macro_dt, t1)
@@ -223,6 +230,8 @@ class Scheduler:
                 was_active[proc_name] = cond
 
             t = t_next
+            if pbar is not None:
+                pbar.update(1)
 
             # Save snapshot if due
             if t - last_save_t >= save_dt - 1e-12 or t >= t1 - 1e-12:
@@ -231,6 +240,9 @@ class Scheduler:
                     {k: v.copy() for k, v in state.items()}
                 )
                 last_save_t = t
+
+        if pbar is not None:
+            pbar.close()
 
         # Assemble result
         ts = jnp.array(trajectory_ts)
