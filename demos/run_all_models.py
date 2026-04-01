@@ -7,12 +7,14 @@ Runs:
 3. SBML MAPK cascade — signaling dynamics from BioModels
 4. NeuralODE — learned dynamics on a dummy oscillator
 5. ERiQ with hallmark perturbation — Mitochondrial Dysfunction severity sweep
+6. Stem Cell Niche — Sivakumar2011 crosstalk + niche deterioration sweep
 
 Saves plots to demos/plots/
 """
 
 import os
 import sys
+import traceback
 
 # Ensure hallsim is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -26,6 +28,8 @@ import numpy as np
 
 PLOT_DIR = os.path.join(os.path.dirname(__file__), "plots")
 os.makedirs(PLOT_DIR, exist_ok=True)
+
+saved_plots = []
 
 
 def demo_eriq():
@@ -53,30 +57,36 @@ def demo_eriq():
         "eriq/ROS_activity", "eriq/mTOR_activity", "eriq/p53_activity",
     ]
 
+    path = os.path.join(PLOT_DIR, "eriq_trajectories.png")
     fig = plot_trajectories(
         result, paths=key_paths,
         title="ERiQ: Cellular Aging Trajectory",
         figsize=(14, 5),
     )
-    fig.savefig(os.path.join(PLOT_DIR, "eriq_trajectories.png"), dpi=150, bbox_inches="tight")
-    print(f"   Saved: eriq_trajectories.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    saved_plots.append(path)
+    print(f"   Saved: {path}")
 
     # Subplots view
+    path = os.path.join(PLOT_DIR, "eriq_subplots.png")
     fig = plot_trajectories(
         result, paths=key_paths,
         title="ERiQ: Individual State Variables",
         figsize=(14, 8), ncols=3,
     )
-    fig.savefig(os.path.join(PLOT_DIR, "eriq_subplots.png"), dpi=150, bbox_inches="tight")
-    print(f"   Saved: eriq_subplots.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    saved_plots.append(path)
+    print(f"   Saved: {path}")
 
     # Phase portrait: mito_damage vs mito_function
+    path = os.path.join(PLOT_DIR, "eriq_phase.png")
     fig = plot_phase_portrait(
         result, "eriq/mito_damage", "eriq/mito_function",
         title="ERiQ: Damage vs Function Phase Portrait",
     )
-    fig.savefig(os.path.join(PLOT_DIR, "eriq_phase.png"), dpi=150, bbox_inches="tight")
-    print(f"   Saved: eriq_phase.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    saved_plots.append(path)
+    print(f"   Saved: {path}")
 
     print(f"   Final mito_damage: {float(result.ys['eriq/mito_damage'][-1]):.4f}")
     print(f"   Final mito_function: {float(result.ys['eriq/mito_function'][-1]):.4f}")
@@ -154,6 +164,7 @@ def demo_eriq_plus_damage():
 
     result = sim.run(comp, t_span=(0.0, 3000.0), dt=5.0)
 
+    path = os.path.join(PLOT_DIR, "eriq_composed.png")
     fig = plot_trajectories(
         result,
         paths=["eriq/mito_damage", "eriq/mito_function", "eriq/ROS_activity",
@@ -161,16 +172,17 @@ def demo_eriq_plus_damage():
         title="ERiQ + SaturatingRemoval: Composed Aging + Damage Model",
         figsize=(14, 5),
     )
-    fig.savefig(os.path.join(PLOT_DIR, "eriq_composed.png"), dpi=150, bbox_inches="tight")
-    print(f"   Saved: eriq_composed.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    saved_plots.append(path)
+    print(f"   Saved: {path}")
 
     plt.close("all")
 
 
 def demo_mapk():
-    """Run SBML MAPK cascade model from BioModels."""
+    """Run SBML MAPK cascade model through the composable framework."""
     print("\n" + "=" * 60)
-    print("3. SBML MAPK Cascade (BioModels #10, via sbmltoodejax)")
+    print("3. SBML MAPK Cascade (BioModels #10, Kholodenko2000)")
     print("=" * 60)
 
     try:
@@ -193,9 +205,7 @@ def demo_mapk():
     species = list(schema.keys())
     print(f"   Species ({len(species)}): {species}")
 
-    topology = {
-        "mapk": {name: f"mapk/{name}" for name in species},
-    }
+    topology = {"mapk": {name: f"mapk/{name}" for name in species}}
 
     comp = Composite(
         processes={"mapk": proc},
@@ -203,28 +213,35 @@ def demo_mapk():
         validate=False,
     )
 
-    sim = Simulator()
-    print("   Simulating t=[0, 1000]...")
-    result = sim.run(comp, t_span=(0.0, 1000.0), dt=1.0)
+    # max_step_size=0.1 matches the original sbmltoodejax deltaT;
+    # rtol=1e-8 prevents accumulated phase drift over many cycles
+    n_secs = 150 * 60
+    sim = Simulator(max_step_size=0.1, rtol=1e-12, atol=1e-14)
+    print(f"   Simulating t=[0, {n_secs}] ({n_secs/60:.0f} min)...")
+    result = sim.run(comp, t_span=(0.0, float(n_secs)), dt=5.0)
 
-    # Plot all species
+    # Plot key species
     all_paths = [f"mapk/{s}" for s in species]
+    path = os.path.join(PLOT_DIR, "mapk_all.png")
     fig = plot_trajectories(
         result, paths=all_paths,
-        title="MAPK Cascade (BioModels #10): All Species",
+        title="MAPK Cascade (Kholodenko2000, BioModels #10)",
         figsize=(14, 6),
     )
-    fig.savefig(os.path.join(PLOT_DIR, "mapk_all.png"), dpi=150, bbox_inches="tight")
-    print(f"   Saved: mapk_all.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    saved_plots.append(path)
+    print(f"   Saved: {path}")
 
     # Subplots
+    path = os.path.join(PLOT_DIR, "mapk_subplots.png")
     fig = plot_trajectories(
         result, paths=all_paths,
         title="MAPK Cascade: Individual Species",
-        figsize=(16, 10), ncols=3,
+        figsize=(16, 10), ncols=4,
     )
-    fig.savefig(os.path.join(PLOT_DIR, "mapk_subplots.png"), dpi=150, bbox_inches="tight")
-    print(f"   Saved: mapk_subplots.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    saved_plots.append(path)
+    print(f"   Saved: {path}")
 
     plt.close("all")
 
@@ -255,12 +272,12 @@ def demo_neuralode():
     )
     print(f"   Data shape: {ys_data.shape}")
 
-    print("   Training NeuralODE (200 steps)...")
+    print("   Training NeuralODE (1000 steps)...")
     proc = train_neuralode(
         ts_data, ys_data,
         fields=["x", "y"],
-        width=32, depth=2,
-        steps=200, batch_size=32, seed=42,
+        width=64, depth=3,
+        steps=1000, batch_size=32, seed=42,
     )
 
     # Run the trained model in a Composite
@@ -315,8 +332,10 @@ def demo_neuralode():
 
     fig.suptitle("NeuralODE: Learned Damped Oscillator", fontsize=13)
     fig.tight_layout()
-    fig.savefig(os.path.join(PLOT_DIR, "neuralode_oscillator.png"), dpi=150, bbox_inches="tight")
-    print(f"   Saved: neuralode_oscillator.png")
+    path = os.path.join(PLOT_DIR, "neuralode_oscillator.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    saved_plots.append(path)
+    print(f"   Saved: {path}")
 
     plt.close("all")
 
@@ -331,7 +350,6 @@ def demo_hallmark_sweep():
     from hallsim.hallmarks import HALLMARK_REGISTRY
     from hallsim.composite import Composite
     from hallsim.simulator import Simulator
-    import numpy as np
 
     severities = [0.0, 0.3, 0.6, 1.0]
     handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
@@ -367,22 +385,108 @@ def demo_hallmark_sweep():
 
     fig.suptitle("Hallmark Severity Sweep: Mitochondrial Dysfunction", fontsize=13)
     fig.tight_layout()
-    fig.savefig(os.path.join(PLOT_DIR, "hallmark_sweep.png"), dpi=150, bbox_inches="tight")
-    print(f"   Saved: hallmark_sweep.png")
+    path = os.path.join(PLOT_DIR, "hallmark_sweep.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    saved_plots.append(path)
+    print(f"   Saved: {path}")
+
+    plt.close("all")
+
+
+def demo_stem_cell_niche():
+    """Sweep niche deterioration severity on Sivakumar2011 crosstalk model."""
+    print("\n" + "=" * 60)
+    print("6. Stem Cell Niche: Sivakumar2011 Crosstalk + Niche Decay")
+    print("=" * 60)
+
+    try:
+        from hallsim.models.stem_cell_niche import (
+            build_niche_crosstalk,
+            CROSSTALK_WNT, CROSSTALK_EGF, CROSSTALK_SHH, CROSSTALK_NOTCH,
+        )
+    except ImportError as e:
+        print(f"   SKIPPED: {e}")
+        return
+
+    from hallsim.simulator import Simulator
+    import diffrax as dfx
+
+    severities = [0.0, 0.3, 0.6, 1.0]
+    sim = Simulator(solver=dfx.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=500_000, dt0=1e-4)
+
+    ligands = {
+        CROSSTALK_WNT: "Wnt",
+        CROSSTALK_EGF: "EGF",
+        CROSSTALK_SHH: "Shh",
+        CROSSTALK_NOTCH: "Notch",
+    }
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.flatten()
+    colors = plt.cm.Blues(np.linspace(0.3, 1.0, len(severities)))
+
+    for sev, color in zip(severities, colors):
+        print(f"   severity={sev:.1f}...")
+        try:
+            comp = build_niche_crosstalk(severity=sev)
+            result = sim.run(comp, t_span=(0.0, 100.0), dt=0.5)
+
+            ts = np.asarray(result.ts)
+            for ax, (species_id, name) in zip(axes, ligands.items()):
+                vals = np.asarray(result.ys[species_id])
+                ax.plot(ts, vals, color=color, label=f"sev={sev:.1f}",
+                        linewidth=1.5)
+                ax.set_title(f"{name} ({species_id})", fontsize=11)
+                ax.set_xlabel("Time")
+                ax.set_ylabel("Concentration")
+                ax.grid(True, alpha=0.3)
+
+            print(f"   severity={sev:.1f}: final Wnt={float(result.ys[CROSSTALK_WNT][-1]):.3f}")
+        except Exception as e:
+            print(f"   severity={sev:.1f} FAILED: {e}")
+
+    for ax in axes:
+        ax.legend(fontsize=8)
+
+    fig.suptitle(
+        "Stem Cell Exhaustion: Niche Deterioration Severity Sweep\n"
+        "(Sivakumar2011 crosstalk model + StemCellNiche process)",
+        fontsize=13,
+    )
+    fig.tight_layout()
+    path = os.path.join(PLOT_DIR, "stem_cell_niche_sweep.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    saved_plots.append(path)
+    print(f"   Saved: {path}")
 
     plt.close("all")
 
 
 if __name__ == "__main__":
     print("HallSim Model Demos")
-    print("Plots will be saved to demos/plots/")
+    print(f"Plots will be saved to {os.path.abspath(PLOT_DIR)}")
 
-    demo_eriq()
-    demo_eriq_plus_damage()
-    demo_mapk()
-    demo_neuralode()
-    demo_hallmark_sweep()
+    demos = [
+        ("ERiQ", demo_eriq),
+        ("ERiQ + Damage", demo_eriq_plus_damage),
+        ("MAPK", demo_mapk),
+        ("NeuralODE", demo_neuralode),
+        ("Hallmark Sweep", demo_hallmark_sweep),
+        ("Stem Cell Niche", demo_stem_cell_niche),
+    ]
+
+    for name, fn in demos:
+        try:
+            fn()
+        except Exception:
+            print(f"\n   *** {name} demo FAILED ***")
+            traceback.print_exc()
 
     print("\n" + "=" * 60)
-    print("All demos complete! Check demos/plots/ for figures.")
+    if saved_plots:
+        print(f"All demos complete! {len(saved_plots)} plots saved to:")
+        for p in saved_plots:
+            print(f"  {p}")
+    else:
+        print("WARNING: No plots were generated. Check errors above.")
     print("=" * 60)

@@ -158,6 +158,28 @@ def apply_hallmarks(
 # Process names match those in build_eriq_composite().
 
 HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
+    "Stem Cell Exhaustion": HallmarkHandle(
+        name="Stem Cell Exhaustion",
+        description=(
+            "Age-dependent decline in stem cell niche signaling. "
+            "Wnt, EGF, Shh, and Notch pathways deteriorate, reducing "
+            "self-renewal capacity and regenerative potential."
+        ),
+        category="Integrative",
+        references=[
+            "Lopez-Otin et al. 2023",
+            "Sivakumar et al. 2011 (BIOMD0000000398)",
+        ],
+        mappings=[
+            ParameterMapping(
+                process_name="niche",
+                param_name="severity",
+                transform=lambda h: h,
+                description="Niche deterioration severity — scales decay of all ligands",
+            ),
+        ],
+    ),
+
     "Mitochondrial Dysfunction": HallmarkHandle(
         name="Mitochondrial Dysfunction",
         description=(

@@ -101,6 +101,29 @@ def _load_local_sbml(sbml_path: str):
     os.close(fd)
     try:
         GenerateModel(model_data, tmp_py)
+        # Patch sbmltoodejax bug: some SBML models (e.g. Sivakumar2011
+        # crosstalk BIOMD0000000398) contain MathML that sbmltoodejax
+        # translates into bare `no.sqrt(...)` calls — an undefined name
+        # `no` that is never imported.  This appears to come from the
+        # SBML MathML namespace prefix "no" being emitted verbatim
+        # instead of mapping to jax.numpy.  We patch the generated
+        # source to alias `no` to `jax.numpy` before loading.
+        with open(tmp_py, "r") as f:
+            code = f.read()
+        patched = False
+        # Patch MathML namespace prefix "no" → jax.numpy
+        if "\tno " in code or " no." in code or "\tno." in code:
+            code = code.replace("import no\n", "import jax.numpy as no\n")
+            if "import no" not in code:
+                code = "import jax.numpy as no\n" + code
+            patched = True
+        # Patch deprecated eqx.static_field() → eqx.field(static=True)
+        if "eqx.static_field()" in code:
+            code = code.replace("eqx.static_field()", "eqx.field(static=True)")
+            patched = True
+        if patched:
+            with open(tmp_py, "w") as f:
+                f.write(code)
         spec = importlib.util.spec_from_file_location("_sbml_generated", tmp_py)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -119,6 +142,7 @@ def _load_local_sbml(sbml_path: str):
 def process_from_sbml(
     model_id: int | str,
     name: str | None = None,
+    timescale: float | None = None,
 ) -> SBMLProcess:
     """Load an SBML model and wrap it as a Process.
 
@@ -130,6 +154,9 @@ def process_from_sbml(
     name:
         Human-readable name for the process. Defaults to
         ``"biomodel_{model_id}"`` or the filename.
+    timescale:
+        Characteristic timescale in hours for multi-rate scheduling.
+        If ``None``, the process lands in the default group.
 
     Returns
     -------
@@ -186,5 +213,7 @@ def process_from_sbml(
     object.__setattr__(proc, '_w0', w0)
     object.__setattr__(proc, '_c', c)
     object.__setattr__(proc, '_name', name)
+    if timescale is not None:
+        object.__setattr__(proc, 'timescale', timescale)
 
     return proc

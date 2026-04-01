@@ -51,22 +51,32 @@ class Simulator:
         Runge-Kutta, good for non-stiff systems).
     rtol, atol:
         Relative and absolute tolerances for adaptive stepping.
+        Defaults: rtol=1e-6, atol=1e-9 (tight enough for oscillatory
+        dynamics like Kholodenko MAPK).
     max_steps:
         Safety limit on solver steps.
     dt0:
         Initial step size for adaptive controller.
+    max_step_size:
+        Maximum internal step size (``dtmax`` for PIDController).
+        Prevents the adaptive stepper from overshooting fast dynamics.
+        If ``None``, no cap is applied.
     """
 
     def __init__(
         self,
         solver: dfx.AbstractSolver | None = None,
-        rtol: float = 1e-3,
-        atol: float = 1e-6,
-        max_steps: int = 400_000,
+        rtol: float = 1e-6,
+        atol: float = 1e-9,
+        max_steps: int = 1_000_000,
         dt0: float = 1e-3,
+        max_step_size: float | None = None,
     ) -> None:
         self.solver = solver or dfx.Tsit5()
-        self.controller = dfx.PIDController(rtol=rtol, atol=atol)
+        controller_kwargs = dict(rtol=rtol, atol=atol)
+        if max_step_size is not None:
+            controller_kwargs["dtmax"] = max_step_size
+        self.controller = dfx.PIDController(**controller_kwargs)
         self.max_steps = max_steps
         self.dt0 = dt0
 

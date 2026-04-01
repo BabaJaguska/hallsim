@@ -25,6 +25,8 @@ HallSim's goal is to enable compositional co-simulation of reusable systems-biol
 
 ## Architecture
 
+![HallSim Architecture](hallsim_architecture.png)
+
 HallSim is built on a **composable architecture** using JAX/Equinox/Diffrax. Design borrows composition semantics from Vivarium [3] and scheduling concepts from Ptolemy II [5], implemented natively on JAX for GPU acceleration and differentiability.
 
 **Core concepts:**
@@ -71,6 +73,8 @@ Validation is warnings-by-default (not errors). Use `strict=True` to promote war
 | **SaturatingRemoval** | `hallsim.models.saturating_removal` | Uri Alon's damage accumulation with Michaelis-Menten repair. |
 | **NeuralODE** | `hallsim.models.neuralode` | MLP-parameterized dynamics — trainable surrogate or unknown-dynamics learner. Includes training infrastructure. |
 | **SBML Import** | `hallsim.sbml_import` | Auto-generate Process from BioModels SBML via `sbmltoodejax`. |
+| **Sivakumar2011** | `models/sivakumar2011/` | 5 SBML models of neural stem cell signaling: EGF, Shh, Notch, Wnt, and integrated crosstalk (BIOMD0000000394-398). |
+| **StemCellNiche** | `hallsim.models.stem_cell_niche` | Age-dependent niche deterioration — severity-scaled decay of Wnt, EGF, Shh, Notch ligands. Composes additively with the Sivakumar2011 crosstalk model. Maps to the **Stem Cell Exhaustion** hallmark. |
 
 ### Hallmark Handles
 
@@ -86,6 +90,17 @@ modified_procs = apply_hallmarks(comp.processes, {
     "Deregulated Nutrient Sensing": 0.5,
 })
 # Hallmark severity is differentiable: jax.grad through the whole pipeline
+```
+
+**Stem Cell Exhaustion** is mapped to the Sivakumar2011 crosstalk model via the `StemCellNiche` process, which contributes severity-dependent decay to Wnt, EGF, Shh, and Notch signaling:
+
+```python
+from hallsim.models.stem_cell_niche import build_niche_crosstalk
+from hallsim.simulator import Simulator
+
+comp = build_niche_crosstalk(severity=0.6)  # moderate niche deterioration
+result = Simulator().run(comp, t_span=(0.0, 100.0), dt=0.5)
+# Wnt, EGF, Shh, Notch ligands decline with severity
 ```
 
 ### Data Validation (ssGSEA)
@@ -286,6 +301,8 @@ src/hallsim/
 
 ### Next
 
+* [x] Sivakumar2011 neural stem cell models (5 SBML, stem cell exhaustion hallmark)
+* [x] StemCellNiche process (niche deterioration → hallmark severity)
 * [ ] Validate ERiQ against rapamycin scRNA-seq dataset (ssGSEA scores)
 * [ ] PINNs: physics-informed loss for NeuralODE training
 * [ ] Multi-cell / spatial: vmap over populations, inter-cell communication

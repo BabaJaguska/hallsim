@@ -33,8 +33,11 @@ Example
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 import diffrax as dfx
 import jax.numpy as jnp
@@ -109,12 +112,14 @@ class Scheduler:
         max_steps: int = 400_000,
         dt0: float = 1e-3,
         groups: dict[str, list[str]] | None = None,
+        debug: bool = False,
     ) -> None:
         self.solver = solver or dfx.Tsit5()
         self.controller = dfx.PIDController(rtol=rtol, atol=atol)
         self.max_steps = max_steps
         self.dt0 = dt0
         self.manual_groups = groups
+        self.debug = debug
 
     def run(
         self,
@@ -199,7 +204,7 @@ class Scheduler:
 
             # 1. Solve each continuous group (Lie splitting: sequential)
             for gname, rhs_fn in group_rhs.items():
-                state = self._solve_group(rhs_fn, state, t, t_next)
+                state = self._solve_group(rhs_fn, state, t, t_next, group_name=gname)
                 stats[gname]["num_macro_steps"] += 1
 
             # 2. Fire discrete processes that are due
@@ -259,10 +264,13 @@ class Scheduler:
         state: dict[str, jnp.ndarray],
         t0: float,
         t1: float,
+        group_name: str = "",
     ) -> dict[str, jnp.ndarray]:
         """Solve one continuous group from t0 to t1."""
         if t1 <= t0:
             return state
+
+        state_before = {k: float(v) for k, v in state.items()} if self.debug else None
 
         term = dfx.ODETerm(rhs_fn)
         sol = dfx.diffeqsolve(
@@ -276,6 +284,23 @@ class Scheduler:
             stepsize_controller=self.controller,
             max_steps=self.max_steps,
         )
+
+        if self.debug:
+            n_steps = int(sol.stats["num_steps"])
+            n_rejected = int(sol.stats["num_rejected_steps"])
+            # Show max delta (what this group actually changed)
+            final = {k: float(v[-1]) for k, v in sol.ys.items()}
+            deltas = {k: abs(final[k] - state_before[k]) for k in final}
+            max_delta_key = max(deltas, key=deltas.get)
+            max_delta = deltas[max_delta_key]
+            any_nan = any(jnp.isnan(v[-1]).any() for v in sol.ys.values())
+            log.info(
+                f"  [{group_name}] [{t0:.1f} → {t1:.1f}]: "
+                f"{n_steps} steps ({n_rejected} rej) | "
+                f"max Δ: {max_delta_key}={max_delta:.4g}"
+                + (" *** NaN ***" if any_nan else "")
+            )
+
         # Extract final state from solution
         return {k: v[-1] for k, v in sol.ys.items()}
 
