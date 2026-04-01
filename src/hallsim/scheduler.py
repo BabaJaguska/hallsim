@@ -43,7 +43,6 @@ import diffrax as dfx
 import jax.numpy as jnp
 
 from hallsim.composite import Composite
-from hallsim.process import ProcessKind
 from hallsim.store import extract_port_view, route_derivatives
 
 
@@ -189,12 +188,17 @@ class Scheduler:
         events: list[EventRecord] = []
 
         # Per-group stats
-        stats: dict[str, Any] = {gname: {"num_macro_steps": 0} for gname in groups}
+        stats: dict[str, Any] = {
+            gname: {"num_macro_steps": 0} for gname in groups
+        }
 
         n_macro = int((t1 - t0) / macro_dt) + 1
         try:
             from tqdm import tqdm
-            pbar = tqdm(total=n_macro, desc="Scheduler", unit="step", leave=False)
+
+            pbar = tqdm(
+                total=n_macro, desc="Scheduler", unit="step", leave=False
+            )
         except ImportError:
             pbar = None
 
@@ -204,7 +208,9 @@ class Scheduler:
 
             # 1. Solve each continuous group (Lie splitting: sequential)
             for gname, rhs_fn in group_rhs.items():
-                state = self._solve_group(rhs_fn, state, t, t_next, group_name=gname)
+                state = self._solve_group(
+                    rhs_fn, state, t, t_next, group_name=gname
+                )
                 stats[gname]["num_macro_steps"] += 1
 
             # 2. Fire discrete processes that are due
@@ -227,11 +233,13 @@ class Scheduler:
                     routed = route_derivatives(delta, proc_topo)
                     for sp, dval in routed.items():
                         state[sp] = state[sp] + dval
-                    events.append(EventRecord(
-                        time=float(t_next),
-                        process=proc_name,
-                        delta={sp: dval for sp, dval in routed.items()},
-                    ))
+                    events.append(
+                        EventRecord(
+                            time=float(t_next),
+                            process=proc_name,
+                            delta={sp: dval for sp, dval in routed.items()},
+                        )
+                    )
                 was_active[proc_name] = cond
 
             t = t_next
@@ -270,7 +278,9 @@ class Scheduler:
         if t1 <= t0:
             return state
 
-        state_before = {k: float(v) for k, v in state.items()} if self.debug else None
+        state_before = (
+            {k: float(v) for k, v in state.items()} if self.debug else None
+        )
 
         term = dfx.ODETerm(rhs_fn)
         sol = dfx.diffeqsolve(

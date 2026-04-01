@@ -11,10 +11,13 @@ def simulate():
 
 # ── Composable architecture commands ─────────────────────────────────────
 
+
 @simulate.command()
 @click.option("--t1", type=float, default=50.0, help="End time")
 @click.option("--dt", type=float, default=1.0, help="Save interval")
-@click.option("--validate/--no-validate", default=True, help="Run semantic validation")
+@click.option(
+    "--validate/--no-validate", default=True, help="Run semantic validation"
+)
 def compose(t1, dt, validate):
     """Demo: compose ROS production + antioxidant defense, solve ODE.
 
@@ -33,7 +36,8 @@ def compose(t1, dt, validate):
         def ports_schema(self):
             return {
                 "ros": Port(
-                    role=PortRole.EVOLVED, default=0.1,
+                    role=PortRole.EVOLVED,
+                    default=0.1,
                     units="uM",
                     description="Reactive oxygen species concentration",
                     ontology={"chebi": "CHEBI:26523"},
@@ -49,7 +53,8 @@ def compose(t1, dt, validate):
         def ports_schema(self):
             return {
                 "ros": Port(
-                    role=PortRole.EVOLVED, default=0.1,
+                    role=PortRole.EVOLVED,
+                    default=0.1,
                     units="uM",
                     description="Reactive oxygen species concentration",
                     ontology={"chebi": "CHEBI:26523"},
@@ -64,7 +69,7 @@ def compose(t1, dt, validate):
         "antioxidant": AntioxidantDefense(),
     }
     topology = {
-        "ros_prod":   {"ros": "cytoplasm/ROS"},
+        "ros_prod": {"ros": "cytoplasm/ROS"},
         "antioxidant": {"ros": "cytoplasm/ROS"},
     }
 
@@ -77,7 +82,8 @@ def compose(t1, dt, validate):
     click.echo(f"\nTopology: {json.dumps(topology, indent=2)}")
 
     composite = Composite(
-        processes, topology,
+        processes,
+        topology,
         semantic_validation=validate,
     )
 
@@ -93,7 +99,9 @@ def compose(t1, dt, validate):
     ros = result.ys["cytoplasm/ROS"]
     click.echo(f"\n{'t':>8s}  {'ROS (uM)':>10s}")
     click.echo(f"{'─'*8}  {'─'*10}")
-    indices = list(range(min(5, len(ts)))) + list(range(max(5, len(ts) - 3), len(ts)))
+    indices = list(range(min(5, len(ts)))) + list(
+        range(max(5, len(ts) - 3), len(ts))
+    )
     indices = sorted(set(i for i in indices if 0 <= i < len(ts)))
     prev = -1
     for i in indices:
@@ -104,12 +112,16 @@ def compose(t1, dt, validate):
 
     ss = float(ros[-1])
     expected_ss = 0.05 / 0.02
-    click.echo(f"\nSteady state ROS: {ss:.4f} uM (expected: {expected_ss:.1f} uM)")
+    click.echo(
+        f"\nSteady state ROS: {ss:.4f} uM (expected: {expected_ss:.1f} uM)"
+    )
 
 
 @simulate.command("compose-kick")
 @click.option("--t1", type=float, default=100.0, help="End time")
-@click.option("--kick-time", type=float, default=50.0, help="Time of perturbation")
+@click.option(
+    "--kick-time", type=float, default=50.0, help="Time of perturbation"
+)
 @click.option("--kick-ros", type=float, default=5.0, help="ROS delta at kick")
 def compose_kick(t1, kick_time, kick_ros):
     """Demo: composable simulation with a mid-run perturbation."""
@@ -123,7 +135,9 @@ def compose_kick(t1, kick_time, kick_ros):
         rate: float = 0.05
 
         def ports_schema(self):
-            return {"ros": Port(role=PortRole.EVOLVED, default=0.1, units="uM")}
+            return {
+                "ros": Port(role=PortRole.EVOLVED, default=0.1, units="uM")
+            }
 
         def derivative(self, t, state):
             return {"ros": jnp.array(self.rate)}
@@ -132,7 +146,9 @@ def compose_kick(t1, kick_time, kick_ros):
         scavenge_rate: float = 0.02
 
         def ports_schema(self):
-            return {"ros": Port(role=PortRole.EVOLVED, default=0.1, units="uM")}
+            return {
+                "ros": Port(role=PortRole.EVOLVED, default=0.1, units="uM")
+            }
 
         def derivative(self, t, state):
             return {"ros": -self.scavenge_rate * state["ros"]}
@@ -142,7 +158,7 @@ def compose_kick(t1, kick_time, kick_ros):
         "antioxidant": AntioxidantDefense(),
     }
     topology = {
-        "ros_prod":   {"ros": "cytoplasm/ROS"},
+        "ros_prod": {"ros": "cytoplasm/ROS"},
         "antioxidant": {"ros": "cytoplasm/ROS"},
     }
 
@@ -166,11 +182,16 @@ def compose_kick(t1, kick_time, kick_ros):
     for target in key_times:
         idx = int(jnp.argmin(jnp.abs(ts - target)))
         label = ""
-        if abs(float(ts[idx]) - kick_time) < 0.5 and float(ts[idx]) >= kick_time:
+        if (
+            abs(float(ts[idx]) - kick_time) < 0.5
+            and float(ts[idx]) >= kick_time
+        ):
             label = "  <-- kick"
         click.echo(f"{float(ts[idx]):8.1f}  {float(ros[idx]):10.4f}{label}")
 
-    click.echo(f"\nRecovery: ROS returns to ~{float(ros[-1]):.2f} uM (steady state: 2.5 uM)")
+    click.echo(
+        f"\nRecovery: ROS returns to ~{float(ros[-1]):.2f} uM (steady state: 2.5 uM)"
+    )
 
 
 @simulate.command("validate-demo")
@@ -188,7 +209,8 @@ def validate_demo(strict):
         def ports_schema(self):
             return {
                 "x": Port(
-                    role=PortRole.EVOLVED, default=1.0,
+                    role=PortRole.EVOLVED,
+                    default=1.0,
                     units="uM",
                     description="ROS concentration from mitochondrial damage",
                     ontology={"chebi": "CHEBI:26523"},
@@ -205,7 +227,8 @@ def validate_demo(strict):
         def ports_schema(self):
             return {
                 "x": Port(
-                    role=PortRole.EVOLVED, default=1.0,
+                    role=PortRole.EVOLVED,
+                    default=1.0,
                     units="nM",
                     description="ROS concentration from oxidative stress",
                 ),
@@ -226,9 +249,11 @@ def validate_demo(strict):
         click.echo(f"  {name}:")
         for pname, port in proc.ports_schema().items():
             ont = f", ontology={port.ontology}" if port.ontology else ""
-            click.echo(f"    {pname}: {port.role.value}, units={port.units!r}{ont}")
+            click.echo(
+                f"    {pname}: {port.role.value}, units={port.units!r}{ont}"
+            )
 
-    click.echo(f"\nTopology:")
+    click.echo("\nTopology:")
     for name, topo in topology.items():
         click.echo(f"  {name}: {topo}")
 
@@ -243,15 +268,21 @@ def validate_demo(strict):
     click.echo(f"Valid: {report.is_valid}")
 
     if report.interaction_graph:
-        click.echo(f"\nInteraction graph nodes: "
-                    f"{[n['id'] for n in report.interaction_graph.get('nodes', [])]}")
-        click.echo(f"Interaction graph edges: "
-                    f"{len(report.interaction_graph.get('links', []))}")
+        click.echo(
+            f"\nInteraction graph nodes: "
+            f"{[n['id'] for n in report.interaction_graph.get('nodes', [])]}"
+        )
+        click.echo(
+            f"Interaction graph edges: "
+            f"{len(report.interaction_graph.get('links', []))}"
+        )
 
 
 @simulate.command("multiscale")
 @click.option("--t1", type=float, default=100.0, help="End time (seconds)")
-@click.option("--macro-dt", type=float, default=5.0, help="Macro step interval")
+@click.option(
+    "--macro-dt", type=float, default=5.0, help="Macro step interval"
+)
 def multiscale(t1, macro_dt):
     """Demo: multi-timescale simulation with continuous + discrete + event processes."""
     import jax.numpy as jnp
@@ -266,7 +297,9 @@ def multiscale(t1, macro_dt):
         rate: float = 0.5
 
         def ports_schema(self):
-            return {"ros": Port(role=PortRole.EVOLVED, default=0.0, units="uM")}
+            return {
+                "ros": Port(role=PortRole.EVOLVED, default=0.0, units="uM")
+            }
 
         def derivative(self, t, state):
             return {"ros": jnp.array(self.rate)}
@@ -277,7 +310,9 @@ def multiscale(t1, macro_dt):
         rate: float = 0.01
 
         def ports_schema(self):
-            return {"ros": Port(role=PortRole.EVOLVED, default=0.0, units="uM")}
+            return {
+                "ros": Port(role=PortRole.EVOLVED, default=0.0, units="uM")
+            }
 
         def derivative(self, t, state):
             return {"ros": -self.rate * state["ros"]}
@@ -287,7 +322,11 @@ def multiscale(t1, macro_dt):
         dt_step: float = 20.0
 
         def ports_schema(self):
-            return {"beats": Port(role=PortRole.LATCHED, default=0.0, units="dimensionless")}
+            return {
+                "beats": Port(
+                    role=PortRole.LATCHED, default=0.0, units="dimensionless"
+                )
+            }
 
         def update(self, t, state):
             return {"beats": jnp.array(1.0)}
@@ -299,7 +338,9 @@ def multiscale(t1, macro_dt):
         def ports_schema(self):
             return {
                 "ros": Port(role=PortRole.INPUT, default=0.0, units="uM"),
-                "alarm": Port(role=PortRole.LATCHED, default=0.0, units="dimensionless"),
+                "alarm": Port(
+                    role=PortRole.LATCHED, default=0.0, units="dimensionless"
+                ),
             }
 
         def condition(self, t, state):
@@ -316,10 +357,10 @@ def multiscale(t1, macro_dt):
             "alarm": ROSAlarm(),
         },
         topology={
-            "ros_prod":   {"ros": "cell/ROS"},
+            "ros_prod": {"ros": "cell/ROS"},
             "slow_decay": {"ros": "cell/ROS"},
-            "heartbeat":  {"beats": "state/heartbeats"},
-            "alarm":      {"ros": "cell/ROS", "alarm": "state/alarm"},
+            "heartbeat": {"beats": "state/heartbeats"},
+            "alarm": {"ros": "cell/ROS", "alarm": "state/alarm"},
         },
     )
 
@@ -327,9 +368,15 @@ def multiscale(t1, macro_dt):
     click.echo("=" * 50)
     click.echo()
     click.echo("Processes:")
-    click.echo("  ros_prod    [CONTINUOUS, ts=1s]    ROS production (rate=0.5 uM/s)")
-    click.echo("  slow_decay  [CONTINUOUS, ts=100s]  first-order decay (rate=0.01/s)")
-    click.echo("  heartbeat   [DISCRETE, dt=20s]     increments counter every 20s")
+    click.echo(
+        "  ros_prod    [CONTINUOUS, ts=1s]    ROS production (rate=0.5 uM/s)"
+    )
+    click.echo(
+        "  slow_decay  [CONTINUOUS, ts=100s]  first-order decay (rate=0.01/s)"
+    )
+    click.echo(
+        "  heartbeat   [DISCRETE, dt=20s]     increments counter every 20s"
+    )
     click.echo("  alarm       [EVENT]                fires when ROS > 30 uM")
     click.echo()
 
@@ -360,7 +407,9 @@ def multiscale(t1, macro_dt):
         click.echo(f"  t={ev.time:.1f}: {ev.process} -> {ev.delta}")
 
     click.echo()
-    click.echo(f"Final ROS: {float(ros[-1]):.2f} uM (steady state: {0.5/0.01:.0f} uM)")
+    click.echo(
+        f"Final ROS: {float(ros[-1]):.2f} uM (steady state: {0.5/0.01:.0f} uM)"
+    )
     click.echo(f"Final heartbeats: {int(float(beats[-1]))}")
     click.echo(f"Alarm triggered: {'yes' if float(alarm[-1]) > 0.5 else 'no'}")
 
@@ -372,17 +421,33 @@ def info():
     click.echo("================================")
     click.echo()
     click.echo("Core concepts:")
-    click.echo("  Process   — Equinox module declaring ports + computing derivatives/updates")
-    click.echo("  Port      — Named connection point (INPUT / EVOLVED / EXCLUSIVE / LATCHED)")
+    click.echo(
+        "  Process   — Equinox module declaring ports + computing derivatives/updates"
+    )
+    click.echo(
+        "  Port      — Named connection point (INPUT / EVOLVED / EXCLUSIVE / LATCHED)"
+    )
     click.echo("  Topology  — Wires process ports to shared store paths")
-    click.echo("  Composite — Bundles processes + topology, auto-groups by timescale")
-    click.echo("  Simulator — Diffrax-based single-group ODE solver (adaptive Tsit5)")
-    click.echo("  Scheduler — Multi-rate orchestrator (Lie splitting + discrete + events)")
+    click.echo(
+        "  Composite — Bundles processes + topology, auto-groups by timescale"
+    )
+    click.echo(
+        "  Simulator — Diffrax-based single-group ODE solver (adaptive Tsit5)"
+    )
+    click.echo(
+        "  Scheduler — Multi-rate orchestrator (Lie splitting + discrete + events)"
+    )
     click.echo()
     click.echo("Process kinds:")
-    click.echo("  CONTINUOUS — derivative(t, state) -> dy/dt, solved by Diffrax ODE")
-    click.echo("  DISCRETE   — update(t, state) -> delta, called every dt_step seconds")
-    click.echo("  EVENT      — condition + handler, fires on False->True crossing")
+    click.echo(
+        "  CONTINUOUS — derivative(t, state) -> dy/dt, solved by Diffrax ODE"
+    )
+    click.echo(
+        "  DISCRETE   — update(t, state) -> delta, called every dt_step seconds"
+    )
+    click.echo(
+        "  EVENT      — condition + handler, fires on False->True crossing"
+    )
     click.echo()
     click.echo("Validation layer:")
     click.echo("  UnitChecker      — pint-based dimensional analysis")
@@ -391,14 +456,22 @@ def info():
     click.echo("  CouplingAuditor  — duplicate reaction detection")
     click.echo()
     click.echo("CLI commands:")
-    click.echo("  simulate compose          — demo: ROS production + antioxidant defense")
+    click.echo(
+        "  simulate compose          — demo: ROS production + antioxidant defense"
+    )
     click.echo("  simulate compose-kick     — demo: perturbation + recovery")
-    click.echo("  simulate multiscale       — demo: continuous + discrete + event scheduling")
-    click.echo("  simulate validate-demo    — demo: validation catching unit/semantic issues")
+    click.echo(
+        "  simulate multiscale       — demo: continuous + discrete + event scheduling"
+    )
+    click.echo(
+        "  simulate validate-demo    — demo: validation catching unit/semantic issues"
+    )
     click.echo("  simulate info             — this help")
     click.echo()
     click.echo("Python usage:")
-    click.echo("  from hallsim.process import Process, Port, PortRole, ProcessKind")
+    click.echo(
+        "  from hallsim.process import Process, Port, PortRole, ProcessKind"
+    )
     click.echo("  from hallsim.composite import Composite")
     click.echo("  from hallsim.scheduler import Scheduler")
     click.echo("  from hallsim.validation import CompositeValidator")

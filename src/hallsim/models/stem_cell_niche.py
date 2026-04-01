@@ -31,16 +31,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import jax.numpy as jnp
-
 from hallsim.process import Port, PortRole, Process
 
 # Sivakumar2011 crosstalk model (BIOMD0000000398) species IDs
 # for the four niche ligands / receptors.
-CROSSTALK_WNT = "s107"       # Wnt (extracellular)
-CROSSTALK_EGF = "s96"        # EGF
-CROSSTALK_SHH = "s81"        # Shh (Sonic Hedgehog)
-CROSSTALK_NOTCH = "s57"      # Notch receptor
+CROSSTALK_WNT = "s107"  # Wnt (extracellular)
+CROSSTALK_EGF = "s96"  # EGF
+CROSSTALK_SHH = "s81"  # Shh (Sonic Hedgehog)
+CROSSTALK_NOTCH = "s57"  # Notch receptor
 
 
 class StemCellNiche(Process):
@@ -142,7 +140,9 @@ def build_niche_crosstalk(
     if sbml_path is None:
         sbml_path = str(
             Path(__file__).parent.parent.parent.parent
-            / "models" / "sivakumar2011" / "crosstalk_BIOMD0000000398.xml"
+            / "models"
+            / "sivakumar2011"
+            / "crosstalk_BIOMD0000000398.xml"
         )
 
     crosstalk = process_from_sbml(sbml_path, name="crosstalk")

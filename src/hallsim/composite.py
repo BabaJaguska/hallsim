@@ -35,7 +35,7 @@ from typing import Any
 import equinox as eqx
 import jax.numpy as jnp
 
-from hallsim.process import Port, PortRole, Process, ProcessKind
+from hallsim.process import PortRole, Process, ProcessKind
 from hallsim.store import (
     build_initial_store,
     extract_port_view,
@@ -76,7 +76,8 @@ class Composite(eqx.Module):
             errors = validate_topology(processes, topology)
             if errors:
                 raise ValueError(
-                    "Topology validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+                    "Topology validation failed:\n"
+                    + "\n".join(f"  - {e}" for e in errors)
                 )
         if semantic_validation:
             import warnings
@@ -169,10 +170,7 @@ class Composite(eqx.Module):
 
     def metadata(self) -> dict[str, Any]:
         """Aggregate metadata from all processes."""
-        return {
-            name: proc.metadata()
-            for name, proc in self.processes.items()
-        }
+        return {name: proc.metadata() for name, proc in self.processes.items()}
 
     # -----------------------------------------------------------------
     # Process kind filtering
@@ -180,15 +178,27 @@ class Composite(eqx.Module):
 
     def continuous_processes(self) -> dict[str, Process]:
         """All CONTINUOUS kind processes."""
-        return {n: p for n, p in self.processes.items() if p.kind == ProcessKind.CONTINUOUS}
+        return {
+            n: p
+            for n, p in self.processes.items()
+            if p.kind == ProcessKind.CONTINUOUS
+        }
 
     def discrete_processes(self) -> dict[str, Process]:
         """All DISCRETE kind processes."""
-        return {n: p for n, p in self.processes.items() if p.kind == ProcessKind.DISCRETE}
+        return {
+            n: p
+            for n, p in self.processes.items()
+            if p.kind == ProcessKind.DISCRETE
+        }
 
     def event_processes(self) -> dict[str, Process]:
         """All EVENT kind processes."""
-        return {n: p for n, p in self.processes.items() if p.kind == ProcessKind.EVENT}
+        return {
+            n: p
+            for n, p in self.processes.items()
+            if p.kind == ProcessKind.EVENT
+        }
 
     # -----------------------------------------------------------------
     # Group-level RHS building

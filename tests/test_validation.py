@@ -33,14 +33,18 @@ from hallsim.validation import (
 # Toy processes with rich port metadata
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class ROSProducerMicromolar(Process):
     """Produces ROS in micromolar."""
+
     rate: float = 0.1
 
     def ports_schema(self):
         return {
             "ros": Port(
-                role=PortRole.EVOLVED, default=0.0, units="uM",
+                role=PortRole.EVOLVED,
+                default=0.0,
+                units="uM",
                 description="ROS production from mitochondrial electron transport chain",
                 ontology={"chebi": "CHEBI:26523"},
             ),
@@ -52,12 +56,15 @@ class ROSProducerMicromolar(Process):
 
 class ROSProducerNanomolar(Process):
     """Produces ROS in nanomolar — same dimension, different scale."""
+
     rate: float = 100.0
 
     def ports_schema(self):
         return {
             "ros": Port(
-                role=PortRole.EVOLVED, default=0.0, units="nM",
+                role=PortRole.EVOLVED,
+                default=0.0,
+                units="nM",
                 description="ROS production from mitochondrial complex III leakage",
                 ontology={"chebi": "CHEBI:26523"},
             ),
@@ -69,12 +76,15 @@ class ROSProducerNanomolar(Process):
 
 class ROSProducerKilograms(Process):
     """Produces 'ROS' but in kilograms — incompatible dimension with concentration."""
+
     rate: float = 1.0
 
     def ports_schema(self):
         return {
             "ros": Port(
-                role=PortRole.EVOLVED, default=0.0, units="kg",
+                role=PortRole.EVOLVED,
+                default=0.0,
+                units="kg",
                 description="Mass of ROS produced",
             ),
         }
@@ -85,14 +95,19 @@ class ROSProducerKilograms(Process):
 
 class SuperoxideProducer(Process):
     """Produces superoxide specifically (different ChEBI from generic ROS)."""
+
     rate: float = 0.05
 
     def ports_schema(self):
         return {
             "ros": Port(
-                role=PortRole.EVOLVED, default=0.0, units="uM",
+                role=PortRole.EVOLVED,
+                default=0.0,
+                units="uM",
                 description="Superoxide anion production",
-                ontology={"chebi": "CHEBI:18421"},  # superoxide, not generic ROS
+                ontology={
+                    "chebi": "CHEBI:18421"
+                },  # superoxide, not generic ROS
             ),
         }
 
@@ -102,6 +117,7 @@ class SuperoxideProducer(Process):
 
 class BareProducer(Process):
     """Produces something with no units or ontology."""
+
     rate: float = 0.1
 
     def ports_schema(self):
@@ -113,6 +129,7 @@ class BareProducer(Process):
 
 class BareProducer2(Process):
     """Another bare producer."""
+
     rate: float = 0.2
 
     def ports_schema(self):
@@ -124,6 +141,7 @@ class BareProducer2(Process):
 
 class ReaderProcess(Process):
     """Reads from an input port, writes to an output."""
+
     coupling: float = 1.0
 
     def ports_schema(self):
@@ -138,6 +156,7 @@ class ReaderProcess(Process):
 
 class FeedbackA(Process):
     """Part of a feedback loop: reads y, writes x."""
+
     k: float = 0.1
 
     def ports_schema(self):
@@ -152,6 +171,7 @@ class FeedbackA(Process):
 
 class FeedbackB(Process):
     """Part of a feedback loop: reads x, writes y."""
+
     k: float = 0.2
 
     def ports_schema(self):
@@ -167,6 +187,7 @@ class FeedbackB(Process):
 # ═══════════════════════════════════════════════════════════════════════════
 # Unit Checker
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestUnitChecker:
 
@@ -185,7 +206,10 @@ class TestUnitChecker:
         results = UnitChecker().check(procs, topo)
         warnings = [r for r in results if r.level == Severity.WARNING]
         assert len(warnings) == 1
-        assert "scale mismatch" in warnings[0].message.lower() or "factor" in warnings[0].message.lower()
+        assert (
+            "scale mismatch" in warnings[0].message.lower()
+            or "factor" in warnings[0].message.lower()
+        )
 
     def test_incompatible_dimensions(self):
         """uM vs cell → ERROR (incompatible dimensions)."""
@@ -215,6 +239,7 @@ class TestUnitChecker:
 # ═══════════════════════════════════════════════════════════════════════════
 # Semantic Checker
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestSemanticChecker:
 
@@ -257,6 +282,7 @@ class TestSemanticChecker:
 # Graph Analyzer
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestGraphAnalyzer:
 
     def test_feedback_loop_detected(self):
@@ -267,7 +293,11 @@ class TestGraphAnalyzer:
             "b": {"y": "pool/y", "x": "pool/x"},
         }
         results = GraphAnalyzer().analyze(procs, topo)
-        loop_warnings = [r for r in results if "feedback" in r.message.lower() or "loop" in r.message.lower()]
+        loop_warnings = [
+            r
+            for r in results
+            if "feedback" in r.message.lower() or "loop" in r.message.lower()
+        ]
         assert len(loop_warnings) >= 1
 
     def test_high_fan_in(self):
@@ -275,8 +305,10 @@ class TestGraphAnalyzer:
 
         class Writer(Process):
             rate: float = 0.1
+
             def ports_schema(self):
                 return {"x": Port(role=PortRole.EVOLVED, default=0.0)}
+
             def derivative(self, t, state):
                 return {"x": jnp.asarray(self.rate)}
 
@@ -304,7 +336,11 @@ class TestGraphAnalyzer:
             "reader": {"input_val": "pool/x", "output_val": "pool/y"},
         }
         results = GraphAnalyzer().analyze(procs, topo)
-        loops = [r for r in results if "loop" in r.message.lower() or "feedback" in r.message.lower()]
+        loops = [
+            r
+            for r in results
+            if "loop" in r.message.lower() or "feedback" in r.message.lower()
+        ]
         assert len(loops) == 0
 
     def test_graph_export(self):
@@ -318,6 +354,7 @@ class TestGraphAnalyzer:
 # ═══════════════════════════════════════════════════════════════════════════
 # Coupling Auditor
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestCouplingAuditor:
 
@@ -335,21 +372,31 @@ class TestCouplingAuditor:
 
         class ATPProducer(Process):
             rate: float = 0.1
+
             def ports_schema(self):
-                return {"x": Port(
-                    role=PortRole.EVOLVED, default=0.0,
-                    description="ATP synthesis via oxidative phosphorylation",
-                )}
+                return {
+                    "x": Port(
+                        role=PortRole.EVOLVED,
+                        default=0.0,
+                        description="ATP synthesis via oxidative phosphorylation",
+                    )
+                }
+
             def derivative(self, t, state):
                 return {"x": jnp.asarray(self.rate)}
 
         class GlucoseConsumer(Process):
             rate: float = 0.05
+
             def ports_schema(self):
-                return {"x": Port(
-                    role=PortRole.EVOLVED, default=0.0,
-                    description="Hexokinase catalyzed glucose phosphorylation",
-                )}
+                return {
+                    "x": Port(
+                        role=PortRole.EVOLVED,
+                        default=0.0,
+                        description="Hexokinase catalyzed glucose phosphorylation",
+                    )
+                }
+
             def derivative(self, t, state):
                 return {"x": jnp.asarray(-self.rate)}
 
@@ -363,6 +410,7 @@ class TestCouplingAuditor:
 # ═══════════════════════════════════════════════════════════════════════════
 # CompositeValidator (orchestrator)
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestCompositeValidator:
 
@@ -415,6 +463,7 @@ class TestCompositeValidator:
 # Composite integration
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestCompositeIntegration:
 
     def test_semantic_validation_false_by_default(self):
@@ -437,7 +486,9 @@ class TestCompositeIntegration:
         procs = {"a": ROSProducerMicromolar(), "b": ROSProducerKilograms()}
         topo = {"a": {"ros": "pool/ros"}, "b": {"ros": "pool/ros"}}
         # Disable unit checking → should not raise
-        composite = Composite(procs, topo, semantic_validation={"check_units": False})
+        composite = Composite(
+            procs, topo, semantic_validation={"check_units": False}
+        )
         assert composite is not None
 
     def test_semantic_validation_warns_on_warnings(self):
@@ -447,5 +498,7 @@ class TestCompositeIntegration:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             Composite(procs, topo, semantic_validation=True)
-            sem_warnings = [x for x in w if "Semantic validation" in str(x.message)]
+            sem_warnings = [
+                x for x in w if "Semantic validation" in str(x.message)
+            ]
             assert len(sem_warnings) >= 1

@@ -81,7 +81,9 @@ class NeuralODEProcess(Process):
 
     def ports_schema(self):
         return {
-            name: Port(role=PortRole.EVOLVED, default=0.0, units="dimensionless")
+            name: Port(
+                role=PortRole.EVOLVED, default=0.0, units="dimensionless"
+            )
             for name in self.fields
         }
 
@@ -140,7 +142,9 @@ def train_neuralode(
     key = jax.random.PRNGKey(seed)
     model_key, loader_key = jax.random.split(key)
 
-    proc = NeuralODEProcess(fields=fields, width=width, depth=depth, key=model_key)
+    proc = NeuralODEProcess(
+        fields=fields, width=width, depth=depth, key=model_key
+    )
 
     # Wrap for array-based solving
     def solve_trajectory(proc, ts, y0):
@@ -150,7 +154,8 @@ def train_neuralode(
         sol = dfx.diffeqsolve(
             dfx.ODETerm(rhs),
             dfx.Tsit5(),
-            t0=ts[0], t1=ts[-1],
+            t0=ts[0],
+            t1=ts[-1],
             dt0=ts[1] - ts[0],
             y0=y0,
             saveat=dfx.SaveAt(ts=ts),
@@ -178,7 +183,12 @@ def train_neuralode(
     for step in range(steps):
         # Simple random batch
         loader_key, batch_key = jax.random.split(loader_key)
-        idx = jax.random.choice(batch_key, dataset_size, shape=(min(batch_size, dataset_size),), replace=False)
+        idx = jax.random.choice(
+            batch_key,
+            dataset_size,
+            shape=(min(batch_size, dataset_size),),
+            replace=False,
+        )
         yi = ys[idx]
         loss, proc, opt_state = make_step(ts, yi, proc, opt_state)
         if step % 100 == 0:
@@ -220,7 +230,8 @@ def generate_training_data(
         sol = dfx.diffeqsolve(
             dfx.ODETerm(model_fn),
             dfx.Tsit5(),
-            t0=ts[0], t1=ts[-1],
+            t0=ts[0],
+            t1=ts[-1],
             dt0=0.1,
             y0=y0,
             saveat=dfx.SaveAt(ts=ts),

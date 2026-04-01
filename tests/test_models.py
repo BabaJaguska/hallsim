@@ -15,6 +15,7 @@ from hallsim.simulator import Simulator
 class TestSaturatingRemoval:
     def test_ports(self):
         from hallsim.models.saturating_removal import SaturatingRemoval
+
         proc = SaturatingRemoval()
         schema = proc.ports_schema()
         assert "damage" in schema
@@ -22,6 +23,7 @@ class TestSaturatingRemoval:
 
     def test_derivative_at_zero(self):
         from hallsim.models.saturating_removal import SaturatingRemoval
+
         proc = SaturatingRemoval(eta=0.5, beta=1.0, K=0.1)
         dy = proc.derivative(0.0, {"damage": jnp.array(0.0)})
         # At t=0, tau=0, so production=0, repair=0 → dD=0
@@ -29,6 +31,7 @@ class TestSaturatingRemoval:
 
     def test_damage_accumulates(self):
         from hallsim.models.saturating_removal import SaturatingRemoval
+
         proc = SaturatingRemoval(eta=0.5, beta=1.0, K=0.1, tau_scale=0.01)
         comp = Composite(
             processes={"damage": proc},
@@ -65,6 +68,7 @@ class TestSaturatingRemoval:
 class TestNeuralODEProcess:
     def test_construction(self):
         from hallsim.models.neuralode import NeuralODEProcess
+
         proc = NeuralODEProcess(fields=["a", "b", "c"], width=16, depth=1)
         schema = proc.ports_schema()
         assert len(schema) == 3
@@ -72,6 +76,7 @@ class TestNeuralODEProcess:
 
     def test_derivative_shape(self):
         from hallsim.models.neuralode import NeuralODEProcess
+
         proc = NeuralODEProcess(fields=["x", "y"], width=16, depth=1)
         state = {"x": jnp.array(0.5), "y": jnp.array(-0.3)}
         dy = proc.derivative(0.0, state)
@@ -80,6 +85,7 @@ class TestNeuralODEProcess:
 
     def test_in_composite(self):
         from hallsim.models.neuralode import NeuralODEProcess
+
         proc = NeuralODEProcess(fields=["x", "y"], width=16, depth=1)
         comp = Composite(
             processes={"neural": proc},
@@ -120,7 +126,9 @@ class TestHallmarkHandles:
 
         modified = handle.apply(procs, severity=0.5)
         # MDAMAGE_SA should be 1.0 + 0.5 * 2.0 = 2.0
-        assert float(modified["oxidative_stress"].MDAMAGE_SA) == pytest.approx(2.0)
+        assert float(modified["oxidative_stress"].MDAMAGE_SA) == pytest.approx(
+            2.0
+        )
 
     def test_severity_zero_no_change(self):
         from hallsim.hallmarks import HALLMARK_REGISTRY
@@ -130,7 +138,9 @@ class TestHallmarkHandles:
         procs = {"oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=1.0)}
 
         modified = handle.apply(procs, severity=0.0)
-        assert float(modified["oxidative_stress"].MDAMAGE_SA) == pytest.approx(1.0)
+        assert float(modified["oxidative_stress"].MDAMAGE_SA) == pytest.approx(
+            1.0
+        )
 
     def test_severity_one_max_effect(self):
         from hallsim.hallmarks import HALLMARK_REGISTRY
@@ -141,24 +151,36 @@ class TestHallmarkHandles:
 
         modified = handle.apply(procs, severity=1.0)
         # 1.0 + 1.0 * 2.0 = 3.0
-        assert float(modified["oxidative_stress"].MDAMAGE_SA) == pytest.approx(3.0)
+        assert float(modified["oxidative_stress"].MDAMAGE_SA) == pytest.approx(
+            3.0
+        )
 
     def test_apply_hallmarks_multiple(self):
         from hallsim.hallmarks import apply_hallmarks
-        from hallsim.models.eriq import ERiQEnergyMetabolism, ERiQOxidativeStress
+        from hallsim.models.eriq import (
+            ERiQEnergyMetabolism,
+            ERiQOxidativeStress,
+        )
 
         procs = {
             "oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=1.0),
             "energy": ERiQEnergyMetabolism(GLYCOL_SA=1.0),
         }
 
-        modified = apply_hallmarks(procs, {
-            "Mitochondrial Dysfunction": 0.8,
-            "Deregulated Nutrient Sensing": 0.5,
-        })
+        modified = apply_hallmarks(
+            procs,
+            {
+                "Mitochondrial Dysfunction": 0.8,
+                "Deregulated Nutrient Sensing": 0.5,
+            },
+        )
 
-        assert float(modified["oxidative_stress"].MDAMAGE_SA) == pytest.approx(1.0 + 0.8 * 2.0)
-        assert float(modified["energy"].GLYCOL_SA) == pytest.approx(1.0 + 0.5 * 0.5)
+        assert float(modified["oxidative_stress"].MDAMAGE_SA) == pytest.approx(
+            1.0 + 0.8 * 2.0
+        )
+        assert float(modified["energy"].GLYCOL_SA) == pytest.approx(
+            1.0 + 0.5 * 0.5
+        )
 
     def test_missing_process_ignored(self):
         from hallsim.hallmarks import HALLMARK_REGISTRY
@@ -249,7 +271,11 @@ class TestDataValidation:
         )
 
         # direction=-1: x increase should correspond to pathway decrease
-        mappings = [PathwayMapping(state_var="x", pathway_name="pathway", direction=-1.0)]
+        mappings = [
+            PathwayMapping(
+                state_var="x", pathway_name="pathway", direction=-1.0
+            )
+        ]
 
         result = validate_against_data(baseline, perturbed, measured, mappings)
         assert result.concordance == 1.0
@@ -276,8 +302,20 @@ class TestDataValidation:
             n_pathways=2,
             concordance=0.5,
             per_pathway=[
-                {"pathway": "A", "state_var": "x", "sim_delta": 0.1, "meas_delta": 0.2, "concordant": True},
-                {"pathway": "B", "state_var": "y", "sim_delta": 0.1, "meas_delta": -0.1, "concordant": False},
+                {
+                    "pathway": "A",
+                    "state_var": "x",
+                    "sim_delta": 0.1,
+                    "meas_delta": 0.2,
+                    "concordant": True,
+                },
+                {
+                    "pathway": "B",
+                    "state_var": "y",
+                    "sim_delta": 0.1,
+                    "meas_delta": -0.1,
+                    "concordant": False,
+                },
             ],
         )
         s = str(result)
@@ -287,6 +325,7 @@ class TestDataValidation:
 
     def test_eriq_pathway_mappings_exist(self):
         from hallsim.data_validation import ERIQ_PATHWAY_MAPPINGS
+
         assert len(ERIQ_PATHWAY_MAPPINGS) >= 5
         for m in ERIQ_PATHWAY_MAPPINGS:
             assert m.state_var.startswith("eriq/")

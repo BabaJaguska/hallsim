@@ -3,7 +3,6 @@
 import jax.numpy as jnp
 import pytest
 
-from hallsim.composite import Composite
 from hallsim.models.eriq import (
     ERIQ_HOMEOSTATIC_IC,
     ERiQEnergyMetabolism,
@@ -63,9 +62,16 @@ class TestERiQEnergyMetabolism:
     def test_ports(self):
         proc = ERiQEnergyMetabolism()
         schema = proc.ports_schema()
-        exclusive = {k for k, v in schema.items() if v.role == PortRole.EXCLUSIVE}
+        exclusive = {
+            k for k, v in schema.items() if v.role == PortRole.EXCLUSIVE
+        }
         inputs = {k for k, v in schema.items() if v.role == PortRole.INPUT}
-        assert exclusive == {"mito_function", "mito_enzymes", "glycolysis", "glycolytic_enzymes"}
+        assert exclusive == {
+            "mito_function",
+            "mito_enzymes",
+            "glycolysis",
+            "glycolytic_enzymes",
+        }
         assert "mito_damage" in inputs
         assert "ROS_activity" in inputs
 
@@ -88,7 +94,9 @@ class TestERiQOxidativeStress:
     def test_ports(self):
         proc = ERiQOxidativeStress()
         schema = proc.ports_schema()
-        exclusive = {k for k, v in schema.items() if v.role == PortRole.EXCLUSIVE}
+        exclusive = {
+            k for k, v in schema.items() if v.role == PortRole.EXCLUSIVE
+        }
         assert exclusive == {"mito_damage", "ROS_integrator_c", "ROS_activity"}
 
     def test_derivative_finite(self):
@@ -102,9 +110,15 @@ class TestERiQSignaling:
     def test_ports(self):
         proc = ERiQSignaling()
         schema = proc.ports_schema()
-        exclusive = {k for k, v in schema.items() if v.role == PortRole.EXCLUSIVE}
-        assert exclusive == {"mTOR_integrator_c", "mTOR_activity",
-                             "p53_integrator_c", "p53_activity"}
+        exclusive = {
+            k for k, v in schema.items() if v.role == PortRole.EXCLUSIVE
+        }
+        assert exclusive == {
+            "mTOR_integrator_c",
+            "mTOR_activity",
+            "p53_integrator_c",
+            "p53_activity",
+        }
 
     def test_derivative_finite(self):
         proc = ERiQSignaling()
@@ -182,7 +196,9 @@ class TestERiQSimulation:
         for key, val in dy.items():
             # Derivatives should be small at homeostasis (not exactly zero
             # because decomposition introduces splitting error)
-            assert abs(float(val)) < 1.0, f"d({key})/dt = {float(val)} is too large at homeostasis"
+            assert (
+                abs(float(val)) < 1.0
+            ), f"d({key})/dt = {float(val)} is too large at homeostasis"
 
     def test_differentiable(self):
         """Can compute gradients through ERiQ composite RHS."""

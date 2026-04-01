@@ -42,6 +42,7 @@ import jax.numpy as jnp
 # Port role enum
 # ---------------------------------------------------------------------------
 
+
 class ProcessKind(enum.Enum):
     """What kind of update rule a process uses.
 
@@ -97,6 +98,7 @@ class PortRole(enum.Enum):
 # Port descriptor
 # ---------------------------------------------------------------------------
 
+
 class Port:
     """Describes a single named connection point on a Process.
 
@@ -142,6 +144,7 @@ class Port:
 # Process base class
 # ---------------------------------------------------------------------------
 
+
 class Process(eqx.Module):
     """Abstract base for composable biological processes.
 
@@ -181,7 +184,9 @@ class Process(eqx.Module):
         """
         raise NotImplementedError
 
-    def derivative(self, t: float, state: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
+    def derivative(
+        self, t: float, state: dict[str, jnp.ndarray]
+    ) -> dict[str, jnp.ndarray]:
         """Compute time derivatives (CONTINUOUS processes).
 
         Parameters
@@ -201,7 +206,9 @@ class Process(eqx.Module):
 
     # --- Interface: DISCRETE -------------------------------------------------
 
-    def update(self, t: float, state: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
+    def update(
+        self, t: float, state: dict[str, jnp.ndarray]
+    ) -> dict[str, jnp.ndarray]:
         """Compute a state delta (DISCRETE processes).
 
         Called every ``dt_step`` seconds by the Scheduler.  Returns an
@@ -231,7 +238,9 @@ class Process(eqx.Module):
         """
         raise NotImplementedError
 
-    def handler(self, t: float, state: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
+    def handler(
+        self, t: float, state: dict[str, jnp.ndarray]
+    ) -> dict[str, jnp.ndarray]:
         """Event handler (EVENT processes).
 
         Called once when ``condition`` crosses from False to True.
@@ -270,23 +279,41 @@ class Process(eqx.Module):
 
     def evolved_ports(self) -> dict[str, Port]:
         """Ports with role EVOLVED."""
-        return {k: v for k, v in self.ports_schema().items() if v.role == PortRole.EVOLVED}
+        return {
+            k: v
+            for k, v in self.ports_schema().items()
+            if v.role == PortRole.EVOLVED
+        }
 
     def exclusive_ports(self) -> dict[str, Port]:
         """Ports with role EXCLUSIVE."""
-        return {k: v for k, v in self.ports_schema().items() if v.role == PortRole.EXCLUSIVE}
+        return {
+            k: v
+            for k, v in self.ports_schema().items()
+            if v.role == PortRole.EXCLUSIVE
+        }
 
     def input_ports(self) -> dict[str, Port]:
         """Ports with role INPUT."""
-        return {k: v for k, v in self.ports_schema().items() if v.role == PortRole.INPUT}
+        return {
+            k: v
+            for k, v in self.ports_schema().items()
+            if v.role == PortRole.INPUT
+        }
 
     def latched_ports(self) -> dict[str, Port]:
         """Ports with role LATCHED."""
-        return {k: v for k, v in self.ports_schema().items() if v.role == PortRole.LATCHED}
+        return {
+            k: v
+            for k, v in self.ports_schema().items()
+            if v.role == PortRole.LATCHED
+        }
 
     def output_port_names(self) -> set[str]:
         """Names of ports that produce derivatives or deltas."""
         return {
-            k for k, v in self.ports_schema().items()
-            if v.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)
+            k
+            for k, v in self.ports_schema().items()
+            if v.role
+            in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)
         }

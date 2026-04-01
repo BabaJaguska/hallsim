@@ -64,10 +64,7 @@ class SBMLProcess(Process):
             "ratefunc",
         )
         dydt = ratefunc(y, t, self._w0, self._c)
-        return {
-            name: dydt[i]
-            for i, name in enumerate(self._species_names)
-        }
+        return {name: dydt[i] for i, name in enumerate(self._species_names)}
 
     def metadata(self):
         base = super().metadata()
@@ -97,7 +94,9 @@ def _load_local_sbml(sbml_path: str):
     # Use home directory for temp files (avoid /tmp space issues)
     tmp_dir = os.path.expanduser("~/.cache/hallsim")
     os.makedirs(tmp_dir, exist_ok=True)
-    fd, tmp_py = tempfile.mkstemp(suffix=".py", prefix="sbml_jax_", dir=tmp_dir)
+    fd, tmp_py = tempfile.mkstemp(
+        suffix=".py", prefix="sbml_jax_", dir=tmp_dir
+    )
     os.close(fd)
     try:
         GenerateModel(model_data, tmp_py)
@@ -124,11 +123,15 @@ def _load_local_sbml(sbml_path: str):
         if patched:
             with open(tmp_py, "w") as f:
                 f.write(code)
-        spec = importlib.util.spec_from_file_location("_sbml_generated", tmp_py)
+        spec = importlib.util.spec_from_file_location(
+            "_sbml_generated", tmp_py
+        )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         # sbmltoodejax versions use different class names
-        model_cls = getattr(mod, "ModelSpec", None) or getattr(mod, "ModelStep", None)
+        model_cls = getattr(mod, "ModelSpec", None) or getattr(
+            mod, "ModelStep", None
+        )
         if model_cls is None:
             raise AttributeError(
                 f"Generated SBML module has neither ModelSpec nor ModelStep. "
@@ -176,6 +179,7 @@ def process_from_sbml(
         )
 
     import os
+
     is_local_file = isinstance(model_id, str) and os.path.isfile(model_id)
 
     if is_local_file:
@@ -190,7 +194,9 @@ def process_from_sbml(
     # Extract species names from the model's index mapping
     # sbmltoodejax versions differ: ModelSpec uses model.modelstepfunc.y_indexes,
     # ModelStep puts y_indexes directly on the model
-    if hasattr(model, "modelstepfunc") and hasattr(model.modelstepfunc, "y_indexes"):
+    if hasattr(model, "modelstepfunc") and hasattr(
+        model.modelstepfunc, "y_indexes"
+    ):
         y_indexes = model.modelstepfunc.y_indexes
     elif hasattr(model, "y_indexes"):
         y_indexes = model.y_indexes
@@ -207,13 +213,17 @@ def process_from_sbml(
 
     proc = object.__new__(SBMLProcess)
     # Set fields directly (bypassing __init__ since this is a dynamic construction)
-    object.__setattr__(proc, '_species_names', species_names)
-    object.__setattr__(proc, '_species_y0', tuple(float(y0[i]) for i in range(len(species_names))))
-    object.__setattr__(proc, '_model', model)
-    object.__setattr__(proc, '_w0', w0)
-    object.__setattr__(proc, '_c', c)
-    object.__setattr__(proc, '_name', name)
+    object.__setattr__(proc, "_species_names", species_names)
+    object.__setattr__(
+        proc,
+        "_species_y0",
+        tuple(float(y0[i]) for i in range(len(species_names))),
+    )
+    object.__setattr__(proc, "_model", model)
+    object.__setattr__(proc, "_w0", w0)
+    object.__setattr__(proc, "_c", c)
+    object.__setattr__(proc, "_name", name)
     if timescale is not None:
-        object.__setattr__(proc, 'timescale', timescale)
+        object.__setattr__(proc, "timescale", timescale)
 
     return proc

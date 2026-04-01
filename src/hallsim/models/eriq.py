@@ -30,14 +30,13 @@ Homeostatic initial conditions from the original paper::
 """
 
 from __future__ import annotations
-
-import equinox as eqx
 import jax.numpy as jnp
 
 from hallsim.process import Port, PortRole, Process
 
 
 # ── Shared algebraic computation ────────────────────────────────────────
+
 
 def _compute_algebraic(state: dict) -> dict:
     """Compute all algebraic (non-ODE) nodes from the 11 state variables.
@@ -58,8 +57,8 @@ def _compute_algebraic(state: dict) -> dict:
     glycol = state.get("glycolysis", 2.401)
     mdamage = state.get("mito_damage", 0.0724)
     mtor_act = state.get("mTOR_activity", -0.1936)  # Ay
-    p53_act = state.get("p53_activity", 0.8734)      # Ax
-    ros_act = state.get("ROS_activity", 0.0794)      # Az
+    p53_act = state.get("p53_activity", 0.8734)  # Ax
+    ros_act = state.get("ROS_activity", 0.0794)  # Az
     ros_int = state.get("ROS_integrator_c", -0.7944)  # Cz
 
     # Scaling factors (SA parameters) — read from params sub-dict
@@ -86,18 +85,18 @@ def _compute_algebraic(state: dict) -> dict:
     MDR = p.get("MDR", 1.8e-3)
 
     # Hill / Michaelis-Menten parameters (see docs/eriq-equation-revisions.md)
-    K_AMPK = p.get("K_AMPK", 3.0)       # ATP half-inhibition for AMPK
-    n_AMPK = p.get("n_AMPK", 2.0)       # AMPK Hill coefficient
-    K_PTEN = p.get("K_PTEN", 0.5)       # ROS half-inhibition for PTEN
-    n_PTEN = p.get("n_PTEN", 1.0)       # PTEN Hill coefficient
+    K_AMPK = p.get("K_AMPK", 3.0)  # ATP half-inhibition for AMPK
+    n_AMPK = p.get("n_AMPK", 2.0)  # AMPK Hill coefficient
+    K_PTEN = p.get("K_PTEN", 0.5)  # ROS half-inhibition for PTEN
+    n_PTEN = p.get("n_PTEN", 1.0)  # PTEN Hill coefficient
     K_AKT_PTEN = p.get("K_AKT_PTEN", 0.5)  # PTEN half-inhibition of AKT
-    K_FOXO = p.get("K_FOXO", 0.5)       # AKT half-inhibition of FOXO
-    n_FOXO = p.get("n_FOXO", 2.0)       # FOXO Hill coefficient
-    K_AUTO = p.get("K_AUTO", 1.0)       # mTOR half-inhibition of autophagy
-    n_AUTO = p.get("n_AUTO", 2.0)       # autophagy Hill coefficient
-    Km_SIRT = p.get("Km_SIRT", 1.5)     # NAD+ Km for sirtuin (MM)
+    K_FOXO = p.get("K_FOXO", 0.5)  # AKT half-inhibition of FOXO
+    n_FOXO = p.get("n_FOXO", 2.0)  # FOXO Hill coefficient
+    K_AUTO = p.get("K_AUTO", 1.0)  # mTOR half-inhibition of autophagy
+    n_AUTO = p.get("n_AUTO", 2.0)  # autophagy Hill coefficient
+    Km_SIRT = p.get("Km_SIRT", 1.5)  # NAD+ Km for sirtuin (MM)
     K_SIRT_gly = p.get("K_SIRT_gly", 0.5)  # SIRT half-inhibition of glycolysis
-    K_GLU = p.get("K_GLU", 1.0)         # NFkB half-inhibition of glucose uptake
+    K_GLU = p.get("K_GLU", 1.0)  # NFkB half-inhibition of glucose uptake
 
     # ATP
     ATPm = mfunct
@@ -184,13 +183,30 @@ def _compute_algebraic(state: dict) -> dict:
     MD = MDR_SA * MDR * ROS * jnp.maximum(mfunct, 0.0)
 
     return {
-        "ATPm": ATPm, "ATPg": ATPg, "ATPr": ATPr,
-        "ROS": ROS, "PTEN": PTEN, "AKT": AKT, "AMPK": AMPK,
-        "NADr": NADr, "SIRT": SIRT, "PGC1a": PGC1a,
-        "MTORs": MTORs, "MTORa": MTORa, "MTOR": MTOR,
-        "NFKB": NFKB, "P53s": P53s, "P53a": P53a, "P53": P53,
-        "FOXO": FOXO, "Uz": Uz, "AUTOPHAGY": AUTOPHAGY,
-        "HIF": HIF, "PYR": PYR, "GLU": GLU, "MD": MD,
+        "ATPm": ATPm,
+        "ATPg": ATPg,
+        "ATPr": ATPr,
+        "ROS": ROS,
+        "PTEN": PTEN,
+        "AKT": AKT,
+        "AMPK": AMPK,
+        "NADr": NADr,
+        "SIRT": SIRT,
+        "PGC1a": PGC1a,
+        "MTORs": MTORs,
+        "MTORa": MTORa,
+        "MTOR": MTOR,
+        "NFKB": NFKB,
+        "P53s": P53s,
+        "P53a": P53a,
+        "P53": P53,
+        "FOXO": FOXO,
+        "Uz": Uz,
+        "AUTOPHAGY": AUTOPHAGY,
+        "HIF": HIF,
+        "PYR": PYR,
+        "GLU": GLU,
+        "MD": MD,
         # Export SIRT inhibition term for glycolysis derivative
         "SIRT_gly_inhibition": K_SIRT_gly / (K_SIRT_gly + SIRT),
     }
@@ -216,21 +232,41 @@ ERIQ_HOMEOSTATIC_IC = {
 # + Hill / Michaelis-Menten parameters (see docs/eriq-equation-revisions.md)
 ERIQ_DEFAULT_PARAMS = {
     # Original SA scaling factors
-    "ROS_SA": 1.0, "PTEN_SA": 1.0, "AKT_SA": 1.0, "AMPK_SA": 1.0,
-    "NADr_SA": 1.0, "SIRT_SA": 1.0, "PGC1a_SA": 1.0, "MTOR_SA": 1.0,
-    "NFKB_SA": 1.0, "P53_SA": 1.0, "P53_Base": 4.0, "P53_Act": 1.0,
-    "FOXO_SA": 1.0, "FREERAD_SA": 1.0, "AUTO_SA": 1.0, "HIF_SA": 1.0,
-    "PYR_SA": 1.0, "GLU_SA": 1.0, "MDR_SA": 1.0, "MDR": 1.8e-3,
-    "MDAMAGE_SA": 1.0, "GLYCOL_SA": 1.0,
+    "ROS_SA": 1.0,
+    "PTEN_SA": 1.0,
+    "AKT_SA": 1.0,
+    "AMPK_SA": 1.0,
+    "NADr_SA": 1.0,
+    "SIRT_SA": 1.0,
+    "PGC1a_SA": 1.0,
+    "MTOR_SA": 1.0,
+    "NFKB_SA": 1.0,
+    "P53_SA": 1.0,
+    "P53_Base": 4.0,
+    "P53_Act": 1.0,
+    "FOXO_SA": 1.0,
+    "FREERAD_SA": 1.0,
+    "AUTO_SA": 1.0,
+    "HIF_SA": 1.0,
+    "PYR_SA": 1.0,
+    "GLU_SA": 1.0,
+    "MDR_SA": 1.0,
+    "MDR": 1.8e-3,
+    "MDAMAGE_SA": 1.0,
+    "GLYCOL_SA": 1.0,
     # Hill / MM parameters for revised equations
-    "K_AMPK": 3.0, "n_AMPK": 2.0,        # AMPK: inhibitory Hill of ATP
-    "K_PTEN": 0.5, "n_PTEN": 1.0,        # PTEN: inhibitory Hill of ROS
-    "K_AKT_PTEN": 0.5,                    # AKT: PTEN half-inhibition
-    "K_FOXO": 0.5, "n_FOXO": 2.0,        # FOXO: inhibitory Hill of AKT
-    "K_AUTO": 1.0, "n_AUTO": 2.0,        # Autophagy: inhibitory Hill of mTOR
-    "Km_SIRT": 1.5,                       # SIRT: Michaelis-Menten for NAD+
-    "K_SIRT_gly": 0.5,                    # Glycolysis: SIRT inhibition half-max
-    "K_GLU": 1.0,                         # Glucose uptake: NFkB inhibition
+    "K_AMPK": 3.0,
+    "n_AMPK": 2.0,  # AMPK: inhibitory Hill of ATP
+    "K_PTEN": 0.5,
+    "n_PTEN": 1.0,  # PTEN: inhibitory Hill of ROS
+    "K_AKT_PTEN": 0.5,  # AKT: PTEN half-inhibition
+    "K_FOXO": 0.5,
+    "n_FOXO": 2.0,  # FOXO: inhibitory Hill of AKT
+    "K_AUTO": 1.0,
+    "n_AUTO": 2.0,  # Autophagy: inhibitory Hill of mTOR
+    "Km_SIRT": 1.5,  # SIRT: Michaelis-Menten for NAD+
+    "K_SIRT_gly": 0.5,  # Glycolysis: SIRT inhibition half-max
+    "K_GLU": 1.0,  # Glucose uptake: NFkB inhibition
 }
 
 # Store path prefix used by default topology
@@ -238,6 +274,7 @@ ERIQ_PREFIX = "eriq"
 
 
 # ── Process 1: Energy Metabolism ────────────────────────────────────────
+
 
 class ERiQEnergyMetabolism(Process):
     """Mitochondrial oxidative phosphorylation + glycolysis.
@@ -258,22 +295,26 @@ class ERiQEnergyMetabolism(Process):
         return {
             # EXCLUSIVE: this process owns these derivatives
             "mito_function": Port(
-                role=PortRole.EXCLUSIVE, default=3.6239,
+                role=PortRole.EXCLUSIVE,
+                default=3.6239,
                 units="dimensionless",
                 description="Mitochondrial output efficiency",
             ),
             "mito_enzymes": Port(
-                role=PortRole.EXCLUSIVE, default=-1.3358,
+                role=PortRole.EXCLUSIVE,
+                default=-1.3358,
                 units="dimensionless",
                 description="Mitochondrial enzyme levels",
             ),
             "glycolysis": Port(
-                role=PortRole.EXCLUSIVE, default=2.4010,
+                role=PortRole.EXCLUSIVE,
+                default=2.4010,
                 units="dimensionless",
                 description="Glycolytic flux",
             ),
             "glycolytic_enzymes": Port(
-                role=PortRole.EXCLUSIVE, default=-2.1968,
+                role=PortRole.EXCLUSIVE,
+                default=-2.1968,
                 units="dimensionless",
                 description="Glycolytic enzyme levels",
             ),
@@ -288,15 +329,19 @@ class ERiQEnergyMetabolism(Process):
     def derivative(self, t, state):
         obs = _compute_algebraic(state)
 
-        mfunct = state["mito_function"]
         menzy = state["mito_enzymes"]
-        glycol = state["glycolysis"]
         glyenz = state["glycolytic_enzymes"]
         mdamage = state["mito_damage"]
 
         # Mitochondrial function
         # r2 = PGC1a + PYR + P53 - 0.2*HIF - 0.2*NFkB
-        r2 = obs["PGC1a"] + obs["PYR"] + obs["P53"] - 0.2 * obs["HIF"] - 0.2 * obs["NFKB"]
+        r2 = (
+            obs["PGC1a"]
+            + obs["PYR"]
+            + obs["P53"]
+            - 0.2 * obs["HIF"]
+            - 0.2 * obs["NFKB"]
+        )
         gain2 = 0.05  # original MATLAB value
         u2 = r2 + menzy
         dMito_function = gain2 * u2 - obs["SIRT"] * 0.02
@@ -313,7 +358,9 @@ class ERiQEnergyMetabolism(Process):
         r3 = obs["GLU"] + 0.01 * obs["HIF"] + 0.01 * obs["NADr"]
         gain3 = 0.25
         u3 = r3 + glyenz
-        dGlycolysis = self.GLYCOL_SA * (gain3 * u3 + obs["SIRT_gly_inhibition"])
+        dGlycolysis = self.GLYCOL_SA * (
+            gain3 * u3 + obs["SIRT_gly_inhibition"]
+        )
 
         # Glycolytic enzymes
         k5 = -1.0
@@ -329,6 +376,7 @@ class ERiQEnergyMetabolism(Process):
 
 
 # ── Process 2: Oxidative Stress & Damage ────────────────────────────────
+
 
 class ERiQOxidativeStress(Process):
     """Mitochondrial damage accumulation + ROS feedback regulation.
@@ -348,18 +396,21 @@ class ERiQOxidativeStress(Process):
         return {
             # EXCLUSIVE
             "mito_damage": Port(
-                role=PortRole.EXCLUSIVE, default=0.0724,
+                role=PortRole.EXCLUSIVE,
+                default=0.0724,
                 units="dimensionless",
                 description="Mitochondrial structural damage",
                 ontology={"go": "GO:0000422"},  # mitochondrion degradation
             ),
             "ROS_integrator_c": Port(
-                role=PortRole.EXCLUSIVE, default=-0.7944,
+                role=PortRole.EXCLUSIVE,
+                default=-0.7944,
                 units="dimensionless",
                 description="ROS regulatory feedback integrator (Cz)",
             ),
             "ROS_activity": Port(
-                role=PortRole.EXCLUSIVE, default=0.0794,
+                role=PortRole.EXCLUSIVE,
+                default=0.0794,
                 units="dimensionless",
                 description="ROS activity level (Az); ROS = 10 * ROS_SA * Az",
                 ontology={"chebi": "CHEBI:26523"},
@@ -393,6 +444,7 @@ class ERiQOxidativeStress(Process):
 
 # ── Process 3: Signaling Feedback ───────────────────────────────────────
 
+
 class ERiQSignaling(Process):
     """mTOR and p53 regulatory feedback loops.
 
@@ -410,23 +462,27 @@ class ERiQSignaling(Process):
         return {
             # EXCLUSIVE
             "mTOR_integrator_c": Port(
-                role=PortRole.EXCLUSIVE, default=-0.0000,
+                role=PortRole.EXCLUSIVE,
+                default=-0.0000,
                 units="dimensionless",
                 description="mTOR regulatory feedback integrator (Cy)",
             ),
             "mTOR_activity": Port(
-                role=PortRole.EXCLUSIVE, default=-0.1936,
+                role=PortRole.EXCLUSIVE,
+                default=-0.1936,
                 units="dimensionless",
                 description="mTOR activity level (Ay)",
                 ontology={"go": "GO:0031929"},  # TOR signaling
             ),
             "p53_integrator_c": Port(
-                role=PortRole.EXCLUSIVE, default=-0.0000,
+                role=PortRole.EXCLUSIVE,
+                default=-0.0000,
                 units="dimensionless",
                 description="p53 regulatory feedback integrator (Cx)",
             ),
             "p53_activity": Port(
-                role=PortRole.EXCLUSIVE, default=0.8734,
+                role=PortRole.EXCLUSIVE,
+                default=0.8734,
                 units="dimensionless",
                 description="p53 activity level (Ax)",
                 ontology={"go": "GO:0030330"},  # DNA damage response, p53
@@ -474,6 +530,7 @@ class ERiQSignaling(Process):
 
 
 # ── Convenience: build a full ERiQ composite ────────────────────────────
+
 
 def build_eriq_composite(
     *,
@@ -545,7 +602,8 @@ def build_eriq_composite(
     }
 
     return Composite(
-        processes, topology,
+        processes,
+        topology,
         validate=validate,
         semantic_validation=semantic_validation,
     )

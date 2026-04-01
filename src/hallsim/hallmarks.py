@@ -179,7 +179,6 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ),
         ],
     ),
-
     "Mitochondrial Dysfunction": HallmarkHandle(
         name="Mitochondrial Dysfunction",
         description=(
@@ -198,7 +197,6 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ),
         ],
     ),
-
     "Deregulated Nutrient Sensing": HallmarkHandle(
         name="Deregulated Nutrient Sensing",
         description=(
@@ -216,7 +214,6 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ),
         ],
     ),
-
     "Genomic Instability": HallmarkHandle(
         name="Genomic Instability",
         description="DNA damage accumulation due to genomic instability.",

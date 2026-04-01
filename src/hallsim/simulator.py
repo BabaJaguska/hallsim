@@ -138,7 +138,11 @@ class Simulator:
             ts=sol.ts,
             ys=sol.ys,
             stats={
-                "num_steps": sol.stats.get("num_steps", None) if hasattr(sol, "stats") else None,
+                "num_steps": (
+                    sol.stats.get("num_steps", None)
+                    if hasattr(sol, "stats")
+                    else None
+                ),
             },
         )
 
@@ -178,24 +182,29 @@ class Simulator:
         t0, t1 = t_span
 
         # Phase 1: t0 → kick_time
-        res1 = self.run(composite, (t0, kick_time), dt=dt, y0=y0, keep_trajectory=True)
+        res1 = self.run(
+            composite, (t0, kick_time), dt=dt, y0=y0, keep_trajectory=True
+        )
 
         # Extract final state and apply kick
         kicked = {}
         for k, v in res1.ys.items():
             final_val = v[-1]
             if k in kick_dict:
-                final_val = final_val + jnp.asarray(kick_dict[k], dtype=final_val.dtype)
+                final_val = final_val + jnp.asarray(
+                    kick_dict[k], dtype=final_val.dtype
+                )
             kicked[k] = final_val
 
         # Phase 2: kick_time → t1
-        res2 = self.run(composite, (kick_time, t1), dt=dt, y0=kicked, keep_trajectory=True)
+        res2 = self.run(
+            composite, (kick_time, t1), dt=dt, y0=kicked, keep_trajectory=True
+        )
 
         # Concatenate (skip duplicate time point)
         ts = jnp.concatenate([res1.ts, res2.ts[1:]])
         ys = {
-            k: jnp.concatenate([res1.ys[k], res2.ys[k][1:]])
-            for k in res1.ys
+            k: jnp.concatenate([res1.ys[k], res2.ys[k][1:]]) for k in res1.ys
         }
 
         return SimResult(ts=ts, ys=ys, stats={})

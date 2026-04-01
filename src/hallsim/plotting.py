@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Sequence
 
-import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -146,10 +145,20 @@ def plot_events(
 
     if hasattr(result, "events") and result.events:
         for ev in result.events:
-            ax.axvline(ev.time, color="red", linestyle="--", alpha=0.7,
-                       label=f"event: {ev.process}" if ev == result.events[0] else "")
-            ax.annotate(ev.process, xy=(ev.time, float(vals[np.argmin(np.abs(ts - ev.time))])),
-                        fontsize=7, color="red", rotation=45)
+            ax.axvline(
+                ev.time,
+                color="red",
+                linestyle="--",
+                alpha=0.7,
+                label=f"event: {ev.process}" if ev == result.events[0] else "",
+            )
+            ax.annotate(
+                ev.process,
+                xy=(ev.time, float(vals[np.argmin(np.abs(ts - ev.time))])),
+                fontsize=7,
+                color="red",
+                rotation=45,
+            )
 
     ax.set_xlabel("Time")
     ax.set_ylabel(label)

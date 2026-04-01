@@ -24,6 +24,7 @@ from hallsim.store import validate_topology
 # Toy processes for testing
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class ContinuousDecay(Process):
     """Standard continuous process — backward compatibility."""
 
@@ -59,7 +60,9 @@ class SlowDrift(Process):
 
     def ports_schema(self):
         return {
-            "methylation": Port(role=PortRole.EVOLVED, default=0.0, units="dimensionless"),
+            "methylation": Port(
+                role=PortRole.EVOLVED, default=0.0, units="dimensionless"
+            ),
             "ros": Port(role=PortRole.INPUT, default=0.0, units="uM"),
         }
 
@@ -75,8 +78,12 @@ class DivisionCheck(Process):
 
     def ports_schema(self):
         return {
-            "cell_count": Port(role=PortRole.LATCHED, default=1.0, units="cells"),
-            "damage": Port(role=PortRole.INPUT, default=0.0, units="dimensionless"),
+            "cell_count": Port(
+                role=PortRole.LATCHED, default=1.0, units="cells"
+            ),
+            "damage": Port(
+                role=PortRole.INPUT, default=0.0, units="dimensionless"
+            ),
         }
 
     def update(self, t, state):
@@ -92,7 +99,9 @@ class SenescenceEntry(Process):
     def ports_schema(self):
         return {
             "p53": Port(role=PortRole.INPUT, default=0.0, units="uM"),
-            "senescent": Port(role=PortRole.LATCHED, default=0.0, units="dimensionless"),
+            "senescent": Port(
+                role=PortRole.LATCHED, default=0.0, units="dimensionless"
+            ),
         }
 
     def condition(self, t, state):
@@ -105,6 +114,7 @@ class SenescenceEntry(Process):
 # ═══════════════════════════════════════════════════════════════════════════
 # Bad processes for validation testing
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class BadContinuousWithLatched(Process):
     """Invalid: continuous process trying to write a LATCHED port."""
@@ -175,6 +185,7 @@ class LatchedEvolvedConflict(Process):
 # Tests: ProcessKind and basic properties
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestProcessKind:
     def test_default_kind_is_continuous(self):
         proc = ContinuousDecay()
@@ -209,6 +220,7 @@ class TestProcessKind:
 # Tests: LATCHED port role
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestLatchedPort:
     def test_latched_port_exists(self):
         proc = DivisionCheck()
@@ -232,6 +244,7 @@ class TestLatchedPort:
 # Tests: Process interface methods
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestProcessInterfaces:
     def test_continuous_derivative(self):
         proc = ContinuousDecay()
@@ -240,43 +253,58 @@ class TestProcessInterfaces:
 
     def test_discrete_update(self):
         proc = DivisionCheck()
-        result = proc.update(0.0, {
-            "cell_count": jnp.array(1.0),
-            "damage": jnp.array(0.5),
-        })
+        result = proc.update(
+            0.0,
+            {
+                "cell_count": jnp.array(1.0),
+                "damage": jnp.array(0.5),
+            },
+        )
         assert "cell_count" in result
         # damage < 0.8 so can_divide = True, delta = cell_count = 1.0
         assert jnp.isclose(result["cell_count"], 1.0)
 
     def test_discrete_update_high_damage(self):
         proc = DivisionCheck()
-        result = proc.update(0.0, {
-            "cell_count": jnp.array(1.0),
-            "damage": jnp.array(0.9),
-        })
+        result = proc.update(
+            0.0,
+            {
+                "cell_count": jnp.array(1.0),
+                "damage": jnp.array(0.9),
+            },
+        )
         # damage >= 0.8 so can_divide = False, delta = 0.0
         assert jnp.isclose(result["cell_count"], 0.0)
 
     def test_event_condition_false(self):
         proc = SenescenceEntry()
-        assert not proc.condition(0.0, {
-            "p53": jnp.array(0.5),
-            "senescent": jnp.array(0.0),
-        })
+        assert not proc.condition(
+            0.0,
+            {
+                "p53": jnp.array(0.5),
+                "senescent": jnp.array(0.0),
+            },
+        )
 
     def test_event_condition_true(self):
         proc = SenescenceEntry()
-        assert proc.condition(0.0, {
-            "p53": jnp.array(0.95),
-            "senescent": jnp.array(0.0),
-        })
+        assert proc.condition(
+            0.0,
+            {
+                "p53": jnp.array(0.95),
+                "senescent": jnp.array(0.0),
+            },
+        )
 
     def test_event_handler(self):
         proc = SenescenceEntry()
-        result = proc.handler(0.0, {
-            "p53": jnp.array(0.95),
-            "senescent": jnp.array(0.0),
-        })
+        result = proc.handler(
+            0.0,
+            {
+                "p53": jnp.array(0.95),
+                "senescent": jnp.array(0.0),
+            },
+        )
         assert jnp.isclose(result["senescent"], 1.0)
 
     def test_continuous_raises_on_update(self):
@@ -292,12 +320,15 @@ class TestProcessInterfaces:
     def test_discrete_raises_on_derivative(self):
         proc = DivisionCheck()
         with pytest.raises(NotImplementedError):
-            proc.derivative(0.0, {"cell_count": jnp.array(1.0), "damage": jnp.array(0.0)})
+            proc.derivative(
+                0.0, {"cell_count": jnp.array(1.0), "damage": jnp.array(0.0)}
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Tests: Metadata
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestMetadata:
     def test_metadata_includes_kind(self):
@@ -329,6 +360,7 @@ class TestMetadata:
 # ═══════════════════════════════════════════════════════════════════════════
 # Tests: Topology validation — kind/role compatibility
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestKindRoleValidation:
     def test_continuous_with_latched_is_error(self):
@@ -399,7 +431,10 @@ class TestKindRoleValidation:
             {
                 "fast": {"ros": "cell/ROS"},
                 "slow": {"methylation": "cell/methylation", "ros": "cell/ROS"},
-                "div": {"cell_count": "pop/count", "damage": "cell/methylation"},
+                "div": {
+                    "cell_count": "pop/count",
+                    "damage": "cell/methylation",
+                },
                 "sen": {"p53": "cell/p53", "senescent": "cell/senescent"},
             },
         )
@@ -409,6 +444,7 @@ class TestKindRoleValidation:
 # ═══════════════════════════════════════════════════════════════════════════
 # Tests: Composite with mixed process kinds
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestCompositeWithMixedKinds:
     def test_composite_builds_with_mixed_kinds(self):
@@ -460,6 +496,7 @@ class TestCompositeWithMixedKinds:
 # Tests: Backward compatibility
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestBackwardCompatibility:
     def test_existing_process_default_kind(self):
         """Processes without explicit kind are CONTINUOUS."""
@@ -493,8 +530,10 @@ class TestBackwardCompatibility:
 # Additional toy processes for Scheduler testing
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class ConstantProduction(Process):
     """Constant production: dx/dt = +rate."""
+
     kind: ProcessKind = ProcessKind.CONTINUOUS
     timescale: float = 1.0
     rate: float = 1.0
@@ -508,6 +547,7 @@ class ConstantProduction(Process):
 
 class SimpleDecay(Process):
     """First-order decay: dx/dt = -rate * x."""
+
     kind: ProcessKind = ProcessKind.CONTINUOUS
     timescale: float = 1.0
     rate: float = 0.1
@@ -521,12 +561,17 @@ class SimpleDecay(Process):
 
 class SlowGrowth(Process):
     """Slow linear growth on a different variable."""
+
     kind: ProcessKind = ProcessKind.CONTINUOUS
     timescale: float = 1000.0
     rate: float = 0.001
 
     def ports_schema(self):
-        return {"y": Port(role=PortRole.EVOLVED, default=0.0, units="dimensionless")}
+        return {
+            "y": Port(
+                role=PortRole.EVOLVED, default=0.0, units="dimensionless"
+            )
+        }
 
     def derivative(self, t, state):
         return {"y": jnp.asarray(self.rate)}
@@ -534,13 +579,16 @@ class SlowGrowth(Process):
 
 class ThresholdLatch(Process):
     """Event: sets flag when x exceeds threshold."""
+
     kind: ProcessKind = ProcessKind.EVENT
     threshold: float = 5.0
 
     def ports_schema(self):
         return {
             "x": Port(role=PortRole.INPUT, default=0.0, units="uM"),
-            "flag": Port(role=PortRole.LATCHED, default=0.0, units="dimensionless"),
+            "flag": Port(
+                role=PortRole.LATCHED, default=0.0, units="dimensionless"
+            ),
         }
 
     def condition(self, t, state):
@@ -552,12 +600,15 @@ class ThresholdLatch(Process):
 
 class PeriodicCounter(Process):
     """Discrete: increments counter every dt_step."""
+
     kind: ProcessKind = ProcessKind.DISCRETE
     dt_step: float = 10.0
 
     def ports_schema(self):
         return {
-            "count": Port(role=PortRole.LATCHED, default=0.0, units="dimensionless"),
+            "count": Port(
+                role=PortRole.LATCHED, default=0.0, units="dimensionless"
+            ),
         }
 
     def update(self, t, state):
@@ -567,6 +618,7 @@ class PeriodicCounter(Process):
 # ═══════════════════════════════════════════════════════════════════════════
 # Tests: Composite extensions (Phase 2)
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestCompositeFiltering:
     def test_continuous_processes(self):
@@ -678,7 +730,9 @@ class TestAutoGroups:
     def test_no_continuous_empty_groups(self):
         composite = Composite(
             processes={"div": DivisionCheck()},
-            topology={"div": {"cell_count": "pop/count", "damage": "cell/damage"}},
+            topology={
+                "div": {"cell_count": "pop/count", "damage": "cell/damage"}
+            },
         )
         groups = composite.auto_groups()
         assert groups == {}
@@ -726,7 +780,7 @@ class TestBuildGroupRHS:
 # Tests: Scheduler (Phase 3)
 # ═══════════════════════════════════════════════════════════════════════════
 
-from hallsim.scheduler import EventRecord, Scheduler, SchedulerResult
+from hallsim.scheduler import Scheduler, SchedulerResult
 
 
 class TestSchedulerBasic:
@@ -950,7 +1004,10 @@ class TestSchedulerFullIntegration:
         )
         scheduler = Scheduler()
         result = scheduler.run(
-            composite, t_span=(0.0, 100.0), macro_dt=1.0, save_dt=10.0,
+            composite,
+            t_span=(0.0, 100.0),
+            macro_dt=1.0,
+            save_dt=10.0,
         )
         # Should have ~11 time points (0, 10, 20, ..., 100)
         assert len(result.ts) <= 12

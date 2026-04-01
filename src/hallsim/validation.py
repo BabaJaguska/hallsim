@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import enum
 import logging
-import warnings as _warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,6 +46,7 @@ _UREG = pint.UnitRegistry()
 # Result types
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class Severity(enum.Enum):
     INFO = "info"
     WARNING = "warning"
@@ -62,7 +62,9 @@ class ValidationResult:
     message: str
 
     def __str__(self) -> str:
-        return f"[{self.level.value.upper():7s}] ({self.category}) {self.message}"
+        return (
+            f"[{self.level.value.upper():7s}] ({self.category}) {self.message}"
+        )
 
 
 @dataclass
@@ -105,6 +107,7 @@ class ValidationReport:
 # Helper: build store-path → port mapping
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class _PortEntry:
     proc_name: str
@@ -130,12 +133,18 @@ def _store_port_map(
 
 def _writers(entries: list[_PortEntry]) -> list[_PortEntry]:
     """Entries whose role produces derivatives or deltas."""
-    return [e for e in entries if e.port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)]
+    return [
+        e
+        for e in entries
+        if e.port.role
+        in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Subsystem 1: Unit Checker
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class UnitChecker:
     """Validates unit compatibility across ports wired to the same store path.
@@ -171,44 +180,61 @@ class UnitChecker:
                     continue
                 try:
                     parsed.append((entry, _UREG.parse_expression(unit_str)))
-                except (pint.UndefinedUnitError, pint.errors.UndefinedUnitError):
-                    results.append(ValidationResult(
-                        Severity.WARNING, "units",
-                        f"Cannot parse unit {unit_str!r} on "
-                        f"{entry.proc_name}.{entry.port_name} -> {store_path!r}",
-                    ))
+                except (
+                    pint.UndefinedUnitError,
+                    pint.errors.UndefinedUnitError,
+                ):
+                    results.append(
+                        ValidationResult(
+                            Severity.WARNING,
+                            "units",
+                            f"Cannot parse unit {unit_str!r} on "
+                            f"{entry.proc_name}.{entry.port_name} -> {store_path!r}",
+                        )
+                    )
 
             # Warn about unspecified units on shared paths
             if unspecified and parsed:
-                names = ", ".join(f"{e.proc_name}.{e.port_name}" for e in unspecified)
-                results.append(ValidationResult(
-                    Severity.WARNING, "units",
-                    f"Unspecified units at {store_path!r} for: {names}. "
-                    f"Cannot verify compatibility with other writers.",
-                ))
+                names = ", ".join(
+                    f"{e.proc_name}.{e.port_name}" for e in unspecified
+                )
+                results.append(
+                    ValidationResult(
+                        Severity.WARNING,
+                        "units",
+                        f"Unspecified units at {store_path!r} for: {names}. "
+                        f"Cannot verify compatibility with other writers.",
+                    )
+                )
 
             # Pairwise comparison of parsed units
             for i, (e1, u1) in enumerate(parsed):
-                for e2, u2 in parsed[i + 1:]:
+                for e2, u2 in parsed[i + 1 :]:
                     if not u1.is_compatible_with(u2):
-                        results.append(ValidationResult(
-                            Severity.ERROR, "units",
-                            f"Incompatible units at {store_path!r}: "
-                            f"{e1.proc_name}.{e1.port_name}={u1.units} vs "
-                            f"{e2.proc_name}.{e2.port_name}={u2.units}",
-                        ))
+                        results.append(
+                            ValidationResult(
+                                Severity.ERROR,
+                                "units",
+                                f"Incompatible units at {store_path!r}: "
+                                f"{e1.proc_name}.{e1.port_name}={u1.units} vs "
+                                f"{e2.proc_name}.{e2.port_name}={u2.units}",
+                            )
+                        )
                     elif u1.units != u2.units:
                         try:
                             factor = u1.to(u2).magnitude
                         except Exception:
                             factor = "?"
-                        results.append(ValidationResult(
-                            Severity.WARNING, "units",
-                            f"Unit scale mismatch at {store_path!r}: "
-                            f"{e1.proc_name}.{e1.port_name}={u1.units} vs "
-                            f"{e2.proc_name}.{e2.port_name}={u2.units} "
-                            f"(factor: {factor})",
-                        ))
+                        results.append(
+                            ValidationResult(
+                                Severity.WARNING,
+                                "units",
+                                f"Unit scale mismatch at {store_path!r}: "
+                                f"{e1.proc_name}.{e1.port_name}={u1.units} vs "
+                                f"{e2.proc_name}.{e2.port_name}={u2.units} "
+                                f"(factor: {factor})",
+                            )
+                        )
 
         return results
 
@@ -216,6 +242,7 @@ class UnitChecker:
 # ═══════════════════════════════════════════════════════════════════════════
 # Subsystem 2: Semantic Checker
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class SemanticChecker:
     """Validates that ports wired to the same store path refer to the same
@@ -242,41 +269,50 @@ class SemanticChecker:
             onts = [(e, e.port.ontology or {}) for e in writers]
 
             for i, (e1, ont1) in enumerate(onts):
-                for e2, ont2 in onts[i + 1:]:
+                for e2, ont2 in onts[i + 1 :]:
                     shared_ns = set(ont1.keys()) & set(ont2.keys())
 
                     # Conflict: same namespace, different value
                     for ns in shared_ns:
                         if ont1[ns] != ont2[ns]:
-                            results.append(ValidationResult(
-                                Severity.ERROR, "semantics",
-                                f"Semantic conflict at {store_path!r}: "
-                                f"{e1.proc_name}.{e1.port_name} has {ns}={ont1[ns]}, "
-                                f"{e2.proc_name}.{e2.port_name} has {ns}={ont2[ns]}. "
-                                f"These may represent different species.",
-                            ))
+                            results.append(
+                                ValidationResult(
+                                    Severity.ERROR,
+                                    "semantics",
+                                    f"Semantic conflict at {store_path!r}: "
+                                    f"{e1.proc_name}.{e1.port_name} has {ns}={ont1[ns]}, "
+                                    f"{e2.proc_name}.{e2.port_name} has {ns}={ont2[ns]}. "
+                                    f"These may represent different species.",
+                                )
+                            )
 
                     # Partial annotation
                     if not shared_ns and (ont1 or ont2):
                         annotated = e1 if ont1 else e2
                         bare = e2 if ont1 else e1
-                        results.append(ValidationResult(
-                            Severity.WARNING, "semantics",
-                            f"Partial annotation at {store_path!r}: "
-                            f"{annotated.proc_name}.{annotated.port_name} has "
-                            f"ontology {annotated.port.ontology}, but "
-                            f"{bare.proc_name}.{bare.port_name} has none.",
-                        ))
+                        results.append(
+                            ValidationResult(
+                                Severity.WARNING,
+                                "semantics",
+                                f"Partial annotation at {store_path!r}: "
+                                f"{annotated.proc_name}.{annotated.port_name} has "
+                                f"ontology {annotated.port.ontology}, but "
+                                f"{bare.proc_name}.{bare.port_name} has none.",
+                            )
+                        )
 
                     # Both bare
                     if not ont1 and not ont2:
-                        results.append(ValidationResult(
-                            Severity.INFO, "semantics",
-                            f"No ontology annotations at {store_path!r}: "
-                            f"cannot verify semantic compatibility between "
-                            f"{e1.proc_name}.{e1.port_name} and "
-                            f"{e2.proc_name}.{e2.port_name}.",
-                        ))
+                        results.append(
+                            ValidationResult(
+                                Severity.INFO,
+                                "semantics",
+                                f"No ontology annotations at {store_path!r}: "
+                                f"cannot verify semantic compatibility between "
+                                f"{e1.proc_name}.{e1.port_name} and "
+                                f"{e2.proc_name}.{e2.port_name}.",
+                            )
+                        )
 
         return results
 
@@ -284,6 +320,7 @@ class SemanticChecker:
 # ═══════════════════════════════════════════════════════════════════════════
 # Subsystem 3: Interaction Graph Analyzer
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class GraphAnalyzer:
     """Builds and analyzes the process interaction graph.
@@ -315,7 +352,11 @@ class GraphAnalyzer:
             topo = topology.get(proc_name, {})
             for port_name, port in proc.ports_schema().items():
                 sp = topo.get(port_name, port_name)
-                if port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED):
+                if port.role in (
+                    PortRole.EVOLVED,
+                    PortRole.EXCLUSIVE,
+                    PortRole.LATCHED,
+                ):
                     path_writers.setdefault(sp, []).append(proc_name)
                 if port.role == PortRole.INPUT:
                     path_readers.setdefault(sp, []).append(proc_name)
@@ -345,23 +386,31 @@ class GraphAnalyzer:
         # 1. Feedback cycles
         for cycle in nx.simple_cycles(G):
             path_str = " -> ".join(cycle + [cycle[0]])
-            results.append(ValidationResult(
-                Severity.WARNING, "graph",
-                f"Feedback loop: {path_str}. "
-                f"Verify this is intentional and numerically stable.",
-            ))
+            results.append(
+                ValidationResult(
+                    Severity.WARNING,
+                    "graph",
+                    f"Feedback loop: {path_str}. "
+                    f"Verify this is intentional and numerically stable.",
+                )
+            )
 
         # 2. Fan-in analysis
         spm = _store_port_map(processes, topology)
         for store_path, entries in spm.items():
             evolved = [e for e in entries if e.port.role == PortRole.EVOLVED]
             if len(evolved) >= 3:
-                names = ", ".join(f"{e.proc_name}.{e.port_name}" for e in evolved)
-                results.append(ValidationResult(
-                    Severity.WARNING, "graph",
-                    f"High fan-in at {store_path!r}: {len(evolved)} EVOLVED "
-                    f"writers ({names}). Review for potential double-counting.",
-                ))
+                names = ", ".join(
+                    f"{e.proc_name}.{e.port_name}" for e in evolved
+                )
+                results.append(
+                    ValidationResult(
+                        Severity.WARNING,
+                        "graph",
+                        f"High fan-in at {store_path!r}: {len(evolved)} EVOLVED "
+                        f"writers ({names}). Review for potential double-counting.",
+                    )
+                )
 
         # 3. Coupling density
         n = len(processes)
@@ -370,19 +419,26 @@ class GraphAnalyzer:
             actual_edges = G.number_of_edges()
             density = actual_edges / max_edges
             if density > 0.5:
-                results.append(ValidationResult(
-                    Severity.WARNING, "graph",
-                    f"High coupling density: {density:.0%} "
-                    f"({actual_edges}/{max_edges} possible edges). "
-                    f"Consider decomposing into sub-composites.",
-                ))
+                results.append(
+                    ValidationResult(
+                        Severity.WARNING,
+                        "graph",
+                        f"High coupling density: {density:.0%} "
+                        f"({actual_edges}/{max_edges} possible edges). "
+                        f"Consider decomposing into sub-composites.",
+                    )
+                )
 
         # 4. Unfed inputs
         all_written: set[str] = set()
         for proc_name, proc in processes.items():
             topo = topology.get(proc_name, {})
             for port_name, port in proc.ports_schema().items():
-                if port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED):
+                if port.role in (
+                    PortRole.EVOLVED,
+                    PortRole.EXCLUSIVE,
+                    PortRole.LATCHED,
+                ):
                     all_written.add(topo.get(port_name, port_name))
 
         for proc_name, proc in processes.items():
@@ -391,12 +447,15 @@ class GraphAnalyzer:
                 if port.role == PortRole.INPUT:
                     sp = topo.get(port_name, port_name)
                     if sp not in all_written:
-                        results.append(ValidationResult(
-                            Severity.WARNING, "graph",
-                            f"Unfed input: {proc_name}.{port_name} reads from "
-                            f"{sp!r} but no process writes there. "
-                            f"Will use default value only.",
-                        ))
+                        results.append(
+                            ValidationResult(
+                                Severity.WARNING,
+                                "graph",
+                                f"Unfed input: {proc_name}.{port_name} reads from "
+                                f"{sp!r} but no process writes there. "
+                                f"Will use default value only.",
+                            )
+                        )
 
         return results
 
@@ -414,10 +473,28 @@ class GraphAnalyzer:
 # Subsystem 4: Coupling Auditor
 # ═══════════════════════════════════════════════════════════════════════════
 
-_STOP_WORDS = frozenset({
-    "the", "a", "an", "of", "in", "to", "for", "and", "or", "by",
-    "from", "with", "is", "are", "at", "on", "this", "that",
-})
+_STOP_WORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "of",
+        "in",
+        "to",
+        "for",
+        "and",
+        "or",
+        "by",
+        "from",
+        "with",
+        "is",
+        "are",
+        "at",
+        "on",
+        "this",
+        "that",
+    }
+)
 
 
 class CouplingAuditor:
@@ -446,7 +523,7 @@ class CouplingAuditor:
                 continue
 
             for i, e1 in enumerate(writers):
-                for e2 in writers[i + 1:]:
+                for e2 in writers[i + 1 :]:
                     desc1 = (e1.port.description or "").lower()
                     desc2 = (e2.port.description or "").lower()
                     if not desc1 or not desc2:
@@ -457,14 +534,17 @@ class CouplingAuditor:
                     overlap = words1 & words2
 
                     if len(overlap) >= self.min_shared_words:
-                        results.append(ValidationResult(
-                            Severity.WARNING, "coupling",
-                            f"Potential duplication at {store_path!r}: "
-                            f"{e1.proc_name}.{e1.port_name} and "
-                            f"{e2.proc_name}.{e2.port_name} share description "
-                            f"terms: {overlap}. Verify derivatives are "
-                            f"complementary, not duplicating.",
-                        ))
+                        results.append(
+                            ValidationResult(
+                                Severity.WARNING,
+                                "coupling",
+                                f"Potential duplication at {store_path!r}: "
+                                f"{e1.proc_name}.{e1.port_name} and "
+                                f"{e2.proc_name}.{e2.port_name} share description "
+                                f"terms: {overlap}. Verify derivatives are "
+                                f"complementary, not duplicating.",
+                            )
+                        )
 
         return results
 
@@ -472,6 +552,7 @@ class CouplingAuditor:
 # ═══════════════════════════════════════════════════════════════════════════
 # Orchestrator
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class CompositeValidator:
     """Orchestrates all validation subsystems.
@@ -534,8 +615,11 @@ class CompositeValidator:
         # Strict mode: promote warnings to errors
         if self.strict:
             results = [
-                ValidationResult(Severity.ERROR, r.category, r.message)
-                if r.level == Severity.WARNING else r
+                (
+                    ValidationResult(Severity.ERROR, r.category, r.message)
+                    if r.level == Severity.WARNING
+                    else r
+                )
                 for r in results
             ]
 

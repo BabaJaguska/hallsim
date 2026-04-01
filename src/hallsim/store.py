@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from hallsim.process import Port, PortRole, Process, ProcessKind
+from hallsim.process import PortRole, Process, ProcessKind
 
 
 # ---------------------------------------------------------------------------
 # Build initial store from processes + topology
 # ---------------------------------------------------------------------------
+
 
 def build_initial_store(
     processes: dict[str, Process],
@@ -47,15 +48,20 @@ def build_initial_store(
     for proc_name, proc in processes.items():
         topo = topology.get(proc_name, {})
         for port_name, port in proc.ports_schema().items():
-            store_path = topo.get(port_name, port_name)  # identity if no topology
+            store_path = topo.get(
+                port_name, port_name
+            )  # identity if no topology
             if store_path not in store:
-                store[store_path] = jnp.asarray(port.default, dtype=jnp.float32)
+                store[store_path] = jnp.asarray(
+                    port.default, dtype=jnp.float32
+                )
     return store
 
 
 # ---------------------------------------------------------------------------
 # Extract port view / route derivatives back
 # ---------------------------------------------------------------------------
+
 
 def extract_port_view(
     store: dict[str, jnp.ndarray],
@@ -74,7 +80,9 @@ def extract_port_view(
     -------
     ``{port_name: value}``
     """
-    return {port_name: store[store_path] for port_name, store_path in topo.items()}
+    return {
+        port_name: store[store_path] for port_name, store_path in topo.items()
+    }
 
 
 def route_derivatives(
@@ -94,12 +102,17 @@ def route_derivatives(
     -------
     ``{store_path: dy/dt}``
     """
-    return {topo[port_name]: value for port_name, value in derivs.items() if port_name in topo}
+    return {
+        topo[port_name]: value
+        for port_name, value in derivs.items()
+        if port_name in topo
+    }
 
 
 # ---------------------------------------------------------------------------
 # Zero store (for additive accumulation)
 # ---------------------------------------------------------------------------
+
 
 def zeros_like_store(store: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
     """Return a store with the same keys but all-zero values."""
@@ -109,6 +122,7 @@ def zeros_like_store(store: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
+
 
 def validate_topology(
     processes: dict[str, Process],
@@ -161,7 +175,10 @@ def validate_topology(
         for port_name, port in proc.ports_schema().items():
             if port.role == PortRole.EVOLVED:
                 store_path = topo.get(port_name, port_name)
-                if store_path in exclusive_owners and exclusive_owners[store_path] != proc_name:
+                if (
+                    store_path in exclusive_owners
+                    and exclusive_owners[store_path] != proc_name
+                ):
                     errors.append(
                         f"Exclusive conflict: store path {store_path!r} is EXCLUSIVE "
                         f"in {exclusive_owners[store_path]!r} but EVOLVED in {proc_name!r}"
@@ -172,7 +189,10 @@ def validate_topology(
         topo = topology.get(proc_name, {})
         for port_name, port in proc.ports_schema().items():
             # Continuous processes must not write to LATCHED ports
-            if proc.kind == ProcessKind.CONTINUOUS and port.role == PortRole.LATCHED:
+            if (
+                proc.kind == ProcessKind.CONTINUOUS
+                and port.role == PortRole.LATCHED
+            ):
                 errors.append(
                     f"Process {proc_name!r} is CONTINUOUS but port {port_name!r} "
                     f"is LATCHED. Only DISCRETE/EVENT processes may write LATCHED ports."

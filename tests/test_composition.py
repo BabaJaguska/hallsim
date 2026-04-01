@@ -34,6 +34,7 @@ from hallsim.store import (
 # Toy processes for testing
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class Production(Process):
     """Constant production: dx/dt = +rate."""
 
@@ -111,6 +112,7 @@ class Oscillator(Process):
 # Port and Process basics
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestPortSchema:
 
     def test_port_roles(self):
@@ -145,6 +147,7 @@ class TestPortSchema:
 # ═══════════════════════════════════════════════════════════════════════════
 # Store utilities
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestStore:
 
@@ -194,6 +197,7 @@ class TestStore:
 # Topology validation
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestValidation:
 
     def test_valid_topology(self):
@@ -231,6 +235,7 @@ class TestValidation:
 # ═══════════════════════════════════════════════════════════════════════════
 # Composite construction
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestComposite:
 
@@ -316,6 +321,7 @@ class TestComposite:
 # ═══════════════════════════════════════════════════════════════════════════
 # Simulator (full ODE solve)
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestSimulator:
 
@@ -430,6 +436,7 @@ class TestSimulator:
 # Differentiability
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestDifferentiability:
 
     def test_grad_through_simulation(self):
@@ -460,6 +467,7 @@ class TestDifferentiability:
 # ═══════════════════════════════════════════════════════════════════════════
 # Edge cases
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestEdgeCases:
 

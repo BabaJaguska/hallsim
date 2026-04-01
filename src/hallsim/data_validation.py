@@ -172,17 +172,21 @@ def validate_against_data(
         meas_delta = measured.pathway_scores[mapping.pathway_name]
 
         # Concordance: same sign?
-        concordant = (sim_delta > 0 and meas_delta > 0) or (sim_delta < 0 and meas_delta < 0)
+        concordant = (sim_delta > 0 and meas_delta > 0) or (
+            sim_delta < 0 and meas_delta < 0
+        )
         if concordant:
             concordant_count += 1
 
-        per_pathway.append({
-            "pathway": mapping.pathway_name,
-            "state_var": mapping.state_var,
-            "sim_delta": sim_delta,
-            "meas_delta": meas_delta,
-            "concordant": concordant,
-        })
+        per_pathway.append(
+            {
+                "pathway": mapping.pathway_name,
+                "state_var": mapping.state_var,
+                "sim_delta": sim_delta,
+                "meas_delta": meas_delta,
+                "concordant": concordant,
+            }
+        )
 
     n = len(per_pathway)
     concordance = concordant_count / n if n > 0 else 0.0

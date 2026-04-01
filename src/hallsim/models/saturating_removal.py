@@ -15,8 +15,6 @@ Reference: Uri Alon, "An Introduction to Systems Biology" (2006).
 
 from __future__ import annotations
 
-import jax.numpy as jnp
-
 from hallsim.process import Port, PortRole, Process
 
 
