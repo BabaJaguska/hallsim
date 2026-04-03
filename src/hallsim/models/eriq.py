@@ -30,12 +30,118 @@ Homeostatic initial conditions from the original paper::
 """
 
 from __future__ import annotations
+
 import jax.numpy as jnp
 
 from hallsim.process import Port, PortRole, Process
 
 
-# ── Shared algebraic computation ────────────────────────────────────────
+# ── Original algebraic computation (Alfego & Kriete 2017) ──────────────
+
+
+def _compute_algebraic_original(state: dict) -> dict:
+    """Original ERiQ algebraic equations with raw reciprocal terms.
+
+    Preserved for comparison and for demonstrating the ModelAnalyzer.
+    These equations have numerical singularities (1/x terms) that cause
+    blow-up when state variables approach zero.  Use ``_compute_algebraic``
+    for the revised, numerically stable version.
+    """
+    eps = 1e-6
+
+    mfunct = state.get("mito_function", 3.6239)
+    glycol = state.get("glycolysis", 2.401)
+    mdamage = state.get("mito_damage", 0.0724)
+    mtor_act = state.get("mTOR_activity", -0.1936)
+    p53_act = state.get("p53_activity", 0.8734)
+    ros_act = state.get("ROS_activity", 0.0794)
+    ros_int = state.get("ROS_integrator_c", -0.7944)
+
+    p = state.get("_params", {})
+    ROS_SA = p.get("ROS_SA", 1.0)
+    PTEN_SA = p.get("PTEN_SA", 1.0)
+    AKT_SA = p.get("AKT_SA", 1.0)
+    AMPK_SA = p.get("AMPK_SA", 1.0)
+    NADr_SA = p.get("NADr_SA", 1.0)
+    SIRT_SA = p.get("SIRT_SA", 1.0)
+    PGC1a_SA = p.get("PGC1a_SA", 1.0)
+    MTOR_SA = p.get("MTOR_SA", 1.0)
+    NFKB_SA = p.get("NFKB_SA", 1.0)
+    P53_SA = p.get("P53_SA", 1.0)
+    P53_Base = p.get("P53_Base", 4.0)
+    P53_Act = p.get("P53_Act", 1.0)
+    FOXO_SA = p.get("FOXO_SA", 1.0)
+    FREERAD_SA = p.get("FREERAD_SA", 1.0)
+    AUTO_SA = p.get("AUTO_SA", 1.0)
+    HIF_SA = p.get("HIF_SA", 1.0)
+    PYR_SA = p.get("PYR_SA", 1.0)
+    GLU_SA = p.get("GLU_SA", 1.0)
+    MDR_SA = p.get("MDR_SA", 1.0)
+    MDR = p.get("MDR", 1.8e-3)
+    _K_SIRT_gly = p.get(  # noqa: F841 — kept for parity with revised version
+        "K_SIRT_gly", 0.5
+    )
+
+    ATPm = mfunct
+    ATPg = glycol
+    ATPr = ATPm + ATPg
+    ROS = 10.0 * ROS_SA * ros_act
+    PTEN = PTEN_SA * (1.0 / (mfunct + eps))  # SINGULARITY
+    GF = 0.1
+    AKT = AKT_SA * (GF + PTEN + ROS / 5.0)  # SIGN ERROR: PTEN adds
+    AMPK = AMPK_SA * (1.0 / (ATPr + eps))  # SINGULARITY
+    NADr = NADr_SA * mfunct
+    SIRT = SIRT_SA * NADr  # No saturation
+    PGC1a = PGC1a_SA * (AMPK + 0.1 * SIRT)
+    MTORs = AKT - 4.0 * AMPK
+    MTORa = mtor_act - 1.5 * MTORs
+    MTOR = MTOR_SA * (1.0 + MTORs + MTORa)
+    NFKB = NFKB_SA * (AKT + 0.25 * ROS + 0.25 * MTOR)
+    P53s = 0.3 * (P53_Base - AKT - NFKB + 0.5 * ROS) * P53_Act
+    P53a = p53_act - P53s
+    P53 = P53_SA * (P53s + P53a)
+    FOXO = FOXO_SA * (1.0 / (AKT + eps))  # SINGULARITY
+    Uz = FREERAD_SA * (P53 + 0.2 * mdamage + ros_int - 0.05 * FOXO)
+    AUTOPHAGY = (
+        AUTO_SA * 0.001 * (1.0 / (MTOR + eps) + 0.5 * FOXO + ROS + P53)
+    )  # SINGULARITY
+    HIF = HIF_SA * AKT
+    PYR = PYR_SA * glycol * 0.7
+    GLU = GLU_SA * (1.0 / (NFKB + eps))  # SINGULARITY
+    MD = MDR_SA * (jnp.abs(mfunct + ROS) * MDR + (ROS - 0.8) * 0.0001)
+
+    return {
+        "ATPm": ATPm,
+        "ATPg": ATPg,
+        "ATPr": ATPr,
+        "ROS": ROS,
+        "PTEN": PTEN,
+        "AKT": AKT,
+        "AMPK": AMPK,
+        "NADr": NADr,
+        "SIRT": SIRT,
+        "PGC1a": PGC1a,
+        "MTORs": MTORs,
+        "MTORa": MTORa,
+        "MTOR": MTOR,
+        "NFKB": NFKB,
+        "P53s": P53s,
+        "P53a": P53a,
+        "P53": P53,
+        "FOXO": FOXO,
+        "Uz": Uz,
+        "AUTOPHAGY": AUTOPHAGY,
+        "HIF": HIF,
+        "PYR": PYR,
+        "GLU": GLU,
+        "MD": MD,
+        # Use 1/SIRT for original glycolysis equation
+        "SIRT_gly_inhibition": 1.0 / (SIRT + eps),
+    }
+
+
+# ── Revised algebraic computation ─────────────────────────────────────
+
 
 
 def _compute_algebraic(state: dict) -> dict:
@@ -607,3 +713,149 @@ def build_eriq_composite(
         validate=validate,
         semantic_validation=semantic_validation,
     )
+
+
+# ── Original-equation variants (for ModelAnalyzer demonstration) ───────
+
+
+class _OriginalERiQEnergyMetabolism(ERiQEnergyMetabolism):
+    """ERiQEnergyMetabolism using original (pre-revision) equations."""
+
+    def derivative(self, t, state):
+        obs = _compute_algebraic_original(state)
+
+        menzy = state["mito_enzymes"]
+        glyenz = state["glycolytic_enzymes"]
+        mdamage = state["mito_damage"]
+
+        r2 = (
+            obs["PGC1a"]
+            + obs["PYR"]
+            + obs["P53"]
+            - 0.2 * obs["HIF"]
+            - 0.2 * obs["NFKB"]
+        )
+        gain2 = 0.05
+        u2 = r2 + menzy
+        dMito_function = gain2 * u2 - obs["SIRT"] * 0.02
+
+        k3 = 1.0
+        k4 = r2 - mdamage
+        dMito_enzymes = -(k3 * obs["ATPm"]) - (k4 * menzy)
+
+        r3 = obs["GLU"] + 0.01 * obs["HIF"] + 0.01 * obs["NADr"]
+        gain3 = 0.25
+        u3 = r3 + glyenz
+        # Original: 1/SIRT singularity
+        dGlycolysis = self.GLYCOL_SA * (
+            gain3 * u3 + obs["SIRT_gly_inhibition"]
+        )
+
+        k5 = -1.0
+        k6 = r3
+        dGlycolytic_enzymes = k5 * obs["ATPg"] - k6 * glyenz
+
+        return {
+            "mito_function": dMito_function,
+            "mito_enzymes": dMito_enzymes,
+            "glycolysis": dGlycolysis,
+            "glycolytic_enzymes": dGlycolytic_enzymes,
+        }
+
+
+class _OriginalERiQOxidativeStress(ERiQOxidativeStress):
+    """ERiQOxidativeStress using original (pre-revision) equations."""
+
+    def derivative(self, t, state):
+        obs = _compute_algebraic_original(state)
+        ros_int = state["ROS_integrator_c"]
+        dMito_damage = self.MDAMAGE_SA * (obs["MD"] - obs["AUTOPHAGY"])
+        dROS_integrator_c = -obs["ROS"] - ros_int
+        dROS_activity = 0.01 * obs["Uz"]
+        return {
+            "mito_damage": dMito_damage,
+            "ROS_integrator_c": dROS_integrator_c,
+            "ROS_activity": dROS_activity,
+        }
+
+
+class _OriginalERiQSignaling(ERiQSignaling):
+    """ERiQSignaling using original (pre-revision) equations."""
+
+    def derivative(self, t, state):
+        obs = _compute_algebraic_original(state)
+        mtor_int = state["mTOR_integrator_c"]
+        p53_int = state["p53_integrator_c"]
+        gy = 0.1
+        Uy = mtor_int
+        dMTOR_integrator_c = -obs["MTORa"] - mtor_int
+        dMTOR_activity = gy * Uy
+        gx = 0.1
+        Ux = p53_int
+        dp53_integrator_c = -obs["P53a"] - p53_int
+        dp53_activity = gx * Ux
+        return {
+            "mTOR_integrator_c": dMTOR_integrator_c,
+            "mTOR_activity": dMTOR_activity,
+            "p53_integrator_c": dp53_integrator_c,
+            "p53_activity": dp53_activity,
+        }
+
+
+def build_eriq_composite_original(
+    *,
+    prefix: str = ERIQ_PREFIX,
+):
+    """Build ERiQ composite with original (pre-revision) equations.
+
+    This uses the raw reciprocal equations from Alfego & Kriete (2017)
+    that have numerical singularities.  Useful for:
+
+    - Demonstrating the ModelAnalyzer catching issues
+    - Comparing original vs revised dynamics
+    - Reproducing the original paper's results (requires implicit solver)
+    """
+    from hallsim.composite import Composite
+
+    processes = {
+        "energy": _OriginalERiQEnergyMetabolism(),
+        "oxidative_stress": _OriginalERiQOxidativeStress(),
+        "signaling": _OriginalERiQSignaling(),
+    }
+
+    p = prefix
+    topology = {
+        "energy": {
+            "mito_function": f"{p}/mito_function",
+            "mito_enzymes": f"{p}/mito_enzymes",
+            "glycolysis": f"{p}/glycolysis",
+            "glycolytic_enzymes": f"{p}/glycolytic_enzymes",
+            "mito_damage": f"{p}/mito_damage",
+            "mTOR_activity": f"{p}/mTOR_activity",
+            "p53_activity": f"{p}/p53_activity",
+            "ROS_activity": f"{p}/ROS_activity",
+            "ROS_integrator_c": f"{p}/ROS_integrator_c",
+        },
+        "oxidative_stress": {
+            "mito_damage": f"{p}/mito_damage",
+            "ROS_integrator_c": f"{p}/ROS_integrator_c",
+            "ROS_activity": f"{p}/ROS_activity",
+            "mito_function": f"{p}/mito_function",
+            "glycolysis": f"{p}/glycolysis",
+            "mTOR_activity": f"{p}/mTOR_activity",
+            "p53_activity": f"{p}/p53_activity",
+        },
+        "signaling": {
+            "mTOR_integrator_c": f"{p}/mTOR_integrator_c",
+            "mTOR_activity": f"{p}/mTOR_activity",
+            "p53_integrator_c": f"{p}/p53_integrator_c",
+            "p53_activity": f"{p}/p53_activity",
+            "mito_function": f"{p}/mito_function",
+            "glycolysis": f"{p}/glycolysis",
+            "ROS_activity": f"{p}/ROS_activity",
+            "ROS_integrator_c": f"{p}/ROS_integrator_c",
+            "mito_damage": f"{p}/mito_damage",
+        },
+    }
+
+    return Composite(processes, topology, validate=False)

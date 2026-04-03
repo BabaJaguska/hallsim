@@ -98,7 +98,7 @@ def compose(t1, dt, validate):
     ts = result.ts
     ros = result.ys["cytoplasm/ROS"]
     click.echo(f"\n{'t':>8s}  {'ROS (uM)':>10s}")
-    click.echo(f"{'─'*8}  {'─'*10}")
+    click.echo(f"{'─' * 8}  {'─' * 10}")
     indices = list(range(min(5, len(ts)))) + list(
         range(max(5, len(ts) - 3), len(ts))
     )
@@ -176,7 +176,7 @@ def compose_kick(t1, kick_time, kick_ros):
 
     click.echo(f"Perturbation: +{kick_ros} uM ROS at t={kick_time}")
     click.echo(f"\n{'t':>8s}  {'ROS (uM)':>10s}")
-    click.echo(f"{'─'*8}  {'─'*10}")
+    click.echo(f"{'─' * 8}  {'─' * 10}")
 
     key_times = [0, kick_time - 1, kick_time, kick_time + 1, t1]
     for target in key_times:
@@ -260,11 +260,11 @@ def validate_demo(strict):
     validator = CompositeValidator(strict=strict)
     report = validator.validate(processes, topology)
 
-    click.echo(f"\n{'═'*60}")
+    click.echo(f"\n{'═' * 60}")
     click.echo("VALIDATION REPORT")
-    click.echo(f"{'═'*60}")
+    click.echo(f"{'═' * 60}")
     click.echo(report)
-    click.echo(f"{'═'*60}")
+    click.echo(f"{'═' * 60}")
     click.echo(f"Valid: {report.is_valid}")
 
     if report.interaction_graph:
@@ -393,7 +393,7 @@ def multiscale(t1, macro_dt):
     alarm = result.ys["state/alarm"]
 
     click.echo(f"{'t':>8s}  {'ROS (uM)':>10s}  {'beats':>6s}  {'alarm':>6s}")
-    click.echo(f"{'─'*8}  {'─'*10}  {'─'*6}  {'─'*6}")
+    click.echo(f"{'─' * 8}  {'─' * 10}  {'─' * 6}  {'─' * 6}")
 
     for i in range(len(ts)):
         click.echo(
@@ -408,7 +408,7 @@ def multiscale(t1, macro_dt):
 
     click.echo()
     click.echo(
-        f"Final ROS: {float(ros[-1]):.2f} uM (steady state: {0.5/0.01:.0f} uM)"
+        f"Final ROS: {float(ros[-1]):.2f} uM (steady state: {0.5 / 0.01:.0f} uM)"
     )
     click.echo(f"Final heartbeats: {int(float(beats[-1]))}")
     click.echo(f"Alarm triggered: {'yes' if float(alarm[-1]) > 0.5 else 'no'}")

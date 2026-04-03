@@ -38,7 +38,7 @@ HallSim is built on a **composable architecture** using JAX/Equinox/Diffrax. Des
 | **Topology**  | Static wiring map `{proc_name: {port_name: store_path}}`. Defined at composition time, not inside processes. |
 | **Composite** | Bundles processes + topology. `build_rhs()` / `build_group_rhs()` return JAX-compatible ODE right-hand sides. Auto-groups continuous processes by timescale. |
 | **Simulator** | Diffrax wrapper for single-group continuous solves. Retained for simple cases. |
-| **Scheduler** | Multi-rate orchestrator: groups continuous processes by timescale (Lie splitting), dispatches discrete processes at intervals, checks event conditions at sync points. See [design doc](docs/design-multiscale-scheduler.md). |
+| **Scheduler** | Multi-rate orchestrator: groups continuous processes by timescale (Lie splitting), dispatches discrete processes at intervals, checks event conditions at sync points. Supports `coupling_mode="interpolated"` for dense-output coupling between groups. See [design doc](docs/design-multiscale-scheduler.md). |
 | **Store**     | Flat `dict[str, jnp.ndarray]` with path-like keys (e.g., `"cytoplasm/ROS"`). A valid JAX PyTree. |
 
 **Process kinds:**
@@ -141,6 +141,9 @@ simulate multiscale           # Continuous + discrete + event scheduling
 simulate validate-demo        # Validation layer catching unit/semantic issues
 simulate validate-demo --strict # Strict mode: warnings become errors
 simulate info                 # Architecture overview
+
+# Multi-timescale coupling comparison (frozen vs interpolated)
+.venv_hallsim/bin/python demos/multiscale_coupling_demo.py
 ```
 
 ### Run tests
@@ -235,6 +238,38 @@ result = scheduler.run(composite, t_span=(0.0, 86400.0), macro_dt=3600.0)
 print(result.events)  # log of fired events
 ```
 
+### Splitting schemes and coupling modes
+
+The Scheduler supports multiple strategies for how groups communicate
+during operator splitting. Both the **splitting scheme** (how groups
+are ordered) and the **coupling mode** (what state information groups
+exchange) are configurable:
+
+```python
+# Lie splitting (default): groups solved sequentially, one pass. O(dt) error.
+scheduler = Scheduler(splitting="lie", coupling_mode="frozen")
+
+# Strang splitting: symmetric half-steps cancel leading-order error. O(dt²).
+scheduler = Scheduler(splitting="strang")
+
+# Interpolated coupling: groups query a dense interpolant of the previous
+# group's trajectory instead of a frozen snapshot.
+scheduler = Scheduler(coupling_mode="interpolated")
+
+# Adaptive macro_dt: PLL-inspired — shrinks step when coupling residual
+# is large, grows when it's been small for several consecutive steps.
+scheduler = Scheduler(adaptive_dt=True)
+
+# Combine as needed:
+scheduler = Scheduler(splitting="strang", adaptive_dt=True)
+```
+
+See `demos/multiscale_coupling_demo.py` for a comparison. On a coupled
+oscillator/integrator system with macro_dt=2.0:
+- Lie (frozen): baseline
+- Lie (interpolated): ~2.4x error reduction on slow coupling variable
+- Strang: ~2.3x error reduction on slow coupling variable
+
 Parameters are JAX arrays, so you can differentiate through entire simulations:
 
 ```python
@@ -292,6 +327,9 @@ src/hallsim/
 * [x] Define composability formalisms (Process/Port/Topology/Composite)
 * [x] Semantic validation layer (units, ontology, graph analysis, coupling audit)
 * [x] Multi-timescale Scheduler (Lie splitting, discrete dispatch, event detection)
+* [x] Interpolated coupling mode (dense-output Lie splitting)
+* [x] Strang splitting (symmetric half-step, O(dt²) accuracy)
+* [x] Adaptive macro_dt (PLL-inspired, shrinks on high coupling residual)
 * [x] ERiQ decomposed into 3 composable Processes (EnergyMetabolism, OxidativeStress, Signaling)
 * [x] SaturatingRemoval Process (Uri Alon damage model)
 * [x] NeuralODE Process + training infrastructure
@@ -299,7 +337,19 @@ src/hallsim/
 * [x] SBML auto-import (`process_from_sbml` via sbmltoodejax)
 * [x] Data validation layer (ssGSEA pathway concordance analysis)
 
-### Next
+### Next — Scheduler & Multi-Scale
+
+* [ ] Combine Strang splitting + interpolated coupling (currently mutually exclusive)
+* [ ] Waveform relaxation (Gauss-Seidel iteration at sync points, from FSI/PLL analogy)
+* [ ] Anderson acceleration for waveform relaxation convergence
+* [ ] Mori-Zwanzig memory kernel for fast→slow coupling (captures history effects)
+* [ ] Coupling residual spectral monitoring (early-warning diagnostic)
+* [ ] IFT-based adjoint at sync boundaries (for gradient-based optimization)
+* [ ] IMEX (implicit-explicit) solver for stiff multi-scale systems
+
+See [crossgen-suggestions.md](docs/crossgen-suggestions.md) for full analysis.
+
+### Next — Models & Validation
 
 * [x] Sivakumar2011 neural stem cell models (5 SBML, stem cell exhaustion hallmark)
 * [x] StemCellNiche process (niche deterioration → hallmark severity)
@@ -317,6 +367,10 @@ src/hallsim/
 This project is licensed under the MIT License.
 
 ---
+
+## Acknowledgments
+
+The Scheduler's splitting schemes (Strang splitting, interpolated dense-output coupling, adaptive macro_dt) and the multi-scale roadmap were informed by cross-domain analogies generated using [CrossGen](https://github.com/mohamedAtoui/CrossGen), a structure-mapping tool that finds solutions in unrelated fields. Three CrossGen sessions surfaced techniques from gyrokinetic plasma simulation, partitioned fluid-structure interaction, Mori-Zwanzig projection, waveform relaxation, and federated Kalman filtering — many of which turned out to be established methods in those communities for the exact same multi-scale coupling problem. See [docs/crossgen-suggestions.md](docs/crossgen-suggestions.md) for the full analysis.
 
 ## References
 
