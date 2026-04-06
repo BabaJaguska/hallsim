@@ -87,6 +87,7 @@ class Simulator:
         dt: float = 1.0,
         y0: dict[str, jnp.ndarray] | None = None,
         keep_trajectory: bool = True,
+        flat: bool = True,
     ) -> SimResult:
         """Solve the composite ODE system.
 
@@ -103,40 +104,67 @@ class Simulator:
         keep_trajectory:
             If ``True``, saves at every ``dt`` step.
             If ``False``, saves only the final state.
+        flat:
+            If ``True`` (default), internally flattens the state dict to a
+            1-D array before solving.  This makes JIT compilation and
+            ``jax.grad`` orders of magnitude faster for large models.
+            Results are always returned as a dict regardless of this flag.
 
         Returns
         -------
         :class:`SimResult`
         """
         t0, t1 = t_span
-        rhs = composite.build_rhs()
         if y0 is None:
             y0 = composite.initial_state()
 
-        term = dfx.ODETerm(rhs)
-
         if keep_trajectory:
             ts = jnp.arange(t0, t1 + dt, dt)
-            ts = ts[ts <= t1]  # clip to avoid floating-point overshoot
+            ts = ts[ts <= t1]
             saveat = dfx.SaveAt(ts=ts)
         else:
             saveat = dfx.SaveAt(t1=True)
 
-        sol = dfx.diffeqsolve(
-            term,
-            self.solver,
-            t0=t0,
-            t1=t1,
-            dt0=self.dt0,
-            y0=y0,
-            saveat=saveat,
-            stepsize_controller=self.controller,
-            max_steps=self.max_steps,
-        )
+        if flat:
+            rhs, keys = composite.build_flat_rhs()
+            y0_vec = composite.flatten(y0, keys)
+
+            term = dfx.ODETerm(rhs)
+            sol = dfx.diffeqsolve(
+                term,
+                self.solver,
+                t0=t0,
+                t1=t1,
+                dt0=self.dt0,
+                y0=y0_vec,
+                saveat=saveat,
+                stepsize_controller=self.controller,
+                max_steps=self.max_steps,
+            )
+
+            # Unflatten: sol.ys is (n_time, n_vars) → dict of (n_time,) arrays
+            ys_dict = {
+                k: sol.ys[:, i] for i, k in enumerate(keys)
+            }
+        else:
+            rhs = composite.build_rhs()
+            term = dfx.ODETerm(rhs)
+            sol = dfx.diffeqsolve(
+                term,
+                self.solver,
+                t0=t0,
+                t1=t1,
+                dt0=self.dt0,
+                y0=y0,
+                saveat=saveat,
+                stepsize_controller=self.controller,
+                max_steps=self.max_steps,
+            )
+            ys_dict = sol.ys
 
         return SimResult(
             ts=sol.ts,
-            ys=sol.ys,
+            ys=ys_dict,
             stats={
                 "num_steps": (
                     sol.stats.get("num_steps", None)
@@ -154,6 +182,7 @@ class Simulator:
         kick_dict: dict[str, float],
         dt: float = 1.0,
         y0: dict[str, jnp.ndarray] | None = None,
+        flat: bool = True,
     ) -> SimResult:
         """Two-phase simulation with a mid-run state perturbation.
 
@@ -183,7 +212,8 @@ class Simulator:
 
         # Phase 1: t0 → kick_time
         res1 = self.run(
-            composite, (t0, kick_time), dt=dt, y0=y0, keep_trajectory=True
+            composite, (t0, kick_time), dt=dt, y0=y0, keep_trajectory=True,
+            flat=flat,
         )
 
         # Extract final state and apply kick
@@ -198,7 +228,8 @@ class Simulator:
 
         # Phase 2: kick_time → t1
         res2 = self.run(
-            composite, (kick_time, t1), dt=dt, y0=kicked, keep_trajectory=True
+            composite, (kick_time, t1), dt=dt, y0=kicked, keep_trajectory=True,
+            flat=flat,
         )
 
         # Concatenate (skip duplicate time point)

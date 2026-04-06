@@ -99,6 +99,50 @@ class Composite(eqx.Module):
                 )
 
     # -----------------------------------------------------------------
+    # State flattening: dict ↔ array
+    # -----------------------------------------------------------------
+
+    def _store_keys(self) -> list[str]:
+        """Sorted list of all store paths — deterministic key order."""
+        return sorted(self.store_paths())
+
+    def flatten(
+        self, state: dict[str, jnp.ndarray], keys: list[str] | None = None,
+    ) -> jnp.ndarray:
+        """Convert state dict → 1-D array in sorted key order.
+
+        Parameters
+        ----------
+        state:
+            ``{store_path: scalar_or_array}``
+        keys:
+            Key order.  If ``None``, uses ``_store_keys()`` (sorted).
+
+        Returns
+        -------
+        1-D ``jnp.ndarray`` of shape ``(n_vars,)``.
+        """
+        if keys is None:
+            keys = self._store_keys()
+        return jnp.array([state[k] for k in keys])
+
+    def unflatten(
+        self, vec: jnp.ndarray, keys: list[str] | None = None,
+    ) -> dict[str, jnp.ndarray]:
+        """Convert 1-D array → state dict.
+
+        Parameters
+        ----------
+        vec:
+            1-D array from :meth:`flatten`.
+        keys:
+            Key order (must match the order used in ``flatten``).
+        """
+        if keys is None:
+            keys = self._store_keys()
+        return {k: vec[i] for i, k in enumerate(keys)}
+
+    # -----------------------------------------------------------------
     # Build the combined ODE right-hand side
     # -----------------------------------------------------------------
 
@@ -143,6 +187,45 @@ class Composite(eqx.Module):
             return accum
 
         return rhs
+
+    def build_flat_rhs(self):
+        """Return a JAX-compatible ``f(t, y_vec, args=None) -> dy_vec``.
+
+        Like :meth:`build_rhs` but operates on a **flat 1-D array** instead
+        of a dict.  This compiles orders of magnitude faster under
+        ``jax.jit`` / ``jax.grad`` because JAX traces a single array
+        value rather than N separate dict entries.
+
+        The key order is ``sorted(store_paths())``, matching
+        :meth:`flatten` / :meth:`unflatten`.
+
+        Returns
+        -------
+        ``(rhs_fn, keys)`` where ``keys`` is the sorted list of store paths
+        so callers can ``flatten`` / ``unflatten`` consistently.
+        """
+        proc_items = list(self.processes.items())
+        topo = self.topology
+        keys = self._store_keys()
+        key_to_idx = {k: i for i, k in enumerate(keys)}
+        n = len(keys)
+
+        def rhs(t, y_vec, args=None):
+            # Unflatten
+            y_dict = {k: y_vec[i] for i, k in enumerate(keys)}
+            accum = jnp.zeros(n)
+
+            for proc_name, proc in proc_items:
+                proc_topo = topo[proc_name]
+                view = extract_port_view(y_dict, proc_topo)
+                raw_derivs = proc.derivative(t, view)
+                routed = route_derivatives(raw_derivs, proc_topo)
+                for store_path, dval in routed.items():
+                    accum = accum.at[key_to_idx[store_path]].add(dval)
+
+            return accum
+
+        return rhs, keys
 
     # -----------------------------------------------------------------
     # Initial state
