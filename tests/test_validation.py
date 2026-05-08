@@ -467,7 +467,7 @@ class TestCompositeValidator:
 class TestCompositeIntegration:
 
     def test_semantic_validation_false_by_default(self):
-        """Default: no semantic validation, backward compatible."""
+        """Default: no semantic validation runs."""
         procs = {"a": ROSProducerMicromolar(), "b": ROSProducerKilograms()}
         topo = {"a": {"ros": "pool/ros"}, "b": {"ros": "pool/ros"}}
         # Should NOT raise even though units are incompatible

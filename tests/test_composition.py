@@ -1,4 +1,4 @@
-"""Tests for the v2 composable architecture (Process, Composite, Simulator).
+"""Tests for the composable architecture (Process, Composite, Simulator).
 
 Covers:
 - Port schema declaration and roles
@@ -21,13 +21,7 @@ import pytest
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process
 from hallsim.simulator import SimResult, Simulator
-from hallsim.store import (
-    build_initial_store,
-    extract_port_view,
-    route_derivatives,
-    validate_topology,
-    zeros_like_store,
-)
+from hallsim.store import build_initial_store, validate_topology
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -172,26 +166,6 @@ class TestStore:
         assert "pool/a" in store
         assert "pool/b" in store
 
-    def test_extract_port_view(self):
-        store = {"pool/x": jnp.array(5.0), "env/y": jnp.array(2.0)}
-        topo = {"x": "pool/x", "y": "env/y"}
-        view = extract_port_view(store, topo)
-        assert float(view["x"]) == 5.0
-        assert float(view["y"]) == 2.0
-
-    def test_route_derivatives(self):
-        derivs = {"x": jnp.array(0.3)}
-        topo = {"x": "pool/x", "y": "env/y"}
-        routed = route_derivatives(derivs, topo)
-        assert "pool/x" in routed
-        assert "env/y" not in routed  # not in derivs
-
-    def test_zeros_like_store(self):
-        store = {"a": jnp.array(3.0), "b": jnp.array(7.0)}
-        z = zeros_like_store(store)
-        assert float(z["a"]) == 0.0
-        assert float(z["b"]) == 0.0
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Topology validation
@@ -262,9 +236,9 @@ class TestComposite:
             processes={"prod": prod, "decay": decay},
             topology={"prod": {"x": "pool/x"}, "decay": {"x": "pool/x"}},
         )
-        rhs = composite.build_rhs()
-        y = {"pool/x": jnp.array(2.0)}
-        dydt = rhs(0.0, y)
+        rhs, keys = composite.build_rhs()
+        y_vec = composite.flatten({"pool/x": jnp.array(2.0)}, keys)
+        dydt = composite.unflatten(rhs(0.0, y_vec), keys)
         # Production: +0.1, Decay: -0.05 * 2.0 = -0.1 → net = 0.0
         assert jnp.allclose(dydt["pool/x"], jnp.array(0.0), atol=1e-6)
 
@@ -275,9 +249,9 @@ class TestComposite:
             processes={"growth": growth},
             topology={"growth": {"x": "pop/cells"}},
         )
-        rhs = composite.build_rhs()
-        y = {"pop/cells": jnp.array(5.0)}
-        dydt = rhs(0.0, y)
+        rhs, keys = composite.build_rhs()
+        y_vec = composite.flatten({"pop/cells": jnp.array(5.0)}, keys)
+        dydt = composite.unflatten(rhs(0.0, y_vec), keys)
         expected = 0.1 * 5.0 * (1.0 - 5.0 / 10.0)
         assert jnp.allclose(dydt["pop/cells"], jnp.array(expected), atol=1e-6)
 
@@ -309,9 +283,11 @@ class TestComposite:
                 "tp": {"x": "pool/b", "y": "pool/a"},
             },
         )
-        rhs = composite.build_rhs()
-        y = {"pool/a": jnp.array(3.0), "pool/b": jnp.array(0.0)}
-        dydt = rhs(0.0, y)
+        rhs, keys = composite.build_rhs()
+        y_vec = composite.flatten(
+            {"pool/a": jnp.array(3.0), "pool/b": jnp.array(0.0)}, keys
+        )
+        dydt = composite.unflatten(rhs(0.0, y_vec), keys)
         # prod: d(pool/a)/dt = 0.5
         # tp: d(pool/b)/dt = 2.0 * pool/a = 2.0 * 3.0 = 6.0
         assert jnp.allclose(dydt["pool/a"], jnp.array(0.5), atol=1e-6)
@@ -498,6 +474,7 @@ class TestEdgeCases:
                 "prod": {"x": "val"},
             },
         )
-        rhs = composite.build_rhs()
-        dydt = rhs(0.0, {"val": jnp.array(1.0)})
+        rhs, keys = composite.build_rhs()
+        y_vec = composite.flatten({"val": jnp.array(1.0)}, keys)
+        dydt = composite.unflatten(rhs(0.0, y_vec), keys)
         assert jnp.allclose(dydt["val"], jnp.array(0.1), atol=1e-6)

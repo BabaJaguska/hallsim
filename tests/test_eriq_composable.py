@@ -151,9 +151,9 @@ class TestBuildERiQComposite:
 
     def test_build_rhs_returns_callable(self):
         comp = build_eriq_composite()
-        rhs = comp.build_rhs()
-        y0 = comp.initial_state()
-        dy = rhs(0.0, y0)
+        rhs, keys = comp.build_rhs()
+        y0_vec = comp.flatten(comp.initial_state(), keys)
+        dy = comp.unflatten(rhs(0.0, y0_vec), keys)
         for key, val in dy.items():
             assert jnp.isfinite(val), f"RHS({key}) is not finite"
 
@@ -189,9 +189,9 @@ class TestERiQSimulation:
     def test_homeostatic_derivatives_small(self):
         """At homeostatic IC, derivatives should be near-zero (quasi-steady state)."""
         comp = build_eriq_composite()
-        rhs = comp.build_rhs()
-        y0 = comp.initial_state()
-        dy = rhs(0.0, y0)
+        rhs, keys = comp.build_rhs()
+        y0_vec = comp.flatten(comp.initial_state(), keys)
+        dy = comp.unflatten(rhs(0.0, y0_vec), keys)
 
         for key, val in dy.items():
             # Derivatives should be small at homeostasis (not exactly zero
@@ -206,10 +206,10 @@ class TestERiQSimulation:
 
         def loss(glycol_sa):
             comp = build_eriq_composite(GLYCOL_SA=glycol_sa, validate=False)
-            rhs = comp.build_rhs()
-            y0 = comp.initial_state()
-            dy = rhs(0.0, y0)
-            return dy["eriq/glycolysis"] ** 2
+            rhs, keys = comp.build_rhs()
+            y0_vec = comp.flatten(comp.initial_state(), keys)
+            dy_vec = rhs(0.0, y0_vec)
+            return dy_vec[keys.index("eriq/glycolysis")] ** 2
 
         grad = jax.grad(loss)(1.0)
         assert jnp.isfinite(grad)

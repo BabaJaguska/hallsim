@@ -154,8 +154,6 @@ make test
 .venv_hallsim/bin/python -m pytest tests/ -v
 ```
 
-165 tests: 31 composition + 27 validation + 66 multi-timescale/scheduler + 21 ERiQ + 20 models.
-
 ### Python API
 
 ```python
@@ -270,7 +268,9 @@ oscillator/integrator system with macro_dt=2.0:
 - Lie (interpolated): ~2.4x error reduction on slow coupling variable
 - Strang: ~2.3x error reduction on slow coupling variable
 
-Parameters are JAX arrays, so you can differentiate through entire simulations:
+Parameters are JAX arrays, so you can differentiate through entire simulations.
+`build_rhs()` returns a flat `(rhs_fn, keys)` pair — flat-vector state is what
+JAX/Diffrax compile fastest, and `flatten`/`unflatten` convert at the boundary:
 
 ```python
 import jax
@@ -282,10 +282,10 @@ def loss(rate):
         topology={"decay": {"x": "pool/x"}},
         validate=False,
     )
-    rhs = comp.build_rhs()
-    y = {"pool/x": jnp.array(1.0)}
-    dy = rhs(0.0, y)
-    return dy["pool/x"] ** 2
+    rhs, keys = comp.build_rhs()
+    y_vec = comp.flatten({"pool/x": jnp.array(1.0)}, keys)
+    dy_vec = rhs(0.0, y_vec)
+    return dy_vec[keys.index("pool/x")] ** 2
 
 grad = jax.grad(loss)(0.1)  # d(loss)/d(rate)
 ```

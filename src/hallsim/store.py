@@ -1,12 +1,12 @@
-"""Store utilities for the flat-dict state representation.
+"""Store utilities — initial state construction and topology validation.
 
 The store is a plain ``dict[str, jnp.ndarray]`` with path-like keys::
 
     {"cytoplasm/ROS": jnp.array(0.1), "nucleus/p53": jnp.array(0.5)}
 
-This module provides helpers for building, merging, validating, and
-converting stores.  The store is a valid JAX PyTree — it works directly
-with ``jax.tree_map``, Diffrax solvers, and ``jax.grad``.
+It only appears at the API boundary (initial state, simulation results).
+Internally everything runs on the flat vector returned by
+``Composite.flatten`` / ``unflatten``.
 """
 
 from __future__ import annotations
@@ -14,11 +14,6 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from hallsim.process import PortRole, Process, ProcessKind
-
-
-# ---------------------------------------------------------------------------
-# Build initial store from processes + topology
-# ---------------------------------------------------------------------------
 
 
 def build_initial_store(
@@ -29,99 +24,19 @@ def build_initial_store(
 
     For each process, looks up its ports via ``ports_schema()``, maps them
     through the topology to store paths, and collects default values.
-
     If two ports map to the same store path, the first-seen default wins
     (deterministic because dicts are insertion-ordered in Python 3.7+).
-
-    Parameters
-    ----------
-    processes:
-        ``{process_name: Process}``
-    topology:
-        ``{process_name: {port_name: store_path}}``
-
-    Returns
-    -------
-    ``{store_path: jnp.ndarray}`` ready for Diffrax.
     """
     store: dict[str, jnp.ndarray] = {}
     for proc_name, proc in processes.items():
         topo = topology.get(proc_name, {})
         for port_name, port in proc.ports_schema().items():
-            store_path = topo.get(
-                port_name, port_name
-            )  # identity if no topology
+            store_path = topo.get(port_name, port_name)
             if store_path not in store:
                 store[store_path] = jnp.asarray(
                     port.default, dtype=jnp.float32
                 )
     return store
-
-
-# ---------------------------------------------------------------------------
-# Extract port view / route derivatives back
-# ---------------------------------------------------------------------------
-
-
-def extract_port_view(
-    store: dict[str, jnp.ndarray],
-    topo: dict[str, str],
-) -> dict[str, jnp.ndarray]:
-    """Extract values for a single process's ports from the store.
-
-    Parameters
-    ----------
-    store:
-        Full simulation state.
-    topo:
-        ``{port_name: store_path}`` for this process.
-
-    Returns
-    -------
-    ``{port_name: value}``
-    """
-    return {
-        port_name: store[store_path] for port_name, store_path in topo.items()
-    }
-
-
-def route_derivatives(
-    derivs: dict[str, jnp.ndarray],
-    topo: dict[str, str],
-) -> dict[str, jnp.ndarray]:
-    """Map process-local derivative names back to store paths.
-
-    Parameters
-    ----------
-    derivs:
-        ``{port_name: dy/dt}`` from ``process.derivative()``.
-    topo:
-        ``{port_name: store_path}``
-
-    Returns
-    -------
-    ``{store_path: dy/dt}``
-    """
-    return {
-        topo[port_name]: value
-        for port_name, value in derivs.items()
-        if port_name in topo
-    }
-
-
-# ---------------------------------------------------------------------------
-# Zero store (for additive accumulation)
-# ---------------------------------------------------------------------------
-
-
-def zeros_like_store(store: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
-    """Return a store with the same keys but all-zero values."""
-    return {k: jnp.zeros_like(v) for k, v in store.items()}
-
-
-# ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
 
 
 def validate_topology(

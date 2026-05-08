@@ -5,15 +5,13 @@ A Composite is an Equinox module that bundles:
 1. A dict of named Processes (each an Equinox module).
 2. A topology mapping each process's port names to store paths.
 
-It builds a combined right-hand-side function ``f(t, y) -> dy/dt`` that:
+It builds a JAX-compatible flat RHS ``f(t, y_vec) -> dy_vec`` that:
 
-- Extracts each process's port view from the global store via topology.
-- Calls each process's ``derivative()``.
-- Routes derivatives back to store paths.
-- Sums additive contributions (EVOLVED ports).
-- Enforces exclusivity (EXCLUSIVE ports).
-
-The resulting RHS is compatible with Diffrax solvers.
+- Calls each process's ``derivative()`` with a small per-process port view.
+- Scatter-adds each process's contribution into a single accumulator vector.
+- Sums additive contributions (EVOLVED ports) implicitly via the scatter.
+- Enforces exclusivity (EXCLUSIVE ports) at composition time via topology
+  validation.
 
 Example
 -------
@@ -24,8 +22,8 @@ Example
 ...         "growth": {"x": "pool/x", "nutrient": "env/nutrient"},
 ...     },
 ... )
->>> rhs = composite.build_rhs()
->>> y0 = composite.initial_state()
+>>> rhs, keys = composite.build_rhs()
+>>> y0_vec = composite.flatten(composite.initial_state(), keys)
 """
 
 from __future__ import annotations
@@ -36,13 +34,7 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from hallsim.process import PortRole, Process, ProcessKind
-from hallsim.store import (
-    build_initial_store,
-    extract_port_view,
-    route_derivatives,
-    validate_topology,
-    zeros_like_store,
-)
+from hallsim.store import build_initial_store, validate_topology
 
 
 class Composite(eqx.Module):
@@ -102,7 +94,7 @@ class Composite(eqx.Module):
     # State flattening: dict ↔ array
     # -----------------------------------------------------------------
 
-    def _store_keys(self) -> list[str]:
+    def store_keys(self) -> list[str]:
         """Sorted list of all store paths — deterministic key order."""
         return sorted(self.store_paths())
 
@@ -116,14 +108,14 @@ class Composite(eqx.Module):
         state:
             ``{store_path: scalar_or_array}``
         keys:
-            Key order.  If ``None``, uses ``_store_keys()`` (sorted).
+            Key order.  If ``None``, uses ``store_keys()`` (sorted).
 
         Returns
         -------
         1-D ``jnp.ndarray`` of shape ``(n_vars,)``.
         """
         if keys is None:
-            keys = self._store_keys()
+            keys = self.store_keys()
         return jnp.array([state[k] for k in keys])
 
     def unflatten(
@@ -139,90 +131,75 @@ class Composite(eqx.Module):
             Key order (must match the order used in ``flatten``).
         """
         if keys is None:
-            keys = self._store_keys()
+            keys = self.store_keys()
         return {k: vec[i] for i, k in enumerate(keys)}
 
     # -----------------------------------------------------------------
     # Build the combined ODE right-hand side
     # -----------------------------------------------------------------
 
-    def build_rhs(self):
-        """Return a JAX-compatible ``f(t, y, args=None) -> dy/dt``.
+    def build_rhs(self, proc_names: list[str] | None = None):
+        """Return a JAX-compatible flat ``f(t, y_vec, args=None) -> dy_vec``.
 
-        The returned function:
-        1. For each process: extracts its port view, calls ``derivative()``.
-        2. Routes derivatives back to store paths.
-        3. Sums EVOLVED contributions; passes through EXCLUSIVE ones.
-        4. Returns a dict with the same structure as ``y``.
+        Operates on a flat 1-D ``jnp.ndarray`` indexed by
+        ``sorted(store_paths())``.  Per-process index maps are precomputed
+        at composition time; each process contributes via a single batched
+        ``.at[idxs].add(vals)`` scatter.
 
-        The function is safe to JIT-compile and differentiate.
-        """
-        # Pre-compute static metadata for the RHS closure
-        proc_items = list(self.processes.items())
-        topo = self.topology
-
-        # Build a set of exclusive store paths for fast lookup
-        exclusive_paths: set[str] = set()
-        for proc_name, proc in proc_items:
-            proc_topo = topo[proc_name]
-            for port_name, port in proc.ports_schema().items():
-                if port.role == PortRole.EXCLUSIVE:
-                    exclusive_paths.add(proc_topo[port_name])
-
-        def rhs(t, y, args=None):
-            accum = zeros_like_store(y)
-
-            for proc_name, proc in proc_items:
-                proc_topo = topo[proc_name]
-                # 1. Extract port view
-                view = extract_port_view(y, proc_topo)
-                # 2. Compute derivatives
-                raw_derivs = proc.derivative(t, view)
-                # 3. Route back to store paths
-                routed = route_derivatives(raw_derivs, proc_topo)
-                # 4. Accumulate
-                for store_path, dval in routed.items():
-                    accum[store_path] = accum[store_path] + dval
-
-            return accum
-
-        return rhs
-
-    def build_flat_rhs(self):
-        """Return a JAX-compatible ``f(t, y_vec, args=None) -> dy_vec``.
-
-        Like :meth:`build_rhs` but operates on a **flat 1-D array** instead
-        of a dict.  This compiles orders of magnitude faster under
-        ``jax.jit`` / ``jax.grad`` because JAX traces a single array
-        value rather than N separate dict entries.
-
-        The key order is ``sorted(store_paths())``, matching
-        :meth:`flatten` / :meth:`unflatten`.
+        Parameters
+        ----------
+        proc_names:
+            Subset of processes to include.  ``None`` (default) uses every
+            CONTINUOUS process — the whole-system case.  Pass an explicit
+            list for operator splitting (the Scheduler does this per
+            group); only the named processes contribute, all other store
+            entries get zero.  ``keys`` is always the full store layout,
+            so a single flat state vector is valid for every group's solve.
 
         Returns
         -------
-        ``(rhs_fn, keys)`` where ``keys`` is the sorted list of store paths
-        so callers can ``flatten`` / ``unflatten`` consistently.
+        ``(rhs_fn, keys)`` — pair with :meth:`flatten` / :meth:`unflatten`
+        at the API boundary if you need dict-shaped state.
         """
-        proc_items = list(self.processes.items())
-        topo = self.topology
-        keys = self._store_keys()
+        if proc_names is None:
+            proc_names = list(self.continuous_processes().keys())
+
+        keys = self.store_keys()
         key_to_idx = {k: i for i, k in enumerate(keys)}
         n = len(keys)
 
+        # Precompute static index maps per process.  The per-process port
+        # dict (``view`` below) survives because ``Process.derivative``'s
+        # public contract is ``derivative(t, {port_name: value}) -> dict``.
+        pre = []
+        for proc_name in proc_names:
+            proc = self.processes[proc_name]
+            proc_topo = self.topology[proc_name]
+            read_pairs = tuple(
+                (port, key_to_idx[sp]) for port, sp in proc_topo.items()
+            )
+            schema = proc.ports_schema()
+            write_pairs = tuple(
+                (port, key_to_idx[proc_topo[port]])
+                for port, p in schema.items()
+                if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
+            )
+            pre.append((proc, read_pairs, write_pairs))
+
         def rhs(t, y_vec, args=None):
-            # Unflatten
-            y_dict = {k: y_vec[i] for i, k in enumerate(keys)}
             accum = jnp.zeros(n)
-
-            for proc_name, proc in proc_items:
-                proc_topo = topo[proc_name]
-                view = extract_port_view(y_dict, proc_topo)
-                raw_derivs = proc.derivative(t, view)
-                routed = route_derivatives(raw_derivs, proc_topo)
-                for store_path, dval in routed.items():
-                    accum = accum.at[key_to_idx[store_path]].add(dval)
-
+            for proc, read_pairs, write_pairs in pre:
+                view = {port: y_vec[idx] for port, idx in read_pairs}
+                raw = proc.derivative(t, view)
+                out = [
+                    (idx, raw[port])
+                    for port, idx in write_pairs
+                    if port in raw
+                ]
+                if out:
+                    idxs = jnp.array([i for i, _ in out])
+                    vals = jnp.stack([v for _, v in out])
+                    accum = accum.at[idxs].add(vals)
             return accum
 
         return rhs, keys
@@ -282,33 +259,6 @@ class Composite(eqx.Module):
             for n, p in self.processes.items()
             if p.kind == ProcessKind.EVENT
         }
-
-    # -----------------------------------------------------------------
-    # Group-level RHS building
-    # -----------------------------------------------------------------
-
-    def build_group_rhs(self, proc_names: list[str]):
-        """Build a JAX-compatible RHS for a subset of continuous processes.
-
-        Only the named processes contribute derivatives.  All other store
-        paths get zero derivatives.  The returned function has the same
-        signature as ``build_rhs()``: ``f(t, y, args=None) -> dy/dt``.
-        """
-        proc_items = [(n, self.processes[n]) for n in proc_names]
-        topo = self.topology
-
-        def rhs(t, y, args=None):
-            accum = zeros_like_store(y)
-            for proc_name, proc in proc_items:
-                proc_topo = topo[proc_name]
-                view = extract_port_view(y, proc_topo)
-                raw_derivs = proc.derivative(t, view)
-                routed = route_derivatives(raw_derivs, proc_topo)
-                for store_path, dval in routed.items():
-                    accum[store_path] = accum[store_path] + dval
-            return accum
-
-        return rhs
 
     # -----------------------------------------------------------------
     # Timescale auto-grouping

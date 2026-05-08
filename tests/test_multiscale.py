@@ -1,4 +1,4 @@
-"""Tests for the multi-timescale / hybrid discrete-continuous extensions (Phase 1).
+"""Tests for multi-timescale / hybrid discrete-continuous composites.
 
 Covers:
 - ProcessKind enum and kind field
@@ -6,8 +6,8 @@ Covers:
 - LATCHED port role
 - DISCRETE process with update()
 - EVENT process with condition() / handler()
-- Topology validation: kind/role compatibility checks
-- Backward compatibility: existing CONTINUOUS processes unchanged
+- Topology validation: kind/role checks
+- CONTINUOUS-only composites (the simplest case)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from hallsim.store import validate_topology
 
 
 class ContinuousDecay(Process):
-    """Standard continuous process — backward compatibility."""
+    """Plain continuous process — first-order decay."""
 
     rate: float = 0.1
 
@@ -493,35 +493,35 @@ class TestCompositeWithMixedKinds:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Tests: Backward compatibility
+# Tests: continuous-only composites (the simplest case)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestBackwardCompatibility:
-    def test_existing_process_default_kind(self):
+class TestContinuousOnly:
+    def test_default_kind_is_continuous(self):
         """Processes without explicit kind are CONTINUOUS."""
         proc = ContinuousDecay()
         assert proc.kind == ProcessKind.CONTINUOUS
         assert proc.timescale is None
         assert proc.dt_step is None
 
-    def test_existing_rhs_still_works(self):
-        """build_rhs() with only CONTINUOUS processes works as before."""
+    def test_rhs_solves_continuous_only(self):
+        """build_rhs() on a CONTINUOUS-only composite."""
         composite = Composite(
             processes={"decay": ContinuousDecay()},
             topology={"decay": {"x": "pool/x"}},
         )
-        rhs = composite.build_rhs()
-        y = composite.initial_state()
-        dy = rhs(0.0, y)
+        rhs, keys = composite.build_rhs()
+        y_vec = composite.flatten(composite.initial_state(), keys)
+        dy = composite.unflatten(rhs(0.0, y_vec), keys)
         assert "pool/x" in dy
         assert jnp.isclose(dy["pool/x"], -0.1)  # -rate * x = -0.1 * 1.0
 
-    def test_evolved_ports_helper_unchanged(self):
+    def test_evolved_ports_helper(self):
         proc = ContinuousDecay()
         assert "x" in proc.evolved_ports()
 
-    def test_output_port_names_unchanged_for_continuous(self):
+    def test_output_port_names_for_continuous(self):
         proc = ContinuousDecay()
         assert proc.output_port_names() == {"x"}
 
@@ -751,9 +751,9 @@ class TestBuildGroupRHS:
             },
         )
         # Build RHS for only production
-        rhs = composite.build_group_rhs(["prod"])
-        y = {"pool/x": jnp.array(10.0)}
-        dy = rhs(0.0, y)
+        rhs, keys = composite.build_rhs(["prod"])
+        y_vec = composite.flatten({"pool/x": jnp.array(10.0)}, keys)
+        dy = composite.unflatten(rhs(0.0, y_vec), keys)
         # Only production contributes, not decay
         assert jnp.isclose(dy["pool/x"], 1.0)
 
@@ -768,11 +768,11 @@ class TestBuildGroupRHS:
                 "decay": {"x": "pool/x"},
             },
         )
-        full_rhs = composite.build_rhs()
-        group_rhs = composite.build_group_rhs(["prod", "decay"])
-        y = {"pool/x": jnp.array(5.0)}
-        dy_full = full_rhs(0.0, y)
-        dy_group = group_rhs(0.0, y)
+        full_rhs, keys = composite.build_rhs()
+        group_rhs, _ = composite.build_rhs(["prod", "decay"])
+        y_vec = composite.flatten({"pool/x": jnp.array(5.0)}, keys)
+        dy_full = composite.unflatten(full_rhs(0.0, y_vec), keys)
+        dy_group = composite.unflatten(group_rhs(0.0, y_vec), keys)
         assert jnp.isclose(dy_full["pool/x"], dy_group["pool/x"])
 
 

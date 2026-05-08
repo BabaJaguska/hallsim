@@ -1,7 +1,7 @@
 """Scheduler — multi-rate orchestrator for heterogeneous process composites.
 
-Replaces the monolithic ``Simulator`` for composites that mix continuous,
-discrete, and event-driven processes at different timescales.
+For composites that mix continuous, discrete, and event-driven processes
+at different timescales.
 
 Architecture::
 
@@ -15,19 +15,23 @@ Architecture::
     | per group        |  their dt_step)  |  checked at sync)|
     +------------------+------------------+------------------+
 
-Design borrows scheduling concepts from:
-- Vivarium's Engine (Agmon et al., 2022)
-- Ptolemy II's Directors (UC Berkeley)
+State is a flat ``jnp.ndarray`` indexed by ``sorted(composite.store_paths())``.
+Continuous group solves feed it straight to Diffrax; discrete/event
+handlers precompute read/write index arrays once at run-start and apply
+batched scatter updates.  Dict shape only appears at the API boundary
+(``y0`` in, ``ys`` out) and inside ``Process.derivative/update/handler``
+calls where the per-process port view is a small dict of named ports.
 
-Implemented natively on JAX for GPU acceleration and differentiability
-within continuous groups.
+Scheduling concepts borrow from Vivarium's Engine (Agmon et al., 2022)
+and Ptolemy II's Directors (UC Berkeley).  Implemented natively on JAX
+for GPU acceleration and differentiability within continuous groups.
 
 Example
 -------
 >>> scheduler = Scheduler()
 >>> result = scheduler.run(composite, t_span=(0.0, 1000.0), macro_dt=1.0)
->>> result.ts    # macro step times
->>> result.ys    # state trajectories
+>>> result.ts      # macro step times
+>>> result.ys      # state trajectories (dict, unflattened from flat solve)
 >>> result.events  # fired event log
 """
 
@@ -43,7 +47,7 @@ import diffrax as dfx
 import jax.numpy as jnp
 
 from hallsim.composite import Composite
-from hallsim.store import extract_port_view, route_derivatives
+from hallsim.process import PortRole
 
 
 @dataclass
@@ -65,7 +69,8 @@ class SchedulerResult:
         Macro step time points.
     ys:
         State trajectories — ``{store_path: array}`` where each array
-        has shape ``(n_time_points, *state_shape)``.
+        has shape ``(n_time_points, *state_shape)``.  Unflattened from
+        the flat-vector solve at result assembly.
     events:
         Log of fired events.
     stats:
@@ -76,6 +81,44 @@ class SchedulerResult:
     ys: dict[str, jnp.ndarray]
     events: list[EventRecord] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
+
+
+def _build_proc_index_maps(
+    proc, proc_topo: dict[str, str], key_to_idx: dict[str, int]
+) -> tuple[tuple, tuple]:
+    """Precompute (read_pairs, write_pairs) for a discrete/event process.
+
+    ``read_pairs``  = ((port_name, store_idx), ...) — gather port view from state.
+    ``write_pairs`` = ((port_name, store_idx), ...) — scatter LATCHED writes.
+    """
+    read_pairs = tuple(
+        (port, key_to_idx[sp]) for port, sp in proc_topo.items()
+    )
+    schema = proc.ports_schema()
+    write_pairs = tuple(
+        (port, key_to_idx[proc_topo[port]])
+        for port, p in schema.items()
+        if p.role == PortRole.LATCHED
+    )
+    return read_pairs, write_pairs
+
+
+def _apply_delta(
+    state_vec: jnp.ndarray,
+    raw_delta: dict[str, jnp.ndarray],
+    write_pairs: tuple,
+) -> jnp.ndarray:
+    """Scatter-add a process's delta dict into the flat state vector."""
+    out = [
+        (idx, raw_delta[port])
+        for port, idx in write_pairs
+        if port in raw_delta
+    ]
+    if not out:
+        return state_vec
+    idxs = jnp.array([i for i, _ in out])
+    vals = jnp.stack([v for _, v in out])
+    return state_vec.at[idxs].add(vals)
 
 
 class Scheduler:
@@ -227,7 +270,12 @@ class Scheduler:
         :class:`SchedulerResult`
         """
         t0, t1 = t_span
-        state = dict(y0) if y0 is not None else composite.initial_state()
+
+        # Flat state layout — pinned for the whole run.
+        y0_dict = y0 if y0 is not None else composite.initial_state()
+        keys = composite.store_keys()
+        state = composite.flatten(y0_dict, keys)
+        key_to_idx = {k: i for i, k in enumerate(keys)}
 
         # Resolve groups
         groups = self.manual_groups or composite.auto_groups()
@@ -240,21 +288,46 @@ class Scheduler:
             if continuous:
                 groups = {"default": list(continuous.keys())}
 
-        # Pre-build group RHS functions
-        group_rhs = {
-            gname: composite.build_group_rhs(proc_names)
-            for gname, proc_names in groups.items()
+        # Pre-build group flat RHS functions (each returns (fn, keys);
+        # all keys are identical so we discard the per-group copy) and
+        # the indices each group writes derivatives to (used by
+        # interpolated coupling to splice prev-group state into the
+        # next group's RHS input).
+        group_rhs: dict[str, Any] = {}
+        group_write_idxs: dict[str, jnp.ndarray] = {}
+        for gname, proc_names in groups.items():
+            fn, _ = composite.build_rhs(proc_names)
+            group_rhs[gname] = fn
+            written: set[int] = set()
+            for pname in proc_names:
+                proc = composite.processes[pname]
+                proc_topo = composite.topology[pname]
+                for port, p in proc.ports_schema().items():
+                    if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
+                        written.add(key_to_idx[proc_topo[port]])
+            group_write_idxs[gname] = jnp.array(sorted(written), dtype=jnp.int32)
+
+        # Precompute per-process index maps for discrete/event handlers.
+        discrete_idxs = {
+            name: _build_proc_index_maps(
+                proc, composite.topology[name], key_to_idx
+            )
+            for name, proc in discrete_procs.items()
+        }
+        event_idxs = {
+            name: _build_proc_index_maps(
+                proc, composite.topology[name], key_to_idx
+            )
+            for name, proc in event_procs.items()
         }
 
         # Event tracking: was_active[proc_name] -> bool
         was_active: dict[str, bool] = {n: False for n in event_procs}
 
-        # Trajectory recording
+        # Trajectory recording — list of flat vectors, unflattened at end.
         save_dt = save_dt or macro_dt
         trajectory_ts: list[float] = [t0]
-        trajectory_snapshots: list[dict[str, jnp.ndarray]] = [
-            {k: v.copy() for k, v in state.items()}
-        ]
+        trajectory_snapshots: list[jnp.ndarray] = [state]
         last_save_t = t0
 
         # Event log
@@ -292,9 +365,10 @@ class Scheduler:
         while t < t1 - 1e-12:
             t_next = min(t + current_macro_dt, t1)
 
-            # Snapshot state before splitting (for residual check)
-            if self.adaptive_dt:
-                state_before = {k: v.copy() for k, v in state.items()}
+            # Snapshot state before splitting (for residual check).
+            # Flat state is an immutable jnp.ndarray, so a reference
+            # alias is a safe "copy".
+            state_before = state if self.adaptive_dt else None
 
             # 1. Solve continuous groups
             if self.splitting == "strang" and len(group_rhs) > 1:
@@ -302,17 +376,18 @@ class Scheduler:
                 items = list(group_rhs.items())
                 for gname, rhs_fn in items:
                     state = self._solve_group(
-                        rhs_fn, state, t, t_mid, group_name=gname
+                        rhs_fn, state, keys, t, t_mid, group_name=gname
                     )
                     stats[gname]["num_macro_steps"] += 1
                 for gname, rhs_fn in reversed(items):
                     state = self._solve_group(
-                        rhs_fn, state, t_mid, t_next, group_name=gname
+                        rhs_fn, state, keys, t_mid, t_next, group_name=gname
                     )
                     stats[gname]["num_macro_steps"] += 1
             else:
                 # Lie splitting: sequential, one pass
                 prev_interpolant = None
+                prev_idxs: jnp.ndarray | None = None
                 for gname, rhs_fn in group_rhs.items():
                     if self.coupling_mode == "interpolated":
                         state, prev_interpolant = (
@@ -322,27 +397,20 @@ class Scheduler:
                                 t,
                                 t_next,
                                 prev_interpolant,
+                                prev_idxs,
                             )
                         )
+                        prev_idxs = group_write_idxs[gname]
                     else:
                         state = self._solve_group(
-                            rhs_fn, state, t, t_next, group_name=gname
+                            rhs_fn, state, keys, t, t_next, group_name=gname
                         )
                     stats[gname]["num_macro_steps"] += 1
 
             # Adaptive macro_dt: measure coupling residual and adjust
             if self.adaptive_dt:
-                num = sum(
-                    float(jnp.sum((state[k] - state_before[k]) ** 2))
-                    for k in state
-                )
-                den = (
-                    sum(
-                        float(jnp.sum(state_before[k] ** 2))
-                        for k in state_before
-                    )
-                    + 1e-30
-                )
+                num = float(jnp.sum((state - state_before) ** 2))
+                den = float(jnp.sum(state_before**2)) + 1e-30
                 rho = (num / den) ** 0.5
 
                 if rho > self.adaptive_dt_rho_max:
@@ -372,28 +440,30 @@ class Scheduler:
             # 2. Fire discrete processes that are due
             for proc_name, proc in discrete_procs.items():
                 if self._is_due(t, t_next, proc.dt_step):
-                    proc_topo = composite.topology[proc_name]
-                    view = extract_port_view(state, proc_topo)
+                    read_pairs, write_pairs = discrete_idxs[proc_name]
+                    view = {p: state[i] for p, i in read_pairs}
                     delta = proc.update(t_next, view)
-                    routed = route_derivatives(delta, proc_topo)
-                    for sp, dval in routed.items():
-                        state[sp] = state[sp] + dval
+                    state = _apply_delta(state, delta, write_pairs)
 
             # 3. Check event conditions
             for proc_name, proc in event_procs.items():
-                proc_topo = composite.topology[proc_name]
-                view = extract_port_view(state, proc_topo)
+                read_pairs, write_pairs = event_idxs[proc_name]
+                view = {p: state[i] for p, i in read_pairs}
                 cond = bool(proc.condition(t_next, view))
                 if cond and not was_active[proc_name]:
                     delta = proc.handler(t_next, view)
-                    routed = route_derivatives(delta, proc_topo)
-                    for sp, dval in routed.items():
-                        state[sp] = state[sp] + dval
+                    state = _apply_delta(state, delta, write_pairs)
+                    # Record fired delta keyed by store path for the log.
+                    routed = {
+                        keys[idx]: delta[port]
+                        for port, idx in write_pairs
+                        if port in delta
+                    }
                     events.append(
                         EventRecord(
                             time=float(t_next),
                             process=proc_name,
-                            delta={sp: dval for sp, dval in routed.items()},
+                            delta=routed,
                         )
                     )
                 was_active[proc_name] = cond
@@ -405,37 +475,37 @@ class Scheduler:
             # Save snapshot if due
             if t - last_save_t >= save_dt - 1e-12 or t >= t1 - 1e-12:
                 trajectory_ts.append(t)
-                trajectory_snapshots.append(
-                    {k: v.copy() for k, v in state.items()}
-                )
+                trajectory_snapshots.append(state)
                 last_save_t = t
 
         if pbar is not None:
             pbar.close()
 
-        # Assemble result
+        # Assemble result — stack flat snapshots into (n_time, n_vars),
+        # then unflatten into a dict of (n_time,) trajectories.
         ts = jnp.array(trajectory_ts)
-        ys: dict[str, jnp.ndarray] = {}
-        all_keys = trajectory_snapshots[0].keys()
-        for k in all_keys:
-            ys[k] = jnp.stack([snap[k] for snap in trajectory_snapshots])
+        stacked = jnp.stack(trajectory_snapshots)  # (n_time, n_vars)
+        ys: dict[str, jnp.ndarray] = {
+            k: stacked[:, i] for i, k in enumerate(keys)
+        }
 
         return SchedulerResult(ts=ts, ys=ys, events=events, stats=stats)
 
     def _solve_group(
         self,
         rhs_fn,
-        state: dict[str, jnp.ndarray],
+        state_vec: jnp.ndarray,
+        keys: list[str],
         t0: float,
         t1: float,
         group_name: str = "",
-    ) -> dict[str, jnp.ndarray]:
-        """Solve one continuous group from t0 to t1."""
+    ) -> jnp.ndarray:
+        """Solve one continuous group from t0 to t1 on the flat state."""
         if t1 <= t0:
-            return state
+            return state_vec
 
         state_before = (
-            {k: float(v) for k, v in state.items()} if self.debug else None
+            jnp.asarray(state_vec) if self.debug else None
         )
 
         term = dfx.ODETerm(rhs_fn)
@@ -445,21 +515,22 @@ class Scheduler:
             t0=t0,
             t1=t1,
             dt0=min(self.dt0, t1 - t0),
-            y0=state,
+            y0=state_vec,
             saveat=dfx.SaveAt(t1=True),
             stepsize_controller=self.controller,
             max_steps=self.max_steps,
         )
 
+        final_vec = sol.ys[-1]
+
         if self.debug:
             n_steps = int(sol.stats["num_steps"])
             n_rejected = int(sol.stats["num_rejected_steps"])
-            # Show max delta (what this group actually changed)
-            final = {k: float(v[-1]) for k, v in sol.ys.items()}
-            deltas = {k: abs(final[k] - state_before[k]) for k in final}
-            max_delta_key = max(deltas, key=deltas.get)
-            max_delta = deltas[max_delta_key]
-            any_nan = any(jnp.isnan(v[-1]).any() for v in sol.ys.values())
+            deltas = jnp.abs(final_vec - state_before)
+            max_idx = int(jnp.argmax(deltas))
+            max_delta = float(deltas[max_idx])
+            max_delta_key = keys[max_idx]
+            any_nan = bool(jnp.isnan(final_vec).any())
             log.info(
                 f"  [{group_name}] [{t0:.1f} → {t1:.1f}]: "
                 f"{n_steps} steps ({n_rejected} rej) | "
@@ -467,47 +538,43 @@ class Scheduler:
                 + (" *** NaN ***" if any_nan else "")
             )
 
-        # Extract final state from solution
-        return {k: v[-1] for k, v in sol.ys.items()}
+        return final_vec
 
     def _solve_group_interpolated(
         self,
         rhs_fn,
-        state: dict[str, jnp.ndarray],
+        state_vec: jnp.ndarray,
         t0: float,
         t1: float,
         prev_interpolant: Any | None = None,
-    ) -> tuple[dict[str, jnp.ndarray], Any]:
-        """Solve one group with dense output, injecting a previous group's interpolant.
+        prev_idxs: jnp.ndarray | None = None,
+    ) -> tuple[jnp.ndarray, Any]:
+        """Solve one group with dense output, splicing the previous group's
+        evolving variables in via interpolation.
 
-        When ``prev_interpolant`` is provided, the group's RHS receives
-        a time-varying view of the previous group's state via the ``args``
-        parameter.  The RHS can query ``args["interpolant"].evaluate(t)``
-        to get the previous group's state at the current solver time,
-        instead of seeing a frozen snapshot.
+        When ``prev_interpolant`` is provided, this group's RHS sees the
+        previous group's evolved variables at the current solver time
+        ``t`` (queried from the interpolant), while keeping its own
+        evolving ``y`` for everything else.  This is dense-output Lie
+        splitting: the next group "feels" the previous group's continuous
+        trajectory inside the macro step, not just a frozen snapshot.
 
         Returns
         -------
-        (final_state, interpolant)
-            The updated state dict and this group's dense interpolant
+        (final_state_vec, interpolant)
+            The updated flat state and this group's dense interpolant
             (for passing to the next group).
         """
         if t1 <= t0:
-            return state, prev_interpolant
+            return state_vec, prev_interpolant
 
-        # Wrap the RHS to inject interpolant-based coupling
-        if prev_interpolant is not None:
+        if prev_interpolant is not None and prev_idxs is not None:
             base_rhs = rhs_fn
+            idxs = prev_idxs
 
             def coupled_rhs(t, y, args=None):
-                # Evaluate the previous group's interpolant at current t
-                interp_state = prev_interpolant.evaluate(t)
-                # Merge: interpolated values for paths owned by the
-                # previous group, current y for everything else.
-                merged = dict(y)
-                for k, v in interp_state.items():
-                    if k in merged:
-                        merged[k] = v
+                interp_vec = prev_interpolant.evaluate(t)
+                merged = y.at[idxs].set(interp_vec[idxs])
                 return base_rhs(t, merged, args)
 
             rhs_to_solve = coupled_rhs
@@ -521,14 +588,13 @@ class Scheduler:
             t0=t0,
             t1=t1,
             dt0=min(self.dt0, t1 - t0),
-            y0=state,
+            y0=state_vec,
             saveat=dfx.SaveAt(t1=True, dense=True),
             stepsize_controller=self.controller,
             max_steps=self.max_steps,
         )
 
-        final_state = {k: v[-1] for k, v in sol.ys.items()}
-        return final_state, sol.interpolation
+        return sol.ys[-1], sol.interpolation
 
     @staticmethod
     def _is_due(t: float, t_next: float, dt_step: float) -> bool:

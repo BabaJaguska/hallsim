@@ -126,27 +126,21 @@ class ModelAnalyzer:
         y0: dict[str, jnp.ndarray] | None = None,
     ):
         self.composite = composite
-        self.rhs = composite.build_rhs()
+        self._rhs_flat, self._paths = composite.build_rhs()
         self.y0 = y0 if y0 is not None else composite.initial_state()
-        self._paths = sorted(self.y0.keys())
         self._n = len(self._paths)
 
-    # ── Helper: state dict <-> flat vector ─────────────────────────────
+    def rhs(self, t: float, y_dict: dict) -> dict:
+        """Dict-faced eval — flatten, call flat RHS, unflatten.
 
-    def _to_vec(self, state: dict) -> jnp.ndarray:
-        return jnp.stack([jnp.asarray(state[p]) for p in self._paths])
-
-    def _from_vec(self, vec: jnp.ndarray) -> dict:
-        return {p: vec[i] for i, p in enumerate(self._paths)}
-
-    def _rhs_vec(self, t: float, vec: jnp.ndarray) -> jnp.ndarray:
-        """RHS in flat-vector form for Jacobian computation.
-
-        Must be pure-JAX (no Python float() calls) so jax.jacobian works.
+        Cost-sensitive paths (Diffrax, ``jax.jit``, ``jax.grad``) should
+        call ``self._rhs_flat`` directly so they don't pay the
+        flatten/unflatten roundtrip per call.
         """
-        state = {p: vec[i] for i, p in enumerate(self._paths)}
-        dy = self.rhs(t, state)
-        return jnp.stack([dy.get(p, jnp.zeros(())) for p in self._paths])
+        return self.composite.unflatten(
+            self._rhs_flat(t, self.composite.flatten(y_dict, self._paths)),
+            self._paths,
+        )
 
     # ── Check 1: Jacobian & stiffness ──────────────────────────────────
 
@@ -159,9 +153,9 @@ class ModelAnalyzer:
         - Condition number of the Jacobian
         """
         findings = []
-        y_vec = self._to_vec(self.y0)
+        y_vec = self.composite.flatten(self.y0, self._paths)
 
-        J = jax.jacobian(lambda v: self._rhs_vec(t, v))(y_vec)
+        J = jax.jacobian(lambda v: self._rhs_flat(t, v))(y_vec)
         J_np = np.array(J)
 
         eigenvalues = np.linalg.eigvals(J_np)
@@ -659,8 +653,8 @@ class ModelAnalyzer:
         Uses the Jacobian's left null space to find conserved quantities.
         """
         findings = []
-        y_vec = self._to_vec(self.y0)
-        J = np.array(jax.jacobian(lambda v: self._rhs_vec(t, v))(y_vec))
+        y_vec = self.composite.flatten(self.y0, self._paths)
+        J = np.array(jax.jacobian(lambda v: self._rhs_flat(t, v))(y_vec))
 
         # Left null space: rows of V^T where singular values ≈ 0
         U, S, Vt = np.linalg.svd(J)

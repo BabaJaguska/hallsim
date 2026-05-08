@@ -53,10 +53,10 @@ class TestSaturatingRemoval:
                 topology={"d": {"damage": "pool/d"}},
                 validate=False,
             )
-            rhs = comp.build_rhs()
-            y0 = comp.initial_state()
-            dy = rhs(100.0, y0)
-            return dy["pool/d"] ** 2
+            rhs, keys = comp.build_rhs()
+            y0_vec = comp.flatten(comp.initial_state(), keys)
+            dy_vec = rhs(100.0, y0_vec)
+            return dy_vec[keys.index("pool/d")] ** 2
 
         grad = jax.grad(loss)(0.5)
         assert jnp.isfinite(grad)

@@ -78,9 +78,6 @@ def _compute_algebraic_original(state: dict) -> dict:
     GLU_SA = p.get("GLU_SA", 1.0)
     MDR_SA = p.get("MDR_SA", 1.0)
     MDR = p.get("MDR", 1.8e-3)
-    _K_SIRT_gly = p.get(  # noqa: F841 — kept for parity with revised version
-        "K_SIRT_gly", 0.5
-    )
 
     ATPm = mfunct
     ATPg = glycol
