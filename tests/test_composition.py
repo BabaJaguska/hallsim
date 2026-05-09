@@ -439,6 +439,61 @@ class TestDifferentiability:
         # Gradient should be negative: higher decay rate → lower final x
         assert float(g) < 0.0
 
+    def test_grad_through_severity_to_smooth_event_proxy(self):
+        """Gradients flow through a severity-like parameter to a smooth
+        sigmoid surrogate for an event indicator.
+
+        Hard events (``ProcessKind.EVENT``) cast a boolean condition and are
+        therefore non-differentiable. The standard engineering workaround is
+        a sigmoid surrogate ``σ((q - θ) / τ)`` for "event has fired by T",
+        where ``q`` is a continuous quantity, ``θ`` a threshold, ``τ`` a
+        temperature. This test pins down the contract: gradients of such a
+        surrogate w.r.t. an upstream continuous parameter (here played by a
+        hallmark-severity-style ``rate``) are well-defined and match finite
+        differences, which is the differentiability claim used in lieu of
+        (or as a stepping stone to) IFT-based event-time gradients.
+        """
+        threshold = 0.5
+        temperature = 0.05
+        T = 1.0
+
+        def event_proxy(severity):
+            # Severity drives a linear accumulator: dx/dt = severity
+            # so x(T) = severity * T (clean analytic case).
+            prod = Production(rate=severity)
+            composite = Composite(
+                processes={"damage": prod},
+                topology={"damage": {"x": "x"}},
+                validate=False,
+            )
+            sim = Simulator(max_steps=10_000)
+            result = sim.run(
+                composite,
+                t_span=(0.0, T),
+                dt=0.1,
+                keep_trajectory=False,
+            )
+            x_T = jnp.squeeze(result.ys["x"][-1])
+            # Smooth surrogate for "event fired by T".
+            return jax.nn.sigmoid((x_T - threshold) / temperature)
+
+        # severity*T == threshold puts us at the sigmoid inflection,
+        # where the surrogate is most sensitive — gradient should be large
+        # and unambiguously positive.
+        severity_0 = jnp.array(threshold / T)
+        g = jax.grad(event_proxy)(severity_0)
+        assert float(g) > 0.0
+
+        # Central finite-difference sanity check.
+        eps = 1e-3
+        fd = (event_proxy(severity_0 + eps)
+              - event_proxy(severity_0 - eps)) / (2 * eps)
+        rel_err = abs(float(g) - float(fd)) / (abs(float(fd)) + 1e-8)
+        assert rel_err < 1e-2, (
+            f"autodiff grad={float(g):.4f} disagrees with FD={float(fd):.4f} "
+            f"(rel_err={rel_err:.2e})"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Edge cases

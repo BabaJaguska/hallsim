@@ -29,3 +29,8 @@ Documentation = "https://github.com/BabaJaguska/HallSim#readme"
 
 [project.scripts]
 simulate = "hallsim.cli:simulate"
+
+[tool.pytest.ini_options]
+markers = [
+  "slow: tests that take more than ~10s (typically multi-process Scheduler runs); deselect with '-m \"not slow\"'",
+]

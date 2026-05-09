@@ -75,6 +75,7 @@ Validation is warnings-by-default (not errors). Use `strict=True` to promote war
 | **SBML Import** | `hallsim.sbml_import` | Auto-generate Process from BioModels SBML via `sbmltoodejax`. |
 | **Sivakumar2011** | `models/sivakumar2011/` | 5 SBML models of neural stem cell signaling: EGF, Shh, Notch, Wnt, and integrated crosstalk (BIOMD0000000394-398). |
 | **StemCellNiche** | `hallsim.models.stem_cell_niche` | Age-dependent niche deterioration — severity-scaled decay of Wnt, EGF, Shh, Notch ligands. Composes additively with the Sivakumar2011 crosstalk model. Maps to the **Stem Cell Exhaustion** hallmark. |
+| **GenomicInstability composite** | `hallsim.models.damage_p53_eriq` | Cross-publication composition: `SaturatingRemoval` (DDR mode, Karin & Alon 2019) → `GZ06` SBML p53-Mdm2 oscillator (BIOMD0000000157, Geva-Zatorsky et al. 2006) → `P53Bridge` → `ERiQ` (Alfego & Kriete 2017, p53 replaced). Three independent literature sources composed via topology alone. Maps to the **Genomic Instability** hallmark via `SaturatingRemoval.alpha`. |
 
 ### Hallmark Handles
 
@@ -102,6 +103,24 @@ comp = build_niche_crosstalk(severity=0.6)  # moderate niche deterioration
 result = Simulator().run(comp, t_span=(0.0, 100.0), dt=0.5)
 # Wnt, EGF, Shh, Notch ligands decline with severity
 ```
+
+**Genomic Instability** is mapped to a four-process composite that demonstrates HallSim's cross-publication composability claim. An upstream `SaturatingRemoval` (DDR mode) accumulates DSBs; its output drives an SBML-imported p53-Mdm2 oscillator (Geva-Zatorsky 2006, BIOMD0000000157) via a tunable `psi` INPUT port; the oscillator's `x` (p53 protein) replaces ERiQ's intrinsic algebraic p53 via a tracking bridge. Three independent literature sources composed via topology alone:
+
+```python
+from hallsim.models.damage_p53_eriq import build_damage_p53_eriq_composite
+from hallsim.scheduler import Scheduler
+
+# Genomic Instability hallmark severity = alpha (DSB induction rate).
+# Default 0.01 ≈ baseline; 0.03 = moderate; 0.05 = high.
+comp = build_damage_p53_eriq_composite(alpha=0.03)
+result = Scheduler().run(comp, t_span=(0.0, 50.0), macro_dt=5.0, save_dt=5.0)
+result.ys["p53/psi"]            # damage signal (D)
+result.ys["p53/x"]              # imported p53 oscillator
+result.ys["eriq/p53_activity"]  # bridge-driven ERiQ p53
+result.ys["eriq/mTOR_activity"] # ERiQ downstream readouts
+```
+
+The composite has 3 timescale groups (bridge ≈ 0.2, GZ06 ≈ 5, damage ≈ 50) which the multi-rate `Scheduler` auto-clusters; a bare `Simulator` would force a stiff integrator on all of them. SBML constants are exposed as INPUT ports via `process_from_sbml(..., tunable_params=("psi",))` — the mechanism that lets a HallSim Process drive an imported model's parameter without runtime parameter mutation.
 
 ### Data Validation (ssGSEA)
 
@@ -339,6 +358,12 @@ src/hallsim/
 
 ### Next — Scheduler & Multi-Scale
 
+* [ ] **Native batched-IC support in `Scheduler.run`** — a precondition for
+  `jax.vmap` over populations. Currently `Composite.flatten()` assumes scalar
+  port values, which breaks when y0 dict carries `(batch,)` arrays. Fixing
+  this lets the Scheduler be the unified runner for population studies and
+  parameter sweeps on GPU, instead of falling back to `composite.build_rhs()`
+  + plain Diffrax.
 * [ ] Combine Strang splitting + interpolated coupling (currently mutually exclusive)
 * [ ] Waveform relaxation (Gauss-Seidel iteration at sync points, from FSI/PLL analogy)
 * [ ] Anderson acceleration for waveform relaxation convergence
@@ -359,6 +384,20 @@ See [crossgen-suggestions.md](docs/crossgen-suggestions.md) for full analysis.
 * [ ] Stochastic process support (Gillespie-type discrete events)
 * [ ] LLM-assisted model composition
 * [ ] 3D spatial diffusion & ECM modelling
+
+### Next — SBML Import
+
+* [x] `process_from_sbml` for deterministic ODE-only SBML (Sivakumar2011 set)
+* [x] `tunable_params` to expose selected SBML constants as INPUT ports — lets a
+  HallSim Process drive an imported model's parameters (e.g. damage signal feeding
+  a DDR model's input)
+* [ ] **Translate SBML events into `ProcessKind.EVENT`** — generic event translator,
+  so models with discontinuous state resets (Proctor 2008 BIOMD0000000188 and
+  ~10–20% of curated BioModels) become importable. Diffrax 0.5+ already supports
+  events natively; HallSim already has `ProcessKind.EVENT`. The missing piece is
+  parsing SBML event MathML (trigger expressions, assignments, delays, persistence)
+  and emitting the corresponding `condition` / `handler` methods. Most useful
+  long-term enhancement to the SBML pipeline.
 
 ---
 

@@ -200,6 +200,7 @@ def _compute_algebraic(state: dict) -> dict:
     Km_SIRT = p.get("Km_SIRT", 1.5)  # NAD+ Km for sirtuin (MM)
     K_SIRT_gly = p.get("K_SIRT_gly", 0.5)  # SIRT half-inhibition of glycolysis
     K_GLU = p.get("K_GLU", 1.0)  # NFkB half-inhibition of glucose uptake
+    K_PGC1a = p.get("K_PGC1a", 10.0)  # PGC1α biogenesis saturation
 
     # ATP
     ATPm = mfunct
@@ -235,8 +236,15 @@ def _compute_algebraic(state: dict) -> dict:
     # See Borra et al. (2004), Cantó et al. (2015).
     SIRT = SIRT_SA * NADr / (Km_SIRT + NADr)
 
-    # PGC1alpha (unchanged)
-    PGC1a = PGC1a_SA * (AMPK + 0.1 * SIRT)
+    # PGC1alpha — saturating biogenesis (Michaelis-Menten cap)
+    # Replaces linear: PGC1a_SA * (AMPK + 0.1 * SIRT). Linear form has no
+    # upper bound under chronic AMPK/SIRT activation, which can drive
+    # mitochondrial biogenesis runaway when composed with damage modules.
+    # MM form bounds the asymptote at K_PGC1a * PGC1a_SA. With K_PGC1a=10
+    # and baseline x≈0.27, the factor K/(K+x) ≈ 0.974 → ~2.6% reduction
+    # at baseline (well within homeostatic test tolerance).
+    pgc_drive = AMPK + 0.1 * SIRT
+    PGC1a = PGC1a_SA * pgc_drive * K_PGC1a / (K_PGC1a + pgc_drive)
 
     # mTOR (unchanged — already bounded algebraic form)
     MTORs = AKT - 4.0 * AMPK
@@ -370,6 +378,10 @@ ERIQ_DEFAULT_PARAMS = {
     "Km_SIRT": 1.5,  # SIRT: Michaelis-Menten for NAD+
     "K_SIRT_gly": 0.5,  # Glycolysis: SIRT inhibition half-max
     "K_GLU": 1.0,  # Glucose uptake: NFkB inhibition
+    "K_PGC1a": 10.0,  # PGC1α biogenesis saturation cap
+    "k_ROS_clear": 0.01,  # ROS clearance: max saturating decay rate on Az
+    "K_ROS_clear": 1.0,  # ROS clearance: half-saturation in ros_act
+    "n_ROS_clear": 2.0,  # ROS clearance: Hill coefficient
 }
 
 # Store path prefix used by default topology
@@ -533,10 +545,29 @@ class ERiQOxidativeStress(Process):
 
         # ROS feedback (from MATLAB f_ROS_feedback):
         # dCz = -ROS - Cz
-        # dAz = gz * Uz  where gz = 0.01
+        # dAz = gz * Uz - clearance(ros_act)   where gz = 0.01
+        #
+        # Saturating clearance term added to bound ros_act under chronic
+        # damage / strong perturbations. Hill form (n=2, K=1) keeps the
+        # term ≈ 0 at baseline ros_act ≈ 0.08 (decay ~6e-5) and engages
+        # only when ros_act ≳ K. This preserves the homeostatic
+        # equilibrium of the integrator-style feedback while preventing
+        # the unbounded ROS growth that V10's algebraic-activity refactor
+        # was designed to address.
         ros_int = state["ROS_integrator_c"]
+        ros_act = state["ROS_activity"]
+        p = state.get("_params", {})
+        k_ROS_clear = p.get("k_ROS_clear", 0.01)
+        K_ROS_clear = p.get("K_ROS_clear", 1.0)
+        n_ROS_clear = p.get("n_ROS_clear", 2.0)
+        ros_act_pos = jnp.maximum(ros_act, 0.0)
+        ros_clearance = (
+            k_ROS_clear
+            * ros_act_pos**n_ROS_clear
+            / (K_ROS_clear**n_ROS_clear + ros_act_pos**n_ROS_clear)
+        )
         dROS_integrator_c = -obs["ROS"] - ros_int
-        dROS_activity = 0.01 * obs["Uz"]
+        dROS_activity = 0.01 * obs["Uz"] - ros_clearance
 
         return {
             "mito_damage": dMito_damage,
@@ -629,6 +660,69 @@ class ERiQSignaling(Process):
             "mTOR_activity": dMTOR_activity,
             "p53_integrator_c": dp53_integrator_c,
             "p53_activity": dp53_activity,
+        }
+
+
+# ── Process 3 variant: signaling with external p53 ─────────────────────
+
+
+class ERiQSignalingNoP53(Process):
+    """ERiQ signaling without intrinsic p53 dynamics.
+
+    Variant of :class:`ERiQSignaling` that omits the EXCLUSIVE p53
+    ports so an external Process (e.g. :class:`hallsim.models.p53_bridge.P53Bridge`
+    driven by an SBML-imported p53-Mdm2 oscillator) can own the
+    ``p53_activity`` store path without a topology conflict.
+
+    State variables retained:
+    - mTOR_integrator_c (Cy)
+    - mTOR_activity (Ay)
+
+    p53_activity is read as INPUT (from whichever Process owns it in the
+    composite). p53_integrator_c is dropped — it has no role without the
+    intrinsic p53 dynamics it integrated for.
+    """
+
+    def ports_schema(self):
+        return {
+            # EXCLUSIVE — same as ERiQSignaling
+            "mTOR_integrator_c": Port(
+                role=PortRole.EXCLUSIVE,
+                default=-0.0000,
+                units="dimensionless",
+                description="mTOR regulatory feedback integrator (Cy)",
+            ),
+            "mTOR_activity": Port(
+                role=PortRole.EXCLUSIVE,
+                default=-0.1936,
+                units="dimensionless",
+                description="mTOR activity level (Ay)",
+                ontology={"go": "GO:0031929"},  # TOR signaling
+            ),
+            # INPUT — same as ERiQSignaling, plus p53_activity
+            # (which was EXCLUSIVE in the original; here the bridge owns it)
+            "p53_activity": Port(role=PortRole.INPUT, default=0.8734),
+            "mito_function": Port(role=PortRole.INPUT, default=3.6239),
+            "glycolysis": Port(role=PortRole.INPUT, default=2.4010),
+            "ROS_activity": Port(role=PortRole.INPUT, default=0.0794),
+            "ROS_integrator_c": Port(role=PortRole.INPUT, default=-0.7944),
+            "mito_damage": Port(role=PortRole.INPUT, default=0.0724),
+        }
+
+    def derivative(self, t, state):
+        obs = _compute_algebraic(state)
+        mtor_int = state["mTOR_integrator_c"]
+
+        # mTOR feedback unchanged from ERiQSignaling
+        ry = 0.0
+        gy = 0.1
+        Uy = ry + mtor_int
+        dMTOR_integrator_c = -obs["MTORa"] - mtor_int
+        dMTOR_activity = gy * Uy
+
+        return {
+            "mTOR_integrator_c": dMTOR_integrator_c,
+            "mTOR_activity": dMTOR_activity,
         }
 
 

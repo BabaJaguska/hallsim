@@ -378,6 +378,7 @@ well-formed (linear combinations, products, or already bounded):
 - `ROS = 10 * ROS_SA * ros_act` — linear scaling of a state variable
 - `NADr = NADr_SA * mfunct` — proxy for NAD+/NADH ratio
 - `PGC1a = PGC1a_SA * (AMPK + 0.1 * SIRT)` — linear activation
+  *(superseded — see Stability Revisions below)*
 - `MTORs`, `MTORa`, `MTOR` — algebraic combinations
 - `NFKB` — linear combination of activators
 - `P53s`, `P53a`, `P53` — algebraic feedback
@@ -401,3 +402,106 @@ The K values are a starting point and should be refined by:
 1. Matching the homeostatic steady state
 2. Reproducing the qualitative aging trajectory (progressive damage, declining function)
 3. Comparing against the original MATLAB ERiQ output
+
+---
+
+## Stability Revisions (composability hardening)
+
+The singularity revisions above are sufficient for ERiQ at baseline and under mild
+perturbation. The revisions in this section harden ERiQ against runaway feedback under
+the strong, sustained perturbations that arise when ERiQ is composed with upstream
+damage / inflammation / proteostasis modules — for example a DamageRepair process that
+chronically elevates p53 and NF-κB, which then drives mitochondrial biogenesis and ROS
+production.
+
+These changes are informed by the failure-mode analysis from a prior run, which observed runaway mitochondrial function
+(+76,000%) and ATP (+26,000%) followed by NaN under coupled DamageRepair simulations
+in an earlier ERiQ build. Both failure modes traced to unbounded feedback amplification
+in linear sink/source terms.
+
+### Stability Revision 1: PGC1α saturating biogenesis
+
+**Original (after singularity revisions):**
+```python
+PGC1a = PGC1a_SA * (AMPK + 0.1 * SIRT)
+```
+
+**Revised:**
+```python
+pgc_drive = AMPK + 0.1 * SIRT
+PGC1a = PGC1a_SA * pgc_drive * K_PGC1a / (K_PGC1a + pgc_drive)
+```
+with `K_PGC1a = 10.0` (default).
+
+**Problem:** The linear form has no upper bound under chronic AMPK/SIRT activation,
+which can drive mitochondrial biogenesis runaway when ERiQ is composed with damage
+modules that sustain elevated AMPK (energy stress) or SIRT (NAD+ rise from
+mito-dysfunction proxy).
+
+**Biological rationale:** PGC1α is itself transcriptionally regulated and protein
+turnover is bounded. *In vivo*, mitochondrial biogenesis saturates rather than scaling
+linearly with upstream activator concentration. Saturating MM kinetics reflect the
+finite capacity of the biogenesis machinery (ribosomal output, membrane lipid supply,
+nuclear-encoded protein import).
+
+**Calibration:** At baseline, `pgc_drive ≈ 0.27` (AMPK ≈ 0.20, SIRT ≈ 0.71). The
+factor `K/(K + pgc_drive) ≈ 0.974` reduces PGC1α by ~2.6% from the linear value, well
+within the homeostatic test tolerance (`|d/dt| < 1.0`). Under strong perturbation
+(`pgc_drive → 10`), PGC1α saturates at `K_PGC1a` rather than growing without bound.
+
+### Stability Revision 2: ROS clearance saturation
+
+**Original:**
+```python
+dROS_activity = 0.01 * obs["Uz"]
+```
+
+**Revised:**
+```python
+ros_act_pos = max(ros_act, 0.0)
+ros_clearance = (
+    k_ROS_clear * ros_act_pos**n_ROS_clear
+    / (K_ROS_clear**n_ROS_clear + ros_act_pos**n_ROS_clear)
+)
+dROS_activity = 0.01 * obs["Uz"] - ros_clearance
+```
+with `k_ROS_clear = 0.01`, `K_ROS_clear = 1.0`, `n_ROS_clear = 2.0` (defaults).
+
+**Problem:** The integrator-style ROS dynamics in the original ERiQ have no direct sink
+on `ros_act` (Az). The negative-feedback integrator `dCz = -ROS - Cz` provides
+homeostatic regulation at baseline, but `ros_act` itself is unbounded and can grow when
+the driving term `Uz` (which includes p53, mito_damage, FOXO) is sustained — exactly
+the regime introduced by composing with a damage-response module that chronically
+elevates p53.
+
+**Biological rationale:** Cellular ROS clearance is performed by saturating enzyme
+systems — superoxide dismutase, catalase, and the glutathione peroxidase / peroxiredoxin
+network. All operate with Michaelis-Menten kinetics and finite Vmax. At low ROS, clearance
+is approximately linear in ROS; at high ROS, clearance saturates and damage outpaces it.
+The Hill form (n=2) reflects the cooperative recruitment of antioxidant defenses
+(Nrf2/Keap1 transcriptional response).
+
+**Calibration:** At baseline `ros_act ≈ 0.0794`, the clearance term is
+`0.01 × 0.0063 / 1.0063 ≈ 6.3e-5` — three orders of magnitude below
+the homeostatic test threshold and below the nominal `0.01 × Uz ≈ 0` driving term. At
+`ros_act ≥ 1` the term saturates near `k_ROS_clear = 0.01`, providing a hard ceiling on
+ROS growth that engages only when ros_act exceeds the half-saturation.
+
+### What is NOT addressed by these revisions
+
+Possibly remove the integrator-style activity dynamics
+(`Cy/Ay`, `Cx/Ax`, `Cz/Az` pairs in `ERiQSignaling` and `ERiQOxidativeStress`) in
+favor of fully algebraic activity computation. This is a larger refactor not undertaken
+here. If long-horizon coupled simulations show drift in `mTOR_activity`, `p53_activity`,
+or `ROS_activity` toward unphysical values, the next step is to convert these to
+algebraic forms following the V10 pattern.
+
+Also not addressed:
+- **Glycolysis brakes** (G6P product inhibition on hexokinase, ATP allosteric inhibition
+  on PFK1). Defer until a coupled simulation shows glycolysis runaway under strong
+  `GLYCOL_SA` perturbation.
+- **Strict nonnegativity on state variables.** `mfunct` is guarded inside the damage
+  computation (`max(mfunct, 0)` on line 286 of `eriq.py`) but other state variables can
+  still go negative as integrators. Add only if observed in practice.
+- **Wip1 phosphatase, SASP-driven mTORC1 activation.** These are coupling features that
+  belong in upstream damage / inflammation modules, not in ERiQ's intrinsic dynamics.

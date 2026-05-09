@@ -34,6 +34,22 @@ class SBMLProcess(Process):
     exposing SBML species as EVOLVED ports.
 
     Not constructed directly — use :func:`process_from_sbml`.
+
+    Parameters
+    ----------
+    tunable_params:
+        Names of SBML constants (entries in the model's ``c`` array) that
+        should be exposed as INPUT ports rather than read from the SBML
+        defaults. When this is non-empty, the derivative reads each named
+        parameter from the state dict and substitutes it into ``c`` before
+        calling the SBML rate function. This is what lets an upstream
+        Process (e.g. a damage-accumulation module) drive an SBML model's
+        constants — the connection that powers HallSim's cross-publication
+        composability story.
+
+    tunable_param_indexes:
+        Indices in ``c`` for each name in ``tunable_params``, in the same
+        order. Set by :func:`process_from_sbml`; do not pass directly.
     """
 
     _species_names: tuple[str, ...] = ()
@@ -42,9 +58,12 @@ class SBMLProcess(Process):
     _w0: Any = None
     _c: Any = None
     _name: str = ""
+    _tunable_params: tuple[str, ...] = ()
+    _tunable_param_indexes: tuple[int, ...] = ()
+    _tunable_param_defaults: tuple[float, ...] = ()
 
     def ports_schema(self):
-        return {
+        ports = {
             name: Port(
                 role=PortRole.EVOLVED,
                 default=float(y0),
@@ -53,23 +72,43 @@ class SBMLProcess(Process):
             )
             for name, y0 in zip(self._species_names, self._species_y0)
         }
+        for name, default in zip(
+            self._tunable_params, self._tunable_param_defaults
+        ):
+            ports[name] = Port(
+                role=PortRole.INPUT,
+                default=float(default),
+                units="dimensionless",
+                description=f"SBML tunable constant: {name}",
+            )
+        return ports
 
     def derivative(self, t, state):
         # Build y vector in the order sbmltoodejax expects
         y = jnp.array([state[name] for name in self._species_names])
+        # Substitute tunable parameter values into the constants array.
+        # jnp.array(...).at[idx].set(val) is a functional update — JIT-safe.
+        c = self._c
+        if self._tunable_params:
+            for name, idx in zip(
+                self._tunable_params, self._tunable_param_indexes
+            ):
+                c = c.at[idx].set(state[name])
         # sbmltoodejax versions: ModelSpec uses model.modelstepfunc.ratefunc,
         # ModelStep has ratefunc directly
         ratefunc = getattr(
             getattr(self._model, "modelstepfunc", self._model),
             "ratefunc",
         )
-        dydt = ratefunc(y, t, self._w0, self._c)
+        dydt = ratefunc(y, t, self._w0, c)
         return {name: dydt[i] for i, name in enumerate(self._species_names)}
 
     def metadata(self):
         base = super().metadata()
         base["sbml_name"] = self._name
         base["n_species"] = len(self._species_names)
+        if self._tunable_params:
+            base["tunable_params"] = list(self._tunable_params)
         return base
 
 
@@ -146,6 +185,7 @@ def process_from_sbml(
     model_id: int | str,
     name: str | None = None,
     timescale: float | None = None,
+    tunable_params: tuple[str, ...] = (),
 ) -> SBMLProcess:
     """Load an SBML model and wrap it as a Process.
 
@@ -160,6 +200,15 @@ def process_from_sbml(
     timescale:
         Characteristic timescale in hours for multi-rate scheduling.
         If ``None``, the process lands in the default group.
+    tunable_params:
+        Names of SBML constants to expose as INPUT ports. Each named
+        parameter must exist in the model's ``c_indexes`` mapping. When
+        non-empty, the returned process will read these values from the
+        state dict on every derivative call and substitute them into the
+        ``c`` array before invoking the SBML rate function. This is the
+        mechanism for letting an upstream HallSim Process drive a
+        constant of an imported SBML model (e.g. damage signal driving a
+        DDR model's input).
 
     Returns
     -------
@@ -169,6 +218,8 @@ def process_from_sbml(
     ------
     ImportError
         If ``sbmltoodejax`` is not installed.
+    KeyError
+        If any name in ``tunable_params`` is not a constant in the SBML model.
     """
     try:
         from sbmltoodejax.utils import load_biomodel
@@ -211,6 +262,28 @@ def process_from_sbml(
 
     log.info(f"Loaded {len(species_names)} species: {species_names}")
 
+    # Resolve tunable params against the model's c_indexes
+    if tunable_params:
+        c_indexes = getattr(
+            getattr(model, "modelstepfunc", model), "c_indexes", None
+        ) or getattr(model, "c_indexes", None)
+        if c_indexes is None:
+            raise AttributeError(
+                f"Cannot expose tunable params: model has no c_indexes "
+                f"({type(model).__name__})"
+            )
+        missing = [p for p in tunable_params if p not in c_indexes]
+        if missing:
+            raise KeyError(
+                f"Tunable param(s) {missing} not found in SBML constants. "
+                f"Available: {sorted(c_indexes.keys())}"
+            )
+        tunable_indexes = tuple(c_indexes[p] for p in tunable_params)
+        tunable_defaults = tuple(float(c[i]) for i in tunable_indexes)
+    else:
+        tunable_indexes = ()
+        tunable_defaults = ()
+
     proc = object.__new__(SBMLProcess)
     # Set fields directly (bypassing __init__ since this is a dynamic construction)
     object.__setattr__(proc, "_species_names", species_names)
@@ -223,6 +296,9 @@ def process_from_sbml(
     object.__setattr__(proc, "_w0", w0)
     object.__setattr__(proc, "_c", c)
     object.__setattr__(proc, "_name", name)
+    object.__setattr__(proc, "_tunable_params", tuple(tunable_params))
+    object.__setattr__(proc, "_tunable_param_indexes", tunable_indexes)
+    object.__setattr__(proc, "_tunable_param_defaults", tunable_defaults)
     if timescale is not None:
         object.__setattr__(proc, "timescale", timescale)
 

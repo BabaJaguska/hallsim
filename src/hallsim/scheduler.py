@@ -189,6 +189,11 @@ class Scheduler:
         Minimum allowed ``macro_dt``.  Default: ``macro_dt / 64``.
     adaptive_dt_max:
         Maximum allowed ``macro_dt``.  Default: ``macro_dt * 4``.
+    progress:
+        If ``True``, show a tqdm progress bar over macro steps. Default
+        ``False`` because the Python-side ``pbar.update(1)`` is a side
+        effect that interferes with ``jax.vmap`` over batched runs (e.g.
+        population studies, parameter sweeps).
     """
 
     def __init__(
@@ -209,6 +214,7 @@ class Scheduler:
         adaptive_dt_min: float | None = None,
         adaptive_dt_max: float | None = None,
         debug: bool = False,
+        progress: bool = False,
     ) -> None:
         if coupling_mode not in ("frozen", "interpolated"):
             raise ValueError(
@@ -234,6 +240,7 @@ class Scheduler:
         self.adaptive_dt_min = adaptive_dt_min
         self.adaptive_dt_max = adaptive_dt_max
         self.debug = debug
+        self.progress = progress
 
     def run(
         self,
@@ -352,14 +359,16 @@ class Scheduler:
             }
 
         n_macro = int((t1 - t0) / macro_dt) + 1
-        try:
-            from tqdm import tqdm
+        pbar = None
+        if self.progress:
+            try:
+                from tqdm import tqdm
 
-            pbar = tqdm(
-                total=n_macro, desc="Scheduler", unit="step", leave=False
-            )
-        except ImportError:
-            pbar = None
+                pbar = tqdm(
+                    total=n_macro, desc="Scheduler", unit="step", leave=False
+                )
+            except ImportError:
+                pbar = None
 
         t = t0
         while t < t1 - 1e-12:
