@@ -593,18 +593,21 @@ class ERiQSignaling(Process):
 
     def ports_schema(self):
         return {
-            # EXCLUSIVE
+            # EXCLUSIVE — sole owners of these integrators / activity
             "mTOR_integrator_c": Port(
                 role=PortRole.EXCLUSIVE,
                 default=-0.0000,
                 units="dimensionless",
                 description="mTOR regulatory feedback integrator (Cy)",
             ),
+            # EVOLVED — additive: SASP-driven mTOR activators
+            # (e.g. SASPmTORActivator) may contribute additionally.
+            # See models/sasp_mtor.py for the canonical co-writer.
             "mTOR_activity": Port(
-                role=PortRole.EXCLUSIVE,
+                role=PortRole.EVOLVED,
                 default=-0.1936,
                 units="dimensionless",
-                description="mTOR activity level (Ay)",
+                description="mTOR activity level (Ay); additive port",
                 ontology={"go": "GO:0031929"},  # TOR signaling
             ),
             "p53_integrator_c": Port(
@@ -684,18 +687,20 @@ class ERiQSignalingNoP53(Process):
 
     def ports_schema(self):
         return {
-            # EXCLUSIVE — same as ERiQSignaling
+            # EXCLUSIVE — sole owner of the mTOR integrator
             "mTOR_integrator_c": Port(
                 role=PortRole.EXCLUSIVE,
                 default=-0.0000,
                 units="dimensionless",
                 description="mTOR regulatory feedback integrator (Cy)",
             ),
+            # EVOLVED — same additive contract as ERiQSignaling so
+            # SASPmTORActivator can also contribute.
             "mTOR_activity": Port(
-                role=PortRole.EXCLUSIVE,
+                role=PortRole.EVOLVED,
                 default=-0.1936,
                 units="dimensionless",
-                description="mTOR activity level (Ay)",
+                description="mTOR activity level (Ay); additive port",
                 ontology={"go": "GO:0031929"},  # TOR signaling
             ),
             # INPUT — same as ERiQSignaling, plus p53_activity

@@ -72,6 +72,7 @@ from hallsim.models.eriq import (
     ERiQSignalingNoP53,
 )
 from hallsim.models.p53_bridge import P53Bridge
+from hallsim.models.sasp_mtor import SASPmTORActivator, mTORInhibitor
 from hallsim.models.saturating_removal import SaturatingRemoval
 from hallsim.sbml_import import process_from_sbml
 
@@ -93,11 +94,21 @@ def build_damage_p53_eriq_composite(
     bridge_k_track: float = 5.0,
     GLYCOL_SA: float = 1.0,
     MDAMAGE_SA: float = 1.0,
+    with_sasp_mtor: bool = False,
+    sasp_k: float = 0.05,
+    rapamycin_strength: float = 0.0,
     eriq_prefix: str = ERIQ_PREFIX,
     sbml_path: str | None = None,
     validate: bool = False,
 ):
-    """Build the six-process DamageRepair → GZ06 → Bridge → ERiQ composite.
+    """Build the DamageRepair → GZ06 → Bridge → ERiQ composite.
+
+    Six processes by default. With ``with_sasp_mtor=True``, adds a
+    seventh — :class:`SASPmTORActivator` — that captures the
+    paradoxical high-mTOR phenotype of senescent cells (Carroll 2017,
+    Laberge 2015, Herranz 2015, Houssaini 2018, Fielder 2017). When
+    enabled, chronic damage + chronic p53 push mTOR_activity upward in
+    DDIS regimes, overriding AMPK's inhibitory pressure.
 
     Parameters
     ----------
@@ -113,6 +124,22 @@ def build_damage_p53_eriq_composite(
         oscillator's [0,1]-ish range onto ERiQ's p53_activity range.
     GLYCOL_SA, MDAMAGE_SA:
         Pass-throughs to ERiQ for sensitivity analysis.
+    with_sasp_mtor:
+        If True, add :class:`SASPmTORActivator` to the composite. This
+        is what enables capturing the DDIS mTORC1-paradox during
+        validation against ssGSEA pathway data — without it, the
+        canonical AMPK→mTOR axis dominates and mTORC1 trends down with
+        damage.
+    sasp_k:
+        Rate constant for the SASP→mTOR term. Active only when
+        ``with_sasp_mtor=True``. Default 0.05 matches the order of
+        ERiQSignaling's gy=0.1 integrator gain.
+    rapamycin_strength:
+        Strength of the rapamycin perturbation (additive negative
+        driver on ``mTOR_activity``). Default 0.0 disables; values
+        ~0.05 model moderate pharmacological inhibition. Corresponds
+        to the ``DDIS+rapamycin`` rescue arm in the GSE248823
+        validation.
     eriq_prefix:
         Store path prefix for ERiQ state variables.
     sbml_path:
@@ -206,15 +233,37 @@ def build_damage_p53_eriq_composite(
         },
     }
 
+    processes = {
+        "damage_repair": damage_proc,
+        "gz06_p53": gz06_proc,
+        "p53_bridge": bridge_proc,
+        "eriq_energy": eriq_energy,
+        "eriq_oxstress": eriq_oxstress,
+        "eriq_signaling": eriq_signaling,
+    }
+
+    if with_sasp_mtor:
+        # Reads damage from p53/psi (the SaturatingRemoval output) and
+        # p53_activity from the bridge-owned eriq/p53_activity. Writes
+        # additively to eriq/mTOR_activity alongside ERiQSignalingNoP53.
+        processes["sasp_mtor"] = SASPmTORActivator(k_sasp=sasp_k)
+        topology["sasp_mtor"] = {
+            "mTOR_activity": f"{p}/mTOR_activity",
+            "mito_damage": "p53/psi",
+            "p53_activity": f"{p}/p53_activity",
+        }
+
+    if rapamycin_strength > 0.0:
+        # Pharmacological mTOR inhibition; pulls mTOR_activity downward.
+        # Composes additively with ERiQSignalingNoP53 and (if present)
+        # SASPmTORActivator via EVOLVED port-role semantics.
+        processes["rapamycin"] = mTORInhibitor(strength=rapamycin_strength)
+        topology["rapamycin"] = {
+            "mTOR_activity": f"{p}/mTOR_activity",
+        }
+
     return Composite(
-        processes={
-            "damage_repair": damage_proc,
-            "gz06_p53": gz06_proc,
-            "p53_bridge": bridge_proc,
-            "eriq_energy": eriq_energy,
-            "eriq_oxstress": eriq_oxstress,
-            "eriq_signaling": eriq_signaling,
-        },
+        processes=processes,
         topology=topology,
         validate=validate,
     )

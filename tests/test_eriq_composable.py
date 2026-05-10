@@ -110,15 +110,19 @@ class TestERiQSignaling:
     def test_ports(self):
         proc = ERiQSignaling()
         schema = proc.ports_schema()
+        # mTOR_activity was relaxed EXCLUSIVE -> EVOLVED so the SASP-mTOR
+        # module (hallsim.models.sasp_mtor.SASPmTORActivator) can compose
+        # additively. The other three remain sole-owner ports.
         exclusive = {
             k for k, v in schema.items() if v.role == PortRole.EXCLUSIVE
         }
+        evolved = {k for k, v in schema.items() if v.role == PortRole.EVOLVED}
         assert exclusive == {
             "mTOR_integrator_c",
-            "mTOR_activity",
             "p53_integrator_c",
             "p53_activity",
         }
+        assert "mTOR_activity" in evolved
 
     def test_derivative_finite(self):
         proc = ERiQSignaling()

@@ -16,16 +16,30 @@ keep the top-level namespace small.
 """
 
 from hallsim.composite import Composite
+from hallsim.pathway_mapper import (
+    PATHWAY_ORDER,
+    PathwayMapper,
+    PathwayScores,
+    calibrate_pathway_mapper,
+    pearson_r,
+    sign_agreement,
+)
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.scheduler import EventRecord, Scheduler, SchedulerResult
 
 __all__ = [
     "Composite",
     "EventRecord",
+    "PATHWAY_ORDER",
+    "PathwayMapper",
+    "PathwayScores",
     "Port",
     "PortRole",
     "Process",
     "ProcessKind",
     "Scheduler",
     "SchedulerResult",
+    "calibrate_pathway_mapper",
+    "pearson_r",
+    "sign_agreement",
 ]
