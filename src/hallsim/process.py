@@ -277,43 +277,12 @@ class Process(eqx.Module):
 
     # --- Helpers -------------------------------------------------------------
 
-    def evolved_ports(self) -> dict[str, Port]:
-        """Ports with role EVOLVED."""
-        return {
-            k: v
-            for k, v in self.ports_schema().items()
-            if v.role == PortRole.EVOLVED
-        }
-
-    def exclusive_ports(self) -> dict[str, Port]:
-        """Ports with role EXCLUSIVE."""
-        return {
-            k: v
-            for k, v in self.ports_schema().items()
-            if v.role == PortRole.EXCLUSIVE
-        }
-
-    def input_ports(self) -> dict[str, Port]:
-        """Ports with role INPUT."""
-        return {
-            k: v
-            for k, v in self.ports_schema().items()
-            if v.role == PortRole.INPUT
-        }
-
-    def latched_ports(self) -> dict[str, Port]:
-        """Ports with role LATCHED."""
-        return {
-            k: v
-            for k, v in self.ports_schema().items()
-            if v.role == PortRole.LATCHED
-        }
+    def ports_with_role(self, role: PortRole) -> dict[str, Port]:
+        """Subset of ``ports_schema()`` filtered by port role."""
+        return {k: v for k, v in self.ports_schema().items() if v.role == role}
 
     def output_port_names(self) -> set[str]:
-        """Names of ports that produce derivatives or deltas."""
-        return {
-            k
-            for k, v in self.ports_schema().items()
-            if v.role
-            in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)
-        }
+        """Names of ports that produce derivatives or deltas (EVOLVED,
+        EXCLUSIVE, or LATCHED)."""
+        writes = (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)
+        return {k for k, v in self.ports_schema().items() if v.role in writes}

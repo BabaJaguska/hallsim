@@ -49,6 +49,12 @@ import jax.numpy as jnp
 from hallsim.composite import Composite
 from hallsim.process import PortRole
 
+# Float epsilon for floating-point time comparisons in the macro-step loop
+# (start/end of run, save_dt alignment, dt_step alignment for discrete
+# processes). Sized for second-scale ``t_span`` values; runs that span
+# ranges < ~1e-9 should pass an explicit save_dt and not rely on this.
+_TIME_EPS: float = 1e-12
+
 
 @dataclass
 class EventRecord:
@@ -150,9 +156,10 @@ class Scheduler:
     Uses Lie operator splitting for continuous groups: groups are solved
     sequentially, each seeing the updated state from the previous group.
 
-    For composites with only CONTINUOUS processes and no timescale
-    declarations, degrades to a single Diffrax solve (equivalent to
-    the old ``Simulator``).
+    For single-group composites with no events / discrete / adaptive_dt /
+    Strang / interpolated coupling, takes a fast path that issues one
+    ``dfx.diffeqsolve`` over the whole ``t_span`` — no per-macro-step
+    restarts.
 
     Parameters
     ----------
@@ -322,6 +329,40 @@ class Scheduler:
         discrete_procs = composite.discrete_processes()
         event_procs = composite.event_processes()
 
+        # Reject batched y0 against features that rely on Python-side
+        # branching (event firing, discrete delta scatter, adaptive_dt
+        # residual reduction). These paths use ``bool()`` / ``float()``
+        # on traced JAX arrays which would either crash under ``vmap`` or
+        # silently collapse the batch axis. The Scheduler's batched-y0
+        # support is currently the continuous-only path (fast path or
+        # multi-group Lie/Strang). A future PR can lift these by masking
+        # event firing per-batch-element via ``lax.cond``.
+        is_batched = state.ndim > 1
+        if is_batched:
+            blockers = []
+            if event_procs:
+                blockers.append(
+                    f"EVENT processes {list(event_procs.keys())} "
+                    "(condition fires via Python bool — incompatible with vmap)"
+                )
+            if discrete_procs:
+                blockers.append(
+                    f"DISCRETE processes {list(discrete_procs.keys())} "
+                    "(delta scatter is not batch-axis-aware)"
+                )
+            if self.adaptive_dt:
+                blockers.append(
+                    "adaptive_dt=True (coupling residual is a single dt "
+                    "for the whole batch and reduces via Python float)"
+                )
+            if blockers:
+                raise ValueError(
+                    f"Batched y0 of shape {tuple(state.shape)} is not "
+                    "supported with: " + "; ".join(blockers) + ". "
+                    "Run unbatched, drop the blocking feature, or vmap "
+                    "Scheduler.run from outside."
+                )
+
         # If no groups and no discrete/event, single-group fallback
         if not groups and not discrete_procs and not event_procs:
             continuous = composite.continuous_processes()
@@ -457,7 +498,7 @@ class Scheduler:
                 pbar = None
 
         t = t0
-        while t < t1 - 1e-12:
+        while t < t1 - _TIME_EPS:
             t_next = min(t + current_macro_dt, t1)
 
             # Snapshot state before splitting (for residual check).
@@ -568,7 +609,7 @@ class Scheduler:
                 pbar.update(1)
 
             # Save snapshot if due
-            if t - last_save_t >= save_dt - 1e-12 or t >= t1 - 1e-12:
+            if t - last_save_t >= save_dt - _TIME_EPS or t >= t1 - _TIME_EPS:
                 trajectory_ts.append(t)
                 trajectory_snapshots.append(state)
                 last_save_t = t
@@ -702,6 +743,6 @@ class Scheduler:
         n_before = int(t / dt_step)
         n_after = int(t_next / dt_step)
         # Also handle exact alignment
-        if t_next % dt_step < 1e-12:
+        if t_next % dt_step < _TIME_EPS:
             n_after = int(round(t_next / dt_step))
         return n_after > n_before

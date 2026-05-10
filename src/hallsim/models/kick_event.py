@@ -2,10 +2,10 @@
 
 A generic EVENT Process for "at time T, add delta D to store path P".
 
-Replaces the old ``Simulator.run_with_perturbation`` convenience: instead
-of a custom run-kick-run-concatenate code path, the kick becomes a
-first-class composable Process that the Scheduler dispatches at sync
-points — just like any other event in the system.
+Kicks are first-class composable Processes that the Scheduler dispatches
+at sync points — just like any other event in the system. There is no
+separate "run with perturbation" code path: compose a ``KickEvent`` into
+the composite, wire its ports to the kicked store paths, and run.
 
 Why this pattern
 ----------------

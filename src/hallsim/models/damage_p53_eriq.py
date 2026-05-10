@@ -1,11 +1,12 @@
 """Composed system: DamageRepair → SBML p53 oscillator → ERiQ.
 
-A four-process composite that demonstrates HallSim's central
-composability claim: an upstream hand-built damage-accumulation Process
-drives an SBML-imported p53-Mdm2 oscillator from a different
-publication, whose dynamic p53 output replaces ERiQ's intrinsic
-algebraic p53, thereby propagating dose-dependent genomic instability
-through to ERiQ's downstream metabolic and signaling readouts.
+A six-process composite (1 damage + 1 SBML oscillator + 1 bridge + 3
+ERiQ sub-processes) that demonstrates HallSim's central composability
+claim: an upstream hand-built damage-accumulation Process drives an
+SBML-imported p53-Mdm2 oscillator from a different publication, whose
+dynamic p53 output replaces ERiQ's intrinsic algebraic p53, thereby
+propagating dose-dependent genomic instability through to ERiQ's
+downstream metabolic and signaling readouts.
 
 Composition chain
 -----------------
@@ -96,7 +97,7 @@ def build_damage_p53_eriq_composite(
     sbml_path: str | None = None,
     validate: bool = False,
 ):
-    """Build the four-process DamageRepair → GZ06 → Bridge → ERiQ composite.
+    """Build the six-process DamageRepair → GZ06 → Bridge → ERiQ composite.
 
     Parameters
     ----------

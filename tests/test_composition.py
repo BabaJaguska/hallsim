@@ -111,20 +111,22 @@ class TestPortSchema:
 
     def test_port_roles(self):
         p = Production()
-        assert set(p.evolved_ports().keys()) == {"x"}
-        assert p.evolved_ports()["x"].role == PortRole.EVOLVED
-        assert p.exclusive_ports() == {}
-        assert p.input_ports() == {}
+        assert set(p.ports_with_role(PortRole.EVOLVED).keys()) == {"x"}
+        assert (
+            p.ports_with_role(PortRole.EVOLVED)["x"].role == PortRole.EVOLVED
+        )
+        assert p.ports_with_role(PortRole.EXCLUSIVE) == {}
+        assert p.ports_with_role(PortRole.INPUT) == {}
 
     def test_exclusive_role(self):
         g = ExclusiveGrowth()
-        assert g.exclusive_ports().keys() == {"x"}
-        assert g.evolved_ports() == {}
+        assert g.ports_with_role(PortRole.EXCLUSIVE).keys() == {"x"}
+        assert g.ports_with_role(PortRole.EVOLVED) == {}
 
     def test_input_role(self):
         tp = TwoPort()
-        assert tp.input_ports().keys() == {"y"}
-        assert tp.evolved_ports().keys() == {"x"}
+        assert tp.ports_with_role(PortRole.INPUT).keys() == {"y"}
+        assert tp.ports_with_role(PortRole.EVOLVED).keys() == {"x"}
 
     def test_output_port_names(self):
         tp = TwoPort()
@@ -400,7 +402,7 @@ class TestScheduler:
         assert result.events[0].process == "kick"
 
     def test_multi_process_simulation(self):
-        """Run a composite with input ports through the simulator."""
+        """Run a composite with input ports through the Scheduler."""
         prod = Production(rate=1.0)
         tp = TwoPort(coupling=0.5)
         composite = Composite(

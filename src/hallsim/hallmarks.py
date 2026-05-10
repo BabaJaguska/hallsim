@@ -11,7 +11,7 @@ Because Process instances are immutable Equinox modules, hallmark
 handles work by constructing *new* Process instances with modified
 parameters.  This means hallmark severity is differentiable:
 
-    jax.grad(lambda s: simulate(apply_hallmark(composite, s)).loss)(0.5)
+    jax.grad(lambda s: simulate(apply_hallmarks(composite, s)).loss)(0.5)
 
 Usage
 -----

@@ -103,7 +103,7 @@ result = Scheduler().run(comp, t_span=(0.0, 100.0), macro_dt=0.5, save_dt=0.5)
 # Wnt, EGF, Shh, Notch ligands decline with severity
 ```
 
-**Genomic Instability** is mapped to a four-process composite that demonstrates HallSim's cross-publication composability claim. An upstream `SaturatingRemoval` (DDR mode) accumulates DSBs; its output drives an SBML-imported p53-Mdm2 oscillator (Geva-Zatorsky 2006, BIOMD0000000157) via a tunable `psi` INPUT port; the oscillator's `x` (p53 protein) replaces ERiQ's intrinsic algebraic p53 via a tracking bridge. Three independent literature sources composed via topology alone:
+**Genomic Instability** is mapped to a six-process composite that demonstrates HallSim's cross-publication composability claim. An upstream `SaturatingRemoval` (DDR mode) accumulates DSBs; its output drives an SBML-imported p53-Mdm2 oscillator (Geva-Zatorsky 2006, BIOMD0000000157) via a tunable `psi` INPUT port; the oscillator's `x` (p53 protein) replaces ERiQ's intrinsic algebraic p53 via a tracking bridge. Three independent literature sources composed via topology alone:
 
 ```python
 from hallsim.models.damage_p53_eriq import build_damage_p53_eriq_composite
@@ -348,8 +348,7 @@ src/hallsim/
   process.py           — Process base class, Port, PortRole, ProcessKind
   store.py             — Store utilities (build, extract, route, validate)
   composite.py         — Composite: wires Processes via Topology, auto-grouping
-  simulator.py         — Diffrax-based ODE solver wrapper (single-group)
-  scheduler.py         — Multi-rate Scheduler (continuous groups + discrete + events)
+  scheduler.py         — The runner: multi-rate orchestration + single-group fast path
   validation.py        — Semantic validation layer (4 subsystems)
   hallmarks.py         — Hallmark handles (0-1 severity → parameter modulation)
   data_validation.py   — ssGSEA data validation (simulated vs measured)
@@ -370,9 +369,11 @@ src/hallsim/
 * [x] Define composability formalisms (Process/Port/Topology/Composite)
 * [x] Semantic validation layer (units, ontology, graph analysis, coupling audit)
 * [x] Multi-timescale Scheduler (Lie splitting, discrete dispatch, event detection)
+* [x] Single-group fast path (one `diffeqsolve` over the full `t_span` when no events/discrete/adaptive_dt/Strang/interpolated)
 * [x] Interpolated coupling mode (dense-output Lie splitting)
 * [x] Strang splitting (symmetric half-step, O(dt²) accuracy)
 * [x] Adaptive macro_dt (PLL-inspired, shrinks on high coupling residual)
+* [x] Native batched-IC support (`Scheduler.run` accepts `(batch, n_vars)` y0 — population studies without external `vmap`)
 * [x] ERiQ decomposed into 3 composable Processes (EnergyMetabolism, OxidativeStress, Signaling)
 * [x] SaturatingRemoval Process (Uri Alon damage model)
 * [x] NeuralODE Process + training infrastructure
@@ -382,13 +383,10 @@ src/hallsim/
 
 ### Next — Scheduler & Multi-Scale
 
-* [ ] **Native batched-IC support in `Scheduler.run`** — a precondition for
-  `jax.vmap` over populations. Currently `Composite.flatten()` assumes scalar
-  port values, which breaks when y0 dict carries `(batch,)` arrays. Fixing
-  this lets the Scheduler be the unified runner for population studies and
-  parameter sweeps on GPU, instead of falling back to `composite.build_rhs()`
-  + plain Diffrax.
 * [ ] Combine Strang splitting + interpolated coupling (currently mutually exclusive)
+* [ ] Event-bearing and adaptive_dt composites under batched `y0` (currently
+  rejected at `Scheduler.run` entry — both rely on Python-side branching that
+  doesn't compose with `vmap`)
 * [ ] Waveform relaxation (Gauss-Seidel iteration at sync points, from FSI/PLL analogy)
 * [ ] Anderson acceleration for waveform relaxation convergence
 * [ ] Mori-Zwanzig memory kernel for fast→slow coupling (captures history effects)

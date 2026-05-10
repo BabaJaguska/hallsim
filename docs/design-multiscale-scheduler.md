@@ -1,7 +1,13 @@
 # Design: Multi-Timescale Scheduler & Hybrid Discrete-Continuous Architecture
 
-**Status:** Proposed
-**Date:** 2026-03-05
+**Status:** Implemented (2026-05-09). The Scheduler is now the only runner;
+the `Simulator` class proposed as a single-group convenience wrapper was
+implemented and then deleted as redundant — the Scheduler covers the
+single-group case via a fast path. This document is preserved as the
+original design proposal; deviations from the implementation are flagged
+inline. See [docs/diary.md](diary.md) for the implementation history.
+
+**Date:** 2026-03-05 (proposed) → 2026-05-09 (implemented + Simulator deleted)
 **Scope:** Replaces monolithic `Simulator` with a multi-rate `Scheduler`; extends `Process` to support discrete and event-driven processes.
 
 ---
@@ -302,23 +308,27 @@ New checks for the multi-timescale architecture:
 
 Gradients do NOT flow across discrete events or between timescale groups. This is a feature, not a limitation — these boundaries represent genuine discontinuities in the biology.
 
-### 8. Backward Compatibility
+### 8. Single-group composites
 
-A composite with only CONTINUOUS processes and no timescale declarations degrades exactly to current behavior:
+A composite with only CONTINUOUS processes resolves to a single group and
+takes the Scheduler's fast path — one `dfx.diffeqsolve` over the whole
+`t_span`, no per-macro-step restarts:
 
 ```python
-# This still works identically:
 composite = Composite(
     processes={"decay": Decay(), "growth": Growth()},
     topology={"decay": {"x": "pool/x"}, "growth": {"x": "pool/x"}},
 )
 
-# Scheduler with a single group = current Simulator behavior
 scheduler = Scheduler()
 result = scheduler.run(composite, t_span=(0.0, 100.0), macro_dt=1.0)
 ```
 
-The existing `Simulator` class can remain as a convenience wrapper that delegates to `Scheduler` with a single group.
+> **Implementation note (2026-05-09):** the proposal originally suggested
+> keeping a `Simulator` convenience wrapper. That wrapper was implemented
+> and then removed — it duplicated Scheduler behavior with a parallel API,
+> and the fast path inside Scheduler delivers the same performance for
+> single-group composites without the extra surface.
 
 ### 9. SimResult Extension
 
@@ -414,7 +424,7 @@ The scheduler will:
 - [x] Discrete process dispatch
 - [x] Event detection and handling
 - [x] `SchedulerResult` with event log
-- [x] Backward-compatible: single-group = current Simulator
+- [x] Single-group fast path inside Scheduler (one `dfx.diffeqsolve` over the full `t_span`)
 
 ### Phase 4: Validation & Testing — DONE
 - [x] New validation checks (kind/role compatibility, LATCHED conflicts, dt_step)

@@ -229,7 +229,7 @@ class TestLatchedPort:
 
     def test_latched_ports_helper(self):
         proc = DivisionCheck()
-        latched = proc.latched_ports()
+        latched = proc.ports_with_role(PortRole.LATCHED)
         assert "cell_count" in latched
         assert "damage" not in latched
 
@@ -528,7 +528,7 @@ class TestContinuousOnly:
 
     def test_evolved_ports_helper(self):
         proc = ContinuousDecay()
-        assert "x" in proc.evolved_ports()
+        assert "x" in proc.ports_with_role(PortRole.EVOLVED)
 
     def test_output_port_names_for_continuous(self):
         proc = ContinuousDecay()
@@ -1022,6 +1022,87 @@ class TestSchedulerFullIntegration:
         # Should have ~11 time points (0, 10, 20, ..., 100)
         assert len(result.ts) <= 12
         assert len(result.ts) >= 10
+
+
+class TestSchedulerBatchedGuards:
+    """Scheduler.run rejects batched y0 against features that rely on
+    Python-side branching. The error has to be loud and actionable —
+    silent batch-axis collapse on these paths is what the guards prevent.
+    """
+
+    def test_batched_y0_with_event_raises(self):
+        """Batched y0 + EVENT process → ValueError naming the offender."""
+        composite = Composite(
+            processes={
+                "prod": ConstantProduction(rate=1.0),
+                "latch": ThresholdLatch(threshold=5.0),
+            },
+            topology={
+                "prod": {"x": "pool/x"},
+                "latch": {"x": "pool/x", "flag": "state/flag"},
+            },
+        )
+        keys = composite.store_keys()
+        y0 = jnp.broadcast_to(
+            composite.initial_state_vec(keys), (4, len(keys))
+        )
+        with pytest.raises(ValueError, match="EVENT processes"):
+            Scheduler().run(composite, t_span=(0.0, 10.0), macro_dt=1.0, y0=y0)
+
+    def test_batched_y0_with_discrete_raises(self):
+        """Batched y0 + DISCRETE process → ValueError naming the offender."""
+        composite = Composite(
+            processes={
+                "prod": ConstantProduction(rate=1.0),
+                "counter": PeriodicCounter(),
+            },
+            topology={
+                "prod": {"x": "pool/x"},
+                "counter": {"count": "stats/count"},
+            },
+        )
+        keys = composite.store_keys()
+        y0 = jnp.broadcast_to(
+            composite.initial_state_vec(keys), (4, len(keys))
+        )
+        with pytest.raises(ValueError, match="DISCRETE processes"):
+            Scheduler().run(composite, t_span=(0.0, 10.0), macro_dt=1.0, y0=y0)
+
+    def test_batched_y0_with_adaptive_dt_raises(self):
+        """Batched y0 + adaptive_dt=True → ValueError mentioning adaptive_dt."""
+        composite = Composite(
+            processes={"prod": ConstantProduction(rate=1.0)},
+            topology={"prod": {"x": "pool/x"}},
+        )
+        keys = composite.store_keys()
+        y0 = jnp.broadcast_to(
+            composite.initial_state_vec(keys), (4, len(keys))
+        )
+        with pytest.raises(ValueError, match="adaptive_dt"):
+            Scheduler(adaptive_dt=True).run(
+                composite, t_span=(0.0, 10.0), macro_dt=1.0, y0=y0
+            )
+
+    def test_adaptive_dt_unbatched_runs(self):
+        """adaptive_dt=True still works for the unbatched case — guard
+        is targeted at batched y0 only."""
+        composite = Composite(
+            processes={
+                "prod": ConstantProduction(rate=1.0),
+                "decay": SimpleDecay(rate=0.1),
+            },
+            topology={
+                "prod": {"x": "pool/x"},
+                "decay": {"x": "pool/x"},
+            },
+        )
+        result = Scheduler(adaptive_dt=True).run(
+            composite, t_span=(0.0, 5.0), macro_dt=0.5, save_dt=0.5
+        )
+        assert "adaptive_dt" in result.stats
+        assert result.ts.shape[0] >= 2
+        # State must remain finite throughout — no NaN from a bad dt path.
+        assert not jnp.any(jnp.isnan(result.get("pool/x")))
 
 
 class TestSchedulerIsDue:

@@ -728,42 +728,12 @@ class ERiQSignalingNoP53(Process):
 # ── Convenience: build a full ERiQ composite ────────────────────────────
 
 
-def build_eriq_composite(
-    *,
-    GLYCOL_SA: float = 1.0,
-    MDAMAGE_SA: float = 1.0,
-    prefix: str = ERIQ_PREFIX,
-    validate: bool = True,
-    semantic_validation: bool = False,
-):
-    """Build a Composite wiring the 3 ERiQ Processes together.
-
-    All 11 state variables are placed under ``{prefix}/`` store paths.
-    Shared variables (read by multiple processes) are wired to the same
-    store path so they see each other's updates at each macro step.
-
-    Parameters
-    ----------
-    GLYCOL_SA, MDAMAGE_SA:
-        Scaling factors exposed at the top level for quick sensitivity
-        analysis.  All other _SA parameters can be modulated via
-        hallmark handles.
-    prefix:
-        Store path prefix (default: ``"eriq"``).
-    """
-    from hallsim.composite import Composite
-
-    processes = {
-        "energy": ERiQEnergyMetabolism(GLYCOL_SA=GLYCOL_SA),
-        "oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=MDAMAGE_SA),
-        "signaling": ERiQSignaling(),
-    }
-
+def _eriq_topology(prefix: str) -> dict[str, dict[str, str]]:
+    """Topology shared by ``build_eriq_composite`` and the original-equation
+    variant. Wires every port to ``{prefix}/<port_name>`` so all three
+    processes share the same 11 state variables."""
     p = prefix
-
-    # Topology: map port names to store paths.
-    # Shared state variables get the same store path across processes.
-    topology = {
+    return {
         "energy": {
             "mito_function": f"{p}/mito_function",
             "mito_enzymes": f"{p}/mito_enzymes",
@@ -797,9 +767,41 @@ def build_eriq_composite(
         },
     }
 
+
+def build_eriq_composite(
+    *,
+    GLYCOL_SA: float = 1.0,
+    MDAMAGE_SA: float = 1.0,
+    prefix: str = ERIQ_PREFIX,
+    validate: bool = True,
+    semantic_validation: bool = False,
+):
+    """Build a Composite wiring the 3 ERiQ Processes together.
+
+    All 11 state variables are placed under ``{prefix}/`` store paths.
+    Shared variables (read by multiple processes) are wired to the same
+    store path so they see each other's updates at each macro step.
+
+    Parameters
+    ----------
+    GLYCOL_SA, MDAMAGE_SA:
+        Scaling factors exposed at the top level for quick sensitivity
+        analysis.  All other _SA parameters can be modulated via
+        hallmark handles.
+    prefix:
+        Store path prefix (default: ``"eriq"``).
+    """
+    from hallsim.composite import Composite
+
+    processes = {
+        "energy": ERiQEnergyMetabolism(GLYCOL_SA=GLYCOL_SA),
+        "oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=MDAMAGE_SA),
+        "signaling": ERiQSignaling(),
+    }
+
     return Composite(
         processes,
-        topology,
+        _eriq_topology(prefix),
         validate=validate,
         semantic_validation=semantic_validation,
     )
@@ -904,6 +906,8 @@ def build_eriq_composite_original(
     - Demonstrating the ModelAnalyzer catching issues
     - Comparing original vs revised dynamics
     - Reproducing the original paper's results (requires implicit solver)
+    - Showing the revised model doesn't break or explode where the
+      original would (kept as the reference baseline for that claim).
     """
     from hallsim.composite import Composite
 
@@ -913,39 +917,4 @@ def build_eriq_composite_original(
         "signaling": _OriginalERiQSignaling(),
     }
 
-    p = prefix
-    topology = {
-        "energy": {
-            "mito_function": f"{p}/mito_function",
-            "mito_enzymes": f"{p}/mito_enzymes",
-            "glycolysis": f"{p}/glycolysis",
-            "glycolytic_enzymes": f"{p}/glycolytic_enzymes",
-            "mito_damage": f"{p}/mito_damage",
-            "mTOR_activity": f"{p}/mTOR_activity",
-            "p53_activity": f"{p}/p53_activity",
-            "ROS_activity": f"{p}/ROS_activity",
-            "ROS_integrator_c": f"{p}/ROS_integrator_c",
-        },
-        "oxidative_stress": {
-            "mito_damage": f"{p}/mito_damage",
-            "ROS_integrator_c": f"{p}/ROS_integrator_c",
-            "ROS_activity": f"{p}/ROS_activity",
-            "mito_function": f"{p}/mito_function",
-            "glycolysis": f"{p}/glycolysis",
-            "mTOR_activity": f"{p}/mTOR_activity",
-            "p53_activity": f"{p}/p53_activity",
-        },
-        "signaling": {
-            "mTOR_integrator_c": f"{p}/mTOR_integrator_c",
-            "mTOR_activity": f"{p}/mTOR_activity",
-            "p53_integrator_c": f"{p}/p53_integrator_c",
-            "p53_activity": f"{p}/p53_activity",
-            "mito_function": f"{p}/mito_function",
-            "glycolysis": f"{p}/glycolysis",
-            "ROS_activity": f"{p}/ROS_activity",
-            "ROS_integrator_c": f"{p}/ROS_integrator_c",
-            "mito_damage": f"{p}/mito_damage",
-        },
-    }
-
-    return Composite(processes, topology, validate=False)
+    return Composite(processes, _eriq_topology(prefix), validate=False)
