@@ -99,40 +99,71 @@ class Composite(eqx.Module):
         return sorted(self.store_paths())
 
     def flatten(
-        self, state: dict[str, jnp.ndarray], keys: list[str] | None = None,
+        self,
+        state: dict[str, jnp.ndarray],
+        keys: list[str] | None = None,
     ) -> jnp.ndarray:
-        """Convert state dict → 1-D array in sorted key order.
+        """Convert state dict → array in sorted key order.
+
+        Stacks values along the *last* axis so the layout works for
+        scalar values (rank-0) and batched values (rank-1+) without
+        change. Scalars produce ``(n_vars,)``; ``(batch,)`` values
+        produce ``(batch, n_vars)``. This is what makes ``Scheduler.run``
+        accept batched y0 dicts natively — no special vmap path needed.
 
         Parameters
         ----------
         state:
-            ``{store_path: scalar_or_array}``
+            ``{store_path: scalar_or_array}``. Each value may be a
+            JAX scalar or a batched array; all values must share a
+            common batch shape.
         keys:
             Key order.  If ``None``, uses ``store_keys()`` (sorted).
 
         Returns
         -------
-        1-D ``jnp.ndarray`` of shape ``(n_vars,)``.
+        ``jnp.ndarray`` of shape ``(..., n_vars)``.
         """
         if keys is None:
             keys = self.store_keys()
-        return jnp.array([state[k] for k in keys])
+        return jnp.stack([jnp.asarray(state[k]) for k in keys], axis=-1)
+
+    def initial_state_vec(self, keys: list[str] | None = None) -> jnp.ndarray:
+        """Initial state as a flat tensor in trailing-axis convention.
+
+        JAX-native counterpart to :meth:`initial_state` (which returns a
+        dict). Use this as the default y0 for ``Scheduler.run`` and
+        ``Scheduler.run`` — the public API takes a tensor, not a dict.
+
+        Returns
+        -------
+        ``jnp.ndarray`` of shape ``(n_vars,)``. To override values, use
+        ``y0.at[composite.keys.index("path")].set(value)``. To batch over
+        a population, ``jnp.broadcast_to(y0, (batch, n_vars))``.
+        """
+        return self.flatten(self.initial_state(), keys)
 
     def unflatten(
-        self, vec: jnp.ndarray, keys: list[str] | None = None,
+        self,
+        vec: jnp.ndarray,
+        keys: list[str] | None = None,
     ) -> dict[str, jnp.ndarray]:
-        """Convert 1-D array → state dict.
+        """Convert array (last axis = state vars) → state dict.
+
+        Symmetric inverse of :meth:`flatten`. Indexes the last axis so
+        ``(n_vars,)`` produces scalars in the dict and ``(batch, n_vars)``
+        produces ``(batch,)`` arrays in the dict.
 
         Parameters
         ----------
         vec:
-            1-D array from :meth:`flatten`.
+            Array from :meth:`flatten` with state vars on the last axis.
         keys:
             Key order (must match the order used in ``flatten``).
         """
         if keys is None:
             keys = self.store_keys()
-        return {k: vec[i] for i, k in enumerate(keys)}
+        return {k: vec[..., i] for i, k in enumerate(keys)}
 
     # -----------------------------------------------------------------
     # Build the combined ODE right-hand side
@@ -166,7 +197,6 @@ class Composite(eqx.Module):
 
         keys = self.store_keys()
         key_to_idx = {k: i for i, k in enumerate(keys)}
-        n = len(keys)
 
         # Precompute static index maps per process.  The per-process port
         # dict (``view`` below) survives because ``Process.derivative``'s
@@ -187,9 +217,13 @@ class Composite(eqx.Module):
             pre.append((proc, read_pairs, write_pairs))
 
         def rhs(t, y_vec, args=None):
-            accum = jnp.zeros(n)
+            # Trailing-axis convention: y_vec is (..., n_vars). Scalars
+            # for unbatched runs (shape (n,)); (batch, n) for batched
+            # population runs through Scheduler.run with a batched y0.
+            # accum follows y_vec's shape so the scatter stays aligned.
+            accum = jnp.zeros_like(y_vec)
             for proc, read_pairs, write_pairs in pre:
-                view = {port: y_vec[idx] for port, idx in read_pairs}
+                view = {port: y_vec[..., idx] for port, idx in read_pairs}
                 raw = proc.derivative(t, view)
                 out = [
                     (idx, raw[port])
@@ -198,8 +232,12 @@ class Composite(eqx.Module):
                 ]
                 if out:
                     idxs = jnp.array([i for i, _ in out])
-                    vals = jnp.stack([v for _, v in out])
-                    accum = accum.at[idxs].add(vals)
+                    # Stack derivative values along the trailing axis to
+                    # match accum's layout. For scalar derivatives this
+                    # is shape (n_writes,); for batched (batch,) per-port
+                    # derivatives this is (batch, n_writes).
+                    vals = jnp.stack([v for _, v in out], axis=-1)
+                    accum = accum.at[..., idxs].add(vals)
             return accum
 
         return rhs, keys

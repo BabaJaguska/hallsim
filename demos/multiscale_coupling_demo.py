@@ -34,7 +34,6 @@ import matplotlib.pyplot as plt
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.scheduler import Scheduler
-from hallsim.simulator import Simulator
 
 
 # ── Processes ─────────────────────────────────────────────────────────
@@ -137,9 +136,11 @@ def build_composite():
 # ── Run comparisons ──────────────────────────────────────────────────
 
 def run_monolithic(composite, t_span, dt):
-    """Reference: single-group solve, no splitting."""
-    sim = Simulator()
-    return sim.run(composite, t_span=t_span, dt=dt)
+    """Reference: single-group solve via the Scheduler fast path
+    (no manual groups → single Diffrax solve over the whole t_span)."""
+    return Scheduler().run(
+        composite, t_span=t_span, macro_dt=dt, save_dt=dt
+    )
 
 
 def run_split(composite, t_span, macro_dt, mode="frozen", save_dt=None,
@@ -160,11 +161,11 @@ def run_split(composite, t_span, macro_dt, mode="frozen", save_dt=None,
     )
 
 
-def compute_error(ref_ts, ref_ys, test_ts, test_ys, key):
+def compute_error(ref, test, key):
     """RMS error between reference and test trajectories."""
     # Interpolate test to reference time points
-    test_vals = jnp.interp(ref_ts, test_ts, test_ys[key])
-    ref_vals = ref_ys[key]
+    test_vals = jnp.interp(ref.ts, test.ts, test.get(key))
+    ref_vals = ref.get(key)
     return float(jnp.sqrt(jnp.mean((test_vals - ref_vals) ** 2)))
 
 
@@ -186,7 +187,7 @@ def main():
 
     # 1. Monolithic reference (fine dt for ground truth)
     print("Running monolithic reference (no splitting)...")
-    ref = run_monolithic(comp, t_span, dt=0.05)
+    ref = run_monolithic(comp, t_span, macro_dt=0.05, save_dt=0.05)
     print(f"  {len(ref.ts)} time points")
 
     # 2. Frozen splitting
@@ -210,39 +211,39 @@ def main():
     print("-" * 40)
 
     for key, label in [("osc/x", "x (fast)"), ("osc/slow_drive", "slow_drive")]:
-        err_frozen = compute_error(ref.ts, ref.ys, frozen.ts, frozen.ys, key)
-        err_interp = compute_error(ref.ts, ref.ys, interp.ts, interp.ys, key)
-        err_strang = compute_error(ref.ts, ref.ys, strang.ts, strang.ys, key)
+        err_frozen = compute_error(ref, frozen, key)
+        err_interp = compute_error(ref, interp, key)
+        err_strang = compute_error(ref, strang, key)
         print(f"  {label:20s}  lie={err_frozen:.6f}  interp={err_interp:.6f}  strang={err_strang:.6f}")
 
     # Plot
     fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
 
     ax = axes[0]
-    ax.plot(ref.ts, ref.ys["osc/x"], "k-", label="monolithic (reference)", alpha=0.8)
-    ax.plot(frozen.ts, frozen.ys["osc/x"], "r--", label="Lie (frozen)", alpha=0.5)
-    ax.plot(interp.ts, interp.ys["osc/x"], "b:", label="Lie (interpolated)", alpha=0.7, linewidth=2)
-    ax.plot(strang.ts, strang.ys["osc/x"], "g-.", label="Strang", alpha=0.7)
+    ax.plot(ref.ts, ref.get("osc/x"), "k-", label="monolithic (reference)", alpha=0.8)
+    ax.plot(frozen.ts, frozen.get("osc/x"), "r--", label="Lie (frozen)", alpha=0.5)
+    ax.plot(interp.ts, interp.get("osc/x"), "b:", label="Lie (interpolated)", alpha=0.7, linewidth=2)
+    ax.plot(strang.ts, strang.get("osc/x"), "g-.", label="Strang", alpha=0.7)
     ax.set_ylabel("x (fast oscillator)")
     ax.legend(fontsize=7)
     ax.set_title("Multi-Timescale Coupling: Lie vs Interpolated vs Strang")
 
     ax = axes[1]
-    ax.plot(ref.ts, ref.ys["osc/slow_drive"], "k-", label="monolithic", alpha=0.8)
-    ax.plot(frozen.ts, frozen.ys["osc/slow_drive"], "r--", label="Lie", alpha=0.5)
-    ax.plot(interp.ts, interp.ys["osc/slow_drive"], "b:", label="interpolated", alpha=0.7, linewidth=2)
-    ax.plot(strang.ts, strang.ys["osc/slow_drive"], "g-.", label="Strang", alpha=0.7)
+    ax.plot(ref.ts, ref.get("osc/slow_drive"), "k-", label="monolithic", alpha=0.8)
+    ax.plot(frozen.ts, frozen.get("osc/slow_drive"), "r--", label="Lie", alpha=0.5)
+    ax.plot(interp.ts, interp.get("osc/slow_drive"), "b:", label="interpolated", alpha=0.7, linewidth=2)
+    ax.plot(strang.ts, strang.get("osc/slow_drive"), "g-.", label="Strang", alpha=0.7)
     ax.set_ylabel("slow_drive")
     ax.legend(fontsize=7)
 
     # Error panel
     ax = axes[2]
-    frozen_x = jnp.interp(ref.ts, frozen.ts, frozen.ys["osc/x"])
-    interp_x = jnp.interp(ref.ts, interp.ts, interp.ys["osc/x"])
-    strang_x = jnp.interp(ref.ts, strang.ts, strang.ys["osc/x"])
-    ax.plot(ref.ts, jnp.abs(frozen_x - ref.ys["osc/x"]), "r-", label="|Lie - ref|", alpha=0.5)
-    ax.plot(ref.ts, jnp.abs(interp_x - ref.ys["osc/x"]), "b-", label="|interp - ref|", alpha=0.7)
-    ax.plot(ref.ts, jnp.abs(strang_x - ref.ys["osc/x"]), "g-", label="|Strang - ref|", alpha=0.7)
+    frozen_x = jnp.interp(ref.ts, frozen.ts, frozen.get("osc/x"))
+    interp_x = jnp.interp(ref.ts, interp.ts, interp.get("osc/x"))
+    strang_x = jnp.interp(ref.ts, strang.ts, strang.get("osc/x"))
+    ax.plot(ref.ts, jnp.abs(frozen_x - ref.get("osc/x")), "r-", label="|Lie - ref|", alpha=0.5)
+    ax.plot(ref.ts, jnp.abs(interp_x - ref.get("osc/x")), "b-", label="|interp - ref|", alpha=0.7)
+    ax.plot(ref.ts, jnp.abs(strang_x - ref.get("osc/x")), "g-", label="|Strang - ref|", alpha=0.7)
     ax.set_ylabel("absolute error (x)")
     ax.set_xlabel("time (s)")
     ax.legend(fontsize=7)

@@ -391,8 +391,13 @@ class TestKindRoleValidation:
         )
         assert any("dt_step" in e for e in errors)
 
-    def test_latched_evolved_conflict_on_same_path(self):
-        """LATCHED and EVOLVED pointing to the same store path is an error."""
+    def test_latched_evolved_coexist_on_same_path(self):
+        """LATCHED + EVOLVED on the same store path is *allowed*: the
+        CONTINUOUS process owns the derivative, the EVENT/DISCRETE
+        process applies a one-shot scatter-add delta when fired (e.g.
+        a kick at t=10). EXCLUSIVE constrains derivative ownership, not
+        state mutation by an event. See ``KickEvent`` for the canonical
+        use case and store.py's ``validate_topology`` for the rationale."""
         errors = validate_topology(
             {
                 "discrete": DivisionCheck(),
@@ -403,7 +408,11 @@ class TestKindRoleValidation:
                 "continuous": {"x": "pool/x"},
             },
         )
-        assert any("LATCHED" in e and "EVOLVED" in e for e in errors)
+        # Should validate without coexistence errors; any errors that
+        # remain must be unrelated to the LATCHED ↔ EVOLVED pairing.
+        assert not any(
+            "LATCHED" in e and "EVOLVED" in e for e in errors
+        ), errors
 
     def test_valid_discrete_process_no_errors(self):
         errors = validate_topology(
@@ -785,7 +794,7 @@ from hallsim.scheduler import Scheduler, SchedulerResult
 
 class TestSchedulerBasic:
     def test_single_continuous_process(self):
-        """Scheduler with a single continuous process behaves like Simulator."""
+        """Scheduler degrades to one Diffrax solve for a single continuous group."""
         composite = Composite(
             processes={"decay": SimpleDecay(rate=0.1)},
             topology={"decay": {"x": "pool/x"}},
@@ -796,7 +805,7 @@ class TestSchedulerBasic:
         assert result.ts[-1] == 10.0
         # Exponential decay: x(t) = 10 * exp(-0.1t)
         # At t=10: x ≈ 10 * exp(-1) ≈ 3.68
-        final_x = result.ys["pool/x"][-1]
+        final_x = result.get("pool/x")[-1]
         expected = 10.0 * jnp.exp(-0.1 * 10.0)
         assert jnp.allclose(final_x, expected, atol=0.05)
 
@@ -815,7 +824,7 @@ class TestSchedulerBasic:
         scheduler = Scheduler()
         result = scheduler.run(composite, t_span=(0.0, 50.0), macro_dt=1.0)
         # Steady state: dx/dt = rate - decay*x = 0 → x = rate/decay = 10
-        final_x = result.ys["pool/x"][-1]
+        final_x = result.get("pool/x")[-1]
         assert jnp.allclose(final_x, 10.0, atol=0.5)
 
     def test_result_structure(self):
@@ -827,10 +836,11 @@ class TestSchedulerBasic:
         result = scheduler.run(composite, t_span=(0.0, 5.0), macro_dt=1.0)
         assert isinstance(result, SchedulerResult)
         assert isinstance(result.ts, jnp.ndarray)
-        assert isinstance(result.ys, dict)
+        assert isinstance(result.ys, jnp.ndarray)
+        assert isinstance(result.keys, list)
         assert isinstance(result.events, list)
-        assert "pool/x" in result.ys
-        assert len(result.ts) == len(result.ys["pool/x"])
+        assert "pool/x" in result
+        assert len(result.ts) == len(result.get("pool/x"))
 
 
 class TestSchedulerDiscrete:
@@ -843,7 +853,7 @@ class TestSchedulerDiscrete:
         scheduler = Scheduler()
         result = scheduler.run(composite, t_span=(0.0, 50.0), macro_dt=5.0)
         # dt_step=10, t_span=50 → fires at t=10,20,30,40,50 → count=5
-        final_count = result.ys["state/count"][-1]
+        final_count = result.get("state/count")[-1]
         assert jnp.isclose(final_count, 5.0)
 
     def test_discrete_with_continuous(self):
@@ -861,9 +871,9 @@ class TestSchedulerDiscrete:
         scheduler = Scheduler()
         result = scheduler.run(composite, t_span=(0.0, 30.0), macro_dt=5.0)
         # x grows linearly: x(30) ≈ 30
-        assert jnp.allclose(result.ys["pool/x"][-1], 30.0, atol=0.5)
+        assert jnp.allclose(result.get("pool/x")[-1], 30.0, atol=0.5)
         # counter fires at t=10,20,30 → count=3
-        assert jnp.isclose(result.ys["state/count"][-1], 3.0)
+        assert jnp.isclose(result.get("state/count")[-1], 3.0)
 
 
 class TestSchedulerEvent:
@@ -883,7 +893,7 @@ class TestSchedulerEvent:
         result = scheduler.run(composite, t_span=(0.0, 10.0), macro_dt=1.0)
         # x grows at rate 1.0, crosses 5.0 around t=5
         # flag should be 1.0 after that
-        final_flag = result.ys["state/flag"][-1]
+        final_flag = result.get("state/flag")[-1]
         assert jnp.isclose(final_flag, 1.0)
         # Event should be logged
         assert len(result.events) >= 1
@@ -922,7 +932,7 @@ class TestSchedulerEvent:
         scheduler = Scheduler()
         result = scheduler.run(composite, t_span=(0.0, 10.0), macro_dt=1.0)
         assert len(result.events) == 0
-        assert jnp.isclose(result.ys["state/flag"][-1], 0.0)
+        assert jnp.isclose(result.get("state/flag")[-1], 0.0)
 
 
 class TestSchedulerMultiRate:
@@ -943,9 +953,9 @@ class TestSchedulerMultiRate:
         )
         result = scheduler.run(composite, t_span=(0.0, 100.0), macro_dt=10.0)
         # x ≈ 100 (linear growth at rate 1.0)
-        assert jnp.allclose(result.ys["pool/x"][-1], 100.0, atol=1.0)
+        assert jnp.allclose(result.get("pool/x")[-1], 100.0, atol=1.0)
         # y ≈ 0.1 (linear growth at rate 0.001 for 100s)
-        assert jnp.allclose(result.ys["pool/y"][-1], 0.1, atol=0.01)
+        assert jnp.allclose(result.get("pool/y")[-1], 0.1, atol=0.01)
 
     def test_auto_groups_used_by_default(self):
         """Scheduler uses auto_groups when no manual groups given."""
@@ -962,8 +972,8 @@ class TestSchedulerMultiRate:
         scheduler = Scheduler()
         result = scheduler.run(composite, t_span=(0.0, 10.0), macro_dt=1.0)
         # Both should evolve correctly
-        assert result.ys["pool/x"][-1] > 5.0
-        assert result.ys["pool/y"][-1] > 0.0
+        assert result.get("pool/x")[-1] > 5.0
+        assert result.get("pool/y")[-1] > 0.0
 
 
 class TestSchedulerFullIntegration:
@@ -985,13 +995,13 @@ class TestSchedulerFullIntegration:
         result = scheduler.run(composite, t_span=(0.0, 30.0), macro_dt=5.0)
 
         # x grows linearly: x(30) ≈ 30
-        assert jnp.allclose(result.ys["pool/x"][-1], 30.0, atol=1.0)
+        assert jnp.allclose(result.get("pool/x")[-1], 30.0, atol=1.0)
 
         # counter: fires at t=10,20,30 → count=3
-        assert jnp.isclose(result.ys["state/count"][-1], 3.0)
+        assert jnp.isclose(result.get("state/count")[-1], 3.0)
 
         # latch: x crosses 15 around t=15, flag should be 1.0
-        assert jnp.isclose(result.ys["state/flag"][-1], 1.0)
+        assert jnp.isclose(result.get("state/flag")[-1], 1.0)
 
         # Event logged
         assert any(e.process == "latch" for e in result.events)

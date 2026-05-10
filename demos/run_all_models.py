@@ -39,17 +39,17 @@ def demo_eriq():
     print("=" * 60)
 
     from hallsim.models.eriq import build_eriq_composite
-    from hallsim.simulator import Simulator
+    from hallsim.scheduler import Scheduler
     from hallsim.plotting import plot_trajectories, plot_phase_portrait
 
     comp = build_eriq_composite()
-    sim = Simulator()
+    sim = Scheduler()
 
     print(f"   Processes: {list(comp.processes.keys())}")
     print(f"   Store paths: {len(comp.store_paths())} state variables")
     print("   Simulating t=[0, 5000]...")
 
-    result = sim.run(comp, t_span=(0.0, 5000.0), dt=5.0)
+    result = sim.run(comp, t_span=(0.0, 5000.0), macro_dt=5.0, save_dt=5.0)
 
     # Key variables
     key_paths = [
@@ -88,8 +88,8 @@ def demo_eriq():
     saved_plots.append(path)
     print(f"   Saved: {path}")
 
-    print(f"   Final mito_damage: {float(result.ys['eriq/mito_damage'][-1]):.4f}")
-    print(f"   Final mito_function: {float(result.ys['eriq/mito_function'][-1]):.4f}")
+    print(f"   Final mito_damage: {float(result.get('eriq/mito_damage')[-1]):.4f}")
+    print(f"   Final mito_function: {float(result.get('eriq/mito_function')[-1]):.4f}")
 
     plt.close("all")
     return result
@@ -106,7 +106,7 @@ def demo_eriq_plus_damage():
     )
     from hallsim.models.saturating_removal import SaturatingRemoval
     from hallsim.composite import Composite
-    from hallsim.simulator import Simulator
+    from hallsim.scheduler import Scheduler
     from hallsim.plotting import plot_trajectories
 
     # Build ERiQ processes + a SaturatingRemoval process
@@ -156,13 +156,13 @@ def demo_eriq_plus_damage():
     }
 
     comp = Composite(processes, topology)
-    sim = Simulator()
+    sim = Scheduler()
 
     print(f"   Processes: {list(comp.processes.keys())}")
     print(f"   Store paths: {comp.store_paths()}")
     print("   Simulating t=[0, 3000]...")
 
-    result = sim.run(comp, t_span=(0.0, 3000.0), dt=5.0)
+    result = sim.run(comp, t_span=(0.0, 3000.0), macro_dt=5.0, save_dt=5.0)
 
     path = os.path.join(PLOT_DIR, "eriq_composed.png")
     fig = plot_trajectories(
@@ -198,7 +198,7 @@ def demo_mapk():
         return
 
     from hallsim.composite import Composite
-    from hallsim.simulator import Simulator
+    from hallsim.scheduler import Scheduler
     from hallsim.plotting import plot_trajectories
 
     schema = proc.ports_schema()
@@ -216,9 +216,9 @@ def demo_mapk():
     # max_step_size=0.1 matches the original sbmltoodejax deltaT;
     # rtol=1e-8 prevents accumulated phase drift over many cycles
     n_secs = 150 * 60
-    sim = Simulator(max_step_size=0.1, rtol=1e-12, atol=1e-14)
+    sim = Scheduler(max_step_size=0.1, rtol=1e-12, atol=1e-14)
     print(f"   Simulating t=[0, {n_secs}] ({n_secs/60:.0f} min)...")
-    result = sim.run(comp, t_span=(0.0, float(n_secs)), dt=5.0)
+    result = sim.run(comp, t_span=(0.0, float(n_secs)), macro_dt=5.0, save_dt=5.0)
 
     # Plot key species
     all_paths = [f"mapk/{s}" for s in species]
@@ -256,7 +256,7 @@ def demo_neuralode():
         NeuralODEProcess, generate_training_data, train_neuralode,
     )
     from hallsim.composite import Composite
-    from hallsim.simulator import Simulator
+    from hallsim.scheduler import Scheduler
     from hallsim.plotting import plot_trajectories, plot_phase_portrait
 
     # Ground truth: damped oscillator
@@ -288,11 +288,13 @@ def demo_neuralode():
     )
 
     # Use one training IC for comparison
-    y0 = {"osc/x": jnp.array(0.5), "osc/y": jnp.array(0.5)}
-    sim = Simulator()
+    keys = comp.store_keys()
+    y0 = comp.initial_state_vec(keys)
+    y0 = y0.at[keys.index("osc/x")].set(0.5).at[keys.index("osc/y")].set(0.5)
+    sim = Scheduler()
 
     print("   Predicting trajectory t=[0, 20]...")
-    result = sim.run(comp, t_span=(0.0, 20.0), dt=0.2, y0=y0)
+    result = sim.run(comp, t_span=(0.0, 20.0), macro_dt=0.2, save_dt=0.2, y0=y0)
 
     # Also generate ground truth for comparison
     import diffrax as dfx
@@ -308,8 +310,8 @@ def demo_neuralode():
 
     # Time series
     ts_np = np.asarray(result.ts)
-    axes[0].plot(ts_np, np.asarray(result.ys["osc/x"]), label="NeuralODE x", linewidth=2)
-    axes[0].plot(ts_np, np.asarray(result.ys["osc/y"]), label="NeuralODE y", linewidth=2)
+    axes[0].plot(ts_np, np.asarray(result.get("osc/x")), label="NeuralODE x", linewidth=2)
+    axes[0].plot(ts_np, np.asarray(result.get("osc/y")), label="NeuralODE y", linewidth=2)
     gt_ts = np.asarray(gt_sol.ts)
     axes[0].plot(gt_ts, np.asarray(gt_sol.ys[:, 0]), "--", label="True x", alpha=0.7)
     axes[0].plot(gt_ts, np.asarray(gt_sol.ys[:, 1]), "--", label="True y", alpha=0.7)
@@ -320,7 +322,7 @@ def demo_neuralode():
     axes[0].grid(True, alpha=0.3)
 
     # Phase portrait
-    axes[1].plot(np.asarray(result.ys["osc/x"]), np.asarray(result.ys["osc/y"]),
+    axes[1].plot(np.asarray(result.get("osc/x")), np.asarray(result.get("osc/y")),
                  label="NeuralODE", linewidth=2)
     axes[1].plot(np.asarray(gt_sol.ys[:, 0]), np.asarray(gt_sol.ys[:, 1]),
                  "--", label="True", alpha=0.7)
@@ -349,7 +351,7 @@ def demo_hallmark_sweep():
     from hallsim.models.eriq import build_eriq_composite
     from hallsim.hallmarks import HALLMARK_REGISTRY
     from hallsim.composite import Composite
-    from hallsim.simulator import Simulator
+    from hallsim.scheduler import Scheduler
 
     severities = [0.0, 0.3, 0.6, 1.0]
     handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
@@ -362,20 +364,20 @@ def demo_hallmark_sweep():
         modified_procs = handle.apply(comp.processes, severity=sev)
         comp_mod = Composite(modified_procs, comp.topology, validate=False)
 
-        sim = Simulator()
-        result = sim.run(comp_mod, t_span=(0.0, 3000.0), dt=5.0)
+        sim = Scheduler()
+        result = sim.run(comp_mod, t_span=(0.0, 3000.0), macro_dt=5.0, save_dt=5.0)
 
         ts = np.asarray(result.ts)
         label = f"severity={sev:.1f}"
 
-        axes[0].plot(ts, np.asarray(result.ys["eriq/mito_damage"]),
+        axes[0].plot(ts, np.asarray(result.get("eriq/mito_damage")),
                      color=color, label=label, linewidth=1.5)
-        axes[1].plot(ts, np.asarray(result.ys["eriq/mito_function"]),
+        axes[1].plot(ts, np.asarray(result.get("eriq/mito_function")),
                      color=color, label=label, linewidth=1.5)
-        axes[2].plot(ts, np.asarray(result.ys["eriq/ROS_activity"]),
+        axes[2].plot(ts, np.asarray(result.get("eriq/ROS_activity")),
                      color=color, label=label, linewidth=1.5)
 
-        print(f"   severity={sev:.1f}: final damage={float(result.ys['eriq/mito_damage'][-1]):.4f}")
+        print(f"   severity={sev:.1f}: final damage={float(result.get('eriq/mito_damage')[-1]):.4f}")
 
     for ax, title in zip(axes, ["Mitochondrial Damage", "Mitochondrial Function", "ROS Activity"]):
         ax.set_xlabel("Time")
@@ -408,11 +410,11 @@ def demo_stem_cell_niche():
         print(f"   SKIPPED: {e}")
         return
 
-    from hallsim.simulator import Simulator
+    from hallsim.scheduler import Scheduler
     import diffrax as dfx
 
     severities = [0.0, 0.3, 0.6, 1.0]
-    sim = Simulator(solver=dfx.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=500_000, dt0=1e-4)
+    sim = Scheduler(solver=dfx.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=500_000, dt0=1e-4)
 
     ligands = {
         CROSSTALK_WNT: "Wnt",
@@ -429,11 +431,11 @@ def demo_stem_cell_niche():
         print(f"   severity={sev:.1f}...")
         try:
             comp = build_niche_crosstalk(severity=sev)
-            result = sim.run(comp, t_span=(0.0, 100.0), dt=0.5)
+            result = sim.run(comp, t_span=(0.0, 100.0), macro_dt=0.5, save_dt=0.5)
 
             ts = np.asarray(result.ts)
             for ax, (species_id, name) in zip(axes, ligands.items()):
-                vals = np.asarray(result.ys[species_id])
+                vals = np.asarray(result.get(species_id))
                 ax.plot(ts, vals, color=color, label=f"sev={sev:.1f}",
                         linewidth=1.5)
                 ax.set_title(f"{name} ({species_id})", fontsize=11)
@@ -441,7 +443,7 @@ def demo_stem_cell_niche():
                 ax.set_ylabel("Concentration")
                 ax.grid(True, alpha=0.3)
 
-            print(f"   severity={sev:.1f}: final Wnt={float(result.ys[CROSSTALK_WNT][-1]):.3f}")
+            print(f"   severity={sev:.1f}: final Wnt={float(result.get(CROSSTALK_WNT)[-1]):.3f}")
         except Exception as e:
             print(f"   severity={sev:.1f} FAILED: {e}")
 

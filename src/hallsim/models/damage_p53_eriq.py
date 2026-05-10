@@ -43,12 +43,13 @@ different group's published model.
 Usage
 -----
 >>> from hallsim.models.damage_p53_eriq import build_damage_p53_eriq_composite
->>> from hallsim.simulator import Simulator
+>>> from hallsim.scheduler import Scheduler
 >>> comp = build_damage_p53_eriq_composite(alpha=0.03)  # moderate damage
->>> sim = Simulator()
->>> result = sim.run(comp, t_span=(0.0, 100.0), dt=0.5)
+>>> result = Scheduler().run(
+...     comp, t_span=(0.0, 100.0), macro_dt=5.0, save_dt=5.0,
+... )
 >>> # Observe how ERiQ's p53/NF-κB/autophagy track upstream damage:
->>> result.ys["damage_repair/damage"], result.ys["eriq/p53_activity"]
+>>> result.get("damage_repair/damage"), result.get("eriq/p53_activity")
 
 Notes
 -----

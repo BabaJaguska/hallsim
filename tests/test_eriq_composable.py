@@ -12,7 +12,7 @@ from hallsim.models.eriq import (
     build_eriq_composite,
 )
 from hallsim.process import PortRole
-from hallsim.simulator import Simulator
+from hallsim.scheduler import Scheduler
 
 
 # ── Algebraic layer ─────────────────────────────────────────────────────
@@ -169,20 +169,25 @@ class TestERiQSimulation:
     def test_short_simulation_stable(self):
         """Run ERiQ for a short time and verify no NaN/Inf."""
         comp = build_eriq_composite()
-        sim = Simulator()
-        result = sim.run(comp, t_span=(0.0, 100.0), dt=1.0)
+        sched = Scheduler()
+        result = sched.run(
+            comp, t_span=(0.0, 100.0), macro_dt=1.0, save_dt=1.0
+        )
 
         assert len(result.ts) > 0
-        for key, traj in result.ys.items():
+        for key in result.keys:
+            traj = result.get(key)
             assert jnp.all(jnp.isfinite(traj)), f"{key} has non-finite values"
 
     def test_damage_increases_over_time(self):
         """Mitochondrial damage should accumulate from homeostasis."""
         comp = build_eriq_composite()
-        sim = Simulator()
-        result = sim.run(comp, t_span=(0.0, 500.0), dt=10.0)
+        sched = Scheduler()
+        result = sched.run(
+            comp, t_span=(0.0, 500.0), macro_dt=10.0, save_dt=10.0
+        )
 
-        damage = result.ys["eriq/mito_damage"]
+        damage = result.get("eriq/mito_damage")
         # Damage should increase from initial value
         assert float(damage[-1]) > float(damage[0])
 

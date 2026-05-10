@@ -6,7 +6,7 @@ import pytest
 
 from hallsim.composite import Composite
 from hallsim.process import PortRole
-from hallsim.simulator import Simulator
+from hallsim.scheduler import Scheduler
 
 
 # ── SaturatingRemoval ───────────────────────────────────────────────────
@@ -38,9 +38,11 @@ class TestSaturatingRemoval:
             topology={"damage": {"damage": "cell/damage"}},
             validate=False,
         )
-        sim = Simulator()
-        result = sim.run(comp, t_span=(0.0, 100.0), dt=1.0)
-        damage = result.ys["cell/damage"]
+        sched = Scheduler()
+        result = sched.run(
+            comp, t_span=(0.0, 100.0), macro_dt=1.0, save_dt=1.0
+        )
+        damage = result.get("cell/damage")
         assert float(damage[-1]) > float(damage[0])
 
     def test_differentiable(self):
@@ -92,9 +94,9 @@ class TestNeuralODEProcess:
             topology={"neural": {"x": "pool/x", "y": "pool/y"}},
             validate=False,
         )
-        sim = Simulator()
-        result = sim.run(comp, t_span=(0.0, 5.0), dt=0.5)
-        assert jnp.all(jnp.isfinite(result.ys["pool/x"]))
+        sched = Scheduler()
+        result = sched.run(comp, t_span=(0.0, 5.0), macro_dt=0.5, save_dt=0.5)
+        assert jnp.all(jnp.isfinite(result.get("pool/x")))
 
     def test_differentiable(self):
         import equinox as eqx

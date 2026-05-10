@@ -1,4 +1,4 @@
-"""Tests for the composable architecture (Process, Composite, Simulator).
+"""Tests for the composable architecture (Process, Composite, Scheduler).
 
 Covers:
 - Port schema declaration and roles
@@ -7,7 +7,7 @@ Covers:
 - Additive composition (two processes writing to the same store path)
 - Exclusive composition (one process owns a variable)
 - Mixed additive + exclusive in the same composite
-- Full ODE solve via Simulator + Diffrax
+- Full ODE solve via Scheduler + Diffrax
 - Perturbation (kick) mid-simulation
 - Differentiability through the full simulation
 """
@@ -20,7 +20,7 @@ import pytest
 
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process
-from hallsim.simulator import SimResult, Simulator
+from hallsim.scheduler import Scheduler, SchedulerResult
 from hallsim.store import build_initial_store, validate_topology
 
 
@@ -295,11 +295,11 @@ class TestComposite:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Simulator (full ODE solve)
+# Scheduler (full ODE solve)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestSimulator:
+class TestScheduler:
 
     def test_simple_decay(self):
         """Exponential decay: x(t) = x0 * exp(-rate * t)."""
@@ -308,13 +308,15 @@ class TestSimulator:
             processes={"decay": decay},
             topology={"decay": {"x": "x"}},
         )
-        sim = Simulator()
-        result = sim.run(composite, t_span=(0.0, 10.0), dt=0.1)
+        sched = Scheduler()
+        result = sched.run(
+            composite, t_span=(0.0, 10.0), macro_dt=0.1, save_dt=0.1
+        )
 
-        assert isinstance(result, SimResult)
+        assert isinstance(result, SchedulerResult)
         assert result.ts.shape[0] > 1
         # Check exponential decay at t=10
-        x_final = float(result.ys["x"][-1])
+        x_final = float(result.get("x")[-1])
         x_expected = 1.0 * jnp.exp(-0.1 * 10.0)
         assert abs(x_final - float(x_expected)) < 0.01
 
@@ -326,14 +328,14 @@ class TestSimulator:
             processes={"prod": prod, "decay": decay},
             topology={"prod": {"x": "x"}, "decay": {"x": "x"}},
         )
-        sim = Simulator()
-        result = sim.run(
-            composite,
-            t_span=(0.0, 200.0),
-            dt=1.0,
-            y0={"x": jnp.array(0.0)},
+        sched = Scheduler()
+        # IC: x = 0 (override the port default via the trailing-axis tensor).
+        y0 = composite.initial_state_vec()
+        y0 = y0.at[composite.store_keys().index("x")].set(0.0)
+        result = sched.run(
+            composite, t_span=(0.0, 200.0), macro_dt=1.0, save_dt=1.0, y0=y0
         )
-        x_final = float(result.ys["x"][-1])
+        x_final = float(result.get("x")[-1])
         # Steady state: production / decay = 0.5 / 0.1 = 5.0
         assert abs(x_final - 5.0) < 0.1
 
@@ -344,48 +346,58 @@ class TestSimulator:
             processes={"osc": osc},
             topology={"osc": {"x": "pos", "v": "vel"}},
         )
-        sim = Simulator(rtol=1e-6, atol=1e-8)
-        result = sim.run(composite, t_span=(0.0, 20.0), dt=0.1)
-        x = result.ys["pos"]
-        v = result.ys["vel"]
+        sched = Scheduler(rtol=1e-6, atol=1e-8)
+        result = sched.run(
+            composite, t_span=(0.0, 20.0), macro_dt=0.1, save_dt=0.1
+        )
+        x = result.get("pos")
+        v = result.get("vel")
         # Energy = 0.5*k*x^2 + 0.5*v^2 should be ~constant
         energy = 0.5 * 1.0 * x**2 + 0.5 * v**2
         assert jnp.allclose(energy, energy[0], atol=1e-3)
 
     def test_save_final_only(self):
-        """keep_trajectory=False only saves the final state."""
+        """save_dt covering the full t_span saves only start + end."""
         decay = Decay(rate=0.1)
         composite = Composite(
             processes={"decay": decay},
             topology={"decay": {"x": "x"}},
         )
-        sim = Simulator()
-        result = sim.run(composite, t_span=(0.0, 10.0), keep_trajectory=False)
-        assert result.ts.shape[0] == 1
+        sched = Scheduler()
+        # macro_dt = save_dt = full span → 2 save points (start + end).
+        result = sched.run(
+            composite, t_span=(0.0, 10.0), macro_dt=10.0, save_dt=10.0
+        )
+        assert result.ts.shape[0] == 2
 
     def test_perturbation(self):
-        """Mid-simulation kick changes trajectory."""
+        """Mid-simulation kick changes trajectory — kick is a KickEvent
+        Process composed via topology, dispatched by the Scheduler."""
+        from hallsim.models.kick_event import KickEvent
+        from hallsim.scheduler import Scheduler
+
         decay = Decay(rate=0.1)
+        kick = KickEvent(kick_time=10.0, deltas={"x": 5.0})
         composite = Composite(
-            processes={"decay": decay},
-            topology={"decay": {"x": "x"}},
+            processes={"decay": decay, "kick": kick},
+            topology={"decay": {"x": "x"}, "kick": {"x": "x"}},
         )
-        sim = Simulator()
-        result = sim.run_with_perturbation(
+        result = Scheduler().run(
             composite,
             t_span=(0.0, 20.0),
-            kick_time=10.0,
-            kick_dict={"x": 5.0},
-            dt=1.0,
+            macro_dt=1.0,
+            save_dt=1.0,
         )
         # At t=10, x should have been boosted
-        x = result.ys["x"]
-        # Find index closest to t=10
+        x = result.get("x")
         t10_idx = int(jnp.argmin(jnp.abs(result.ts - 10.0)))
         t11_idx = t10_idx + 1
         # After kick, x should be higher than exponential decay alone
         x_no_kick = 1.0 * jnp.exp(-0.1 * 11.0)
         assert float(x[t11_idx]) > float(x_no_kick)
+        # The kick fired exactly once.
+        assert len(result.events) == 1
+        assert result.events[0].process == "kick"
 
     def test_multi_process_simulation(self):
         """Run a composite with input ports through the simulator."""
@@ -398,13 +410,14 @@ class TestSimulator:
                 "tp": {"x": "sink", "y": "source"},
             },
         )
-        sim = Simulator()
-        result = sim.run(composite, t_span=(0.0, 10.0), dt=0.5)
+        result = Scheduler().run(
+            composite, t_span=(0.0, 10.0), macro_dt=0.5, save_dt=0.5
+        )
         # Source grows linearly: source(t) ≈ t
         # Sink grows quadratically: sink(t) ≈ 0.5 * 0.5 * t^2 = 0.25*t^2
-        source_final = float(result.ys["source"][-1])
+        source_final = float(result.get("source")[-1])
         assert source_final > 9.0  # should be ~10
-        sink_final = float(result.ys["sink"][-1])
+        sink_final = float(result.get("sink")[-1])
         assert sink_final > 20.0  # should be ~25
 
 
@@ -425,14 +438,13 @@ class TestDifferentiability:
                 topology={"decay": {"x": "x"}},
                 validate=False,  # skip validation for speed in grad
             )
-            sim = Simulator(max_steps=10_000)
-            result = sim.run(
+            result = Scheduler(max_steps=10_000).run(
                 composite,
                 t_span=(0.0, 5.0),
-                dt=1.0,
-                keep_trajectory=False,
+                macro_dt=5.0,
+                save_dt=5.0,
             )
-            return jnp.squeeze(result.ys["x"][-1])
+            return jnp.squeeze(result.get("x")[-1])
 
         grad_fn = jax.grad(loss_fn)
         g = grad_fn(jnp.array(0.1))
@@ -466,14 +478,13 @@ class TestDifferentiability:
                 topology={"damage": {"x": "x"}},
                 validate=False,
             )
-            sim = Simulator(max_steps=10_000)
-            result = sim.run(
+            result = Scheduler(max_steps=10_000).run(
                 composite,
                 t_span=(0.0, T),
-                dt=0.1,
-                keep_trajectory=False,
+                macro_dt=T,
+                save_dt=T,
             )
-            x_T = jnp.squeeze(result.ys["x"][-1])
+            x_T = jnp.squeeze(result.get("x")[-1])
             # Smooth surrogate for "event fired by T".
             return jax.nn.sigmoid((x_T - threshold) / temperature)
 
@@ -486,8 +497,9 @@ class TestDifferentiability:
 
         # Central finite-difference sanity check.
         eps = 1e-3
-        fd = (event_proxy(severity_0 + eps)
-              - event_proxy(severity_0 - eps)) / (2 * eps)
+        fd = (
+            event_proxy(severity_0 + eps) - event_proxy(severity_0 - eps)
+        ) / (2 * eps)
         rel_err = abs(float(g) - float(fd)) / (abs(float(fd)) + 1e-8)
         assert rel_err < 1e-2, (
             f"autodiff grad={float(g):.4f} disagrees with FD={float(fd):.4f} "

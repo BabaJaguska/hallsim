@@ -37,8 +37,7 @@ HallSim is built on a **composable architecture** using JAX/Equinox/Diffrax. Des
 | **Port**      | Named connection point with a role (`INPUT` / `EVOLVED` / `EXCLUSIVE` / `LATCHED`), default value, units, description, and ontology annotation. |
 | **Topology**  | Static wiring map `{proc_name: {port_name: store_path}}`. Defined at composition time, not inside processes. |
 | **Composite** | Bundles processes + topology. `build_rhs()` / `build_group_rhs()` return JAX-compatible ODE right-hand sides. Auto-groups continuous processes by timescale. |
-| **Simulator** | Diffrax wrapper for single-group continuous solves. Retained for simple cases. |
-| **Scheduler** | Multi-rate orchestrator: groups continuous processes by timescale (Lie splitting), dispatches discrete processes at intervals, checks event conditions at sync points. Supports `coupling_mode="interpolated"` for dense-output coupling between groups. See [design doc](docs/design-multiscale-scheduler.md). |
+| **Scheduler** | The unified runner — handles every composite shape. Multi-rate orchestrator: groups continuous processes by timescale (Lie splitting), dispatches discrete processes at intervals, fires events at sync points. Supports `coupling_mode="interpolated"` for dense-output coupling between groups. For single-group continuous composites with no events, takes a fast path that issues one `diffrax.diffeqsolve` over the whole `t_span` (no per-macro-step overhead). The state pipeline is shape-polymorphic — pass a `(n_vars,)` y0 tensor for a single run or a `(batch, n_vars)` tensor for a JAX-native population study, no extra `vmap` required. See [design doc](docs/design-multiscale-scheduler.md). |
 | **Store**     | Flat `dict[str, jnp.ndarray]` with path-like keys (e.g., `"cytoplasm/ROS"`). A valid JAX PyTree. |
 
 **Process kinds:**
@@ -97,10 +96,10 @@ modified_procs = apply_hallmarks(comp.processes, {
 
 ```python
 from hallsim.models.stem_cell_niche import build_niche_crosstalk
-from hallsim.simulator import Simulator
+from hallsim.scheduler import Scheduler
 
 comp = build_niche_crosstalk(severity=0.6)  # moderate niche deterioration
-result = Simulator().run(comp, t_span=(0.0, 100.0), dt=0.5)
+result = Scheduler().run(comp, t_span=(0.0, 100.0), macro_dt=0.5, save_dt=0.5)
 # Wnt, EGF, Shh, Notch ligands decline with severity
 ```
 
@@ -114,13 +113,36 @@ from hallsim.scheduler import Scheduler
 # Default 0.01 ≈ baseline; 0.03 = moderate; 0.05 = high.
 comp = build_damage_p53_eriq_composite(alpha=0.03)
 result = Scheduler().run(comp, t_span=(0.0, 50.0), macro_dt=5.0, save_dt=5.0)
-result.ys["p53/psi"]            # damage signal (D)
-result.ys["p53/x"]              # imported p53 oscillator
-result.ys["eriq/p53_activity"]  # bridge-driven ERiQ p53
-result.ys["eriq/mTOR_activity"] # ERiQ downstream readouts
+result.ts                                # (n_time,)
+result.ys                                # (n_time, n_vars) — raw tensor
+result.get("p53/psi")                    # damage signal (D)
+result.get("p53/x")                      # imported p53 oscillator
+result.get("eriq/p53_activity")          # bridge-driven ERiQ p53
+result.get("eriq/mTOR_activity")         # ERiQ downstream readouts
 ```
 
-The composite has 3 timescale groups (bridge ≈ 0.2, GZ06 ≈ 5, damage ≈ 50) which the multi-rate `Scheduler` auto-clusters; a bare `Simulator` would force a stiff integrator on all of them. SBML constants are exposed as INPUT ports via `process_from_sbml(..., tunable_params=("psi",))` — the mechanism that lets a HallSim Process drive an imported model's parameter without runtime parameter mutation.
+**Population studies via batched `y0`.** The Scheduler's state pipeline
+is shape-polymorphic — a batched `y0` tensor of shape `(batch, n_vars)`
+flows through every group's Diffrax solve as a single batched
+computation, no `jax.vmap` over `Scheduler.run` required:
+
+```python
+keys = comp.store_keys()
+y0 = comp.initial_state_vec(keys)                       # (n_vars,)
+y0 = jnp.broadcast_to(y0, (1024, len(keys)))            # (1024, n_vars)
+y0 = y0.at[..., keys.index("p53/psi")].set(             # vary IC across cells
+    jnp.linspace(0.0, 1.5, 1024)
+)
+result = Scheduler().run(comp, t_span=(0.0, 50.0), macro_dt=5.0, y0=y0)
+result.ys.shape                          # (n_time, 1024, n_vars)
+result.get("eriq/p53_activity").shape    # (n_time, 1024)
+```
+
+On a GPU this is near-flat in `batch` — kernel launch dominates over
+per-cell compute. On CPU, scaling is sub-linear because Python overhead
+amortizes across the batch.
+
+The composite has 3 timescale groups (bridge ≈ 0.2, GZ06 ≈ 5, damage ≈ 50) which the `Scheduler` auto-clusters and Lie-splits between groups; a single-group composite of comparable stiffness would be forced into very small adaptive steps. SBML constants are exposed as INPUT ports via `process_from_sbml(..., tunable_params=("psi",))` — the mechanism that lets a HallSim Process drive an imported model's parameter without runtime parameter mutation.
 
 ### Data Validation (ssGSEA)
 
@@ -179,7 +201,7 @@ make test
 import jax.numpy as jnp
 from hallsim.process import Process, Port, PortRole
 from hallsim.composite import Composite
-from hallsim.simulator import Simulator
+from hallsim.scheduler import Scheduler
 
 # 1. Define processes
 class Decay(Process):
@@ -208,24 +230,26 @@ composite = Composite(
 )
 
 # 3. Solve
-sim = Simulator()
-result = sim.run(composite, t_span=(0.0, 100.0), dt=1.0)
-print(result.ts.shape, result.ys["pool/x"].shape)
+result = Scheduler().run(
+    composite, t_span=(0.0, 100.0), macro_dt=1.0, save_dt=1.0
+)
+print(result.ts.shape, result.get("pool/x").shape)
 ```
 
 ### ERiQ Model
 
 ```python
 from hallsim.models.eriq import build_eriq_composite
-from hallsim.simulator import Simulator
+from hallsim.scheduler import Scheduler
 
 # Build the 3-process ERiQ composite (11 state variables)
 comp = build_eriq_composite()
-sim = Simulator()
-result = sim.run(comp, t_span=(0.0, 1000.0), dt=1.0)
+result = Scheduler().run(
+    comp, t_span=(0.0, 1000.0), macro_dt=1.0, save_dt=1.0
+)
 
 # Mitochondrial damage accumulates over time
-print(result.ys["eriq/mito_damage"][-1])
+print(result.get("eriq/mito_damage")[-1])
 ```
 
 ### Multi-timescale with Scheduler

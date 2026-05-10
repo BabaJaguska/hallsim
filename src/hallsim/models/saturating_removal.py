@@ -85,7 +85,9 @@ class SaturatingRemoval(Process):
                 default=0.0,
                 units="dimensionless",
                 description="Accumulated cellular damage (DSB pool)",
-                ontology={"go": "GO:0006974"},  # cellular response to DNA damage
+                ontology={
+                    "go": "GO:0006974"
+                },  # cellular response to DNA damage
             ),
         }
 

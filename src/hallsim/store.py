@@ -129,27 +129,19 @@ def validate_topology(
                 f"Set dt_step to the interval between update calls (in seconds)."
             )
 
-    # Check LATCHED port conflicts: no continuous process writes, but also
-    # check that LATCHED paths are not mixed with EVOLVED/EXCLUSIVE
-    latched_paths: dict[str, str] = {}  # store_path → proc_name
-    for proc_name, proc in processes.items():
-        topo = topology.get(proc_name, {})
-        for port_name, port in proc.ports_schema().items():
-            if port.role == PortRole.LATCHED:
-                store_path = topo.get(port_name, port_name)
-                latched_paths[store_path] = proc_name
-
-    for proc_name, proc in processes.items():
-        topo = topology.get(proc_name, {})
-        for port_name, port in proc.ports_schema().items():
-            if port.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
-                store_path = topo.get(port_name, port_name)
-                if store_path in latched_paths:
-                    errors.append(
-                        f"Store path {store_path!r} is LATCHED by "
-                        f"{latched_paths[store_path]!r} but "
-                        f"{port.role.value.upper()} by {proc_name!r}. "
-                        f"LATCHED paths cannot also be EVOLVED/EXCLUSIVE."
-                    )
-
+    # NOTE on LATCHED ↔ EVOLVED/EXCLUSIVE coexistence: previously the
+    # validator rejected store paths that had both a LATCHED writer
+    # (DISCRETE/EVENT) and an EVOLVED/EXCLUSIVE writer (CONTINUOUS). That
+    # rule conflated two distinct things — derivative ownership
+    # (EVOLVED/EXCLUSIVE) and one-shot state mutation by an event
+    # (LATCHED writes from EVENT/DISCRETE processes scatter-add a delta
+    # at sync points, they do not contribute to the derivative).
+    #
+    # The two are semantically orthogonal, and they need to coexist for
+    # the canonical use case of an event "kicking" a continuous state
+    # variable (e.g. a one-time perturbation of mTOR activity at t=10).
+    # See ``hallsim.models.kick_event.KickEvent`` for the reference
+    # pattern. The CONTINUOUS process retains derivative ownership; the
+    # EVENT process applies a one-shot scatter-add when its condition
+    # fires. The earlier rejection is removed.
     return errors

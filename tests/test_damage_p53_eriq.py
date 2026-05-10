@@ -16,7 +16,6 @@ These tests cover:
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 import pytest
 
@@ -57,8 +56,7 @@ class TestComposeStructure:
     def test_topology_wires_bridge_to_eriq_p53(self):
         comp = build_damage_p53_eriq_composite()
         assert (
-            comp.topology["p53_bridge"]["p53_activity"]
-            == "eriq/p53_activity"
+            comp.topology["p53_bridge"]["p53_activity"] == "eriq/p53_activity"
         )
         assert (
             comp.topology["eriq_signaling"]["p53_activity"]
@@ -80,19 +78,19 @@ class TestComposedSimulation:
         return sched.run(comp, t_span=(0.0, 50.0), macro_dt=5.0, save_dt=5.0)
 
     def test_runs_to_completion(self, short_run):
-        assert "p53/psi" in short_run.ys
-        assert "p53/x" in short_run.ys
-        assert "eriq/p53_activity" in short_run.ys
-        assert "eriq/mTOR_activity" in short_run.ys
+        assert "p53/psi" in short_run
+        assert "p53/x" in short_run
+        assert "eriq/p53_activity" in short_run
+        assert "eriq/mTOR_activity" in short_run
 
     def test_damage_accumulates(self, short_run):
         """damage rises from IC=0 toward steady state."""
-        psi = short_run.ys["p53/psi"]
+        psi = short_run.get("p53/psi")
         assert float(psi[-1]) > float(psi[0])
 
     def test_gz06_responds_to_damage(self, short_run):
         """p53 protein x should respond to non-zero damage signal."""
-        x = short_run.ys["p53/x"]
+        x = short_run.get("p53/x")
         # x starts at 0; with psi > 0 it should rise.
         assert float(x.max()) > 0.1
 
@@ -111,7 +109,7 @@ class TestDoseResponse:
             res = sched.run(
                 comp, t_span=(0.0, 50.0), macro_dt=5.0, save_dt=5.0
             )
-            results[alpha] = float(res.ys["p53/psi"][-1])
+            results[alpha] = float(res.get("p53/psi")[-1])
         assert results[0.03] > results[0.01]
         assert results[0.05] > results[0.03]
 
@@ -127,14 +125,20 @@ class TestDoseResponse:
             res = sched.run(
                 comp, t_span=(0.0, 50.0), macro_dt=5.0, save_dt=5.0
             )
-            ys = res.ys
             # Compute final-time NF-κB / autophagy via ERiQ algebraic.
-            state = {k.split("/")[1]: float(ys[k][-1]) for k in ys if "/" in k}
+            # Convert the tensor row at -1 into a name-keyed dict for the
+            # ERiQ algebraic helper (which lives outside the JAX hot path).
+            final_row = res.ys[-1]
+            state = {
+                k.split("/")[1]: float(final_row[i])
+                for i, k in enumerate(res.keys)
+                if "/" in k
+            }
             state["_params"] = {}
             obs = _compute_algebraic(state)
             return {
-                "psi_fin": float(ys["p53/psi"][-1]),
-                "eriq_p53_max": float(ys["eriq/p53_activity"].max()),
+                "psi_fin": float(res.get("p53/psi")[-1]),
+                "eriq_p53_max": float(res.get("eriq/p53_activity").max()),
                 "NFKB": float(obs["NFKB"]),
                 "AUTOPHAGY": float(obs["AUTOPHAGY"]),
             }
@@ -156,8 +160,93 @@ class TestDifferentiability:
 
         comp = build_damage_p53_eriq_composite(alpha=0.02)
         sched = Scheduler()
+        res = sched.run(comp, t_span=(0.0, 20.0), macro_dt=5.0, save_dt=5.0)
+        assert jnp.isfinite(res.get("p53/psi")[-1])
+        assert jnp.isfinite(res.get("eriq/p53_activity")[-1])
+
+
+@pytest.mark.slow
+class TestBatchedPopulationRun:
+    """The Scheduler accepts a batched y0 tensor and produces batched
+    trajectories — the JAX-native population study path.
+
+    Trailing-axis convention all the way: y0 shape ``(batch, n_vars)``,
+    output ``ys`` shape ``(n_time, batch, n_vars)``, ``result.get(key)``
+    shape ``(n_time, batch)``. No vmap'ing of ``Scheduler.run`` from
+    outside required — the whole pipeline is shape-polymorphic.
+    """
+
+    def test_batched_y0_produces_batched_trajectories(self):
+        comp = build_damage_p53_eriq_composite(alpha=0.03)
+        sched = Scheduler(max_steps=2_000_000)
+        keys = comp.store_keys()
+        n_vars = len(keys)
+
+        batch = 4
+        y0 = jnp.broadcast_to(comp.initial_state_vec(keys), (batch, n_vars))
+        psi_idx = keys.index("p53/psi")
+        # Heterogeneous initial damage across cells.
+        y0 = y0.at[..., psi_idx].set(jnp.linspace(0.0, 1.5, batch))
+
         res = sched.run(
-            comp, t_span=(0.0, 20.0), macro_dt=5.0, save_dt=5.0
+            comp, t_span=(0.0, 20.0), macro_dt=5.0, save_dt=5.0, y0=y0
         )
-        assert jnp.isfinite(res.ys["p53/psi"][-1])
-        assert jnp.isfinite(res.ys["eriq/p53_activity"][-1])
+
+        # Shapes propagated cleanly through the scheduler.
+        assert res.ys.shape == (5, batch, n_vars)
+        assert res.get("p53/psi").shape == (5, batch)
+        assert res.get("eriq/p53_activity").shape == (5, batch)
+
+        # Each cell starts at its assigned IC.
+        psi_initial = res.get("p53/psi")[0]
+        assert jnp.allclose(psi_initial, jnp.linspace(0.0, 1.5, batch))
+
+        # Damage grows monotonically with initial-damage IC at the final
+        # time — heavier-damage cells stay heavier-damage cells.
+        psi_final = res.get("p53/psi")[-1]
+        assert jnp.all(jnp.diff(psi_final) > 0)
+
+    def test_batch_runtime_close_to_single(self):
+        """Batched runs should be near-flat in cell count on JAX-native
+        hardware; on CPU the scaling is sub-linear because per-step Python
+        overhead dominates over compute. We only require that batch=4 is
+        at most 3x the single-cell wall-time — generous to keep the test
+        deterministic on CI hardware."""
+        import time
+
+        comp = build_damage_p53_eriq_composite(alpha=0.03)
+        sched = Scheduler(max_steps=2_000_000)
+        keys = comp.store_keys()
+
+        # Single
+        y0_single = comp.initial_state_vec(keys)
+        # Warm up JIT
+        sched.run(
+            comp, t_span=(0.0, 20.0), macro_dt=5.0, save_dt=5.0, y0=y0_single
+        )
+        t0 = time.time()
+        sched.run(
+            comp, t_span=(0.0, 20.0), macro_dt=5.0, save_dt=5.0, y0=y0_single
+        )
+        t_single = time.time() - t0
+
+        # Batched (N=4)
+        batch = 4
+        y0_batched = jnp.broadcast_to(y0_single, (batch, len(keys)))
+        # Warm up batched JIT (different shape)
+        sched.run(
+            comp, t_span=(0.0, 20.0), macro_dt=5.0, save_dt=5.0, y0=y0_batched
+        )
+        t0 = time.time()
+        sched.run(
+            comp, t_span=(0.0, 20.0), macro_dt=5.0, save_dt=5.0, y0=y0_batched
+        )
+        t_batched = time.time() - t0
+
+        # Batched should not be much slower than single. On GPU this would
+        # be ~1x; on CPU we allow up to 3x.
+        assert t_batched < 3.0 * t_single, (
+            f"batched (N={batch}) wall {t_batched:.2f}s exceeds 3x single "
+            f"{t_single:.2f}s — JIT/vmap not propagating cleanly through "
+            f"the Scheduler"
+        )

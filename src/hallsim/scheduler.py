@@ -31,7 +31,7 @@ Example
 >>> scheduler = Scheduler()
 >>> result = scheduler.run(composite, t_span=(0.0, 1000.0), macro_dt=1.0)
 >>> result.ts      # macro step times
->>> result.ys      # state trajectories (dict, unflattened from flat solve)
+>>> result.ys      # (n_time, ..., n_vars) state tensor; per-path via .get(key)
 >>> result.events  # fired event log
 """
 
@@ -61,16 +61,27 @@ class EventRecord:
 
 @dataclass
 class SchedulerResult:
-    """Container for scheduler output.
+    """JAX-native container for scheduler output.
+
+    ``ys`` is the raw stacked tensor — same convention as Diffrax's
+    ``sol.ys`` — so it composes cleanly with ``jax.vmap``, ``jax.grad``,
+    and downstream JAX-native code without a Python-side dict of arrays
+    in the middle.
 
     Attributes
     ----------
     ts:
-        Macro step time points.
+        Macro step time points, shape ``(n_time,)``.
     ys:
-        State trajectories — ``{store_path: array}`` where each array
-        has shape ``(n_time_points, *state_shape)``.  Unflattened from
-        the flat-vector solve at result assembly.
+        State trajectory tensor, shape ``(n_time, ..., n_vars)``.
+        For scalar runs this is ``(n_time, n_vars)``; for batched runs
+        (population studies, parameter sweeps via batched y0) this is
+        ``(n_time, batch, n_vars)``. The trailing axis matches
+        ``Composite.flatten/unflatten`` — index it via ``keys``.
+    keys:
+        Store paths in trailing-axis order — the inverse map for ``ys``.
+        Use ``result.get("eriq/p53_activity")`` for ergonomic per-path
+        access.
     events:
         Log of fired events.
     stats:
@@ -78,9 +89,21 @@ class SchedulerResult:
     """
 
     ts: jnp.ndarray
-    ys: dict[str, jnp.ndarray]
+    ys: jnp.ndarray
+    keys: list[str]
     events: list[EventRecord] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
+
+    def get(self, key: str) -> jnp.ndarray:
+        """Per-path trajectory: ``ys[..., keys.index(key)]``.
+
+        Returns shape ``(n_time,)`` for scalar runs, ``(n_time, batch)``
+        for batched runs.
+        """
+        return self.ys[..., self.keys.index(key)]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.keys
 
 
 def _build_proc_index_maps(
@@ -247,7 +270,7 @@ class Scheduler:
         composite: Composite,
         t_span: tuple[float, float],
         macro_dt: float = 1.0,
-        y0: dict[str, jnp.ndarray] | None = None,
+        y0: jnp.ndarray | None = None,
         save_dt: float | None = None,
     ) -> SchedulerResult:
         """Run the composite with multi-rate scheduling.
@@ -266,7 +289,11 @@ class Scheduler:
             2. Discrete processes fire if due.
             3. Event conditions are checked.
         y0:
-            Initial state.  If ``None``, uses ``composite.initial_state()``.
+            Initial state tensor of shape ``(n_vars,)`` (or
+            ``(batch, n_vars)`` for batched-population runs). If
+            ``None``, uses ``composite.initial_state_vec()``. Override
+            values via
+            ``y0.at[composite.store_keys().index("path")].set(...)``.
         save_dt:
             Save interval for trajectory output.  If ``None``, saves at
             every macro step.  If larger than ``macro_dt``, saves less
@@ -278,10 +305,16 @@ class Scheduler:
         """
         t0, t1 = t_span
 
-        # Flat state layout — pinned for the whole run.
-        y0_dict = y0 if y0 is not None else composite.initial_state()
+        # Flat state layout — pinned for the whole run. y0 is a tensor in
+        # trailing-axis convention; for batched-population runs it has
+        # shape (batch, n_vars), and the rest of the run propagates that
+        # batch axis through every group's Diffrax solve.
         keys = composite.store_keys()
-        state = composite.flatten(y0_dict, keys)
+        state = (
+            composite.initial_state_vec(keys)
+            if y0 is None
+            else jnp.asarray(y0)
+        )
         key_to_idx = {k: i for i, k in enumerate(keys)}
 
         # Resolve groups
@@ -294,6 +327,57 @@ class Scheduler:
             continuous = composite.continuous_processes()
             if continuous:
                 groups = {"default": list(continuous.keys())}
+
+        # ─── Fast path: single continuous group, no events, no
+        # discrete, no adaptive macro_dt ───────────────────────────────
+        # Skip the macro-step loop entirely. One ``diffeqsolve`` over
+        # the full t_span lets Diffrax's adaptive stepper find the right
+        # step sizes once instead of restarting on every macro step.
+        # Strang/interpolated only matter for multi-group splitting, so
+        # this path also requires the default Lie/frozen settings.
+        fast_path_eligible = (
+            len(groups) == 1
+            and not discrete_procs
+            and not event_procs
+            and not self.adaptive_dt
+            and self.splitting == "lie"
+            and self.coupling_mode == "frozen"
+        )
+        if fast_path_eligible:
+            (gname,) = groups.keys()
+            (proc_names,) = groups.values()
+            rhs_fn, _ = composite.build_rhs(proc_names)
+            save_step = save_dt if save_dt is not None else macro_dt
+            save_ts = jnp.arange(t0, t1 + save_step / 2, save_step)
+            save_ts = save_ts[save_ts <= t1]
+            sol = dfx.diffeqsolve(
+                dfx.ODETerm(rhs_fn),
+                self.solver,
+                t0=t0,
+                t1=t1,
+                dt0=min(self.dt0, t1 - t0),
+                y0=state,
+                saveat=dfx.SaveAt(ts=save_ts),
+                stepsize_controller=self.controller,
+                max_steps=self.max_steps,
+            )
+            stats = {
+                gname: {
+                    "num_macro_steps": 1,
+                    "num_solver_steps": (
+                        int(sol.stats["num_steps"])
+                        if hasattr(sol, "stats") and "num_steps" in sol.stats
+                        else None
+                    ),
+                }
+            }
+            return SchedulerResult(
+                ts=sol.ts,
+                ys=sol.ys,
+                keys=keys,
+                events=[],
+                stats=stats,
+            )
 
         # Pre-build group flat RHS functions (each returns (fn, keys);
         # all keys are identical so we discard the per-group copy) and
@@ -312,7 +396,9 @@ class Scheduler:
                 for port, p in proc.ports_schema().items():
                     if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
                         written.add(key_to_idx[proc_topo[port]])
-            group_write_idxs[gname] = jnp.array(sorted(written), dtype=jnp.int32)
+            group_write_idxs[gname] = jnp.array(
+                sorted(written), dtype=jnp.int32
+            )
 
         # Precompute per-process index maps for discrete/event handlers.
         discrete_idxs = {
@@ -490,15 +576,15 @@ class Scheduler:
         if pbar is not None:
             pbar.close()
 
-        # Assemble result — stack flat snapshots into (n_time, n_vars),
-        # then unflatten into a dict of (n_time,) trajectories.
+        # Assemble result — stack flat snapshots, ship the raw tensor.
+        # Shape is (n_time, n_vars) for scalar runs and (n_time, batch,
+        # n_vars) for batched runs; the trailing axis matches `keys`.
         ts = jnp.array(trajectory_ts)
-        stacked = jnp.stack(trajectory_snapshots)  # (n_time, n_vars)
-        ys: dict[str, jnp.ndarray] = {
-            k: stacked[:, i] for i, k in enumerate(keys)
-        }
+        ys = jnp.stack(trajectory_snapshots)
 
-        return SchedulerResult(ts=ts, ys=ys, events=events, stats=stats)
+        return SchedulerResult(
+            ts=ts, ys=ys, keys=keys, events=events, stats=stats
+        )
 
     def _solve_group(
         self,
@@ -513,9 +599,7 @@ class Scheduler:
         if t1 <= t0:
             return state_vec
 
-        state_before = (
-            jnp.asarray(state_vec) if self.debug else None
-        )
+        state_before = jnp.asarray(state_vec) if self.debug else None
 
         term = dfx.ODETerm(rhs_fn)
         sol = dfx.diffeqsolve(

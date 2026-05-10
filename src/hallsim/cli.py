@@ -28,7 +28,7 @@ def compose(t1, dt, validate):
 
     from hallsim.composite import Composite
     from hallsim.process import Port, PortRole, Process
-    from hallsim.simulator import Simulator
+    from hallsim.scheduler import Scheduler
 
     class ROSProduction(Process):
         rate: float = 0.05
@@ -89,14 +89,14 @@ def compose(t1, dt, validate):
 
     click.echo(f"\nStore paths: {composite.store_paths()}")
 
-    sim = Simulator()
-    result = sim.run(composite, t_span=(0.0, t1), dt=dt)
+    sim = Scheduler()
+    result = sim.run(composite, t_span=(0.0, t1), macro_dt=dt, save_dt=dt)
 
     click.echo(f"\nSimulation t=[0, {t1}], dt={dt}")
     click.echo(f"Time points: {len(result.ts)}")
 
     ts = result.ts
-    ros = result.ys["cytoplasm/ROS"]
+    ros = result.get("cytoplasm/ROS")
     click.echo(f"\n{'t':>8s}  {'ROS (uM)':>10s}")
     click.echo(f"{'─' * 8}  {'─' * 10}")
     indices = list(range(min(5, len(ts)))) + list(
@@ -129,7 +129,7 @@ def compose_kick(t1, kick_time, kick_ros):
 
     from hallsim.composite import Composite
     from hallsim.process import Port, PortRole, Process
-    from hallsim.simulator import Simulator
+    from hallsim.scheduler import Scheduler
 
     class ROSProduction(Process):
         rate: float = 0.05
@@ -162,17 +162,23 @@ def compose_kick(t1, kick_time, kick_ros):
         "antioxidant": {"ros": "cytoplasm/ROS"},
     }
 
+    # Mid-run perturbation expressed as a first-class EVENT process: the
+    # KickEvent fires once when its condition (t >= kick_time) becomes
+    # true and applies its delta via the Scheduler's event dispatcher.
+    from hallsim.models.kick_event import KickEvent
+
+    processes["kick"] = KickEvent(
+        kick_time=kick_time, deltas={"ros": kick_ros}
+    )
+    topology["kick"] = {"ros": "cytoplasm/ROS"}
+
     composite = Composite(processes, topology, semantic_validation=False)
-    sim = Simulator()
-    result = sim.run_with_perturbation(
-        composite,
-        t_span=(0.0, t1),
-        kick_time=kick_time,
-        kick_dict={"cytoplasm/ROS": kick_ros},
+    result = Scheduler().run(
+        composite, t_span=(0.0, t1), macro_dt=1.0, save_dt=1.0
     )
 
     ts = result.ts
-    ros = result.ys["cytoplasm/ROS"]
+    ros = result.get("cytoplasm/ROS")
 
     click.echo(f"Perturbation: +{kick_ros} uM ROS at t={kick_time}")
     click.echo(f"\n{'t':>8s}  {'ROS (uM)':>10s}")
@@ -388,9 +394,9 @@ def multiscale(t1, macro_dt):
     result = scheduler.run(composite, t_span=(0.0, t1), macro_dt=macro_dt)
 
     ts = result.ts
-    ros = result.ys["cell/ROS"]
-    beats = result.ys["state/heartbeats"]
-    alarm = result.ys["state/alarm"]
+    ros = result.get("cell/ROS")
+    beats = result.get("state/heartbeats")
+    alarm = result.get("state/alarm")
 
     click.echo(f"{'t':>8s}  {'ROS (uM)':>10s}  {'beats':>6s}  {'alarm':>6s}")
     click.echo(f"{'─' * 8}  {'─' * 10}  {'─' * 6}  {'─' * 6}")
@@ -432,11 +438,9 @@ def info():
         "  Composite — Bundles processes + topology, auto-groups by timescale"
     )
     click.echo(
-        "  Simulator — Diffrax-based single-group ODE solver (adaptive Tsit5)"
+        "  Scheduler — Default runner: multi-rate, native batched populations,"
     )
-    click.echo(
-        "  Scheduler — Multi-rate orchestrator (Lie splitting + discrete + events)"
-    )
+    click.echo("              JIT/grad-friendly, single-group fast path")
     click.echo()
     click.echo("Process kinds:")
     click.echo(

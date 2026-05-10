@@ -1,6 +1,6 @@
 """Plotting utilities for HallSim simulations.
 
-Provides quick visualization for simulation results from Simulator
+Provides quick visualization for simulation results from Scheduler
 and Scheduler, including trajectory plots, phase portraits, and
 composite overviews.
 """
@@ -22,12 +22,12 @@ def plot_trajectories(
     ylabel: str = "Value",
     save: str | None = None,
 ):
-    """Plot state trajectories from a SimResult or SchedulerResult.
+    """Plot state trajectories from a SchedulerResult.
 
     Parameters
     ----------
     result:
-        SimResult or SchedulerResult with ``.ts`` and ``.ys``.
+        SchedulerResult with ``.ts`` and ``.ys``.
     paths:
         Store paths to plot. If None, plots all.
     title:
@@ -43,12 +43,12 @@ def plot_trajectories(
     """
     ts = np.asarray(result.ts)
     if paths is None:
-        paths = list(result.ys.keys())
+        paths = list(result.keys)
 
     if ncols == 1:
         fig, ax = plt.subplots(figsize=figsize)
         for path in paths:
-            vals = np.asarray(result.ys[path])
+            vals = np.asarray(result.get(path))
             label = path.split("/")[-1] if "/" in path else path
             ax.plot(ts, vals, label=label, linewidth=1.5)
         ax.set_xlabel("Time")
@@ -62,7 +62,7 @@ def plot_trajectories(
         fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
         for i, path in enumerate(paths):
             ax = axes[i // ncols][i % ncols]
-            vals = np.asarray(result.ys[path])
+            vals = np.asarray(result.get(path))
             label = path.split("/")[-1] if "/" in path else path
             ax.plot(ts, vals, linewidth=1.5)
             ax.set_title(label, fontsize=10)
@@ -93,12 +93,12 @@ def plot_phase_portrait(
     Parameters
     ----------
     result:
-        SimResult or SchedulerResult.
+        SchedulerResult.
     x_path, y_path:
         Store paths for x and y axes.
     """
-    x = np.asarray(result.ys[x_path])
-    y = np.asarray(result.ys[y_path])
+    x = np.asarray(result.get(x_path))
+    y = np.asarray(result.get(y_path))
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.plot(x, y, linewidth=1.0, alpha=0.8)
@@ -137,7 +137,7 @@ def plot_events(
         Store path to plot as the main trajectory.
     """
     ts = np.asarray(result.ts)
-    vals = np.asarray(result.ys[path])
+    vals = np.asarray(result.get(path))
 
     fig, ax = plt.subplots(figsize=figsize)
     label = path.split("/")[-1] if "/" in path else path

@@ -140,7 +140,6 @@ def _compute_algebraic_original(state: dict) -> dict:
 # ── Revised algebraic computation ─────────────────────────────────────
 
 
-
 def _compute_algebraic(state: dict) -> dict:
     """Compute all algebraic (non-ODE) nodes from the 11 state variables.
 

@@ -24,7 +24,7 @@ Usage
 -----
 >>> from hallsim.models.stem_cell_niche import StemCellNiche, build_niche_crosstalk
 >>> comp = build_niche_crosstalk(severity=0.5)
->>> result = Simulator().run(comp, t_span=(0.0, 100.0), dt=0.5)
+>>> result = Scheduler().run(comp, t_span=(0.0, 100.0), macro_dt=0.5, save_dt=0.5)
 """
 
 from __future__ import annotations

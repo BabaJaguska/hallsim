@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 
 from hallsim.sbml_import import process_from_sbml
 from hallsim.composite import Composite
-from hallsim.simulator import Simulator
+from hallsim.scheduler import Scheduler
 
 MODEL_DIR = Path(__file__).parent.parent / "models" / "sivakumar2011"
 
@@ -49,7 +49,7 @@ def get_species_names(sbml_path):
     return names
 
 
-sim = Simulator(solver=dfx.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=500_000, dt0=1e-4)
+sim = Scheduler(solver=dfx.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=500_000, dt0=1e-4)
 
 fig, axes = plt.subplots(len(models), 1, figsize=(14, 4 * len(models)))
 
@@ -62,11 +62,11 @@ for ax, (label, sbml_path) in zip(axes, models.items()):
         print(f"  {len(species)} species")
 
         comp = Composite({label: proc}, {label: {s: s for s in species}})
-        result = sim.run(comp, t_span=(0.0, 100.0), dt=0.5)
+        result = sim.run(comp, t_span=(0.0, 100.0), macro_dt=0.5, save_dt=0.5)
         print(f"  {len(result.ts)} timepoints, solver OK")
 
         for s in species:
-            traj = result.ys[s]
+            traj = result.get(s)
             if float(traj[-1]) != float(traj[0]):
                 ax.plot(result.ts, traj, lw=1.2, alpha=0.8,
                         label=names.get(s, s))
