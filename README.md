@@ -450,7 +450,9 @@ See [crossgen-suggestions.md](docs/crossgen-suggestions.md) for full analysis.
 
 * [x] Sivakumar2011 neural stem cell models (5 SBML, stem cell exhaustion hallmark)
 * [x] StemCellNiche process (niche deterioration → hallmark severity)
-* [x] Validate ERiQ against DDIS bulk transcriptomics (GSE248823) via ssGSEA — held-out r=0.90 across DDIS→OIS arms
+* [x] Validate ERiQ against DDIS bulk transcriptomics (GSE248823) via ssGSEA — held-out r=0.90 across DDIS→OIS arms, plus +0.50 on the held-out rapamycin rescue
+* [ ] **Lipid-metabolism extension** — Tighanimine et al. 2024 (*Nat Metab*, the paper behind GSE248823) identified a G3P/PEtn homeostatic switch as *causal* for senescence (p53 → glycerol kinase activation drives G3P↑; PCYT2 post-translational inactivation drives PEtn↑; lipid droplet biogenesis is the downstream effect). Adding a `LipidMetabolism` Process (states: G3P, PEtn; inputs: `p53_activity`, a PCYT2-PTM proxy; outputs: a senescence-amplifying signal that feeds back into the SASP axis) would let HallSim test their causal claim *in silico* — and the GSE248824 SuperSeries includes the paired metabolomics needed to validate it. Strong follow-up paper: HallSim recapitulates the G3P/PEtn → senescence amplification loop and predicts G3PP/ETNPPL overexpression as senomorphic.
+* [ ] **Trajectory-level validation** — GSE248823 has 3 timepoints per arm (DDIS: D00/D07/D14, OIS: D00/D04/D07). Current concordance uses two-endpoint deltas; matching predicted vs. measured pathway-score *trajectories* (rate of change, time-constant ordering across pathways) would be a substantially stronger validation than scalar deltas.
 * [ ] Validate against scRNA-seq (Tabula Muris Senis, Ma 2020 caloric restriction) — pseudobulk ssGSEA
 * [ ] PINNs: physics-informed loss for NeuralODE training
 

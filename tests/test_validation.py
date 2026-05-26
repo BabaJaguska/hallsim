@@ -466,12 +466,18 @@ class TestCompositeValidator:
 
 class TestCompositeIntegration:
 
-    def test_semantic_validation_false_by_default(self):
-        """Default: no semantic validation runs."""
+    def test_semantic_validation_on_by_default(self):
+        """Default: semantic validation runs and surfaces errors."""
         procs = {"a": ROSProducerMicromolar(), "b": ROSProducerKilograms()}
         topo = {"a": {"ros": "pool/ros"}, "b": {"ros": "pool/ros"}}
-        # Should NOT raise even though units are incompatible
-        composite = Composite(procs, topo)
+        with pytest.raises(ValueError, match="Semantic validation failed"):
+            Composite(procs, topo)
+
+    def test_semantic_validation_can_be_disabled(self):
+        """Pass semantic_validation=False to skip the layer entirely."""
+        procs = {"a": ROSProducerMicromolar(), "b": ROSProducerKilograms()}
+        topo = {"a": {"ros": "pool/ros"}, "b": {"ros": "pool/ros"}}
+        composite = Composite(procs, topo, semantic_validation=False)
         assert composite is not None
 
     def test_semantic_validation_true_raises_on_error(self):

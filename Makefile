@@ -1,13 +1,12 @@
-.PHONY: install format lint test run run-compose run-validate update help all
+.PHONY: install install-dev format lint test run run-compose run-validate help all
 
 install:
 	pip install --upgrade pip
-	pip install -r requirements.txt
+	pip install -e .
 
 install-dev:
 	pip install --upgrade pip
-	pip install -r requirements_dev.txt
-	pip install -e .
+	pip install -e ".[dev]"
 
 format:
 	black --line-length 79 src/
@@ -29,24 +28,15 @@ run-compose:
 run-validate:
 	simulate validate-demo
 
-update:
-	pip freeze > requirements_freeze.txt
-	@echo "Updated requirements_freeze.txt with current dependencies."
-	python -m piptools compile -o requirements.txt pyproject.toml
-	python -m piptools compile pyproject.toml \
-		--output-file requirements_dev.txt\
-		--constraint=requirements.txt \
-		--extra dev
-	@echo "Updated requirements.txt from pyproject.toml."
-
-
 all: install format lint test run
 
 help:
 	@echo "Available commands:"
-	@echo "  make format  - Format the code using black"
-	@echo "  make lint    - Lint the code using flake8"
-	@echo "  make test    - Run tests using pytest"
+	@echo "  make install      - Install runtime deps (editable) from pyproject.toml"
+	@echo "  make install-dev  - Install runtime + dev deps (editable) from pyproject.toml"
+	@echo "  make format       - Format the code using black"
+	@echo "  make lint         - Lint the code using flake8"
+	@echo "  make test         - Run tests using pytest"
 	@echo "  make run          - Run the legacy simulation"
 	@echo "  make run-compose  - Run the composable architecture demo"
 	@echo "  make run-validate - Run the semantic validation demo"

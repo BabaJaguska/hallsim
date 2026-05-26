@@ -843,6 +843,19 @@ class TestSchedulerBasic:
         assert len(result.ts) == len(result.get("pool/x"))
 
 
+class TestSchedulerInitValidation:
+    def test_strang_plus_interpolated_rejected(self):
+        """Strang's reverse pass can't consume yet-to-be-produced interpolants."""
+        with pytest.raises(ValueError, match="incompatible"):
+            Scheduler(splitting="strang", coupling_mode="interpolated")
+
+    def test_strang_plus_frozen_ok(self):
+        Scheduler(splitting="strang", coupling_mode="frozen")
+
+    def test_lie_plus_interpolated_ok(self):
+        Scheduler(splitting="lie", coupling_mode="interpolated")
+
+
 class TestSchedulerDiscrete:
     def test_discrete_counter(self):
         """Discrete process increments counter at fixed intervals."""
