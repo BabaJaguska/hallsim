@@ -28,6 +28,205 @@ from hallsim.process import Port, PortRole, Process
 log = logging.getLogger(__name__)
 
 
+class UnsupportedSBMLFeatureError(Exception):
+    """Raised when an SBML file uses features sbmltoodejax cannot translate.
+
+    The pre-flight check in :func:`_precheck_sbml_supported` catches the
+    documented limitations (events; named functions outside
+    ``sbmltoodejax.modulegeneration.mathFuncs``) before ``GenerateModel``
+    runs, so users get one clear message naming the offending feature
+    rather than a cryptic traceback from inside the generated module.
+    """
+
+
+def _supported_function_names() -> set[str]:
+    """Names sbmltoodejax recognises as named function calls.
+
+    Source of truth is the ``mathFuncs`` dict literal inside
+    ``sbmltoodejax.modulegeneration.GenerateModel``. Upstream defines
+    it as a local variable, so we extract the keys via ``ast`` rather
+    than copying them — the set stays in sync as the table grows. If
+    upstream ever promotes ``mathFuncs`` to module scope, the direct
+    attribute lookup below picks it up automatically. Arithmetic
+    primitives (``+``, ``*``, ``**``, …) are not in this set because
+    libsbml's ``formulaToString`` emits them as Python operators that
+    never hit the function-name lookup.
+    """
+    import ast
+    import inspect
+
+    import sbmltoodejax.modulegeneration as mg
+
+    if hasattr(mg, "mathFuncs") and isinstance(mg.mathFuncs, dict):
+        keys: set[str] = set(mg.mathFuncs.keys())
+    else:
+        try:
+            src = inspect.getsource(mg.GenerateModel)
+        except (TypeError, OSError):
+            return set()
+        keys = set()
+        for node in ast.walk(ast.parse(src)):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "mathFuncs"
+                and isinstance(node.value, ast.Dict)
+            ):
+                keys = {
+                    k.value
+                    for k in node.value.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                }
+                break
+    # ParseRHS also special-cases bare identifiers 'time' and 'pi'.
+    return keys | {"time", "pi"}
+
+
+def _collect_known_symbols(sbml_model) -> set[str]:
+    """Identifiers libsbml's ``formulaToString`` may emit that refer to
+    model components (species, parameters, compartments, reactions,
+    local kineticLaw parameters) rather than function calls."""
+    names: set[str] = set()
+    for i in range(sbml_model.getNumSpecies()):
+        names.add(sbml_model.getSpecies(i).getId())
+    for i in range(sbml_model.getNumParameters()):
+        names.add(sbml_model.getParameter(i).getId())
+    for i in range(sbml_model.getNumCompartments()):
+        names.add(sbml_model.getCompartment(i).getId())
+    for i in range(sbml_model.getNumReactions()):
+        rxn = sbml_model.getReaction(i)
+        names.add(rxn.getId())
+        kl = rxn.getKineticLaw()
+        if kl is None:
+            continue
+        for j in range(kl.getNumParameters()):
+            names.add(kl.getParameter(j).getId())
+        if hasattr(kl, "getNumLocalParameters"):
+            for j in range(kl.getNumLocalParameters()):
+                names.add(kl.getLocalParameter(j).getId())
+    names.discard("")
+    return names
+
+
+def _collect_math_nodes(sbml_model):
+    """Yield every libsbml ASTNode root attached to the model.
+
+    Covers kinetic laws, rules, initial assignments, constraints,
+    event triggers/delays/assignments, and user function definitions —
+    everywhere SBML carries an evaluatable expression.
+    """
+    for i in range(sbml_model.getNumReactions()):
+        kl = sbml_model.getReaction(i).getKineticLaw()
+        if kl is not None and kl.isSetMath():
+            yield kl.getMath()
+    for i in range(sbml_model.getNumRules()):
+        r = sbml_model.getRule(i)
+        if r.isSetMath():
+            yield r.getMath()
+    for i in range(sbml_model.getNumInitialAssignments()):
+        ia = sbml_model.getInitialAssignment(i)
+        if ia.isSetMath():
+            yield ia.getMath()
+    for i in range(sbml_model.getNumConstraints()):
+        c = sbml_model.getConstraint(i)
+        if c.isSetMath():
+            yield c.getMath()
+    for i in range(sbml_model.getNumEvents()):
+        e = sbml_model.getEvent(i)
+        if e.isSetTrigger() and e.getTrigger().isSetMath():
+            yield e.getTrigger().getMath()
+        if e.isSetDelay() and e.getDelay().isSetMath():
+            yield e.getDelay().getMath()
+        for j in range(e.getNumEventAssignments()):
+            ea = e.getEventAssignment(j)
+            if ea.isSetMath():
+                yield ea.getMath()
+    for i in range(sbml_model.getNumFunctionDefinitions()):
+        fd = sbml_model.getFunctionDefinition(i)
+        if fd.isSetMath():
+            yield fd.getMath()
+
+
+def _precheck_sbml_supported(xml_path: str) -> list[str]:
+    """Scan an SBML file for features sbmltoodejax cannot translate.
+
+    Covers the two limitations documented at
+    https://developmentalsystems.org/sbmltoodejax/why_use.html#limitations:
+
+    1. ``<event>`` elements (discrete state changes).
+    2. Named function calls in any math expression whose name is not in
+       ``sbmltoodejax.modulegeneration.mathFuncs`` (and not the built-in
+       ``time`` or ``pi`` identifiers that ``ParseRHS`` special-cases).
+       Distinguishing operators from named function calls is delegated
+       to libsbml's ``ASTNode.isFunction`` so arithmetic primitives are
+       not flagged.
+
+    Returns
+    -------
+    list of human-readable issue strings. Empty list means OK.
+    """
+    import libsbml
+
+    reader = libsbml.SBMLReader()
+    doc = reader.readSBMLFromFile(str(xml_path))
+    model = doc.getModel()
+    if model is None:
+        return [f"libsbml could not parse {xml_path!r} as SBML"]
+
+    issues: list[str] = []
+
+    n_events = model.getNumEvents()
+    if n_events > 0:
+        ids = [
+            model.getEvent(i).getId() or "<unnamed>"
+            for i in range(n_events)
+        ]
+        issues.append(
+            f"contains {n_events} <event> element(s) "
+            f"(ids: {', '.join(ids)}); discrete state changes are not "
+            f"translated by sbmltoodejax"
+        )
+
+    # Mirror sbmltoodejax's identifier-resolution path: serialize each
+    # math AST to infix via libsbml (the same conversion sbmltoodejax
+    # itself feeds into ParseRHS), find every function-call identifier
+    # (name immediately followed by ``(``), and flag any that isn't a
+    # model symbol and isn't in the supported function set. Doing the
+    # check post-formulaToString avoids false positives like ``power``
+    # and ``root`` that libsbml rewrites to ``pow`` and ``sqrt``.
+    import re
+
+    supported = _supported_function_names()
+    known_symbols = _collect_known_symbols(model)
+    unsupported: dict[str, int] = {}
+    for math_root in _collect_math_nodes(model):
+        infix = libsbml.formulaToString(math_root)
+        for match in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", infix):
+            name = match.group(1)
+            if name in supported or name in known_symbols:
+                continue
+            # libsbml renders <lambda> inside functionDefinitions as
+            # "lambda(...)" in the infix string. That's an SBML construct,
+            # not a call site; the actual unsupported event is the
+            # call to the user-defined function elsewhere, which the
+            # scan catches on its own.
+            if name == "lambda":
+                continue
+            unsupported[name] = unsupported.get(name, 0) + 1
+
+    if unsupported:
+        listing = ", ".join(
+            f"{name}() (x{n})" for name, n in sorted(unsupported.items())
+        )
+        issues.append(
+            f"calls function(s) outside sbmltoodejax's mathFuncs table: "
+            f"{listing}"
+        )
+
+    return issues
+
+
 class SBMLProcess(Process):
     """Process auto-generated from an SBML model via sbmltoodejax.
 
@@ -142,6 +341,72 @@ class SBMLProcess(Process):
         return base
 
 
+def _preprocess_sbml(sbml_path: str) -> str:
+    """Apply libsbml converters that flatten SBML features sbmltoodejax
+    cannot translate but that have well-defined equivalent forms.
+
+    Currently runs:
+
+    * **expandFunctionDefinitions** — inlines every ``<functionDefinition>``
+      body at every call site. After this pass, the model has zero
+      user-defined functions and no ``function_X(...)`` references, so
+      sbmltoodejax (which rejects custom functions in ``ParseRHS``) can
+      translate the model directly. Idempotent on models that have no
+      function definitions to begin with.
+
+    Returns a path to the converted SBML file under
+    ``~/.cache/hallsim/converted``. The cache key is the basename of the
+    input, so a converted local file lives alongside any converted
+    BioModels download.
+    """
+    import os
+
+    import libsbml
+
+    reader = libsbml.SBMLReader()
+    doc = reader.readSBMLFromFile(str(sbml_path))
+    if doc.getModel() is None:
+        # libsbml couldn't parse it; let the downstream pre-check produce
+        # the actual diagnostic — we just hand back the original path.
+        return sbml_path
+
+    props = libsbml.ConversionProperties()
+    props.addOption("expandFunctionDefinitions", True)
+    doc.convert(props)
+
+    cache_dir = os.path.expanduser("~/.cache/hallsim/converted")
+    os.makedirs(cache_dir, exist_ok=True)
+    out_path = os.path.join(cache_dir, os.path.basename(sbml_path))
+    libsbml.writeSBMLToFile(doc, out_path)
+    return out_path
+
+
+def _download_biomodel_to_cache(model_id) -> str:
+    """Fetch SBML XML for a BioModels ID and cache it under
+    ``~/.cache/hallsim/biomodels``. Returns the cached path.
+
+    Subsequent calls with the same ID reuse the cached file (BioModels
+    IDs are immutable post-curation), so this is a one-time download per
+    model per machine.
+    """
+    import os
+
+    from sbmltoodejax.biomodels_api import get_content_for_model
+
+    cache_dir = os.path.expanduser("~/.cache/hallsim/biomodels")
+    os.makedirs(cache_dir, exist_ok=True)
+    if isinstance(model_id, int):
+        fname = f"BIOMD{model_id:010d}.xml"
+    else:
+        fname = f"{model_id}.xml"
+    cache_path = os.path.join(cache_dir, fname)
+    if not os.path.exists(cache_path):
+        xml = get_content_for_model(model_id)
+        with open(cache_path, "w") as f:
+            f.write(xml)
+    return cache_path
+
+
 def _load_local_sbml(sbml_path: str):
     """Load a local SBML XML file via sbmltoodejax.
 
@@ -156,6 +421,19 @@ def _load_local_sbml(sbml_path: str):
     import tempfile
 
     from sbmltoodejax.utils import ParseSBMLFile, GenerateModel
+
+    # Flatten features that sbmltoodejax can't translate but libsbml
+    # knows how to expand (currently: user-defined function definitions).
+    sbml_path = _preprocess_sbml(sbml_path)
+
+    issues = _precheck_sbml_supported(sbml_path)
+    if issues:
+        bullets = "\n  - ".join(issues)
+        raise UnsupportedSBMLFeatureError(
+            f"Cannot import {sbml_path!r} via sbmltoodejax:\n  - {bullets}\n"
+            f"See https://developmentalsystems.org/sbmltoodejax/why_use.html"
+            f"#limitations"
+        )
 
     model_data = ParseSBMLFile(sbml_path)
 
@@ -252,7 +530,7 @@ def process_from_sbml(
         If any name in ``tunable_params`` is not a constant in the SBML model.
     """
     try:
-        from sbmltoodejax.utils import load_biomodel
+        import sbmltoodejax  # noqa: F401  (only checking availability)
     except ImportError:
         raise ImportError(
             "sbmltoodejax is required for SBML import. "
@@ -266,11 +544,16 @@ def process_from_sbml(
     if is_local_file:
         name = name or os.path.splitext(os.path.basename(model_id))[0]
         log.info(f"Loading local SBML file '{model_id}' as '{name}'...")
-        model, y0, w0, c = _load_local_sbml(model_id)
+        xml_path = model_id
     else:
         name = name or f"biomodel_{model_id}"
-        log.info(f"Loading BioModels #{model_id} as '{name}'...")
-        model, y0, w0, c = load_biomodel(model_id)
+        log.info(f"Fetching BioModels #{model_id} as '{name}'...")
+        xml_path = _download_biomodel_to_cache(model_id)
+
+    # Single import path: both local files and downloaded BioModels go
+    # through _load_local_sbml so the pre-check and the generated-module
+    # patches (namespace alias, eqx.static_field) apply uniformly.
+    model, y0, w0, c = _load_local_sbml(xml_path)
 
     # Extract species names from the model's index mapping
     # sbmltoodejax versions differ: ModelSpec uses model.modelstepfunc.y_indexes,

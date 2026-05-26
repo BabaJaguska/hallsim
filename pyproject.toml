@@ -10,6 +10,8 @@ readme          = "README.md"
 requires-python = ">=3.9"
 dependencies    = [
   "numpy",
+  "scipy",
+  "pandas",
   "click",
   "jax",
   "diffrax",
@@ -22,7 +24,7 @@ dependencies    = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "black", "pre-commit", "flake8"]
+dev = ["pytest", "black", "pre-commit", "flake8", "matplotlib"]
 
 [project.urls]
 Documentation = "https://github.com/BabaJaguska/HallSim#readme"
