@@ -53,6 +53,14 @@ class KickEvent(Process):
         wired in topology to the store path being kicked. Values may
         be Python floats or JAX arrays; arrays must broadcast against
         the store path's value shape (relevant for batched runs).
+    units:
+        Optional mapping from port name to unit string for that kick
+        target. A kick's units must match the target store path's
+        units to be physically meaningful — pass them here so the
+        semantic validator can verify compatibility with whichever
+        CONTINUOUS process owns that path. Keys not present default
+        to ``""`` (unspecified → validator emits a warning when the
+        kicked path has units declared elsewhere).
 
     Notes
     -----
@@ -63,17 +71,19 @@ class KickEvent(Process):
     kind: ProcessKind = ProcessKind.EVENT
     kick_time: float = 0.0
     deltas: Mapping[str, float] = None  # type: ignore[assignment]
+    units: Mapping[str, str] = None  # type: ignore[assignment]
 
     def ports_schema(self):
         # All kick targets are LATCHED — that's the role EVENT processes
         # use to apply scatter-add deltas. Other processes' EVOLVED /
         # EXCLUSIVE ports may share these store paths (post topology
         # validator relaxation in store.py).
+        units_map = self.units or {}
         return {
             name: Port(
                 role=PortRole.LATCHED,
                 default=0.0,
-                units="dimensionless",
+                units=units_map.get(name, ""),
                 description=f"kick target: {name}",
             )
             for name in (self.deltas or {})

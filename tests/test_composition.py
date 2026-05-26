@@ -379,7 +379,7 @@ class TestScheduler:
         from hallsim.scheduler import Scheduler
 
         decay = Decay(rate=0.1)
-        kick = KickEvent(kick_time=10.0, deltas={"x": 5.0})
+        kick = KickEvent(kick_time=10.0, deltas={"x": 5.0}, units={"x": "uM"})
         composite = Composite(
             processes={"decay": decay, "kick": kick},
             topology={"decay": {"x": "x"}, "kick": {"x": "x"}},

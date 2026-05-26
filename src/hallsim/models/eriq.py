@@ -779,7 +779,7 @@ def build_eriq_composite(
     MDAMAGE_SA: float = 1.0,
     prefix: str = ERIQ_PREFIX,
     validate: bool = True,
-    semantic_validation: bool = False,
+    semantic_validation: bool = True,
 ):
     """Build a Composite wiring the 3 ERiQ Processes together.
 

@@ -1,10 +1,11 @@
-"""Tests for composable models: SaturatingRemoval, NeuralODE, Hallmarks, DataValidation."""
+"""Tests for composable models: SaturatingRemoval, NeuralODE, Hallmarks."""
 
 import jax
 import jax.numpy as jnp
 import pytest
 
 from hallsim.composite import Composite
+from hallsim.models.eriq import ERiQOxidativeStress
 from hallsim.process import PortRole
 from hallsim.scheduler import Scheduler
 
@@ -200,138 +201,3 @@ class TestHallmarkHandles:
         summary = handle.summary(severity=0.5)
         assert "oxidative_stress.MDAMAGE_SA" in summary
         assert summary["oxidative_stress.MDAMAGE_SA"] == pytest.approx(2.0)
-
-
-# ── Data Validation Layer ───────────────────────────────────────────────
-
-
-class TestDataValidation:
-    def test_perfect_concordance(self):
-        from hallsim.data_validation import (
-            MeasuredScores,
-            PathwayMapping,
-            validate_against_data,
-        )
-
-        baseline = {"eriq/mTOR_activity": jnp.array(1.0)}
-        perturbed = {"eriq/mTOR_activity": jnp.array(0.5)}  # decreased
-
-        measured = MeasuredScores(
-            condition="rapamycin",
-            pathway_scores={"MTOR_SIGNALING": -0.5},  # also decreased
-        )
-
-        mappings = [
-            PathwayMapping(
-                state_var="eriq/mTOR_activity",
-                pathway_name="MTOR_SIGNALING",
-            ),
-        ]
-
-        result = validate_against_data(baseline, perturbed, measured, mappings)
-        assert result.concordance == 1.0
-        assert result.n_pathways == 1
-
-    def test_mismatch(self):
-        from hallsim.data_validation import (
-            MeasuredScores,
-            PathwayMapping,
-            validate_against_data,
-        )
-
-        baseline = {"eriq/mTOR_activity": jnp.array(1.0)}
-        perturbed = {"eriq/mTOR_activity": jnp.array(1.5)}  # increased
-
-        measured = MeasuredScores(
-            condition="rapamycin",
-            pathway_scores={"MTOR_SIGNALING": -0.5},  # decreased
-        )
-
-        mappings = [
-            PathwayMapping(
-                state_var="eriq/mTOR_activity",
-                pathway_name="MTOR_SIGNALING",
-            ),
-        ]
-
-        result = validate_against_data(baseline, perturbed, measured, mappings)
-        assert result.concordance == 0.0
-
-    def test_inverse_direction_mapping(self):
-        from hallsim.data_validation import (
-            MeasuredScores,
-            PathwayMapping,
-            validate_against_data,
-        )
-
-        baseline = {"x": jnp.array(1.0)}
-        perturbed = {"x": jnp.array(2.0)}  # x increases
-
-        measured = MeasuredScores(
-            condition="test",
-            pathway_scores={"pathway": -0.3},  # pathway decreases
-        )
-
-        # direction=-1: x increase should correspond to pathway decrease
-        mappings = [
-            PathwayMapping(
-                state_var="x", pathway_name="pathway", direction=-1.0
-            )
-        ]
-
-        result = validate_against_data(baseline, perturbed, measured, mappings)
-        assert result.concordance == 1.0
-
-    def test_missing_pathway_skipped(self):
-        from hallsim.data_validation import (
-            MeasuredScores,
-            PathwayMapping,
-            validate_against_data,
-        )
-
-        baseline = {"x": jnp.array(1.0)}
-        perturbed = {"x": jnp.array(2.0)}
-        measured = MeasuredScores(condition="test", pathway_scores={})
-
-        mappings = [PathwayMapping(state_var="x", pathway_name="missing")]
-        result = validate_against_data(baseline, perturbed, measured, mappings)
-        assert result.n_pathways == 0
-
-    def test_str_output(self):
-        from hallsim.data_validation import ValidationResult
-
-        result = ValidationResult(
-            n_pathways=2,
-            concordance=0.5,
-            per_pathway=[
-                {
-                    "pathway": "A",
-                    "state_var": "x",
-                    "sim_delta": 0.1,
-                    "meas_delta": 0.2,
-                    "concordant": True,
-                },
-                {
-                    "pathway": "B",
-                    "state_var": "y",
-                    "sim_delta": 0.1,
-                    "meas_delta": -0.1,
-                    "concordant": False,
-                },
-            ],
-        )
-        s = str(result)
-        assert "concordance = 50.0%" in s
-        assert "OK" in s
-        assert "MISMATCH" in s
-
-    def test_eriq_pathway_mappings_exist(self):
-        from hallsim.data_validation import ERIQ_PATHWAY_MAPPINGS
-
-        assert len(ERIQ_PATHWAY_MAPPINGS) >= 5
-        for m in ERIQ_PATHWAY_MAPPINGS:
-            assert m.state_var.startswith("eriq/")
-
-
-# Import needed for test_missing_process_ignored
-from hallsim.models.eriq import ERiQOxidativeStress  # noqa: E402

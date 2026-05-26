@@ -213,12 +213,17 @@ def demo_mapk():
         validate=False,
     )
 
-    # max_step_size=0.1 matches the original sbmltoodejax deltaT;
-    # rtol=1e-8 prevents accumulated phase drift over many cycles
+    # Scheduler's default Kvaerno5 (implicit ESDIRK) is well-suited to
+    # the mildly stiff Kholodenko cascade. Moderate tolerances preserve
+    # the limit cycle without the ppm-level local-error budget that
+    # tight tolerances (e.g. atol=1e-12) require, which would push step
+    # count above the default budget.
     n_secs = 150 * 60
-    sim = Scheduler(max_step_size=0.1, rtol=1e-12, atol=1e-14)
+    sim = Scheduler(rtol=1e-6, atol=1e-9, dt0=1e-3)
     print(f"   Simulating t=[0, {n_secs}] ({n_secs/60:.0f} min)...")
-    result = sim.run(comp, t_span=(0.0, float(n_secs)), macro_dt=5.0, save_dt=5.0)
+    result = sim.run(
+        comp, t_span=(0.0, float(n_secs)), macro_dt=10.0, save_dt=5.0
+    )
 
     # Plot key species
     all_paths = [f"mapk/{s}" for s in species]

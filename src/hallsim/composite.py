@@ -60,7 +60,7 @@ class Composite(eqx.Module):
         topology: dict[str, dict[str, str]],
         *,
         validate: bool = True,
-        semantic_validation: bool | dict = False,
+        semantic_validation: bool | dict = True,
     ) -> None:
         self.processes = processes
         self.topology = topology

@@ -13,33 +13,24 @@ via topology; ``Scheduler`` is the runner.
 Hallmark handles, validation, plotting, and SBML import are imported on
 demand from their respective submodules — they aren't surfaced here to
 keep the top-level namespace small.
+
+Validation against transcriptomic data is via
+:mod:`hallsim.gene_reporters` — a one-to-one mapping from mechanistic
+state variables to canonical reporter genes, evaluated by sign agreement
+and Spearman concordance.
 """
 
 from hallsim.composite import Composite
-from hallsim.pathway_mapper import (
-    PATHWAY_ORDER,
-    PathwayMapper,
-    PathwayScores,
-    calibrate_pathway_mapper,
-    pearson_r,
-    sign_agreement,
-)
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.scheduler import EventRecord, Scheduler, SchedulerResult
 
 __all__ = [
     "Composite",
     "EventRecord",
-    "PATHWAY_ORDER",
-    "PathwayMapper",
-    "PathwayScores",
     "Port",
     "PortRole",
     "Process",
     "ProcessKind",
     "Scheduler",
     "SchedulerResult",
-    "calibrate_pathway_mapper",
-    "pearson_r",
-    "sign_agreement",
 ]

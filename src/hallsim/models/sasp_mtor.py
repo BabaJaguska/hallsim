@@ -68,8 +68,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from hallsim.pathway_mapper import h_act
 from hallsim.process import Port, PortRole, Process
+from hallsim.utils import h_act
 
 
 class SASPmTORActivator(Process):
