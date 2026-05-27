@@ -37,18 +37,96 @@ from hallsim.process import PortRole, Process, ProcessKind
 from hallsim.store import build_initial_store, validate_topology
 
 
+def _flatten_subcomposites(
+    items: dict[str, Process | "Composite"],
+    extra_topology: dict[str, dict[str, str]],
+) -> tuple[dict[str, Process], dict[str, dict[str, str]]]:
+    """Expand sub-Composites into a flat (processes, topology) pair.
+
+    A value that is a :class:`Composite` contributes its internal
+    processes under ``<outer_key>.<sub_name>`` and its internal store
+    paths under ``<outer_key>/<path>`` (idempotent: paths already
+    starting with ``<outer_key>/`` are kept as-is).
+
+    A value that is a :class:`Process` contributes one entry directly
+    under ``outer_key``, with its topology taken from
+    ``extra_topology[outer_key]`` (the topology arg passed to
+    :class:`Composite`).
+    """
+    flat_processes: dict[str, Process] = {}
+    flat_topology: dict[str, dict[str, str]] = {}
+
+    for outer_key, item in items.items():
+        if isinstance(item, Composite):
+            prefix = f"{outer_key}/"
+            for sub_name, sub_proc in item.processes.items():
+                merged_name = f"{outer_key}.{sub_name}"
+                if merged_name in flat_processes:
+                    raise ValueError(
+                        f"process name collision while flattening "
+                        f"composite {outer_key!r}: {merged_name!r} "
+                        f"already exists in the merged composite"
+                    )
+                flat_processes[merged_name] = sub_proc
+                sub_topo = item.topology.get(sub_name, {})
+                flat_topology[merged_name] = {
+                    port: (path if path.startswith(prefix) else prefix + path)
+                    for port, path in sub_topo.items()
+                }
+        elif isinstance(item, Process):
+            if outer_key in flat_processes:
+                raise ValueError(
+                    f"process name collision: {outer_key!r} already "
+                    f"exists in the merged composite"
+                )
+            flat_processes[outer_key] = item
+            # Ports without an explicit topology entry get an
+            # auto-prefixed store path ``<outer_key>/<port>``. This
+            # matches sub-Composite flattening: the outer key becomes
+            # the namespace by default. Caller-provided topology entries
+            # win on a per-port basis, so an INPUT port reading from a
+            # canonical path elsewhere stays explicit.
+            user_topo = extra_topology.get(outer_key, {})
+            flat_topology[outer_key] = {
+                port: user_topo.get(port, f"{outer_key}/{port}")
+                for port in item.ports_schema()
+            }
+        else:
+            raise TypeError(
+                f"processes[{outer_key!r}] must be a Process or Composite, "
+                f"got {type(item).__name__}"
+            )
+
+    return flat_processes, flat_topology
+
+
 class Composite(eqx.Module):
     """A wired bundle of Processes sharing a flat state store.
 
     Parameters
     ----------
     processes:
-        ``{name: Process}`` — each an Equinox module.
+        ``{name: Process | Composite}`` — each an Equinox module. When a
+        value is another Composite, it is flattened in place: each
+        sub-process is renamed ``<outer_key>.<sub_name>`` and every store
+        path the sub-composite references is prefixed with
+        ``<outer_key>/`` unless it already carries that prefix. This is
+        how independent published composites are merged into one.
     topology:
-        ``{name: {port_name: store_path}}`` — maps each process's
-        local port names to global store paths.  Two processes writing
+        ``{name: {port_name: store_path}}`` — maps each top-level
+        Process's local port names to global store paths. Sub-composites
+        bring their own topology; the caller only writes topology entries
+        for raw Process values at the top level.  Two processes writing
         to the same store path contribute additively (EVOLVED) or
         exclusively (EXCLUSIVE).
+    rewire:
+        Optional ``{old_path: new_path}`` mapping applied after sub-
+        composite flattening. Use this to resolve overlapping biology
+        across merged composites — e.g.,
+        ``rewire={"dp14/mTORC1_pS2448": "eriq/mTOR_activity"}`` declares
+        DP14's phospho-mTOR state and ERiQ's mTOR activity refer to the
+        same canonical store path. Targets are taken as-is; the rewire
+        is a single pass over the flattened topology.
     """
 
     processes: dict[str, Process]
@@ -56,16 +134,27 @@ class Composite(eqx.Module):
 
     def __init__(
         self,
-        processes: dict[str, Process],
-        topology: dict[str, dict[str, str]],
+        processes: dict[str, Process | Composite],
+        topology: dict[str, dict[str, str]] | None = None,
         *,
+        rewire: dict[str, str] | None = None,
         validate: bool = True,
         semantic_validation: bool | dict = True,
     ) -> None:
-        self.processes = processes
-        self.topology = topology
+        flat_processes, flat_topology = _flatten_subcomposites(
+            processes, topology or {}
+        )
+        if rewire:
+            flat_topology = {
+                proc_name: {
+                    port: rewire.get(path, path) for port, path in topo.items()
+                }
+                for proc_name, topo in flat_topology.items()
+            }
+        self.processes = flat_processes
+        self.topology = flat_topology
         if validate:
-            errors = validate_topology(processes, topology)
+            errors = validate_topology(flat_processes, flat_topology)
             if errors:
                 raise ValueError(
                     "Topology validation failed:\n"
@@ -80,7 +169,7 @@ class Composite(eqx.Module):
                 validator = CompositeValidator(**semantic_validation)
             else:
                 validator = CompositeValidator()
-            report = validator.validate(processes, topology)
+            report = validator.validate(flat_processes, flat_topology)
             if report.errors:
                 raise ValueError(f"Semantic validation failed:\n{report}")
             if report.warnings:

@@ -55,47 +55,72 @@ HallSim is built on a **composable architecture** using JAX/Equinox/Diffrax. Des
 - `EXCLUSIVE` — sole ownership: only one process may write to this store path (validated at composition time).
 - `LATCHED` — written by discrete/event processes, read as constant by continuous processes within a macro step.
 
-**Validation layer** (optional, runs at composition time):
+**Validation layer** (on by default, runs at composition time):
 
 | Subsystem          | What it checks |
 |--------------------|----------------|
 | **UnitChecker**    | pint-based dimensional analysis across shared store paths |
-| **SemanticChecker**| Ontology ID comparison (ChEBI, GO, SBO) for species disambiguation |
-| **GraphAnalyzer**  | Feedback cycle detection, fan-in analysis, coupling density |
+| **SemanticChecker**| Ontology ID comparison (ChEBI, GO, SBO, UniProt) for species disambiguation |
+| **GraphAnalyzer**  | Feedback cycle detection, fan-in analysis, coupling density, unfed-INPUT detection |
 | **CouplingAuditor**| Heuristic duplicate-reaction detection via description overlap |
+| **RangeChecker**   | Numerical-range compatibility at shared store paths — catches magnitude mismatches that unit-checking misses (e.g. a writer producing `[10, 100]` feeding a reader calibrated for `[0, 2]`) |
 
-Validation is warnings-by-default (not errors). Use `strict=True` to promote warnings to errors.
+Validation runs warnings-by-default but raises on hard conflicts (incompatible units, disjoint typical ranges, ontology mismatches at shared paths). Use `semantic_validation={"strict": True}` to promote warnings to errors; disable with `semantic_validation=False`. Per-subsystem opt-out via `semantic_validation={"check_units": False, ...}`.
 
-### Included Models
+**Composing composites.** `Composite` accepts other `Composite` instances inside its `processes` dict — they are flattened with namespace prefixes (`outer.sub_proc` for processes, `outer/path` for store paths). Bare `Process` values get their ports auto-prefixed under the outer key too. A `rewire={old_path: new_path}` kwarg on the constructor aliases overlapping biology onto canonical paths. `analyze_composability(**composites)` (in `hallsim.validation`) surfaces candidate overlaps before merging by matching on ontology IDs first, then name and substring heuristics.
 
-| Model | Module | Description |
-|-------|--------|-------------|
-| **ERiQ** | `hallsim.models.eriq` | Energy Restriction in Quiescence [4] — decomposed into 3 composable Processes: EnergyMetabolism (4 ODEs), OxidativeStress (3 ODEs), Signaling (4 ODEs). 11 state variables, ~20 algebraic intermediates. |
-| **SaturatingRemoval** | `hallsim.models.saturating_removal` | Uri Alon's damage accumulation with Michaelis-Menten repair. |
-| **NeuralODE** | `hallsim.models.neuralode` | MLP-parameterized dynamics — trainable surrogate or unknown-dynamics learner. Includes training infrastructure. |
-| **SBML Import** | `hallsim.sbml_import` | Auto-generate Process from BioModels SBML via `sbmltoodejax`. |
-| **Sivakumar2011** | `models/sivakumar2011/` | 5 SBML models of neural stem cell signaling: EGF, Shh, Notch, Wnt, and integrated crosstalk (BIOMD0000000394-398). |
-| **StemCellNiche** | `hallsim.models.stem_cell_niche` | Age-dependent niche deterioration — severity-scaled decay of Wnt, EGF, Shh, Notch ligands. Composes additively with the Sivakumar2011 crosstalk model. Maps to the **Stem Cell Exhaustion** hallmark. |
-| **GenomicInstability composite** | `hallsim.models.damage_p53_eriq` | Cross-publication composition: `SaturatingRemoval` (DDR mode, Karin & Alon 2019) → `GZ06` SBML p53-Mdm2 oscillator (BIOMD0000000157, Geva-Zatorsky et al. 2006) → `P53Bridge` → `ERiQ` (Alfego & Kriete 2017, p53 replaced). Three independent literature sources composed via topology alone. Maps to the **Genomic Instability** hallmark via `SaturatingRemoval.alpha`. With `with_sasp_mtor=True` adds `SASPmTORActivator` for the chronic-stress mTOR axis. |
-| **SASPmTORActivator** | `hallsim.models.sasp_mtor` | Chronic-stress mTORC1 activation Process — Hill-gated additive contribution to `eriq/mTOR_activity` driven by mito_damage × p53_activity. Captures the kinase-level mTORC1 paradox in DDIS (Carroll 2017, Laberge 2015, Herranz 2015, Houssaini 2018, Fielder 2017). |
-| **mTORInhibitor** | `hallsim.models.sasp_mtor` | Rapamycin-like pharmacological perturbation — additive negative driver on `eriq/mTOR_activity` with tunable `strength`. Used to model the DDIS-rescue arm of GSE248823 in the held-out validation. |
-| **PathwayMapper** | `hallsim.pathway_mapper` | Multi-input Hill-function readout from mechanistic state (p53, mTORC1, NF-κB, ROS, ATP) to seven ssGSEA-style pathway scores. `eqx.Module`, not a Process. 14 calibratable params; defaults K=0.5, n=4. |
+```python
+from hallsim import Composite, analyze_composability
+from hallsim.sbml_import import process_from_sbml
+
+a = process_from_sbml(582, name="dp14")      # DallePezze2014 — 23 species
+b = process_from_sbml(157, name="gz06")      # Geva-Zatorsky 2006 — p53 oscillator
+report = analyze_composability(dp14=a, gz06=b)
+print(report)                                 # candidate overlaps + suggested rewire
+merged = Composite(
+    processes={"dp14": a, "gz06": b},
+    rewire=report.suggested_rewire,
+)
+```
+
+### Example composites and SBML import
+
+HallSim is a *framework* for composing biological models, not a model library. The expectation is that you bring your own Processes — either hand-written, imported from curated SBML on BioModels, or learned via `NeuralODE`. A small set of example composites ships under [`src/hallsim/models/`](src/hallsim/models/) to demonstrate the framework's patterns:
+
+- A **DP14-anchored multi-hallmark composite** ([`multi_hallmark.py`](src/hallsim/models/multi_hallmark.py)) — three independent BioModels SBML imports (DallePezze 2014 + Geva-Zatorsky 2006 + Ihekwaba 2004) stitched via topology, spanning Cellular Senescence, Deregulated Nutrient Sensing, Genomic Instability, and Inflammaging in one substrate. The current validation composite.
+- A **damage → p53 → ERiQ composite** ([`damage_p53_eriq.py`](src/hallsim/models/damage_p53_eriq.py)) — earlier cross-publication composition demo (`SaturatingRemoval` → GZ06 SBML p53-Mdm2 oscillator → `P53Bridge` → ERiQ). Reference for the topology-driven composition pattern.
+- A **stem-cell niche + Sivakumar 2011 crosstalk composite** ([`stem_cell_niche.py`](src/hallsim/models/stem_cell_niche.py)) — niche deterioration mapped to the Stem Cell Exhaustion hallmark, additively composed with the Sivakumar 2011 crosstalk SBML model.
+
+The SBML import path ([`sbml_import.py`](src/hallsim/sbml_import.py)) is one of the framework's main entry points: it auto-generates a Process from any BioModels entry via `sbmltoodejax`, with a libsbml-driven `<functionDefinition>` inliner that unlocks the large majority of curated models that would otherwise hit "Custom functions are not handled" upstream, pre-flight checks that reject `<event>` blocks and unsupported MathML operators with actionable error messages, and MIRIAM annotation extraction that populates `Port.ontology` from species CVTerms. Bundled SBML files live under [`models/<author><year>/`](models/) for offline use; arbitrary BioModels IDs download to `~/.cache/hallsim/biomodels/` on first import.
+
+The few hand-written Processes that ship — [`saturating_removal.py`](src/hallsim/models/saturating_removal.py) (Uri Alon damage model), [`sasp_mtor.py`](src/hallsim/models/sasp_mtor.py) (chronic-stress mTOR activation), [`p53_bridge.py`](src/hallsim/models/p53_bridge.py) (tracking-bridge pattern), [`kick_event.py`](src/hallsim/models/kick_event.py) (one-shot perturbation EVENT pattern), and the [ERiQ](src/hallsim/models/eriq.py) decomposition — exist either as reference implementations of common patterns or to support the example composites above. 
 
 ### Hallmark Handles
 
-Each of the 12 hallmarks of aging is represented as a 0-1 severity handle that modulates parameters across processes:
+Each hallmark of aging is represented as a 0-1 severity handle that modulates parameters across one or more processes. Hallmark severity is differentiable end-to-end: `jax.grad` through the whole pipeline works.
 
 ```python
+from hallsim import Composite
 from hallsim.hallmarks import apply_hallmarks
-from hallsim.models.eriq import build_eriq_composite
+from hallsim.models.multi_hallmark import build_multi_hallmark_composite
 
-comp = build_eriq_composite()
-modified_procs = apply_hallmarks(comp.processes, {
-    "Mitochondrial Dysfunction": 0.7,
-    "Deregulated Nutrient Sensing": 0.5,
-})
-# Hallmark severity is differentiable: jax.grad through the whole pipeline
+base = build_multi_hallmark_composite()
+
+# Rapamycin = downward severity shift on Deregulated Nutrient Sensing.
+# The hallmark mapping targets DP14's mTORC1_S2448 phosphorylation rate
+# via the parameter_overrides field; severity=1.0 → SBML default (full
+# dysregulation), severity=0.0 → 30% of default (rapamycin-rescued).
+treated_procs = apply_hallmarks(
+    base.processes, {"Deregulated Nutrient Sensing": 0.3}
+)
+treated = Composite(
+    processes=treated_procs,
+    semantic_validation={"check_semantics": False},
+)
+# Run treated and control composites, compare gene-reporter outputs.
 ```
+
+**Pharmacological interventions belong on the hallmark layer they perturb**, not as separate Processes. Rapamycin targets mTORC1 → maps to Deregulated Nutrient Sensing. The same hallmark applies to ERiQ-based composites (targets ERiQ's `GLYCOL_SA`) and to DP14-based composites (targets DP14's `mTORC1_S2448_phos_by_AA_n_Akt_pS473`) without changing how the user calls `apply_hallmarks`.
 
 **Stem Cell Exhaustion** is mapped to the Sivakumar2011 crosstalk model via the `StemCellNiche` process, which contributes severity-dependent decay to Wnt, EGF, Shh, and Notch signaling:
 
@@ -149,66 +174,38 @@ amortizes across the batch.
 
 The composite has 3 timescale groups (bridge ≈ 0.2, GZ06 ≈ 5, damage ≈ 50) which the `Scheduler` auto-clusters and Lie-splits between groups; a single-group composite of comparable stiffness would be forced into very small adaptive steps. SBML constants are exposed as INPUT ports via `process_from_sbml(..., tunable_params=("psi",))` — the mechanism that lets a HallSim Process drive an imported model's parameter without runtime parameter mutation.
 
-### Data Validation (ssGSEA, held-out)
+### Data validation (gene reporters, held-out splits)
 
-HallSim mechanistic states are bridged to ssGSEA pathway scores via a
-**14-parameter multi-input Hill-function module** (`PathwayMapper`,
-[`hallsim.pathway_mapper`](src/hallsim/pathway_mapper.py)). The mapper
-is a small `eqx.Module` (not a Process, since it has no own dynamics);
-its parameters are JAX arrays so calibration via `jax.grad` works.
+HallSim mechanistic states are validated against transcriptomic data via **single-gene reporters** in [`hallsim.gene_reporters`](src/hallsim/gene_reporters.py). The mapping is one canonical reporter gene per mechanistic observable, with literature-anchored sign expectations.
 
 ```python
-from hallsim import PathwayMapper, calibrate_pathway_mapper
-
-mapper = PathwayMapper()  # K=0.5, n=4 defaults
-scores = mapper.from_eriq_state(state)  # 7 pathway scores in [0,1]
+from hallsim.gene_reporters import (
+    CANONICAL_REPORTERS, compute_concordance, derive_observables,
+    load_gene_expression, log2_fold_change,
+)
 ```
 
-**Held-out validation against GSE248823.** The composite `damage_p53_eriq`
-is run under control (α=0.01) and DDIS (α=0.05); seven canonical
-pathway scores are computed via PathwayMapper. We compare to real
-ssGSEA NES values from GSE248823 (DNA-damage-induced senescence and
-RAS-OIS arms). To defend against curve-fitting the validation, we use
-a **held-out methodology**:
+Canonical reporters in the current set:
 
-1. Sign agreement on the *default* mapper is the calibration-invariant
-   primary metric (Hill calibration cannot flip a sign of a multi-input
-   formula).
-2. We calibrate Hill parameters on the DDIS arm and report Pearson r on
-   the held-out OIS arm. The two arms drive senescence via different
-   upstream mechanisms (DDR vs. oncogene), so an r that survives the
-   transfer reflects general senescence biology, not arm-specific fit.
-
-Reproduce with:
-
-```bash
-.venv_hallsim/bin/python scripts/run_ssgsea.py        # produce data/ssgsea_deltas.csv
-.venv_hallsim/bin/python demos/concordance_ddis.py --plot
-```
-
-Headline numbers from GSE248823 (etoposide+rapamycin senescence study,
-Tighanimine et al. 2024) — **three held-out arms, two model variants**:
-
-| Variant | DDIS (in-sample) | OIS (held-out) | **Rapamycin rescue (held-out)** |
+| Observable | Gene | Sign | Anchor |
 |---|---|---|---|
-| Vanilla ERiQ | +0.992 | +0.897 | **−0.261** ❌ |
-| SASP-corrected | +0.922 | +0.921 | **+0.504** ✅ |
+| `p53_activity` | `CDKN1A` (p21) | + | el-Deiry et al. 1993 |
+| `mito_damage` | `DDB2` | + | Hwang et al. 1999 |
+| `ROS_activity` | `HMOX1` | + | Alam & Cook 2007 |
+| `NFKB_activity` | `NFKBIA` (IκBα) | + | Sun et al. 1993 |
+| `mito_function` | `CYCS` (cytochrome c) | + | Scarpulla 2008 |
+| `mTOR_activity` | `EIF4EBP1` (4E-BP1) | + | Brunn et al. 1997 |
 
-The held-out arms test increasingly demanding generalization. **OIS** is
-a different senescence type (RAS oncogene rather than DNA damage), so a
-calibrated mapper that survives the transfer captures *general*
-senescence signature, not arm-specific overfit. **Rapamycin rescue**
-tests *intervention prediction*: given the calibrated DDIS-trained
-model, can we predict what an mTOR inhibitor does in DDIS cells?
+**Validation pipeline** (sketch — see [`demos/concordance_reporters.py`](demos/concordance_reporters.py) for a runnable example):
 
-The "SASP-corrected" variant adds [`SASPmTORActivator`](src/hallsim/models/sasp_mtor.py)
-(chronic-stress mTORC1 activation; Carroll 2017, Laberge 2015,
-Herranz 2015, Houssaini 2018, Fielder 2017) and accepts a
-[`mTORInhibitor`](src/hallsim/models/sasp_mtor.py) Process that models
-rapamycin pharmacology. This SASP module is *necessary* for intervention
-prediction: vanilla ERiQ fits DDIS and OIS but predicts rapamycin moves
-pathways the *wrong* way (negative r), while the SASP variant gives up
-some in-sample DDIS fit and earns positive rescue concordance.
+1. Run the composite under control and perturbed conditions.
+2. Compute Δ_observable per arm via `derive_observables` on late-time state snapshots.
+3. Compute Δ_gene from a bulk or pseudo-bulk expression matrix via `log2_fold_change`.
+4. Aggregate per-reporter sign agreement + Spearman correlation via `compute_concordance`.
+
+**Held-out splits are mandatory** for any reported concordance number — calibrate on one arm (e.g. DDIS), evaluate on a held-out arm (e.g. OIS or rapamycin rescue). Same-data calibrate-and-evaluate is curve-fit, not concordance.
+
+For the senescence composite, calibration of the merge-sensitive rate constants against GSE248823 Δ_data is the documented next step. Numbers will be reported once calibration lands.
 
 ---
 
@@ -281,22 +278,6 @@ result = Scheduler().run(
     composite, t_span=(0.0, 100.0), macro_dt=1.0, save_dt=1.0
 )
 print(result.ts.shape, result.get("pool/x").shape)
-```
-
-### ERiQ Model
-
-```python
-from hallsim.models.eriq import build_eriq_composite
-from hallsim.scheduler import Scheduler
-
-# Build the 3-process ERiQ composite (11 state variables)
-comp = build_eriq_composite()
-result = Scheduler().run(
-    comp, t_span=(0.0, 1000.0), macro_dt=1.0, save_dt=1.0
-)
-
-# Mitochondrial damage accumulates over time
-print(result.get("eriq/mito_damage")[-1])
 ```
 
 ### Multi-timescale with Scheduler
@@ -396,42 +377,29 @@ src/hallsim/
   store.py             — Store utilities (build, extract, route, validate)
   composite.py         — Composite: wires Processes via Topology, auto-grouping
   scheduler.py         — The runner: multi-rate orchestration + single-group fast path
-  validation.py        — Semantic validation layer (4 subsystems)
-  hallmarks.py         — Hallmark handles (0-1 severity → parameter modulation)
-  data_validation.py   — ssGSEA data validation (simulated vs measured)
-  sbml_import.py       — SBML auto-import via sbmltoodejax
+  validation.py        — Semantic validation (5 subsystems) + analyze_composability
+  hallmarks.py         — Hallmark handles (0-1 severity → parameter modulation), supports dotted param_name for dict-keyed targets
+  gene_reporters.py    — Single-gene reporter validation against transcriptomic data
+  calibration.py       — Calibrator (forward + reverse autodiff) for mechanism-level parameter fitting
+  sbml_import.py       — SBML auto-import via sbmltoodejax (libsbml functionDefinition inliner, MIRIAM ontology extraction, pre-flight checks)
   cli.py               — CLI entry points (simulate command group)
   models/
-    eriq.py            — ERiQ model decomposed into 3 Processes
+    multi_hallmark.py     — DP14 + GZ06 + Ihekwaba multi-publication composite
+    damage_p53_eriq.py    — SaturatingRemoval + GZ06 + ERiQ composition demo
+    stem_cell_niche.py    — Niche deterioration + Sivakumar 2011 crosstalk
+    eriq.py               — ERiQ Energy Restriction in Quiescence (3 Processes)
     saturating_removal.py — Uri Alon damage model
-    neuralode.py       — NeuralODE Process + training infrastructure
+    sasp_mtor.py          — Chronic-stress mTOR activation Process
+    p53_bridge.py         — Tracking-bridge pattern reference
+    kick_event.py         — One-shot perturbation EVENT Process
+    neuralode.py          — NeuralODE Process + training infrastructure
 ```
 
 ---
 
 ## Roadmap
 
-### Done
-
-* [x] Define composability formalisms (Process/Port/Topology/Composite)
-* [x] Semantic validation layer (units, ontology, graph analysis, coupling audit)
-* [x] Multi-timescale Scheduler (Lie splitting, discrete dispatch, event detection)
-* [x] Single-group fast path (one `diffeqsolve` over the full `t_span` when no events/discrete/adaptive_dt/Strang/interpolated)
-* [x] Interpolated coupling mode (dense-output Lie splitting)
-* [x] Strang splitting (symmetric half-step, O(dt²) accuracy)
-* [x] Adaptive macro_dt (PLL-inspired, shrinks on high coupling residual)
-* [x] Native batched-IC support (`Scheduler.run` accepts `(batch, n_vars)` y0 — population studies without external `vmap`)
-* [x] ERiQ decomposed into 3 composable Processes (EnergyMetabolism, OxidativeStress, Signaling)
-* [x] SaturatingRemoval Process (Uri Alon damage model)
-* [x] NeuralODE Process + training infrastructure
-* [x] Hallmark handles v2 (immutable parameter modifier, differentiable)
-* [x] SBML auto-import (`process_from_sbml` via sbmltoodejax)
-* [x] Data validation layer (ssGSEA pathway concordance analysis)
-* [x] PathwayMapper (mechanistic state → 7 ssGSEA pathway scores via multi-input Hill)
-* [x] Held-out validation against GSE248823 (calibrate on DDIS; evaluate on held-out OIS r ≈ 0.90 *and* held-out rapamycin rescue r ≈ +0.50)
-* [x] SASPmTORActivator process (chronic-stress mTORC1 activation; literature-grounded)
-
-### Next — Scheduler & Multi-Scale
+### Scheduler & Multi-Scale
 
 * [ ] Combine Strang splitting + interpolated coupling (currently mutually exclusive)
 * [ ] Event-bearing and adaptive_dt composites under batched `y0` (currently
@@ -446,12 +414,9 @@ src/hallsim/
 
 See [crossgen-suggestions.md](docs/crossgen-suggestions.md) for full analysis.
 
-### Next — Models & Validation
+### Models & Validation
 
-* [x] Sivakumar2011 neural stem cell models (5 SBML, stem cell exhaustion hallmark)
-* [x] StemCellNiche process (niche deterioration → hallmark severity)
-* [x] Validate ERiQ against DDIS bulk transcriptomics (GSE248823) via ssGSEA — held-out r=0.90 across DDIS→OIS arms, plus +0.50 on the held-out rapamycin rescue
-* [ ] **Lipid-metabolism extension** — Tighanimine et al. 2024 (*Nat Metab*, the paper behind GSE248823) identified a G3P/PEtn homeostatic switch as *causal* for senescence (p53 → glycerol kinase activation drives G3P↑; PCYT2 post-translational inactivation drives PEtn↑; lipid droplet biogenesis is the downstream effect). Adding a `LipidMetabolism` Process (states: G3P, PEtn; inputs: `p53_activity`, a PCYT2-PTM proxy; outputs: a senescence-amplifying signal that feeds back into the SASP axis) would let HallSim test their causal claim *in silico* — and the GSE248824 SuperSeries includes the paired metabolomics needed to validate it. Strong follow-up paper: HallSim recapitulates the G3P/PEtn → senescence amplification loop and predicts G3PP/ETNPPL overexpression as senomorphic.
+* [ ] **Lipid-metabolism extension** — Tighanimine et al. 2024 (*Nat Metab*, the paper behind GSE248823) identified a G3P/PEtn homeostatic switch as *causal* for senescence (p53 → glycerol kinase activation drives G3P↑; PCYT2 post-translational inactivation drives PEtn↑; lipid droplet biogenesis is the downstream effect). Adding a `LipidMetabolism` Process (states: G3P, PEtn; inputs: `p53_activity`, a PCYT2-PTM proxy; outputs: a senescence-amplifying signal that feeds back into the SASP axis) would let HallSim test their causal claim *in silico* — and the GSE248824 SuperSeries includes the paired metabolomics needed to validate it. HallSim recapitulates the G3P/PEtn → senescence amplification loop and predicts G3PP/ETNPPL overexpression as senomorphic.
 * [ ] **Trajectory-level validation** — GSE248823 has 3 timepoints per arm (DDIS: D00/D07/D14, OIS: D00/D04/D07). Current concordance uses two-endpoint deltas; matching predicted vs. measured pathway-score *trajectories* (rate of change, time-constant ordering across pathways) would be a substantially stronger validation than scalar deltas.
 * [ ] Validate against scRNA-seq (Tabula Muris Senis, Ma 2020 caloric restriction) — pseudobulk ssGSEA
 * [ ] PINNs: physics-informed loss for NeuralODE training
@@ -480,9 +445,6 @@ with `update(t, state) -> delta` and `ProcessKind.EVENT` with
   (the existing batched-IC machinery already gives the cell axis;
   we just need the key axis alongside it)
 
-Out of scope for the preprint (deterministic ERiQ + p53-Mdm2 covers the
-composability claim) but a concrete next-quarter milestone.
-
 #### Multi-cell / inter-cell communication
 
 Batched y0 currently gives **N independent cells** — every batch element
@@ -509,17 +471,13 @@ as the natural follow-up paper.
 
 #### Other queued items
 
-* [ ] LLM-assisted model composition
+* [ ] LLM agent-assisted model composition
 * [ ] FBA / genome-scale metabolism via `jaxopt`-based LP — couples
   ERiQ signaling state to BiGG-scale flux distributions with gradients
 * [ ] 3D spatial diffusion & ECM modelling
 
-### Next — SBML Import
+### SBML Import
 
-* [x] `process_from_sbml` for deterministic ODE-only SBML (Sivakumar2011 set)
-* [x] `tunable_params` to expose selected SBML constants as INPUT ports — lets a
-  HallSim Process drive an imported model's parameters (e.g. damage signal feeding
-  a DDR model's input)
 * [ ] **Translate SBML events into `ProcessKind.EVENT`** — generic event translator,
   so models with discontinuous state resets (Proctor 2008 BIOMD0000000188 and
   ~10–20% of curated BioModels) become importable. Diffrax 0.5+ already supports

@@ -23,14 +23,24 @@ and Spearman concordance.
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.scheduler import EventRecord, Scheduler, SchedulerResult
+from hallsim.validation import (
+    ComposabilityReport,
+    CompositeValidator,
+    OverlapMatch,
+    analyze_composability,
+)
 
 __all__ = [
+    "ComposabilityReport",
     "Composite",
+    "CompositeValidator",
     "EventRecord",
+    "OverlapMatch",
     "Port",
     "PortRole",
     "Process",
     "ProcessKind",
     "Scheduler",
     "SchedulerResult",
+    "analyze_composability",
 ]

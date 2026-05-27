@@ -83,6 +83,13 @@ GZ06_SBML_PATH = (
     / "zatorsky2006_BIOMD0000000157.xml"
 )
 
+DP14_SBML_PATH = (
+    Path(__file__).parent.parent.parent.parent
+    / "models"
+    / "dallepezze2014"
+    / "dallepezze2014_BIOMD0000000582.xml"
+)
+
 
 def build_damage_p53_eriq_composite(
     *,
@@ -265,5 +272,78 @@ def build_damage_p53_eriq_composite(
     return Composite(
         processes=processes,
         topology=topology,
+        validate=validate,
+    )
+
+
+def build_damage_p53_eriq_dp14_composite(
+    *,
+    alpha: float = 0.05,
+    MDAMAGE_SA: float = 1.0,
+    with_sasp_mtor: bool = True,
+    sasp_k: float = 0.05,
+    rapamycin_strength: float = 0.0,
+    validate: bool = True,
+):
+    """``damage_p53_eriq`` composed with the DallePezze2014 senescence model.
+
+    Merges the existing ERiQ + GZ06 + SASPmTOR composite with
+    BioModels BIOMD0000000582 (DallePezze2014) by sharing three
+    canonical store paths:
+
+    - ``eriq/mTOR_activity`` is the canonical mTOR pool. DP14's
+      ``mTORC1_pS2448`` shares this path so the rapamycin perturbation
+      (which writes to ``eriq/mTOR_activity``) propagates into DP14's
+      downstream signaling, mitophagy regulation, and CDKN1A readout.
+    - ``eriq/ROS_activity`` is the canonical reactive-oxygen pool;
+      DP14's ``ROS`` shares it.
+    - ``eriq/mito_damage`` is the canonical damage pool; DP14's
+      ``DNA_damage`` shares it so DP14's mitophagy-driven turnover can
+      reach the same accumulator ERiQ's oxidative stress writes to.
+
+    All other DP14 state variables (CDKN1A, CDKN1B, Mitophagy,
+    Mito_mass_*, Akt, AMPK, FoxO3a, JNK, IKKbeta, SA_beta_gal, ...)
+    live under the ``dp14/`` prefix and are read by gene-reporter
+    validation as state-level observables.
+
+    Parameters
+    ----------
+    alpha, MDAMAGE_SA, with_sasp_mtor, sasp_k, rapamycin_strength:
+        Forwarded to :func:`build_damage_p53_eriq_composite`.
+    validate:
+        Topology validation. Semantic validation is set explicitly per
+        composite below; the merged composite enables it.
+    """
+    from hallsim.sbml_import import process_from_sbml
+
+    eriq_full = build_damage_p53_eriq_composite(
+        alpha=alpha,
+        MDAMAGE_SA=MDAMAGE_SA,
+        with_sasp_mtor=with_sasp_mtor,
+        sasp_k=sasp_k,
+        rapamycin_strength=rapamycin_strength,
+        validate=validate,
+    )
+
+    dp14_proc = process_from_sbml(
+        str(DP14_SBML_PATH), name="dp14_dallepezze2014"
+    )
+    dp14_ports = list(dp14_proc.ports_schema().keys())
+    dp14 = Composite(
+        processes={"main": dp14_proc},
+        topology={"main": {p: p for p in dp14_ports}},
+        validate=validate,
+        semantic_validation=False,
+    )
+
+    rewire = {
+        "dp14/mTORC1_pS2448": "eriq/mTOR_activity",
+        "dp14/ROS": "eriq/ROS_activity",
+        "dp14/DNA_damage": "eriq/mito_damage",
+    }
+
+    return Composite(
+        processes={"eriq": eriq_full, "dp14": dp14},
+        rewire=rewire,
         validate=validate,
     )

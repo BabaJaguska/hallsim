@@ -19,13 +19,16 @@ import pytest
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process
 from hallsim.validation import (
+    ComposabilityReport,
     CompositeValidator,
     CouplingAuditor,
     GraphAnalyzer,
+    RangeChecker,
     SemanticChecker,
     Severity,
     UnitChecker,
     ValidationReport,
+    analyze_composability,
 )
 
 
@@ -408,6 +411,141 @@ class TestCouplingAuditor:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Range Checker
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestRangeChecker:
+    """Numerical-range compatibility at shared store paths."""
+
+    def _wide(self) -> Process:
+        class HighRange(Process):
+            def ports_schema(self):
+                return {
+                    "x": Port(
+                        role=PortRole.EVOLVED,
+                        default=10.0,
+                        typical_range=(10.0, 100.0),
+                    )
+                }
+
+            def derivative(self, t, state):
+                return {"x": jnp.asarray(0.0)}
+
+        return HighRange()
+
+    def _narrow(self) -> Process:
+        class LowRange(Process):
+            def ports_schema(self):
+                return {
+                    "x": Port(
+                        role=PortRole.INPUT,
+                        default=1.0,
+                        typical_range=(0.0, 2.0),
+                    )
+                }
+
+            def derivative(self, t, state):
+                return {}
+
+        return LowRange()
+
+    def _overlapping(self) -> Process:
+        class MidRange(Process):
+            def ports_schema(self):
+                return {
+                    "x": Port(
+                        role=PortRole.INPUT,
+                        default=5.0,
+                        typical_range=(5.0, 90.0),
+                    )
+                }
+
+            def derivative(self, t, state):
+                return {}
+
+        return MidRange()
+
+    def _unranged(self) -> Process:
+        class NoRange(Process):
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.INPUT, default=5.0)}
+
+            def derivative(self, t, state):
+                return {}
+
+        return NoRange()
+
+    def test_disjoint_ranges_are_error(self):
+        procs = {"big": self._wide(), "small": self._narrow()}
+        topo = {"big": {"x": "shared"}, "small": {"x": "shared"}}
+        results = RangeChecker().check(procs, topo)
+        errors = [r for r in results if r.level == Severity.ERROR]
+        assert len(errors) == 1
+        assert "Disjoint ranges" in errors[0].message
+
+    def test_strong_overlap_is_silent(self):
+        procs = {"big": self._wide(), "mid": self._overlapping()}
+        topo = {"big": {"x": "shared"}, "mid": {"x": "shared"}}
+        results = RangeChecker().check(procs, topo)
+        assert results == []
+
+    def test_weak_overlap_is_warning(self):
+        # Writer [10, 100] vs reader [9, 12]: overlap [10, 12] covers
+        # 67% of the narrow reader range (1.0 * (12-10) / (12-9) ≈ 0.67)
+        # — above the 25% threshold, so silent. Tighten the reader to
+        # force a weak overlap.
+        # Reader [8, 13], writer [12, 200]: overlap=[12,13]=1 unit,
+        # min(reader_span=5, writer_span=188)=5, frac=1/5=0.20 < 0.25
+        # → weak-overlap warning.
+        class TightReader(Process):
+            def ports_schema(self):
+                return {
+                    "x": Port(
+                        role=PortRole.INPUT,
+                        default=10.5,
+                        typical_range=(8.0, 13.0),
+                    )
+                }
+
+            def derivative(self, t, state):
+                return {}
+
+        class BroadWriter(Process):
+            def ports_schema(self):
+                return {
+                    "x": Port(
+                        role=PortRole.EVOLVED,
+                        default=12.0,
+                        typical_range=(12.0, 200.0),
+                    )
+                }
+
+            def derivative(self, t, state):
+                return {"x": jnp.asarray(0.0)}
+
+        procs = {"big": BroadWriter(), "tight": TightReader()}
+        topo = {"big": {"x": "shared"}, "tight": {"x": "shared"}}
+        results = RangeChecker().check(procs, topo)
+        warnings = [r for r in results if r.level == Severity.WARNING]
+        assert len(warnings) == 1
+        assert "Weak range overlap" in warnings[0].message
+
+    def test_ports_without_range_are_skipped(self):
+        procs = {"big": self._wide(), "unranged": self._unranged()}
+        topo = {"big": {"x": "shared"}, "unranged": {"x": "shared"}}
+        # Only one of the two declares a range → fewer than 2 ranged
+        # ports at the path → no check fires.
+        assert RangeChecker().check(procs, topo) == []
+
+    def test_single_writer_is_skipped(self):
+        procs = {"big": self._wide()}
+        topo = {"big": {"x": "shared"}}
+        # Only one port at the path → nothing to compare against.
+        assert RangeChecker().check(procs, topo) == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # CompositeValidator (orchestrator)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -508,3 +646,196 @@ class TestCompositeIntegration:
                 x for x in w if "Semantic validation" in str(x.message)
             ]
             assert len(sem_warnings) >= 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Composite-of-composites: merging sub-composites via the constructor
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestSubCompositeFlattening:
+    """Composite.__init__ accepts other Composites as values inside its
+    processes dict and flattens them with namespace prefixes."""
+
+    def _inner_uM(self) -> Composite:
+        return Composite(
+            processes={"prod": ROSProducerMicromolar()},
+            topology={"prod": {"ros": "pool/ros"}},
+            semantic_validation=False,
+        )
+
+    def _inner_nM(self) -> Composite:
+        return Composite(
+            processes={"prod": ROSProducerNanomolar()},
+            topology={"prod": {"ros": "pool/ros"}},
+            semantic_validation=False,
+        )
+
+    def test_two_disjoint_subcomposites_merge_cleanly(self):
+        merged = Composite(
+            processes={"a": self._inner_uM(), "b": self._inner_nM()},
+            semantic_validation=False,
+        )
+        assert set(merged.processes) == {"a.prod", "b.prod"}
+        assert merged.topology["a.prod"] == {"ros": "a/pool/ros"}
+        assert merged.topology["b.prod"] == {"ros": "b/pool/ros"}
+        assert set(merged.store_paths()) == {"a/pool/ros", "b/pool/ros"}
+
+    def test_rewire_merges_overlapping_paths(self):
+        merged = Composite(
+            processes={"a": self._inner_uM(), "b": self._inner_nM()},
+            rewire={"b/pool/ros": "a/pool/ros"},
+            semantic_validation=False,
+        )
+        # Both inner processes now write to the same canonical path.
+        assert merged.topology["a.prod"]["ros"] == "a/pool/ros"
+        assert merged.topology["b.prod"]["ros"] == "a/pool/ros"
+        assert merged.store_paths() == {"a/pool/ros"}
+
+    def test_subcomposite_with_incompatible_units_raises_on_merge(self):
+        """Inner composites validate fine individually; merging onto one
+        canonical path surfaces the unit conflict at merge time."""
+        kg_inner = Composite(
+            processes={"prod": ROSProducerKilograms()},
+            topology={"prod": {"ros": "pool/ros"}},
+            semantic_validation=False,
+        )
+        with pytest.raises(ValueError, match="Semantic validation failed"):
+            Composite(
+                processes={"a": self._inner_uM(), "b": kg_inner},
+                rewire={"b/pool/ros": "a/pool/ros"},
+            )
+
+    def test_path_already_prefixed_is_not_double_prefixed(self):
+        """Idempotence: a sub-composite that already prefixes its paths
+        with its outer key is not prefixed twice."""
+        pre_namespaced = Composite(
+            processes={"prod": ROSProducerMicromolar()},
+            topology={"prod": {"ros": "a/pool/ros"}},
+            semantic_validation=False,
+        )
+        merged = Composite(
+            processes={"a": pre_namespaced},
+            semantic_validation=False,
+        )
+        assert merged.topology["a.prod"]["ros"] == "a/pool/ros"
+
+    def test_mixed_process_and_composite_values(self):
+        """A raw Process can sit alongside a Composite; the Process uses
+        the caller-supplied topology arg."""
+        merged = Composite(
+            processes={
+                "a": self._inner_uM(),
+                "extra": ROSProducerMicromolar(),
+            },
+            topology={"extra": {"ros": "a/pool/ros"}},
+            semantic_validation=False,
+        )
+        assert set(merged.processes) == {"a.prod", "extra"}
+        assert merged.topology["extra"]["ros"] == "a/pool/ros"
+
+    def test_unknown_value_type_raises_typeerror(self):
+        with pytest.raises(TypeError, match="must be a Process or Composite"):
+            Composite(processes={"bogus": 42})  # type: ignore[dict-item]
+
+    def test_process_name_collision_raises(self):
+        """Two raw Processes can't share the same outer name."""
+        with pytest.raises(ValueError, match="name collision"):
+            Composite(
+                processes={
+                    "x": ROSProducerMicromolar(),
+                    # Same outer key reused — dict literal can't, but
+                    # we simulate by using a sub-composite that produces
+                    # the same merged name as a Process.
+                },
+                topology={"x": {"ros": "pool/ros"}},
+            ) and Composite(
+                processes={
+                    "x": Composite(
+                        processes={"x": ROSProducerMicromolar()},
+                        topology={"x": {"ros": "pool/ros"}},
+                        semantic_validation=False,
+                    ),
+                    "x.x": ROSProducerMicromolar(),
+                },
+                topology={"x.x": {"ros": "pool/ros"}},
+                semantic_validation=False,
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# analyze_composability — cross-composite overlap discovery
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAnalyzeComposability:
+    """Surfacing candidate overlaps across composites before merging."""
+
+    def _ros_with_ontology(self) -> Composite:
+        return Composite(
+            processes={"prod": ROSProducerMicromolar()},  # has chebi ontology
+            topology={"prod": {"ros": "pool/ros"}},
+            semantic_validation=False,
+        )
+
+    def _ros_named_only(self) -> Composite:
+        return Composite(
+            processes={"prod": BareProducer()},  # no ontology on port
+            topology={"prod": {"x": "pool/ros"}},
+            semantic_validation=False,
+        )
+
+    def test_no_composites_returns_empty_report(self):
+        report = analyze_composability()
+        assert isinstance(report, ComposabilityReport)
+        assert report.matches == ()
+        assert report.suggested_rewire == {}
+
+    def test_single_composite_returns_empty_report(self):
+        report = analyze_composability(only=self._ros_with_ontology())
+        assert report.matches == ()
+        assert report.suggested_rewire == {}
+
+    def test_ontology_match_is_high_confidence(self):
+        report = analyze_composability(
+            eriq=self._ros_with_ontology(),
+            dp14=self._ros_with_ontology(),
+        )
+        assert len(report.matches) == 1
+        match = report.matches[0]
+        assert match.method == "ontology_id"
+        assert match.confidence >= 0.9
+        assert match.path_a == "eriq/pool/ros"
+        assert match.path_b == "dp14/pool/ros"
+
+    def test_exact_name_match_when_no_ontology(self):
+        report = analyze_composability(
+            eriq=self._ros_named_only(),
+            dp14=self._ros_named_only(),
+        )
+        assert len(report.matches) == 1
+        assert report.matches[0].method == "exact_name"
+        assert 0.7 <= report.matches[0].confidence < 0.95
+
+    def test_suggested_rewire_picks_first_kwarg_as_canonical(self):
+        report = analyze_composability(
+            eriq=self._ros_with_ontology(),
+            dp14=self._ros_with_ontology(),
+        )
+        # eriq comes first → canonical
+        assert report.suggested_rewire == {"dp14/pool/ros": "eriq/pool/ros"}
+
+    def test_suggested_rewire_directly_usable_in_composite_merge(self):
+        """End-to-end: analyzer suggestion → Composite rewire kwarg."""
+        eriq = self._ros_with_ontology()
+        dp14 = self._ros_with_ontology()
+        report = analyze_composability(eriq=eriq, dp14=dp14)
+        merged = Composite(
+            processes={"eriq": eriq, "dp14": dp14},
+            rewire=report.suggested_rewire,
+            semantic_validation=False,
+        )
+        # Both writers now collapsed onto the canonical path
+        assert merged.topology["eriq.prod"]["ros"] == "eriq/pool/ros"
+        assert merged.topology["dp14.prod"]["ros"] == "eriq/pool/ros"
+        assert merged.store_paths() == {"eriq/pool/ros"}

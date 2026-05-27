@@ -36,7 +36,9 @@ class TestForwardMode:
         assert isinstance(history, CalibrationHistory)
         assert history.losses[-1] < 1e-3
         assert float(history.final_params["a"]) == pytest.approx(1.5, abs=0.05)
-        assert float(history.final_params["b"]) == pytest.approx(-0.7, abs=0.05)
+        assert float(history.final_params["b"]) == pytest.approx(
+            -0.7, abs=0.05
+        )
 
     def test_clamping_respected(self):
         """Clamps should hold parameters inside the box even if the
@@ -89,12 +91,18 @@ class TestReverseMode:
 
         init = {"a": jnp.asarray(0.0), "b": jnp.asarray(0.0)}
         cal_f = Calibrator(
-            loss_fn=loss, init_params=init, mode="forward",
-            learning_rate=0.1, verbose=False,
+            loss_fn=loss,
+            init_params=init,
+            mode="forward",
+            learning_rate=0.1,
+            verbose=False,
         )
         cal_r = Calibrator(
-            loss_fn=loss, init_params=init, mode="reverse",
-            learning_rate=0.1, verbose=False,
+            loss_fn=loss,
+            init_params=init,
+            mode="reverse",
+            learning_rate=0.1,
+            verbose=False,
         )
         h_f = cal_f.fit(steps=100)
         h_r = cal_r.fit(steps=100)

@@ -147,9 +147,7 @@ class Calibrator:
 
         primal = f_flat(flat)
         eye = jnp.eye(flat.shape[0], dtype=flat.dtype)
-        _, grad_flat = jax.vmap(
-            lambda v: jax.jvp(f_flat, (flat,), (v,))
-        )(eye)
+        _, grad_flat = jax.vmap(lambda v: jax.jvp(f_flat, (flat,), (v,)))(eye)
         return primal, unravel(grad_flat)
 
     # ── Clamping ───────────────────────────────────────────────
@@ -186,9 +184,7 @@ class Calibrator:
             history.losses.append(float(loss))
             history.param_history.append(params)
             if self.verbose and (s % self.log_every == 0 or s == steps - 1):
-                msg = (
-                    f"  [{s+1:3d}/{steps}] loss = {float(loss):.4g}"
-                )
+                msg = f"  [{s+1:3d}/{steps}] loss = {float(loss):.4g}"
                 if isinstance(params, dict):
                     # Show the first 4 scalar keys for compactness.
                     pieces = [

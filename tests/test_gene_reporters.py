@@ -35,9 +35,10 @@ class TestReporterTable:
 
     def test_all_signs_are_plus_or_minus_one(self):
         for r in CANONICAL_REPORTERS:
-            assert r.sign in (+1, -1), (
-                f"{r.observable}: sign {r.sign} must be ±1"
-            )
+            assert r.sign in (
+                +1,
+                -1,
+            ), f"{r.observable}: sign {r.sign} must be ±1"
 
     def test_all_reporters_have_references(self):
         for r in CANONICAL_REPORTERS:
@@ -46,13 +47,15 @@ class TestReporterTable:
 
     def test_observables_unique(self):
         obs = [r.observable for r in CANONICAL_REPORTERS]
-        assert len(obs) == len(set(obs)), "duplicate observable in reporter table"
+        assert len(obs) == len(
+            set(obs)
+        ), "duplicate observable in reporter table"
 
     def test_genes_unique(self):
         genes = [r.gene_symbol for r in CANONICAL_REPORTERS]
-        assert len(genes) == len(set(genes)), (
-            "duplicate gene symbol in reporter table"
-        )
+        assert len(genes) == len(
+            set(genes)
+        ), "duplicate gene symbol in reporter table"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -231,8 +234,6 @@ class TestLog2FoldChange:
         assert lfc["GENE_B"] == pytest.approx(1.0)
 
     def test_negative_change(self):
-        df = pd.DataFrame(
-            {"s": [2.0], "ctrl": [4.0]}, index=["GENE_A"]
-        )
+        df = pd.DataFrame({"s": [2.0], "ctrl": [4.0]}, index=["GENE_A"])
         lfc = log2_fold_change(df, ["s"], ["ctrl"])
         assert lfc["GENE_A"] == pytest.approx(-2.0)

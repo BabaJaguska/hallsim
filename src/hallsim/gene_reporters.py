@@ -195,11 +195,13 @@ def load_gene_expression(
     with open(series_matrix_path) as f:
         lines = f.readlines()
     start = next(
-        i for i, ln in enumerate(lines)
+        i
+        for i, ln in enumerate(lines)
         if ln.startswith("!series_matrix_table_begin")
     )
     end = next(
-        i for i, ln in enumerate(lines)
+        i
+        for i, ln in enumerate(lines)
         if ln.startswith("!series_matrix_table_end")
     )
     expr = pd.read_csv(
@@ -210,9 +212,7 @@ def load_gene_expression(
         quotechar='"',
     ).dropna(how="all")
 
-    plat = pd.read_csv(
-        platform_path, sep="\t", comment="#", low_memory=False
-    )
+    plat = pd.read_csv(platform_path, sep="\t", comment="#", low_memory=False)
     probe_to_gene: dict[str, str] = {}
     for probe, raw in zip(plat["ID"], plat["gene_assignment"].fillna("")):
         if not raw or raw == "---":
@@ -244,9 +244,8 @@ def log2_fold_change(
     Microarray series-matrix values are already log2-scaled, so this is a
     mean-difference computation.
     """
-    return (
-        gene_expr[group_cols].mean(axis=1)
-        - gene_expr[baseline_cols].mean(axis=1)
+    return gene_expr[group_cols].mean(axis=1) - gene_expr[baseline_cols].mean(
+        axis=1
     )
 
 

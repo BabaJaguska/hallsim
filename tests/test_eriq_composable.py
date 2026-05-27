@@ -94,10 +94,11 @@ class TestERiQOxidativeStress:
     def test_ports(self):
         proc = ERiQOxidativeStress()
         schema = proc.ports_schema()
-        exclusive = {
-            k for k, v in schema.items() if v.role == PortRole.EXCLUSIVE
-        }
-        assert exclusive == {"mito_damage", "ROS_integrator_c", "ROS_activity"}
+        # mito_damage, ROS_integrator_c, and ROS_activity are EVOLVED so
+        # the DallePezze2014 mitophagy/turnover module can additively
+        # contribute to the same canonical paths when composed.
+        evolved = {k for k, v in schema.items() if v.role == PortRole.EVOLVED}
+        assert {"mito_damage", "ROS_integrator_c", "ROS_activity"} <= evolved
 
     def test_derivative_finite(self):
         proc = ERiQOxidativeStress()

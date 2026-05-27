@@ -508,22 +508,23 @@ class ERiQOxidativeStress(Process):
 
     def ports_schema(self):
         return {
-            # EXCLUSIVE
+            # EVOLVED — other processes (e.g. DallePezze2014 mitophagy/turnover)
+            # may contribute additively to the same canonical paths.
             "mito_damage": Port(
-                role=PortRole.EXCLUSIVE,
+                role=PortRole.EVOLVED,
                 default=0.0724,
                 units="dimensionless",
                 description="Mitochondrial structural damage",
                 ontology={"go": "GO:0000422"},  # mitochondrion degradation
             ),
             "ROS_integrator_c": Port(
-                role=PortRole.EXCLUSIVE,
+                role=PortRole.EVOLVED,
                 default=-0.7944,
                 units="dimensionless",
                 description="ROS regulatory feedback integrator (Cz)",
             ),
             "ROS_activity": Port(
-                role=PortRole.EXCLUSIVE,
+                role=PortRole.EVOLVED,
                 default=0.0794,
                 units="dimensionless",
                 description="ROS activity level (Az); ROS = 10 * ROS_SA * Az",

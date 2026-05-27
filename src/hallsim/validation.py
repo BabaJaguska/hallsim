@@ -550,6 +550,98 @@ class CouplingAuditor:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Subsystem 5: Range Checker
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _overlap(
+    a: tuple[float, float], b: tuple[float, float]
+) -> tuple[float, float] | None:
+    """Intersection of two closed intervals, or ``None`` if disjoint."""
+    lo = max(a[0], b[0])
+    hi = min(a[1], b[1])
+    return (lo, hi) if lo <= hi else None
+
+
+class RangeChecker:
+    """Validates that ports sharing a store path operate over compatible
+    numerical ranges.
+
+    Same-unit ports can still be numerically incompatible — e.g., a
+    writer producing ``[10, 100]`` (dimensionless) feeding a reader
+    calibrated for ``[0, 2]`` (dimensionless). The unit checker passes
+    this; this checker catches it. Each port may declare a
+    ``typical_range`` on its :class:`Port` object; ports without a
+    declared range are skipped silently.
+
+    - ERROR: declared ranges at the same store path are entirely
+      disjoint — feeding one into the other will drive the receiver
+      out of its calibrated operating regime.
+    - WARNING: ranges overlap but the smaller range covers less than
+      ``min_overlap_fraction`` of the larger one — partial mismatch
+      that may still mis-scale the coupling.
+    """
+
+    min_overlap_fraction: float = 0.25
+
+    def check(
+        self,
+        processes: dict[str, Process],
+        topology: dict[str, dict[str, str]],
+    ) -> list[ValidationResult]:
+        results: list[ValidationResult] = []
+        spm = _store_port_map(processes, topology)
+
+        for store_path, entries in spm.items():
+            ranged = [
+                e
+                for e in entries
+                if getattr(e.port, "typical_range", None) is not None
+            ]
+            if len(ranged) < 2:
+                continue
+            for i, e1 in enumerate(ranged):
+                r1 = e1.port.typical_range
+                for e2 in ranged[i + 1 :]:
+                    r2 = e2.port.typical_range
+                    overlap = _overlap(r1, r2)
+                    if overlap is None:
+                        results.append(
+                            ValidationResult(
+                                Severity.ERROR,
+                                "ranges",
+                                f"Disjoint ranges at {store_path!r}: "
+                                f"{e1.proc_name}.{e1.port_name}={r1} vs "
+                                f"{e2.proc_name}.{e2.port_name}={r2}. "
+                                f"Feeding one into the other will drive "
+                                f"the receiver out of its calibrated "
+                                f"regime — add a rescaling bridge or "
+                                f"recalibrate.",
+                            )
+                        )
+                        continue
+                    span_overlap = overlap[1] - overlap[0]
+                    span_min = min(r1[1] - r1[0], r2[1] - r2[0])
+                    if span_min > 0:
+                        frac = span_overlap / span_min
+                        if frac < self.min_overlap_fraction:
+                            results.append(
+                                ValidationResult(
+                                    Severity.WARNING,
+                                    "ranges",
+                                    f"Weak range overlap at "
+                                    f"{store_path!r}: "
+                                    f"{e1.proc_name}.{e1.port_name}={r1} "
+                                    f"vs {e2.proc_name}.{e2.port_name}"
+                                    f"={r2} (overlap covers "
+                                    f"{frac:.0%} of the smaller range). "
+                                    f"Consider a bridge transform.",
+                                )
+                            )
+        return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Orchestrator
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -567,6 +659,8 @@ class CompositeValidator:
         Run interaction graph analysis (cycles, fan-in, density).
     check_coupling:
         Run description-overlap coupling auditor.
+    check_ranges:
+        Run numerical-range compatibility analysis at shared store paths.
     strict:
         If ``True``, promote all warnings to errors.
     """
@@ -577,6 +671,7 @@ class CompositeValidator:
         check_semantics: bool = True,
         check_graph: bool = True,
         check_coupling: bool = True,
+        check_ranges: bool = True,
         strict: bool = False,
     ) -> None:
         self.checkers: list[Any] = []
@@ -590,6 +685,8 @@ class CompositeValidator:
             self.checkers.append(self._graph_analyzer)
         if check_coupling:
             self.checkers.append(CouplingAuditor())
+        if check_ranges:
+            self.checkers.append(RangeChecker())
         self.strict = strict
 
     def validate(
@@ -629,3 +726,193 @@ class CompositeValidator:
             graph_data = self._graph_analyzer.to_dict(processes, topology)
 
         return ValidationReport(results=results, interaction_graph=graph_data)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Cross-composite overlap discovery
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class OverlapMatch:
+    """One candidate biological overlap between two composites.
+
+    ``path_a`` and ``path_b`` are the *flat* store paths each variable
+    would occupy after merging — i.e., already prefixed with each
+    composite's kwarg name. ``confidence`` reports how strongly the
+    match is supported (``ontology_id`` > ``exact_name`` > ``name_fuzzy``).
+    """
+
+    composite_a: str
+    path_a: str
+    composite_b: str
+    path_b: str
+    confidence: float
+    method: str  # "ontology_id" | "exact_name" | "name_fuzzy"
+
+
+@dataclass(frozen=True)
+class ComposabilityReport:
+    """Output of :func:`analyze_composability`.
+
+    ``suggested_rewire`` is ready to pass directly to ``Composite(...)``'s
+    ``rewire`` kwarg. The convention is: the first composite (by kwarg
+    order) wins as canonical; non-canonical paths get remapped onto it.
+    Override freely — the report is advisory.
+    """
+
+    matches: tuple[OverlapMatch, ...]
+    suggested_rewire: dict[str, str]
+
+    def __str__(self) -> str:
+        if not self.matches:
+            return "No overlaps detected across composites."
+        lines = [
+            f"Composability: {len(self.matches)} overlap(s) detected.",
+            f"  {'method':<14} {'conf':>5}  source  →  target",
+        ]
+        for m in sorted(self.matches, key=lambda x: (-x.confidence, x.path_a)):
+            lines.append(
+                f"  {m.method:<14} {m.confidence:>5.2f}  "
+                f"{m.path_a!r:<32} →  {m.path_b!r}"
+            )
+        if self.suggested_rewire:
+            lines.append("")
+            lines.append("Suggested rewire:")
+            for k, v in self.suggested_rewire.items():
+                lines.append(f"  {k!r:<32} →  {v!r}")
+        return "\n".join(lines)
+
+
+@dataclass
+class _OverlapEntry:
+    """One port universe entry — what a path would look like after merging."""
+
+    composite: str
+    flat_path: str
+    naked: str  # flat_path with the composite's outer prefix removed
+    last_segment: str
+    ontology: dict[str, str]
+
+
+def _match_score(a: _OverlapEntry, b: _OverlapEntry) -> tuple[float, str]:
+    """Return ``(confidence, method)`` for two port entries, or
+    ``(0.0, "")`` if no plausible overlap.
+
+    Priority: ontology ID match > exact naked-name match > substring
+    match on the last path segment. Substring rule requires the shorter
+    string to be at least 4 characters to avoid spurious matches on
+    short biological identifiers like ``Akt`` vs ``Akr1``.
+    """
+    if a.ontology and b.ontology:
+        for k, v in a.ontology.items():
+            if v and b.ontology.get(k) == v:
+                return (0.95, "ontology_id")
+    if a.naked and a.naked == b.naked:
+        return (0.75, "exact_name")
+    la, lb = a.last_segment.lower(), b.last_segment.lower()
+    if la and lb and la != lb:
+        shorter, longer = (la, lb) if len(la) <= len(lb) else (lb, la)
+        if len(shorter) >= 4 and shorter in longer:
+            return (0.4, "name_fuzzy")
+    return (0.0, "")
+
+
+def _build_overlap_universe(name: str, composite) -> list[_OverlapEntry]:
+    """Build the list of overlap-candidate entries for one composite.
+
+    Each unique store path in the composite produces one entry, prefixed
+    as ``<name>/`` to match what merging through ``Composite(...)`` would
+    produce. Ontology annotations are taken from the first port at each
+    path (sufficient for matching; downstream validation surfaces any
+    conflicts among multiple ports at the same path).
+    """
+    prefix = f"{name}/"
+    spm = _store_port_map(composite.processes, composite.topology)
+    entries: list[_OverlapEntry] = []
+    seen: set[str] = set()
+    for path, port_entries in spm.items():
+        flat = path if path.startswith(prefix) else prefix + path
+        if flat in seen:
+            continue
+        seen.add(flat)
+        port = port_entries[0].port
+        naked = flat[len(prefix) :]
+        last_seg = naked.rsplit("/", 1)[-1]
+        entries.append(
+            _OverlapEntry(
+                composite=name,
+                flat_path=flat,
+                naked=naked,
+                last_segment=last_seg,
+                ontology=dict(port.ontology) if port.ontology else {},
+            )
+        )
+    return entries
+
+
+def analyze_composability(**composites) -> ComposabilityReport:
+    """Find candidate biological overlaps across two or more composites.
+
+    Pass composites as kwargs — the kwarg name becomes the namespace
+    prefix that :class:`hallsim.composite.Composite` will apply when
+    merging::
+
+        report = analyze_composability(eriq=eriq_comp, dp14=dp14_comp)
+        print(report)
+        merged = Composite(
+            processes={"eriq": eriq_comp, "dp14": dp14_comp},
+            rewire=report.suggested_rewire,
+        )
+
+    Matching uses three strategies in priority order: shared ontology IDs
+    on the ports (highest confidence), exact name match after stripping
+    the namespace prefix, then substring match on the last path segment
+    (heuristic — surfaces candidates, never auto-applied without human
+    or agent confirmation).
+
+    The first composite (by kwarg order) wins as canonical in
+    ``suggested_rewire``; later composites' paths are remapped onto it.
+    """
+    if len(composites) < 2:
+        return ComposabilityReport(matches=(), suggested_rewire={})
+
+    composite_names = list(composites.keys())
+    universe = {
+        name: _build_overlap_universe(name, composites[name])
+        for name in composite_names
+    }
+
+    matches: list[OverlapMatch] = []
+    for i, name_a in enumerate(composite_names):
+        for name_b in composite_names[i + 1 :]:
+            for ea in universe[name_a]:
+                for eb in universe[name_b]:
+                    confidence, method = _match_score(ea, eb)
+                    if confidence > 0:
+                        matches.append(
+                            OverlapMatch(
+                                composite_a=name_a,
+                                path_a=ea.flat_path,
+                                composite_b=name_b,
+                                path_b=eb.flat_path,
+                                confidence=confidence,
+                                method=method,
+                            )
+                        )
+
+    # Build suggested rewire: each non-canonical path gets its highest-
+    # confidence canonical (first composite in kwarg order). When the
+    # same non-canonical path appears in multiple matches, the highest
+    # confidence wins.
+    rewire_picks: dict[str, tuple[float, str]] = {}
+    for m in matches:
+        prev = rewire_picks.get(m.path_b)
+        if prev is None or m.confidence > prev[0]:
+            rewire_picks[m.path_b] = (m.confidence, m.path_a)
+    suggested_rewire = {k: v[1] for k, v in rewire_picks.items()}
+
+    return ComposabilityReport(
+        matches=tuple(matches),
+        suggested_rewire=suggested_rewire,
+    )

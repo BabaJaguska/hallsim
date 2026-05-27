@@ -179,8 +179,7 @@ def _precheck_sbml_supported(xml_path: str) -> list[str]:
     n_events = model.getNumEvents()
     if n_events > 0:
         ids = [
-            model.getEvent(i).getId() or "<unnamed>"
-            for i in range(n_events)
+            model.getEvent(i).getId() or "<unnamed>" for i in range(n_events)
         ]
         issues.append(
             f"contains {n_events} <event> element(s) "
@@ -254,6 +253,7 @@ class SBMLProcess(Process):
 
     _species_names: tuple[str, ...] = ()
     _species_y0: tuple[float, ...] = ()
+    _species_ontology: tuple[dict[str, str], ...] = ()
     _model: Any = None  # sbmltoodejax model object
     _w0: Any = None
     _c: Any = None
@@ -261,6 +261,13 @@ class SBMLProcess(Process):
     _tunable_params: tuple[str, ...] = ()
     _tunable_param_indexes: tuple[int, ...] = ()
     _tunable_param_defaults: tuple[float, ...] = ()
+    # parameter_overrides is a dict-of-floats field consumed via
+    # eqx.tree_at by the hallmark machinery. Each key is an SBML
+    # constant name (must exist in the model's c_indexes); values are
+    # substituted into the `c` array at derivative time. This is how
+    # a HallmarkHandle parameterises a specific SBML rate constant.
+    parameter_overrides: dict[str, float] = None  # type: ignore[assignment]
+    _override_indexes: tuple[int, ...] = ()
 
     def ports_schema(self):
         ports = {
@@ -269,8 +276,13 @@ class SBMLProcess(Process):
                 default=float(y0),
                 units="dimensionless",
                 description=f"SBML species: {name}",
+                ontology=dict(ont) if ont else {},
             )
-            for name, y0 in zip(self._species_names, self._species_y0)
+            for name, y0, ont in zip(
+                self._species_names,
+                self._species_y0,
+                self._species_ontology or ({},) * len(self._species_names),
+            )
         }
         for name, default in zip(
             self._tunable_params, self._tunable_param_defaults
@@ -303,23 +315,34 @@ class SBMLProcess(Process):
         # traced value, so this is JIT-safe.
         is_batched = y.ndim > 1
 
-        if self._tunable_params:
-            if is_batched:
-                # Build per-batch c by broadcasting then writing the
-                # tunable slots from the (batched) port values.
-                c = jnp.broadcast_to(self._c, y.shape[:-1] + self._c.shape)
-                for name, idx in zip(
-                    self._tunable_params, self._tunable_param_indexes
-                ):
-                    c = c.at[..., idx].set(state[name])
-            else:
-                c = self._c
-                for name, idx in zip(
-                    self._tunable_params, self._tunable_param_indexes
-                ):
-                    c = c.at[idx].set(state[name])
+        # Build the constants vector. Two override sources stack here:
+        # parameter_overrides (static, hallmark-driven) is applied first,
+        # then tunable_params (dynamic, state-driven). State-driven
+        # values win when a name appears in both — most recent
+        # substitution dominates.
+        needs_batched_c = is_batched and self._tunable_params
+        if needs_batched_c:
+            c = jnp.broadcast_to(self._c, y.shape[:-1] + self._c.shape)
         else:
             c = self._c
+
+        if self.parameter_overrides and self._override_indexes:
+            override_names = tuple(self.parameter_overrides.keys())
+            for name, idx in zip(override_names, self._override_indexes):
+                value = self.parameter_overrides[name]
+                if needs_batched_c:
+                    c = c.at[..., idx].set(value)
+                else:
+                    c = c.at[idx].set(value)
+
+        if self._tunable_params:
+            for name, idx in zip(
+                self._tunable_params, self._tunable_param_indexes
+            ):
+                if needs_batched_c:
+                    c = c.at[..., idx].set(state[name])
+                else:
+                    c = c.at[idx].set(state[name])
 
         if is_batched:
             # vmap ratefunc and (if present) the batched c along axis 0.
@@ -405,6 +428,51 @@ def _download_biomodel_to_cache(model_id) -> str:
         with open(cache_path, "w") as f:
             f.write(xml)
     return cache_path
+
+
+def _extract_species_ontology(xml_path: str) -> dict[str, dict[str, str]]:
+    """Pull MIRIAM identifier URIs from each species' annotation block.
+
+    SBML curators annotate species with controlled-vocabulary URIs that
+    point to entries in registries like UniProt, ChEBI, GO, SBO, and
+    Reactome — the canonical form is
+    ``http(s)://identifiers.org/<namespace>/<id>``. This function reads
+    every species' CVTerm resources, parses the URIs, and returns a
+    ``{species_id: {namespace: id}}`` mapping suitable for populating
+    :attr:`hallsim.process.Port.ontology`. The first URI seen per
+    namespace wins when a species has multiple resources in the same
+    collection.
+
+    Species without parseable annotations get an empty dict. Returns an
+    empty mapping if libsbml cannot parse the file.
+    """
+    import re
+
+    import libsbml
+
+    pattern = re.compile(r"https?://identifiers\.org/([^/]+)/(.+)$")
+
+    reader = libsbml.SBMLReader()
+    doc = reader.readSBMLFromFile(str(xml_path))
+    model = doc.getModel()
+    if model is None:
+        return {}
+
+    result: dict[str, dict[str, str]] = {}
+    for i in range(model.getNumSpecies()):
+        sp = model.getSpecies(i)
+        sp_id = sp.getId()
+        ontology: dict[str, str] = {}
+        for j in range(sp.getNumCVTerms()):
+            cv = sp.getCVTerm(j)
+            for k in range(cv.getNumResources()):
+                uri = cv.getResourceURI(k)
+                match = pattern.match(uri)
+                if match:
+                    namespace, identifier = match.group(1), match.group(2)
+                    ontology.setdefault(namespace, identifier)
+        result[sp_id] = ontology
+    return result
 
 
 def _load_local_sbml(sbml_path: str):
@@ -494,6 +562,7 @@ def process_from_sbml(
     name: str | None = None,
     timescale: float | None = None,
     tunable_params: tuple[str, ...] = (),
+    parameter_overrides: dict[str, float] | None = None,
 ) -> SBMLProcess:
     """Load an SBML model and wrap it as a Process.
 
@@ -517,6 +586,16 @@ def process_from_sbml(
         mechanism for letting an upstream HallSim Process drive a
         constant of an imported SBML model (e.g. damage signal driving a
         DDR model's input).
+    parameter_overrides:
+        Optional ``{c_name: initial_value}`` dict exposing specific
+        SBML constants as a single :attr:`SBMLProcess.parameter_overrides`
+        eqx field. Each name must exist in ``c_indexes``. Substitution
+        is static (not state-driven): the value comes from the field at
+        derivative time, so :class:`hallsim.hallmarks.HallmarkHandle`
+        can target it via ``param_name="parameter_overrides.<c_name>"``
+        and update it through ``eqx.tree_at``. If both ``tunable_params``
+        and ``parameter_overrides`` reference the same constant, the
+        state-driven (tunable) value wins.
 
     Returns
     -------
@@ -527,7 +606,8 @@ def process_from_sbml(
     ImportError
         If ``sbmltoodejax`` is not installed.
     KeyError
-        If any name in ``tunable_params`` is not a constant in the SBML model.
+        If any name in ``tunable_params`` or ``parameter_overrides`` is
+        not a constant in the SBML model.
     """
     try:
         import sbmltoodejax  # noqa: F401  (only checking availability)
@@ -573,13 +653,20 @@ def process_from_sbml(
     species_ordered = sorted(y_indexes.items(), key=lambda x: x[1])
     species_names = tuple(name for name, _ in species_ordered)
 
+    # MIRIAM annotations on each species → Port.ontology, so the
+    # composability analyzer can detect shared biology across imported
+    # SBML models by their identifiers.org references.
+    ontology_map = _extract_species_ontology(xml_path)
+    species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
+
     log.info(f"Loaded {len(species_names)} species: {species_names}")
 
-    # Resolve tunable params against the model's c_indexes
+    # Resolve any name-indexed accesses against the model's c_indexes.
+    c_indexes = getattr(
+        getattr(model, "modelstepfunc", model), "c_indexes", None
+    ) or getattr(model, "c_indexes", None)
+
     if tunable_params:
-        c_indexes = getattr(
-            getattr(model, "modelstepfunc", model), "c_indexes", None
-        ) or getattr(model, "c_indexes", None)
         if c_indexes is None:
             raise AttributeError(
                 f"Cannot expose tunable params: model has no c_indexes "
@@ -597,6 +684,26 @@ def process_from_sbml(
         tunable_indexes = ()
         tunable_defaults = ()
 
+    if parameter_overrides:
+        if c_indexes is None:
+            raise AttributeError(
+                f"Cannot expose parameter overrides: model has no "
+                f"c_indexes ({type(model).__name__})"
+            )
+        missing = [p for p in parameter_overrides if p not in c_indexes]
+        if missing:
+            raise KeyError(
+                f"parameter_overrides {missing} not found in SBML "
+                f"constants. Available: {sorted(c_indexes.keys())}"
+            )
+        override_dict = {
+            n: float(parameter_overrides[n]) for n in parameter_overrides
+        }
+        override_indexes = tuple(c_indexes[n] for n in parameter_overrides)
+    else:
+        override_dict = {}
+        override_indexes = ()
+
     proc = object.__new__(SBMLProcess)
     # Set fields directly (bypassing __init__ since this is a dynamic construction)
     object.__setattr__(proc, "_species_names", species_names)
@@ -605,6 +712,7 @@ def process_from_sbml(
         "_species_y0",
         tuple(float(y0[i]) for i in range(len(species_names))),
     )
+    object.__setattr__(proc, "_species_ontology", species_ontology)
     object.__setattr__(proc, "_model", model)
     object.__setattr__(proc, "_w0", w0)
     object.__setattr__(proc, "_c", c)
@@ -612,6 +720,8 @@ def process_from_sbml(
     object.__setattr__(proc, "_tunable_params", tuple(tunable_params))
     object.__setattr__(proc, "_tunable_param_indexes", tunable_indexes)
     object.__setattr__(proc, "_tunable_param_defaults", tunable_defaults)
+    object.__setattr__(proc, "parameter_overrides", override_dict)
+    object.__setattr__(proc, "_override_indexes", override_indexes)
     if timescale is not None:
         object.__setattr__(proc, "timescale", timescale)
 

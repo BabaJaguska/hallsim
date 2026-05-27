@@ -554,14 +554,24 @@ class Scheduler:
                 items = list(group_rhs.items())
                 for gname, rhs_fn in items:
                     state, last_dt = self._solve_group(
-                        rhs_fn, state, keys, t, t_mid, group_name=gname,
+                        rhs_fn,
+                        state,
+                        keys,
+                        t,
+                        t_mid,
+                        group_name=gname,
                         dt0_hint=group_dt0_hint.get(gname),
                     )
                     group_dt0_hint[gname] = last_dt
                     stats[gname]["num_macro_steps"] += 1
                 for gname, rhs_fn in reversed(items):
                     state, last_dt = self._solve_group(
-                        rhs_fn, state, keys, t_mid, t_next, group_name=gname,
+                        rhs_fn,
+                        state,
+                        keys,
+                        t_mid,
+                        t_next,
+                        group_name=gname,
                         dt0_hint=group_dt0_hint.get(gname),
                     )
                     group_dt0_hint[gname] = last_dt
@@ -585,7 +595,12 @@ class Scheduler:
                         prev_idxs = group_write_idxs[gname]
                     else:
                         state, last_dt = self._solve_group(
-                            rhs_fn, state, keys, t, t_next, group_name=gname,
+                            rhs_fn,
+                            state,
+                            keys,
+                            t,
+                            t_next,
+                            group_name=gname,
                             dt0_hint=group_dt0_hint.get(gname),
                         )
                         group_dt0_hint[gname] = last_dt
@@ -789,7 +804,7 @@ class Scheduler:
             y0=state_vec,
             saveat=dfx.SaveAt(t1=True, dense=True),
             stepsize_controller=self.controller,
-                adjoint=self.adjoint,
+            adjoint=self.adjoint,
             max_steps=self.max_steps,
         )
 

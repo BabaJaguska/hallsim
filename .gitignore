@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 .DS_Store
+data/
+models/
+docs/diary.md
 
 # C extensions
 *.so

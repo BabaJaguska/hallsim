@@ -88,6 +88,14 @@ class HallmarkHandle:
         Target processes get new instances with updated parameter values
         via ``eqx.tree_at``.
 
+        ``ParameterMapping.param_name`` may be either a plain attribute
+        (e.g. ``"alpha"``) or a dotted path into a dict-valued field
+        (e.g. ``"parameter_overrides.mTORC1_S2448_phos_by_AA"``). The
+        dotted form lets a hallmark target a specific key inside the
+        ``parameter_overrides`` dict on an :class:`hallsim.sbml_import.SBMLProcess`,
+        which is the mechanism for parameterising specific SBML rate
+        constants from a hallmark severity.
+
         Parameters
         ----------
         processes:
@@ -106,12 +114,33 @@ class HallmarkHandle:
                 continue
             proc = result[pname]
             new_val = mapping.transform(severity)
-            # Use eqx.tree_at to create a new Process with the modified param
-            result[pname] = eqx.tree_at(
-                lambda p: getattr(p, mapping.param_name),
-                proc,
-                new_val,
-            )
+            if "." in mapping.param_name:
+                # Dotted form: target a key inside a dict-valued field.
+                field_name, key = mapping.param_name.split(".", 1)
+                current = getattr(proc, field_name)
+                if not isinstance(current, dict):
+                    raise TypeError(
+                        f"Dotted param_name {mapping.param_name!r} "
+                        f"requires {field_name!r} to be a dict on "
+                        f"{type(proc).__name__}; got "
+                        f"{type(current).__name__}"
+                    )
+                if key not in current:
+                    raise KeyError(
+                        f"Key {key!r} not in {pname}.{field_name}; "
+                        f"available: {sorted(current.keys())}"
+                    )
+                result[pname] = eqx.tree_at(
+                    lambda p, fn=field_name, k=key: getattr(p, fn)[k],
+                    proc,
+                    new_val,
+                )
+            else:
+                result[pname] = eqx.tree_at(
+                    lambda p, pn=mapping.param_name: getattr(p, pn),
+                    proc,
+                    new_val,
+                )
         return result
 
     def summary(self, severity: float) -> dict[str, Any]:
@@ -201,16 +230,39 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
         name="Deregulated Nutrient Sensing",
         description=(
             "Imbalance in nutrient-sensing pathways (mTOR, AMPK, sirtuins). "
-            "Chronic mTOR activation, impaired AMPK response, declining NAD+."
+            "Chronic mTOR activation, impaired AMPK response, declining NAD+. "
+            "Pharmacological mTORC1 inhibitors (rapamycin and analogs) map "
+            "to this hallmark as a downward severity shift."
         ),
         category="Primary",
-        references=["Lopez-Otin et al. 2023", "Alfego & Kriete 2017"],
+        references=[
+            "Lopez-Otin et al. 2023",
+            "Alfego & Kriete 2017",
+            "DallePezze 2014 (BIOMD0000000582)",
+        ],
         mappings=[
             ParameterMapping(
                 process_name="energy",
                 param_name="GLYCOL_SA",
                 transform=lambda h: 1.0 + h * 0.5,  # 1.0 -> 1.5
-                description="Glycolytic flux increases with nutrient dysregulation",
+                description="Glycolytic flux increases with nutrient dysregulation (ERiQ-based composites)",
+            ),
+            # DP14-based composites: scale the mTORC1 phosphorylation
+            # rate. Severity 0.0 → 30% of SBML default (rapamycin-rescued
+            # regime). Severity 1.0 → SBML default (untreated DDIS).
+            # Targets the parameter_overrides dict registered by
+            # build_multi_hallmark_composite.
+            ParameterMapping(
+                process_name="dp14",
+                param_name=(
+                    "parameter_overrides."
+                    "mTORC1_S2448_phos_by_AA_n_Akt_pS473"
+                ),
+                transform=lambda h: 162.471039450073 * (0.3 + 0.7 * h),
+                description=(
+                    "mTORC1 S2448 phosphorylation rate (DP14): "
+                    "rapa-suppressed at severity=0, full at severity=1"
+                ),
             ),
         ],
     ),
