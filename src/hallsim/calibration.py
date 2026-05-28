@@ -1,10 +1,17 @@
 """Differentiable calibration of HallSim composites.
 
-Wraps the common pattern: a user-supplied ``loss_fn(params) -> scalar``
-that runs a composite under the proposed parameters and compares the
-output to data, plus a parameter pytree to optimize. The ``Calibrator``
-handles autodiff-mode selection, optax setup, parameter clamping,
-history logging, and an iteration loop.
+Two layers:
+
+- :class:`Calibrator` — the low-level optimization loop. Takes a
+  user-supplied ``loss_fn(params) -> scalar`` and a parameter pytree;
+  handles autodiff mode, optax setup, clamping, history logging.
+
+- :class:`CalibrationProblem` (+ :class:`Condition`, :class:`ParameterRef`) —
+  the high-level framework. Wires a composite, a set of experimental
+  conditions (hallmark severity profiles), gene-reporter Δ_data, and a
+  set of fittable mechanism parameters into one declarative object
+  that builds the loss function for you and runs concordance on
+  arbitrary held-out arms. Reuse this for any composite + dataset.
 
 Choose the autodiff mode by parameter count, not by habit:
 
@@ -21,7 +28,7 @@ Choose the autodiff mode by parameter count, not by habit:
 For most mechanism-parameter calibration (a handful of hallmark knobs,
 rate constants), forward-mode is the right call.
 
-Usage::
+Low-level usage::
 
     from hallsim.calibration import Calibrator
 
@@ -30,26 +37,45 @@ Usage::
         result = Scheduler(adjoint=...).run(composite, ...)
         return compute_loss_against_data(result)
 
-    cal = Calibrator(
-        loss_fn=loss_fn,
-        init_params={"alpha": 0.05, "k": 0.1},
-        clamps={"alpha": (0.001, 1.0), "k": (0.0, 1.0)},
-        mode="forward",
-        learning_rate=0.05,
-    )
+    cal = Calibrator(loss_fn=loss_fn, init_params={...}, mode="forward")
     history = cal.fit(steps=50)
+
+High-level usage::
+
+    from hallsim.calibration import (
+        CalibrationProblem, Condition, ParameterRef,
+    )
+    problem = CalibrationProblem(
+        composite=my_composite,
+        reporters=MULTI_HALLMARK_REPORTERS,
+        conditions={"ctrl": Condition(...), "DDIS": Condition(...)},
+        data={"DDIS_vs_ctrl": ds.delta(...)},
+        params={"rate": ParameterRef("dp14", "parameter_overrides.k", init=1.0)},
+        fit_arms=["DDIS_vs_ctrl"],
+        held_out_arms=[],
+    )
+    history = problem.fit(steps=40)
+    results = problem.evaluate(history.final_params)
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
+import diffrax as dfx
+import equinox as eqx
 import jax
 import jax.flatten_util  # noqa: F401  # for ravel_pytree
 import jax.numpy as jnp
 import optax
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from hallsim.composite import Composite
+    from hallsim.gene_reporters import GeneReporter
 
 
 ParamPytree = Any  # PyTree of jnp.ndarrays / scalars
@@ -198,3 +224,391 @@ class Calibrator:
         history.final_params = params
         history.wall_time_s = time.time() - t0
         return history
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# High-level framework: Condition, ParameterRef, CalibrationProblem
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _normalized(v: jnp.ndarray) -> jnp.ndarray:
+    """Zero-mean, unit-norm. Robust to scale mismatch between sim and data.
+
+    Regularization goes inside the sqrt so the gradient stays finite at
+    the all-zero input (``sqrt(x)`` has divergent derivative at x=0).
+    """
+    v = v - jnp.mean(v)
+    return v / jnp.sqrt(jnp.sum(v**2) + 1e-12)
+
+
+@dataclass(frozen=True)
+class Condition:
+    """A named experimental arm — a hallmark severity profile.
+
+    A ``Condition`` represents one experimental setup (untreated DDIS,
+    control, rapamycin rescue, etc.) by the severities at which each
+    hallmark is applied. The same ``Condition`` is reused across
+    iterations of a calibration loop.
+
+    Attributes
+    ----------
+    name:
+        Human-readable label, e.g. ``"DDIS"``.
+    hallmarks:
+        ``{hallmark_name: severity}`` passed to :func:`apply_hallmarks`.
+    description:
+        Optional notes for the report.
+    """
+
+    name: str
+    hallmarks: dict[str, float]
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class ParameterRef:
+    """Declarative pointer to a fittable parameter inside a composite.
+
+    The ``field`` follows the same dotted convention as
+    :attr:`hallsim.hallmarks.ParameterMapping.param_name`:
+
+    - Plain attribute: ``field="alpha"`` targets ``proc.alpha``.
+    - Dotted: ``field="parameter_overrides.<key>"`` targets a single
+      entry inside an SBMLProcess's parameter_overrides dict.
+
+    Calibrator substitutes ``init`` (or the latest iterate) into this
+    location via ``eqx.tree_at`` before each loss evaluation.
+
+    Attributes
+    ----------
+    process_name:
+        Key into ``composite.processes``.
+    field:
+        Attribute name or dotted path (see above).
+    init:
+        Initial value for the optimizer.
+    clamp:
+        Optional ``(lo, hi)`` box-clamp applied after each step.
+    description:
+        Optional notes.
+    """
+
+    process_name: str
+    field: str
+    init: float
+    clamp: tuple[float, float] | None = None
+    description: str = ""
+
+
+def _substitute_param(proc, field: str, value: Any):
+    """Return a new Process with ``field`` set to ``value`` via eqx.tree_at.
+
+    Handles both plain and dotted (``parameter_overrides.<key>``) forms,
+    mirroring :meth:`hallsim.hallmarks.HallmarkHandle.apply` so the
+    calibration substitution path and the hallmark substitution path
+    use the same convention.
+    """
+    if "." in field:
+        field_name, key = field.split(".", 1)
+        current = getattr(proc, field_name)
+        if not isinstance(current, dict):
+            raise TypeError(
+                f"Dotted field {field!r} requires {field_name!r} to be "
+                f"a dict on {type(proc).__name__}; got "
+                f"{type(current).__name__}"
+            )
+        if key not in current:
+            raise KeyError(
+                f"Key {key!r} not in {field_name}; "
+                f"available: {sorted(current.keys())}"
+            )
+        return eqx.tree_at(
+            lambda p, fn=field_name, k=key: getattr(p, fn)[k],
+            proc,
+            value,
+        )
+    return eqx.tree_at(lambda p, pn=field: getattr(p, pn), proc, value)
+
+
+class CalibrationProblem:
+    """Wire a composite + conditions + data + params into a calibration.
+
+    Encapsulates the standard pattern for fitting mechanism parameters
+    against gene-reporter Δ_data with one or more experimental arms.
+    Each Δ_arm is a ``(condition, baseline)`` pair; for each arm in
+    ``fit_arms``, the loss is a normalized cosine distance between
+    sign-adjusted Δ_sim and Δ_data on the reporters. Held-out arms are
+    evaluated in :meth:`evaluate` but not included in the fit.
+
+    Parameters
+    ----------
+    composite:
+        The base composite (its ``processes`` dict gets per-iteration
+        substitution; topology is reused unchanged).
+    reporters:
+        List of :class:`GeneReporter` instances. Each reporter's
+        ``observable`` is a store path; each reporter's ``summary``
+        collapses the per-path trajectory to a scalar.
+    conditions:
+        ``{arm_name: Condition}``. Severities applied to the
+        per-iteration substituted processes.
+    data:
+        ``{arm_pair_name: pd.Series}``. Each Series is Δ_data indexed
+        by gene symbol; the per-arm-pair name (e.g.
+        ``"DDIS_vs_ctrl"``) is what ``fit_arms`` / ``held_out_arms``
+        select.
+    arm_pairs:
+        ``{arm_pair_name: (condition_name, baseline_name)}``. Names
+        must be keys in ``conditions``.
+    params:
+        ``{param_name: ParameterRef}``. Each is fit independently.
+    fit_arms:
+        Subset of ``arm_pairs`` keys included in the loss.
+    held_out_arms:
+        Subset of ``arm_pairs`` keys excluded from the loss but
+        evaluated in ``evaluate`` for held-out concordance.
+    t_end, macro_dt, scheduler_kwargs:
+        Forwarded to ``Scheduler.run``.
+    n_save:
+        Number of save points retained for trajectory summaries
+        (``save_dt = (t_end - 0) / (n_save - 1)``). The trailing
+        portion is what each reporter's ``summary`` operates on.
+    """
+
+    def __init__(
+        self,
+        *,
+        composite: "Composite",
+        reporters: list["GeneReporter"],
+        conditions: dict[str, Condition],
+        data: dict[str, "pd.Series"],
+        arm_pairs: dict[str, tuple[str, str]],
+        params: dict[str, ParameterRef],
+        fit_arms: list[str],
+        held_out_arms: list[str] | None = None,
+        t_end: float = 25.0,
+        macro_dt: float = 5.0,
+        n_save: int = 6,
+        scheduler_kwargs: dict | None = None,
+    ) -> None:
+        from hallsim.composite import Composite  # local import — avoid cycle
+
+        # Validation pass over the wiring — catch typos early so the
+        # JIT trace doesn't fail with a confusing message later.
+        for arm, (c, b) in arm_pairs.items():
+            if c not in conditions:
+                raise KeyError(
+                    f"arm_pairs[{arm!r}] references unknown condition {c!r}"
+                )
+            if b not in conditions:
+                raise KeyError(
+                    f"arm_pairs[{arm!r}] references unknown condition {b!r}"
+                )
+        for arm in fit_arms:
+            if arm not in arm_pairs:
+                raise KeyError(f"fit_arms entry {arm!r} not in arm_pairs")
+            if arm not in data:
+                raise KeyError(f"fit arm {arm!r} has no Δ_data entry")
+        for arm in held_out_arms or []:
+            if arm not in arm_pairs:
+                raise KeyError(f"held_out_arms entry {arm!r} not in arm_pairs")
+        for pname, pref in params.items():
+            if pref.process_name not in composite.processes:
+                raise KeyError(
+                    f"params[{pname!r}].process_name={pref.process_name!r} "
+                    f"not in composite.processes "
+                    f"(have {sorted(composite.processes.keys())})"
+                )
+
+        self.composite = composite
+        self.reporters = reporters
+        self.conditions = conditions
+        self.data = data
+        self.arm_pairs = arm_pairs
+        self.params = params
+        self.fit_arms = fit_arms
+        self.held_out_arms = held_out_arms or []
+        self.t_end = t_end
+        self.macro_dt = macro_dt
+        self.n_save = n_save
+        self.scheduler_kwargs = scheduler_kwargs or {}
+
+        # Precompute store-path → trailing-axis index for fast lookup.
+        self._store_idx = {k: i for i, k in enumerate(composite.store_keys())}
+        # Precompute reporter target indices.
+        self._reporter_indices = tuple(
+            self._store_idx[r.observable] for r in reporters
+        )
+        # Reuse the Composite type for re-construction in the loss.
+        self._Composite = Composite
+
+    # ── Internal: per-condition simulation ────────────────────────
+
+    def _substitute(self, processes: dict, param_values: dict) -> dict:
+        new = dict(processes)
+        for pname, pref in self.params.items():
+            new[pref.process_name] = _substitute_param(
+                new[pref.process_name],
+                pref.field,
+                param_values[pname],
+            )
+        return new
+
+    def _simulate_condition(self, processes: dict, condition: Condition):
+        """Apply hallmarks + run Scheduler for one condition. Returns the
+        per-reporter ``summary``-collapsed observable values (a jnp array
+        of length ``len(reporters)``)."""
+        from hallsim.hallmarks import apply_hallmarks
+        from hallsim.scheduler import Scheduler
+
+        procs = apply_hallmarks(processes, condition.hallmarks)
+        comp = self._Composite(
+            processes=procs,
+            topology=self.composite.topology,
+            validate=False,
+            semantic_validation=False,
+        )
+        sched = Scheduler(
+            adjoint=dfx.ForwardMode(),
+            **self.scheduler_kwargs,
+        )
+        y0 = comp.initial_state_vec()
+        save_dt = max(1e-6, self.t_end / max(1, self.n_save - 1))
+        res = sched.run(
+            comp,
+            t_span=(0.0, self.t_end),
+            macro_dt=self.macro_dt,
+            y0=y0,
+            save_dt=save_dt,
+        )
+        # res.ys is (n_save, ..., n_vars). Trailing-axis convention.
+        out = []
+        for rep, idx in zip(self.reporters, self._reporter_indices):
+            traj = res.ys[..., idx]
+            out.append(rep.summary(traj))
+        return jnp.stack([jnp.asarray(o) for o in out])
+
+    # ── Loss / fit / evaluate ─────────────────────────────────────
+
+    def loss(self, param_values: dict[str, jnp.ndarray]) -> jnp.ndarray:
+        substituted = self._substitute(self.composite.processes, param_values)
+        # Cache per-condition observables so each appears in the loss
+        # only once even if it's both a condition and a baseline in
+        # different arm_pairs.
+        obs_cache: dict[str, jnp.ndarray] = {}
+
+        def obs_for(cond_name: str) -> jnp.ndarray:
+            if cond_name not in obs_cache:
+                obs_cache[cond_name] = self._simulate_condition(
+                    substituted, self.conditions[cond_name]
+                )
+            return obs_cache[cond_name]
+
+        signs = jnp.asarray([r.sign for r in self.reporters], dtype=float)
+        per_arm_losses = []
+        for arm in self.fit_arms:
+            cond, base = self.arm_pairs[arm]
+            delta_sim = signs * (obs_for(cond) - obs_for(base))
+            # Extract Δ_data for the reporters' genes (drop NaN/missing).
+            delta_data = jnp.asarray(
+                [
+                    float(self.data[arm].get(r.gene_symbol, jnp.nan))
+                    for r in self.reporters
+                ]
+            )
+            # Same-shape comparison; missing genes get a NaN that the
+            # mask removes.
+            mask = jnp.isfinite(delta_data)
+            sim_norm = _normalized(jnp.where(mask, delta_sim, 0.0))
+            data_norm = _normalized(jnp.where(mask, delta_data, 0.0))
+            per_arm_losses.append(jnp.mean((sim_norm - data_norm) ** 2))
+        return jnp.mean(jnp.stack(per_arm_losses))
+
+    def fit(
+        self,
+        *,
+        steps: int = 40,
+        **calibrator_kwargs,
+    ) -> CalibrationHistory:
+        init = {k: jnp.asarray(p.init) for k, p in self.params.items()}
+        clamps = {
+            k: p.clamp for k, p in self.params.items() if p.clamp is not None
+        }
+        cal = Calibrator(
+            loss_fn=self.loss,
+            init_params=init,
+            clamps=clamps or None,
+            mode="forward",
+            **calibrator_kwargs,
+        )
+        return cal.fit(steps=steps)
+
+    def evaluate(
+        self,
+        param_values: dict[str, jnp.ndarray],
+    ):
+        """Run all arms (fit + held-out), return per-arm
+        :class:`ConcordanceResult` via :func:`compute_concordance`.
+
+        Bypasses the JAX/jvp path used inside ``loss`` — runs each
+        condition once with the standard Scheduler default adjoint so
+        wall-time is faster (no forward-mode unfold).
+        """
+        from hallsim.gene_reporters import compute_concordance
+        from hallsim.hallmarks import apply_hallmarks
+        from hallsim.scheduler import Scheduler
+        import pandas as pd
+
+        substituted = self._substitute(self.composite.processes, param_values)
+        sched = Scheduler(**self.scheduler_kwargs)
+
+        # Per-condition simulation cache.
+        obs_cache: dict[str, dict[str, float]] = {}
+
+        def obs_for(cond_name: str) -> dict[str, float]:
+            if cond_name in obs_cache:
+                return obs_cache[cond_name]
+            procs = apply_hallmarks(
+                substituted, self.conditions[cond_name].hallmarks
+            )
+            comp = self._Composite(
+                processes=procs,
+                topology=self.composite.topology,
+                validate=False,
+                semantic_validation=False,
+            )
+            y0 = comp.initial_state_vec()
+            save_dt = max(1e-6, self.t_end / max(1, self.n_save - 1))
+            res = sched.run(
+                comp,
+                t_span=(0.0, self.t_end),
+                macro_dt=self.macro_dt,
+                y0=y0,
+                save_dt=save_dt,
+            )
+            out: dict[str, float] = {}
+            for rep, idx in zip(self.reporters, self._reporter_indices):
+                traj = res.ys[..., idx]
+                out[rep.observable] = float(rep.summary(traj))
+            obs_cache[cond_name] = out
+            return out
+
+        results = {}
+        all_arms = list(self.fit_arms) + list(self.held_out_arms)
+        for arm in all_arms:
+            cond, base = self.arm_pairs[arm]
+            c_obs = obs_for(cond)
+            b_obs = obs_for(base)
+            delta_sim_named = {
+                r.observable: c_obs[r.observable] - b_obs[r.observable]
+                for r in self.reporters
+            }
+            results[arm] = compute_concordance(
+                delta_observables=delta_sim_named,
+                delta_gene_expression=self.data.get(
+                    arm, pd.Series(dtype=float)
+                ),
+                condition_name=arm,
+                reporters=self.reporters,
+            )
+        return results

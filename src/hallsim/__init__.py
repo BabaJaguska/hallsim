@@ -20,7 +20,19 @@ state variables to canonical reporter genes, evaluated by sign agreement
 and Spearman concordance.
 """
 
+from hallsim.calibration import (
+    CalibrationProblem,
+    Calibrator,
+    Condition,
+    ParameterRef,
+)
 from hallsim.composite import Composite
+from hallsim.hallmarks import (
+    HALLMARK_REGISTRY,
+    HallmarkHandle,
+    ParameterMapping,
+    apply_hallmarks,
+)
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.scheduler import EventRecord, Scheduler, SchedulerResult
 from hallsim.validation import (
@@ -31,11 +43,18 @@ from hallsim.validation import (
 )
 
 __all__ = [
+    "CalibrationProblem",
+    "Calibrator",
     "ComposabilityReport",
     "Composite",
     "CompositeValidator",
+    "Condition",
     "EventRecord",
+    "HALLMARK_REGISTRY",
+    "HallmarkHandle",
     "OverlapMatch",
+    "ParameterMapping",
+    "ParameterRef",
     "Port",
     "PortRole",
     "Process",
@@ -43,4 +62,5 @@ __all__ = [
     "Scheduler",
     "SchedulerResult",
     "analyze_composability",
+    "apply_hallmarks",
 ]

@@ -115,14 +115,6 @@ class Port:
         Human-readable description for metadata / LLM consumption.
     ontology:
         Optional ontology annotation, e.g. ``{"GO": "GO:0006915"}``.
-    typical_range:
-        Optional ``(low, high)`` covering the values this port expects
-        to see or produce during a normal simulation. Consumed by the
-        validation layer's ``RangeChecker``: when two ports at the same
-        store path have ranges that don't overlap, the merge is flagged
-        as a magnitude mismatch (e.g. a writer that produces
-        ``[10, 100]`` feeding a reader calibrated for ``[0, 2]``). Skip
-        when the range is unknown.
     """
 
     __slots__ = (
@@ -131,7 +123,6 @@ class Port:
         "units",
         "description",
         "ontology",
-        "typical_range",
     )
 
     def __init__(
@@ -141,14 +132,12 @@ class Port:
         units: str = "",
         description: str = "",
         ontology: dict[str, str] | None = None,
-        typical_range: tuple[float, float] | None = None,
     ) -> None:
         self.role = role
         self.default = default
         self.units = units
         self.description = description
         self.ontology = ontology or {}
-        self.typical_range = typical_range
 
     def __repr__(self) -> str:
         return (

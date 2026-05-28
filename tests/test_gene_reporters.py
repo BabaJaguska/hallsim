@@ -16,9 +16,15 @@ import pytest
 
 from hallsim.gene_reporters import (
     CANONICAL_REPORTERS,
+    MULTI_HALLMARK_REPORTERS,
+    GeneExpressionDataset,
     GeneReporter,
     compute_concordance,
+    cycle_average,
+    derive_multi_hallmark_summaries,
+    derive_observable_summaries,
     derive_observables,
+    last_value,
     log2_fold_change,
 )
 
@@ -208,6 +214,157 @@ class TestComputeConcordance:
             reporters=[inverse_rep],
         )
         assert result.rows[0].sign_match is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Trajectory summaries (last_value / cycle_average) and the
+# derive_observable_summaries pipeline
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestTrajectorySummaries:
+
+    def test_last_value_picks_endpoint(self):
+        y = jnp.asarray([1.0, 2.0, 3.0, 4.0, 5.0])
+        assert float(last_value(y)) == pytest.approx(5.0)
+
+    def test_cycle_average_quarter(self):
+        # Linear ramp 0..99 (100 points). Last 25% are 75..99, mean = 87.
+        y = jnp.arange(100, dtype=jnp.float32)
+        s = cycle_average(0.25)
+        assert float(s(y)) == pytest.approx(87.0)
+
+    def test_cycle_average_full_trajectory(self):
+        y = jnp.arange(10, dtype=jnp.float32)
+        s = cycle_average(1.0)
+        assert float(s(y)) == pytest.approx(4.5)
+
+    def test_cycle_average_phase_insensitive_on_oscillator(self):
+        # Two trajectories of pure sinusoid with different phases at
+        # endpoint. The cycle_average of the last several cycles should
+        # match (both ≈ 0); endpoints differ by ~2.
+        t = jnp.linspace(0, 20 * jnp.pi, 2000)
+        y1 = jnp.sin(t)
+        y2 = jnp.sin(t + 1.3)
+        s = cycle_average(0.5)
+        # Endpoint readouts differ significantly...
+        assert abs(float(y1[-1]) - float(y2[-1])) > 0.5
+        # ...but cycle-averaged readouts both ≈ 0.
+        assert abs(float(s(y1))) < 0.05
+        assert abs(float(s(y2))) < 0.05
+
+    def test_cycle_average_rejects_invalid_fraction(self):
+        with pytest.raises(ValueError):
+            cycle_average(0.0)
+        with pytest.raises(ValueError):
+            cycle_average(1.5)
+
+    def test_ddb2_reporter_uses_cycle_average(self):
+        ddb2 = next(r for r in CANONICAL_REPORTERS if r.gene_symbol == "DDB2")
+        # Sinusoidal oscillator-style trajectory.
+        t = jnp.linspace(0, 20 * jnp.pi, 1000)
+        # cycle_average should ≈ 5.0 (the mean), not 5 + sin(20π) ≈ 5.0
+        # at endpoint by accident — pick a phase that makes endpoint != mean.
+        y_offset = 5.0 + jnp.sin(t + 1.7)
+        assert abs(float(ddb2.summary(y_offset)) - 5.0) < 0.05
+        # last_value would give a phase-dependent value.
+        assert abs(float(y_offset[-1]) - 5.0) > 0.1
+
+    def test_derive_observable_summaries_collapses_trajectory(self):
+        # Build a trajectory by tiling the homeostatic state along
+        # a time axis and adding a sinusoidal wiggle to one channel.
+        n_time = 200
+        state_traj = {
+            k: jnp.broadcast_to(v, (n_time,))
+            for k, v in _stub_eriq_state().items()
+        }
+        out = derive_observable_summaries(state_traj)
+        for r in CANONICAL_REPORTERS:
+            assert r.observable in out
+            assert jnp.isfinite(out[r.observable])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Multi-hallmark reporter table + GeneExpressionDataset
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestMultiHallmarkReporters:
+
+    def test_table_integrity(self):
+        # All entries have a store-path observable, a gene symbol, ±1 sign,
+        # and a literature anchor.
+        for r in MULTI_HALLMARK_REPORTERS:
+            assert (
+                "/" in r.observable
+            ), f"{r.gene_symbol}: observable should be a store path"
+            assert r.sign in (+1, -1)
+            assert r.gene_symbol
+            assert r.reference
+
+    def test_unique_gene_symbols(self):
+        genes = [r.gene_symbol for r in MULTI_HALLMARK_REPORTERS]
+        assert len(genes) == len(set(genes))
+
+    def test_ddb2_uses_cycle_average(self):
+        ddb2 = next(
+            r for r in MULTI_HALLMARK_REPORTERS if r.gene_symbol == "DDB2"
+        )
+        # Sinusoid centered at 5: endpoint phase-dependent, mean ≈ 5.
+        t = jnp.linspace(0, 20 * jnp.pi, 1000)
+        traj = 5.0 + jnp.sin(t + 1.7)
+        assert abs(float(ddb2.summary(traj)) - 5.0) < 0.05
+
+    def test_derive_multi_hallmark_summaries(self):
+        n_time = 20
+        traj = {
+            "dp14/CDKN1A": jnp.linspace(0, 10, n_time),
+            "gz06/x": jnp.linspace(0, 1, n_time),
+            "dp14/ROS": jnp.linspace(0, 5, n_time),
+            "nfkb/IkBa": jnp.linspace(0, 2, n_time),
+            "dp14/Mito_mass_new": jnp.linspace(0, 3, n_time),
+            "dp14/mTORC1_pS2448": jnp.linspace(0, 4, n_time),
+        }
+        out = derive_multi_hallmark_summaries(traj)
+        for r in MULTI_HALLMARK_REPORTERS:
+            assert r.observable in out
+            assert jnp.isfinite(out[r.observable])
+        # CDKN1A uses last_value → 10.0
+        assert float(out["dp14/CDKN1A"]) == pytest.approx(10.0)
+
+
+class TestGeneExpressionDataset:
+
+    def _toy_df(self):
+        return pd.DataFrame(
+            {
+                "ctrl1": [3.0, 5.0],
+                "ctrl2": [3.0, 5.0],
+                "ddis1": [4.0, 4.0],
+                "ddis2": [4.0, 4.0],
+            },
+            index=["GENE_A", "GENE_B"],
+        )
+
+    def test_delta_uses_named_groups(self):
+        ds = GeneExpressionDataset(
+            gene_expr=self._toy_df(),
+            sample_groups={
+                "ctrl": ["ctrl1", "ctrl2"],
+                "ddis": ["ddis1", "ddis2"],
+            },
+        )
+        delta = ds.delta("ddis", "ctrl")
+        assert delta["GENE_A"] == pytest.approx(1.0)
+        assert delta["GENE_B"] == pytest.approx(-1.0)
+
+    def test_delta_unknown_group_raises(self):
+        ds = GeneExpressionDataset(
+            gene_expr=self._toy_df(),
+            sample_groups={"ctrl": ["ctrl1", "ctrl2"]},
+        )
+        with pytest.raises(KeyError):
+            ds.delta("unknown", "ctrl")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

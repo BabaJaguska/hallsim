@@ -554,93 +554,6 @@ class CouplingAuditor:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _overlap(
-    a: tuple[float, float], b: tuple[float, float]
-) -> tuple[float, float] | None:
-    """Intersection of two closed intervals, or ``None`` if disjoint."""
-    lo = max(a[0], b[0])
-    hi = min(a[1], b[1])
-    return (lo, hi) if lo <= hi else None
-
-
-class RangeChecker:
-    """Validates that ports sharing a store path operate over compatible
-    numerical ranges.
-
-    Same-unit ports can still be numerically incompatible — e.g., a
-    writer producing ``[10, 100]`` (dimensionless) feeding a reader
-    calibrated for ``[0, 2]`` (dimensionless). The unit checker passes
-    this; this checker catches it. Each port may declare a
-    ``typical_range`` on its :class:`Port` object; ports without a
-    declared range are skipped silently.
-
-    - ERROR: declared ranges at the same store path are entirely
-      disjoint — feeding one into the other will drive the receiver
-      out of its calibrated operating regime.
-    - WARNING: ranges overlap but the smaller range covers less than
-      ``min_overlap_fraction`` of the larger one — partial mismatch
-      that may still mis-scale the coupling.
-    """
-
-    min_overlap_fraction: float = 0.25
-
-    def check(
-        self,
-        processes: dict[str, Process],
-        topology: dict[str, dict[str, str]],
-    ) -> list[ValidationResult]:
-        results: list[ValidationResult] = []
-        spm = _store_port_map(processes, topology)
-
-        for store_path, entries in spm.items():
-            ranged = [
-                e
-                for e in entries
-                if getattr(e.port, "typical_range", None) is not None
-            ]
-            if len(ranged) < 2:
-                continue
-            for i, e1 in enumerate(ranged):
-                r1 = e1.port.typical_range
-                for e2 in ranged[i + 1 :]:
-                    r2 = e2.port.typical_range
-                    overlap = _overlap(r1, r2)
-                    if overlap is None:
-                        results.append(
-                            ValidationResult(
-                                Severity.ERROR,
-                                "ranges",
-                                f"Disjoint ranges at {store_path!r}: "
-                                f"{e1.proc_name}.{e1.port_name}={r1} vs "
-                                f"{e2.proc_name}.{e2.port_name}={r2}. "
-                                f"Feeding one into the other will drive "
-                                f"the receiver out of its calibrated "
-                                f"regime — add a rescaling bridge or "
-                                f"recalibrate.",
-                            )
-                        )
-                        continue
-                    span_overlap = overlap[1] - overlap[0]
-                    span_min = min(r1[1] - r1[0], r2[1] - r2[0])
-                    if span_min > 0:
-                        frac = span_overlap / span_min
-                        if frac < self.min_overlap_fraction:
-                            results.append(
-                                ValidationResult(
-                                    Severity.WARNING,
-                                    "ranges",
-                                    f"Weak range overlap at "
-                                    f"{store_path!r}: "
-                                    f"{e1.proc_name}.{e1.port_name}={r1} "
-                                    f"vs {e2.proc_name}.{e2.port_name}"
-                                    f"={r2} (overlap covers "
-                                    f"{frac:.0%} of the smaller range). "
-                                    f"Consider a bridge transform.",
-                                )
-                            )
-        return results
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Orchestrator
 # ═══════════════════════════════════════════════════════════════════════════
@@ -659,8 +572,6 @@ class CompositeValidator:
         Run interaction graph analysis (cycles, fan-in, density).
     check_coupling:
         Run description-overlap coupling auditor.
-    check_ranges:
-        Run numerical-range compatibility analysis at shared store paths.
     strict:
         If ``True``, promote all warnings to errors.
     """
@@ -671,7 +582,6 @@ class CompositeValidator:
         check_semantics: bool = True,
         check_graph: bool = True,
         check_coupling: bool = True,
-        check_ranges: bool = True,
         strict: bool = False,
     ) -> None:
         self.checkers: list[Any] = []
@@ -685,8 +595,6 @@ class CompositeValidator:
             self.checkers.append(self._graph_analyzer)
         if check_coupling:
             self.checkers.append(CouplingAuditor())
-        if check_ranges:
-            self.checkers.append(RangeChecker())
         self.strict = strict
 
     def validate(

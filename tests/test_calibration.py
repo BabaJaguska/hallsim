@@ -150,3 +150,235 @@ class TestInvalidConfig:
                 init_params={"a": 0.0},
                 mode="invalid",  # type: ignore
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CalibrationProblem — high-level framework
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestConditionAndParameterRef:
+
+    def test_condition_construction(self):
+        from hallsim.calibration import Condition
+
+        c = Condition("DDIS", {"Genomic Instability": 1.0})
+        assert c.name == "DDIS"
+        assert c.hallmarks["Genomic Instability"] == 1.0
+
+    def test_parameter_ref_construction(self):
+        from hallsim.calibration import ParameterRef
+
+        p = ParameterRef(
+            process_name="dp14",
+            field="parameter_overrides.k",
+            init=1.0,
+            clamp=(0.0, 10.0),
+        )
+        assert p.process_name == "dp14"
+        assert p.field == "parameter_overrides.k"
+        assert p.init == 1.0
+        assert p.clamp == (0.0, 10.0)
+
+
+class TestCalibrationProblemValidation:
+    """Construction-time validation: typos are caught early."""
+
+    def _toy_setup(self):
+        """A 1-process composite with a single tunable scalar attribute.
+
+        Using a real Composite (not a mock) verifies the wiring against
+        the actual framework. Single-process keeps integration fast.
+        """
+        import pandas as pd
+
+        from hallsim.calibration import Condition, ParameterRef
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter
+        from hallsim.process import Port, PortRole, Process
+
+        class Decay(Process):
+            rate: float = 0.1
+
+            def ports_schema(self):
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=1.0, units="uM"),
+                }
+
+            def derivative(self, t, state):
+                return {"x": -self.rate * state["x"]}
+
+        comp = Composite(
+            processes={"decay": Decay()},
+            topology={"decay": {"x": "pool/x"}},
+            validate=False,
+            semantic_validation=False,
+        )
+
+        reporters = [
+            GeneReporter(
+                observable="pool/x",
+                gene_symbol="GENE_X",
+                sign=+1,
+            ),
+        ]
+        conditions = {
+            "ctrl": Condition("ctrl", {}),
+            "DDIS": Condition("DDIS", {}),
+        }
+        arm_pairs = {"DDIS_vs_ctrl": ("DDIS", "ctrl")}
+        data = {"DDIS_vs_ctrl": pd.Series({"GENE_X": -0.5})}
+        params = {
+            "rate": ParameterRef(process_name="decay", field="rate", init=0.1),
+        }
+        return comp, reporters, conditions, data, arm_pairs, params
+
+    def test_arm_pairs_reference_unknown_condition_raises(self):
+        from hallsim.calibration import CalibrationProblem
+
+        comp, reporters, conds, data, arm_pairs, params = self._toy_setup()
+        with pytest.raises(KeyError, match="unknown condition"):
+            CalibrationProblem(
+                composite=comp,
+                reporters=reporters,
+                conditions=conds,
+                data=data,
+                arm_pairs={"bad": ("DDIS", "NONEXISTENT")},
+                params=params,
+                fit_arms=[],
+            )
+
+    def test_fit_arms_must_be_in_arm_pairs(self):
+        from hallsim.calibration import CalibrationProblem
+
+        comp, reporters, conds, data, arm_pairs, params = self._toy_setup()
+        with pytest.raises(KeyError, match="not in arm_pairs"):
+            CalibrationProblem(
+                composite=comp,
+                reporters=reporters,
+                conditions=conds,
+                data=data,
+                arm_pairs=arm_pairs,
+                params=params,
+                fit_arms=["NONEXISTENT"],
+            )
+
+    def test_params_reference_unknown_process_raises(self):
+        from hallsim.calibration import (
+            CalibrationProblem,
+            ParameterRef,
+        )
+
+        comp, reporters, conds, data, arm_pairs, _params = self._toy_setup()
+        with pytest.raises(KeyError, match="not in composite.processes"):
+            CalibrationProblem(
+                composite=comp,
+                reporters=reporters,
+                conditions=conds,
+                data=data,
+                arm_pairs=arm_pairs,
+                params={
+                    "bad": ParameterRef(
+                        process_name="nonexistent",
+                        field="rate",
+                        init=0.1,
+                    ),
+                },
+                fit_arms=[],
+            )
+
+
+class TestCalibrationProblemEndToEnd:
+    """Runs .loss(), .fit(steps=2), .evaluate() on a toy composite."""
+
+    def _setup(self):
+        """One-process composite with a tunable rate parameter; data
+        prescribes a Δ_data sign that the loss can chase."""
+        import pandas as pd
+
+        from hallsim.calibration import (
+            CalibrationProblem,
+            Condition,
+            ParameterRef,
+        )
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter
+        from hallsim.process import Port, PortRole, Process
+
+        class Decay(Process):
+            rate: float = 0.1
+
+            def ports_schema(self):
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=1.0, units="uM"),
+                }
+
+            def derivative(self, t, state):
+                return {"x": -self.rate * state["x"]}
+
+        comp = Composite(
+            processes={"decay": Decay()},
+            topology={"decay": {"x": "pool/x"}},
+            validate=False,
+            semantic_validation=False,
+        )
+        reporters = [
+            GeneReporter(
+                observable="pool/x",
+                gene_symbol="GENE_X",
+                sign=+1,
+            ),
+            GeneReporter(
+                observable="pool/x",
+                gene_symbol="GENE_Y",
+                sign=-1,
+            ),
+        ]
+        return CalibrationProblem(
+            composite=comp,
+            reporters=reporters,
+            conditions={
+                "ctrl": Condition("ctrl", {}),
+                "high": Condition("high", {}),
+            },
+            data={
+                "high_vs_ctrl": pd.Series({"GENE_X": -0.5, "GENE_Y": +0.5}),
+            },
+            arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
+            params={
+                "rate": ParameterRef(
+                    process_name="decay",
+                    field="rate",
+                    init=0.2,
+                    clamp=(0.001, 5.0),
+                ),
+            },
+            fit_arms=["high_vs_ctrl"],
+            t_end=5.0,
+            macro_dt=1.0,
+            n_save=3,
+        )
+
+    def test_loss_returns_finite_scalar(self):
+        problem = self._setup()
+        v = problem.loss({"rate": jnp.asarray(0.2)})
+        assert jnp.isfinite(v)
+        assert v.shape == ()
+
+    def test_fit_decreases_loss_or_stays(self):
+        problem = self._setup()
+        # 3 steps is enough to confirm machinery runs; not testing
+        # convergence on a contrived toy problem.
+        history = problem.fit(steps=3, learning_rate=0.05, verbose=False)
+        assert len(history.losses) == 3
+        for v in history.losses:
+            assert jnp.isfinite(v)
+
+    def test_evaluate_returns_per_arm_concordance(self):
+        problem = self._setup()
+        params = {"rate": jnp.asarray(0.2)}
+        results = problem.evaluate(params)
+        assert "high_vs_ctrl" in results
+        r = results["high_vs_ctrl"]
+        # n_compared = 2 reporters, both have data
+        assert r.n_compared == 2

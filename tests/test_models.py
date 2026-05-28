@@ -201,3 +201,47 @@ class TestHallmarkHandles:
         summary = handle.summary(severity=0.5)
         assert "oxidative_stress.MDAMAGE_SA" in summary
         assert summary["oxidative_stress.MDAMAGE_SA"] == pytest.approx(2.0)
+
+    def test_transform_reads_calibrated_base_not_hardcoded_constant(self):
+        """The multiplicative refactor's core invariant: if you change
+        the base value, the transform's output scales with it.
+        """
+        from hallsim.hallmarks import HALLMARK_REGISTRY
+        from hallsim.models.eriq import ERiQOxidativeStress
+
+        handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
+        # base=1 → severity=1 → 3
+        out1 = handle.apply(
+            {"oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=1.0)},
+            severity=1.0,
+        )
+        # base=5 → severity=1 → 15 (5x scaling preserved)
+        out5 = handle.apply(
+            {"oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=5.0)},
+            severity=1.0,
+        )
+        assert float(out1["oxidative_stress"].MDAMAGE_SA) == pytest.approx(3.0)
+        assert float(out5["oxidative_stress"].MDAMAGE_SA) == pytest.approx(
+            15.0
+        )
+
+    def test_grad_through_severity(self):
+        """Severity-differentiability claim — pass a jnp.ndarray severity
+        and confirm jax.grad through apply_hallmarks returns finite.
+        """
+        import jax
+        import jax.numpy as jnp
+        from hallsim.hallmarks import HALLMARK_REGISTRY
+        from hallsim.models.eriq import ERiQOxidativeStress
+
+        handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
+        procs = {"oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=1.0)}
+
+        def loss(sev):
+            modified = handle.apply(procs, severity=sev)
+            return modified["oxidative_stress"].MDAMAGE_SA ** 2
+
+        g = jax.grad(loss)(jnp.asarray(0.5))
+        assert jnp.isfinite(g)
+        # d/dh ((1 + 2h)^2) at h=0.5 = 2 * 2 * 2 = 8 → check magnitude
+        assert float(g) == pytest.approx(8.0)

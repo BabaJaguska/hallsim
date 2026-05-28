@@ -29,12 +29,47 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 
 from hallsim.models.eriq import _compute_algebraic
+
+
+# ── Trajectory summaries ───────────────────────────────────────────
+
+
+def last_value(y):
+    """Default trajectory summary: take the endpoint value."""
+    return y[-1] if hasattr(y, "__getitem__") and hasattr(y, "shape") else y
+
+
+def cycle_average(fraction: float = 0.25):
+    """Summary that averages the last ``fraction`` of a trajectory.
+
+    Use for observables routed through an oscillating state — at the
+    final sample the oscillator's phase is arbitrary, so a pointwise
+    readout has phase-dependent noise that dominates the signal. The
+    mean over the last fraction of the trajectory is phase-insensitive
+    and matches what bulk transcriptomics measures: a population
+    average over cells at random oscillator phases.
+
+    Parameters
+    ----------
+    fraction:
+        Fraction of the trajectory to average over. Default 0.25
+        (the last quarter, typically several cycles for our oscillators).
+    """
+    if not 0 < fraction <= 1:
+        raise ValueError(f"fraction must be in (0, 1]; got {fraction!r}")
+
+    def summarize(y):
+        n = int(y.shape[0])
+        k = max(1, int(round(n * fraction)))
+        return y[-k:].mean(axis=0)
+
+    return summarize
 
 
 # ── Reporter table ─────────────────────────────────────────────────
@@ -56,6 +91,11 @@ class GeneReporter:
         Short mechanistic rationale for the mapping.
     reference:
         Primary literature anchor.
+    summary:
+        Callable collapsing a trajectory ``y`` (shape ``(n_time, ...)``)
+        to a single value. Defaults to :func:`last_value` (the endpoint).
+        Use :func:`cycle_average` for observables routed through an
+        oscillating state.
     """
 
     observable: str
@@ -63,6 +103,7 @@ class GeneReporter:
     sign: int = 1
     description: str = ""
     reference: str = ""
+    summary: Callable[[Any], Any] = field(default=last_value)
 
 
 CANONICAL_REPORTERS: list[GeneReporter] = [
@@ -84,9 +125,15 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
         description=(
             "Damage-specific DNA Binding Protein 2 — direct p53 target "
             "induced by DDR signaling. Transcriptional readout of "
-            "accumulated DNA damage."
+            "accumulated DNA damage. Routed through a p53 oscillator "
+            "(e.g. Geva-Zatorsky 2006) in the multi-hallmark composite, "
+            "so the summary is a cycle-average rather than the endpoint: "
+            "the final-time phase of the oscillator is arbitrary, but "
+            "the cycle-mean is phase-insensitive and matches bulk "
+            "transcriptomics' implicit population averaging."
         ),
         reference="Hwang et al. 1999, Nature 401:430–432",
+        summary=cycle_average(0.25),
     ),
     GeneReporter(
         observable="ROS_algebraic",
@@ -135,6 +182,115 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
 ]
 
 
+# ── Multi-hallmark composite reporters ─────────────────────────────
+#
+# These map directly to store paths in the DP14 + NFKB + GZ06 composite,
+# unlike CANONICAL_REPORTERS which routes through ERiQ algebraic helpers.
+
+MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
+    GeneReporter(
+        observable="dp14/CDKN1A",
+        gene_symbol="CDKN1A",
+        sign=+1,
+        description=(
+            "p21/CIP1/WAF1 — senescence and cell-cycle arrest marker. "
+            "DallePezze 2014 models CDKN1A as transcribed by FoxO3a in "
+            "the presence of DNA damage and degraded by phospho-Akt; "
+            "DP14 has no explicit p53 species, so CDKN1A here is a "
+            "senescence-state readout rather than a direct p53 readout."
+        ),
+        reference="el-Deiry et al. 1993, Cell 75:817–825",
+    ),
+    GeneReporter(
+        observable="gz06/x",
+        gene_symbol="DDB2",
+        sign=+1,
+        description=(
+            "Damage-specific DNA Binding Protein 2 — direct p53 "
+            "transcription target. Maps to GZ06's p53 protein (x) which "
+            "is the actual p53 dynamic in the composite; CDKN1A in DP14 "
+            "is FoxO-driven, not p53-driven, so DDB2 needs its own "
+            "mechanistic counterpart. GZ06's p53 oscillates after "
+            "damage, so the summary is a cycle-average — phase-"
+            "insensitive and matches bulk transcriptomics' implicit "
+            "population averaging over cells at random cycle phases."
+        ),
+        reference="Hwang et al. 1999, Nature 401:430–432",
+        summary=cycle_average(0.25),
+    ),
+    GeneReporter(
+        observable="dp14/ROS",
+        gene_symbol="HMOX1",
+        sign=+1,
+        description=(
+            "Heme oxygenase 1 — Nrf2/ARE-driven oxidative-stress "
+            "reporter. Mapped to DP14's ROS state as the closest "
+            "available proxy until a curated Nrf2 module is added."
+        ),
+        reference="Alam & Cook 2007, Antioxid Redox Signal 9:2499–2511",
+    ),
+    GeneReporter(
+        observable="nfkb/IkBa",
+        gene_symbol="NFKBIA",
+        sign=+1,
+        description=(
+            "IκBα — direct NF-κB target via the autoregulatory negative "
+            "feedback loop. Direct state in Ihekwaba 2004."
+        ),
+        reference="Sun et al. 1993, Science 259:1912–1915",
+    ),
+    GeneReporter(
+        observable="dp14/Mito_mass_new",
+        gene_symbol="CYCS",
+        sign=+1,
+        description=(
+            "Cytochrome c — OXPHOS / mitochondrial biogenesis readout. "
+            "Mapped to DP14's newly-synthesized mitochondrial mass."
+        ),
+        reference="Scarpulla 2008, Physiol Rev 88:611–638",
+    ),
+    GeneReporter(
+        observable="dp14/mTORC1_pS2448",
+        gene_symbol="EIF4EBP1",
+        sign=+1,
+        description=(
+            "4E-BP1 — mTORC1 substrate and mTOR-target gene. Mapped to "
+            "DP14's phospho-mTORC1 (kinase-level proxy)."
+        ),
+        reference="Brunn et al. 1997, Science 277:99–101",
+    ),
+]
+
+
+def derive_multi_hallmark_summaries(
+    state_trajectory: dict,
+    reporters: list[GeneReporter] | None = None,
+) -> dict[str, Any]:
+    """Apply each reporter's ``summary`` callable to its store-path trajectory.
+
+    Parameters
+    ----------
+    state_trajectory:
+        ``{store_path: jnp.ndarray}`` with each array shaped
+        ``(n_time, ...)``. Typically the result of
+        ``Composite.unflatten(scheduler_result.ys)``.
+    reporters:
+        Defaults to :data:`MULTI_HALLMARK_REPORTERS`.
+
+    Returns
+    -------
+    ``{reporter.observable: scalar (or batched array)}``, ready to feed
+    :func:`compute_concordance`.
+    """
+    if reporters is None:
+        reporters = MULTI_HALLMARK_REPORTERS
+    return {
+        rep.observable: rep.summary(state_trajectory[rep.observable])
+        for rep in reporters
+        if rep.observable in state_trajectory
+    }
+
+
 # ── Mechanistic observable derivation ──────────────────────────────
 
 
@@ -173,6 +329,43 @@ def derive_observables(state: dict) -> dict[str, Any]:
         "mTOR_activity_algebraic": obs["MTOR"],
         "NFKB_algebraic": obs["NFKB"],
         "ROS_algebraic": obs["ROS"],
+    }
+
+
+def derive_observable_summaries(
+    state_trajectory: dict,
+    reporters: list[GeneReporter] | None = None,
+) -> dict[str, Any]:
+    """Apply each reporter's ``summary`` callable to its observable trajectory.
+
+    Use this when the loss / concordance routes through an oscillating
+    state. ``derive_observables`` is shape-polymorphic (via
+    :func:`_compute_algebraic`), so passing a state dict whose values
+    are time-axis-leading trajectory arrays produces per-observable
+    trajectories. Each reporter's ``summary`` then collapses its own
+    observable to a scalar; defaults to :func:`last_value` (endpoint).
+
+    Parameters
+    ----------
+    state_trajectory:
+        ``{store_path: jnp.ndarray}`` with each array shaped
+        ``(n_time, ...)`` — typically the output of
+        ``Composite.unflatten(scheduler_result.ys)``.
+    reporters:
+        Defaults to :data:`CANONICAL_REPORTERS`.
+
+    Returns
+    -------
+    ``{observable_name: scalar (or batched array)}`` ready to be
+    consumed by :func:`compute_concordance`.
+    """
+    if reporters is None:
+        reporters = CANONICAL_REPORTERS
+    obs_traj = derive_observables(state_trajectory)
+    return {
+        rep.observable: rep.summary(obs_traj[rep.observable])
+        for rep in reporters
+        if rep.observable in obs_traj
     }
 
 
@@ -247,6 +440,59 @@ def log2_fold_change(
     return gene_expr[group_cols].mean(axis=1) - gene_expr[baseline_cols].mean(
         axis=1
     )
+
+
+@dataclass
+class GeneExpressionDataset:
+    """A gene-expression dataset + named sample groups, with a uniform
+    ``.delta(condition, baseline)`` interface for calibration.
+
+    Calibration code consumes datasets through ``.delta(...)``; future
+    datasets (Tabula Muris Senis, Ma 2020) implement the same interface
+    by subclassing or providing a compatible class.
+
+    Attributes
+    ----------
+    gene_expr:
+        ``gene × sample`` DataFrame indexed by HGNC gene symbol.
+    sample_groups:
+        ``{group_name: [sample_column_name, ...]}``. Looked up by
+        ``delta``.
+    """
+
+    gene_expr: pd.DataFrame
+    sample_groups: dict[str, list]
+
+    @classmethod
+    def from_series_matrix(
+        cls,
+        series_matrix_path,
+        platform_path,
+        sample_groups: dict[str, list],
+        sample_position_groups: dict[str, list[int]] | None = None,
+    ) -> "GeneExpressionDataset":
+        """Build from a GEO series matrix + Affymetrix platform pair.
+
+        Use ``sample_groups`` for explicit column-name lists, or
+        ``sample_position_groups`` for position-based selection that
+        gets resolved against the loaded matrix's columns.
+        """
+        gene_expr = load_gene_expression(series_matrix_path, platform_path)
+        if sample_position_groups is not None:
+            samples = list(gene_expr.columns)
+            sample_groups = {
+                k: [samples[i] for i in idxs]
+                for k, idxs in sample_position_groups.items()
+            }
+        return cls(gene_expr=gene_expr, sample_groups=sample_groups)
+
+    def delta(self, condition: str, baseline: str) -> pd.Series:
+        """Δ_data = log2 fold change between two named groups."""
+        return log2_fold_change(
+            self.gene_expr,
+            self.sample_groups[condition],
+            self.sample_groups[baseline],
+        )
 
 
 # ── Concordance computation ────────────────────────────────────────

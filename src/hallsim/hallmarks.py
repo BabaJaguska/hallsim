@@ -7,11 +7,27 @@ one or more Processes.
     severity = 0.0  ->  healthy / optimal
     severity = 1.0  ->  severely impaired
 
+Hallmark transforms are **multiplicative of the current calibrated
+base value**, not absolute. A transform receives ``(severity, base)``
+and returns ``base * f(severity)``. This lets a calibration loss
+substitute mechanism parameters via ``parameter_overrides`` and then
+apply hallmarks at the experimental severity profile without the
+hallmark clobbering the calibrated values.
+
 Because Process instances are immutable Equinox modules, hallmark
 handles work by constructing *new* Process instances with modified
-parameters.  This means hallmark severity is differentiable:
+parameters. Severity is JAX-traceable (pass a ``jnp.ndarray`` and
+``jax.grad`` flows through), and so is the base value (so Calibrator
+can fit through ``parameter_overrides`` while hallmarks scale by
+severity).
 
-    jax.grad(lambda s: simulate(apply_hallmarks(composite, s)).loss)(0.5)
+**Severity is an experimental-design knob, not a fittable parameter.**
+The intended pattern is to set severity for each experimental
+condition (DDIS=1.0, ctrl=0.0, RAPA-rescued=0.3) and fit mechanism
+parameters via ``parameter_overrides`` with Calibrator. Severity-
+differentiability is preserved for sensitivity analysis and severity-
+sweep population studies, not for inferring "what severity does the
+data show" — that would conflate experimental setup with model state.
 
 Usage
 -----
@@ -40,16 +56,24 @@ class ParameterMapping:
     process_name:
         Name of the target process in the composite.
     param_name:
-        Name of the Process field to modify.
+        Name of the Process field to modify. Either a plain attribute
+        (``"alpha"``) or a dotted path into a dict-valued field
+        (``"parameter_overrides.<key>"``).
     transform:
-        Function ``severity -> param_value``.
+        ``(severity, base) -> new_value``. ``base`` is the current
+        value at the target field, read fresh on each hallmark
+        application — so any prior substitution into
+        ``parameter_overrides`` (e.g. from a calibration step) flows
+        through cleanly. Typically returns ``base * f(severity)``
+        where ``f(0) = 1`` for "no perturbation" and ``f(1)`` is the
+        full perturbation factor.
     description:
         Human-readable description of what this mapping does.
     """
 
     process_name: str
     param_name: str
-    transform: Callable[[float], float]
+    transform: Callable[[Any, Any], Any]
     description: str = ""
 
 
@@ -113,7 +137,6 @@ class HallmarkHandle:
             if pname not in result:
                 continue
             proc = result[pname]
-            new_val = mapping.transform(severity)
             if "." in mapping.param_name:
                 # Dotted form: target a key inside a dict-valued field.
                 field_name, key = mapping.param_name.split(".", 1)
@@ -130,12 +153,16 @@ class HallmarkHandle:
                         f"Key {key!r} not in {pname}.{field_name}; "
                         f"available: {sorted(current.keys())}"
                     )
+                base = current[key]
+                new_val = mapping.transform(severity, base)
                 result[pname] = eqx.tree_at(
                     lambda p, fn=field_name, k=key: getattr(p, fn)[k],
                     proc,
                     new_val,
                 )
             else:
+                base = getattr(proc, mapping.param_name)
+                new_val = mapping.transform(severity, base)
                 result[pname] = eqx.tree_at(
                     lambda p, pn=mapping.param_name: getattr(p, pn),
                     proc,
@@ -143,12 +170,33 @@ class HallmarkHandle:
                 )
         return result
 
-    def summary(self, severity: float) -> dict[str, Any]:
-        """Show what parameters would be set at a given severity."""
-        return {
-            f"{m.process_name}.{m.param_name}": m.transform(severity)
-            for m in self.mappings
-        }
+    def summary(
+        self,
+        severity: float,
+        processes: dict[str, Process] | None = None,
+    ) -> dict[str, Any]:
+        """Show what parameters would be set at a given severity.
+
+        If ``processes`` is provided, reads the actual current base
+        values from each target process and returns the transformed
+        result. If omitted, uses ``base=1.0`` as a placeholder
+        (suitable for displaying the transform's severity-shape but
+        not the absolute resulting value).
+        """
+        out: dict[str, Any] = {}
+        for m in self.mappings:
+            base: Any = 1.0
+            if processes is not None and m.process_name in processes:
+                proc = processes[m.process_name]
+                if "." in m.param_name:
+                    field_name, key = m.param_name.split(".", 1)
+                    base = getattr(proc, field_name)[key]
+                else:
+                    base = getattr(proc, m.param_name)
+            out[f"{m.process_name}.{m.param_name}"] = m.transform(
+                severity, base
+            )
+        return out
 
 
 def apply_hallmarks(
@@ -200,10 +248,12 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             "Sivakumar et al. 2011 (BIOMD0000000398)",
         ],
         mappings=[
+            # Stem-cell niche severity is the direct knob (no calibrated
+            # base behind it) — base is ignored.
             ParameterMapping(
                 process_name="niche",
                 param_name="severity",
-                transform=lambda h: h,
+                transform=lambda h, base: h,
                 description="Niche deterioration severity — scales decay of all ligands",
             ),
         ],
@@ -218,11 +268,13 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
         category="Primary",
         references=["Lopez-Otin et al. 2023", "Alfego & Kriete 2017"],
         mappings=[
+            # severity=0 → base (no perturbation); severity=1 → 3*base
+            # (the published "severely impaired" factor).
             ParameterMapping(
                 process_name="oxidative_stress",
                 param_name="MDAMAGE_SA",
-                transform=lambda h: 1.0 + h * 2.0,  # 1.0 -> 3.0
-                description="Damage accumulation rate increases with dysfunction",
+                transform=lambda h, base: base * (1.0 + h * 2.0),
+                description="Damage accumulation rate scales 1x→3x with dysfunction",
             ),
         ],
     ),
@@ -241,42 +293,81 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             "DallePezze 2014 (BIOMD0000000582)",
         ],
         mappings=[
+            # ERiQ-based composites: severity=0 → base; severity=1 → 1.5*base.
             ParameterMapping(
                 process_name="energy",
                 param_name="GLYCOL_SA",
-                transform=lambda h: 1.0 + h * 0.5,  # 1.0 -> 1.5
-                description="Glycolytic flux increases with nutrient dysregulation (ERiQ-based composites)",
+                transform=lambda h, base: base * (1.0 + h * 0.5),
+                description="Glycolytic flux scales 1x→1.5x with nutrient dysregulation (ERiQ-based composites)",
             ),
             # DP14-based composites: scale the mTORC1 phosphorylation
-            # rate. Severity 0.0 → 30% of SBML default (rapamycin-rescued
-            # regime). Severity 1.0 → SBML default (untreated DDIS).
-            # Targets the parameter_overrides dict registered by
-            # build_multi_hallmark_composite.
+            # rate around the calibrated base. severity=0 → 0.3*base
+            # (rapamycin-rescued); severity=1 → base (untreated DDIS).
             ParameterMapping(
                 process_name="dp14",
                 param_name=(
                     "parameter_overrides."
                     "mTORC1_S2448_phos_by_AA_n_Akt_pS473"
                 ),
-                transform=lambda h: 162.471039450073 * (0.3 + 0.7 * h),
+                transform=lambda h, base: base * (0.3 + 0.7 * h),
                 description=(
                     "mTORC1 S2448 phosphorylation rate (DP14): "
-                    "rapa-suppressed at severity=0, full at severity=1"
+                    "30% of base at severity=0 (rapa-rescued), "
+                    "full base at severity=1 (untreated)"
                 ),
             ),
         ],
     ),
     "Genomic Instability": HallmarkHandle(
         name="Genomic Instability",
-        description="DNA damage accumulation due to genomic instability.",
+        description=(
+            "Exogenous DNA damage source. Drives ERiQ's damage_repair "
+            "(eta), DP14's DNA_damaged_by_irradiation rate, and GZ06's "
+            "psi independently — each at its own calibrated scale. "
+            "Same severity knob, no internal coupling between models."
+        ),
         category="Primary",
-        references=["Lopez-Otin et al. 2023"],
+        references=[
+            "Lopez-Otin et al. 2023",
+            "DallePezze 2014 (BIOMD0000000582)",
+            "Geva-Zatorsky 2006 (BIOMD0000000157)",
+        ],
         mappings=[
+            # ERiQ-based composites: severity=0 → base; severity=1 → 5*base
+            # (matches the prior absolute mapping with default base=0.5
+            # giving 0.5→2.5).
             ParameterMapping(
                 process_name="damage_repair",
                 param_name="eta",
-                transform=lambda h: 0.5 + h * 2.0,  # 0.5 -> 2.5
-                description="Damage production rate increases with instability",
+                transform=lambda h, base: base * (1.0 + h * 4.0),
+                description="Damage production rate scales 1x→5x with instability (ERiQ-based composites)",
+            ),
+            # DP14-based composites: severity-driven dose. severity=0 → 0
+            # (no irradiation); severity=1 → base. Base is the calibrated
+            # rate at full DDIS (the value Calibrator fits).
+            ParameterMapping(
+                process_name="dp14",
+                param_name="parameter_overrides.DNA_damaged_by_irradiation",
+                transform=lambda h, base: base * h,
+                description=(
+                    "Exogenous-damage rate constant (DP14): zero at "
+                    "severity=0 (no irradiation), full base at "
+                    "severity=1 (DDIS dose)"
+                ),
+            ),
+            # GZ06 (Geva-Zatorsky 2006 p53-Mdm2 oscillator): the same
+            # severity drives its psi damage-signal independently, at
+            # GZ06's own calibrated scale. No DP14↔GZ06 topology
+            # coupling — the hallmark is the shared knob.
+            ParameterMapping(
+                process_name="gz06",
+                param_name="parameter_overrides.psi",
+                transform=lambda h, base: base * h,
+                description=(
+                    "GZ06 damage-signal parameter: zero at severity=0 "
+                    "(no damage), full base at severity=1 (calibrated "
+                    "full-dose value)"
+                ),
             ),
         ],
     ),
