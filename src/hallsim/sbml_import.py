@@ -267,6 +267,11 @@ class SBMLProcess(Process):
     # substituted into the `c` array at derivative time. This is how
     # a HallmarkHandle parameterises a specific SBML rate constant.
     parameter_overrides: dict[str, float] = None  # type: ignore[assignment]
+    # _override_names and _override_indexes are parallel tuples fixed
+    # at construction. The dict can be reordered by eqx.tree_at on
+    # substitution; we iterate the tuple at trace time (JIT-safe — same
+    # call shape every time) and look up the current value by name.
+    _override_names: tuple[str, ...] = ()
     _override_indexes: tuple[int, ...] = ()
 
     def ports_schema(self):
@@ -327,8 +332,11 @@ class SBMLProcess(Process):
             c = self._c
 
         if self.parameter_overrides and self._override_indexes:
-            override_names = tuple(self.parameter_overrides.keys())
-            for name, idx in zip(override_names, self._override_indexes):
+            # Iterate the fixed-order names tuple (NOT the dict's
+            # current key order — eqx.tree_at can reorder it on
+            # substitution). Look up each value by name in the
+            # (possibly reordered) parameter_overrides dict.
+            for name, idx in zip(self._override_names, self._override_indexes):
                 value = self.parameter_overrides[name]
                 if needs_batched_c:
                     c = c.at[..., idx].set(value)
@@ -699,9 +707,11 @@ def process_from_sbml(
         override_dict = {
             n: float(parameter_overrides[n]) for n in parameter_overrides
         }
-        override_indexes = tuple(c_indexes[n] for n in parameter_overrides)
+        override_names = tuple(parameter_overrides.keys())
+        override_indexes = tuple(c_indexes[n] for n in override_names)
     else:
         override_dict = {}
+        override_names = ()
         override_indexes = ()
 
     proc = object.__new__(SBMLProcess)
@@ -721,6 +731,7 @@ def process_from_sbml(
     object.__setattr__(proc, "_tunable_param_indexes", tunable_indexes)
     object.__setattr__(proc, "_tunable_param_defaults", tunable_defaults)
     object.__setattr__(proc, "parameter_overrides", override_dict)
+    object.__setattr__(proc, "_override_names", override_names)
     object.__setattr__(proc, "_override_indexes", override_indexes)
     if timescale is not None:
         object.__setattr__(proc, "timescale", timescale)
