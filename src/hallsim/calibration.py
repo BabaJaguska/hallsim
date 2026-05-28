@@ -60,8 +60,10 @@ High-level usage::
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 import diffrax as dfx
@@ -612,3 +614,196 @@ class CalibrationProblem:
                 reporters=self.reporters,
             )
         return results
+
+    # ── Output bundle: trajectories + topology + concordance JSON ──
+
+    def _simulate_all_conditions(
+        self,
+        param_values: dict,
+        n_save: int | None = None,
+    ) -> dict:
+        """Run each condition once at ``param_values``; return
+        ``{cond_name: SchedulerResult}``. Uses the Scheduler's default
+        adjoint (no forward-mode JVP), so wall-time is fast — meant
+        for post-fit visualisation, not loss evaluation."""
+        from hallsim.hallmarks import apply_hallmarks
+        from hallsim.scheduler import Scheduler
+
+        substituted = self._substitute(self.composite.processes, param_values)
+        sched = Scheduler(**self.scheduler_kwargs)
+        n = n_save if n_save is not None else self.n_save
+        save_dt = max(1e-6, self.t_end / max(1, n - 1))
+        results: dict = {}
+        for cond_name, cond in self.conditions.items():
+            procs = apply_hallmarks(substituted, cond.hallmarks)
+            comp = self._Composite(
+                processes=procs,
+                topology=self.composite.topology,
+                validate=False,
+                semantic_validation=False,
+            )
+            y0 = comp.initial_state_vec()
+            results[cond_name] = sched.run(
+                comp,
+                t_span=(0.0, self.t_end),
+                macro_dt=self.macro_dt,
+                y0=y0,
+                save_dt=save_dt,
+            )
+        return results
+
+    def save_outputs(
+        self,
+        out_dir: str,
+        history: "CalibrationHistory",
+        *,
+        n_save_plot: int = 50,
+    ) -> dict:
+        """Produce the post-fit artifact bundle in ``out_dir``.
+
+        Generates:
+
+        - ``graph.png`` — composite topology rendered via networkx.
+        - ``trajectories_<cond>_pre_vs_post.png`` — one figure per
+          condition overlaying pre-fit and post-fit reporter
+          trajectories.
+        - ``trajectories_post_all_arms.png`` — all conditions
+          overlaid at post-fit params.
+        - ``trajectories.json`` — per-condition reporter-path
+          trajectories at post-fit (densely sampled, ``n_save_plot``
+          points).
+        - ``summary.json`` — fitted params, init params, loss history,
+          per-arm concordance (pre and post), conditions, params.
+
+        Re-samples each condition at ``n_save_plot`` points so the
+        trajectory plots are smooth (the loss path uses ``self.n_save``
+        which is intentionally low for jvp tractability).
+
+        Returns a dict describing the written artifacts.
+        """
+        from hallsim.plotting import (
+            draw_composite_graph,
+            plot_runs_comparison,
+            save_run_results,
+        )
+
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        init = {k: jnp.asarray(p.init) for k, p in self.params.items()}
+        final = history.final_params or init
+
+        # Densely-sampled trajectories at both ends of the fit.
+        pre_runs = self._simulate_all_conditions(init, n_save=n_save_plot)
+        post_runs = self._simulate_all_conditions(final, n_save=n_save_plot)
+
+        # Concordance — uses the standard n_save path (matches the
+        # numbers the demo prints) so the JSON tallies with stdout.
+        results_pre = self.evaluate(init)
+        results_post = self.evaluate(final)
+
+        reporter_paths = [r.observable for r in self.reporters]
+
+        # 1. Topology
+        draw_composite_graph(
+            self.composite,
+            save=str(out / "graph.png"),
+            title="composite topology",
+        )
+
+        # 2. Per-condition pre-vs-post trajectory overlays
+        for cond_name in self.conditions:
+            plot_runs_comparison(
+                {"pre-fit": pre_runs[cond_name], "post-fit": post_runs[cond_name]},
+                paths=reporter_paths,
+                title=f"{cond_name}: pre vs post",
+                save=str(out / f"trajectories_{cond_name}_pre_vs_post.png"),
+            )
+
+        # 3. All conditions at post-fit
+        plot_runs_comparison(
+            post_runs,
+            paths=reporter_paths,
+            title="all conditions at post-fit params",
+            save=str(out / "trajectories_post_all_arms.png"),
+        )
+
+        # 4. Trajectories JSON (post-fit only — pre-fit is in the plots)
+        save_run_results(
+            post_runs,
+            str(out / "trajectories.json"),
+            paths=reporter_paths,
+            metadata={
+                "fitted_params": {k: float(v) for k, v in final.items()},
+                "n_save_plot": n_save_plot,
+                "t_end": self.t_end,
+                "macro_dt": self.macro_dt,
+            },
+        )
+
+        # 5. Summary JSON
+        def _conc_to_dict(results_dict):
+            out = {}
+            for arm, r in results_dict.items():
+                out[arm] = {
+                    "sign_agreement": float(r.sign_agreement),
+                    "spearman_r": float(r.spearman_r),
+                    "n_compared": r.n_compared,
+                    "rows": [
+                        {
+                            "gene": row.reporter.gene_symbol,
+                            "observable": row.reporter.observable,
+                            "delta_sim_signed": float(row.delta_sim),
+                            "delta_data": float(row.delta_data),
+                            "sign_match": bool(row.sign_match),
+                        }
+                        for row in r.rows
+                    ],
+                }
+            return out
+
+        summary = {
+            "params": {
+                k: {
+                    "process_name": p.process_name,
+                    "field": p.field,
+                    "init": p.init,
+                    "clamp": list(p.clamp) if p.clamp else None,
+                    "description": p.description,
+                }
+                for k, p in self.params.items()
+            },
+            "init_params": {k: float(v) for k, v in init.items()},
+            "fitted_params": {k: float(v) for k, v in final.items()},
+            "loss_history": [float(v) for v in history.losses],
+            "wall_time_s": float(history.wall_time_s),
+            "conditions": {
+                name: {"hallmarks": dict(c.hallmarks), "description": c.description}
+                for name, c in self.conditions.items()
+            },
+            "arm_pairs": dict(self.arm_pairs),
+            "fit_arms": list(self.fit_arms),
+            "held_out_arms": list(self.held_out_arms),
+            "t_end": self.t_end,
+            "macro_dt": self.macro_dt,
+            "concordance_pre": _conc_to_dict(results_pre),
+            "concordance_post": _conc_to_dict(results_post),
+            "reporters": [
+                {
+                    "gene_symbol": r.gene_symbol,
+                    "observable": r.observable,
+                    "sign": r.sign,
+                    "summary": r.summary.__name__
+                    if hasattr(r.summary, "__name__")
+                    else type(r.summary).__name__,
+                }
+                for r in self.reporters
+            ],
+        }
+        with open(out / "summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
+
+        return {
+            "out_dir": str(out),
+            "files": sorted(p.name for p in out.iterdir()),
+        }

@@ -180,6 +180,14 @@ def main() -> None:
         "DDIS_vs_ctrl, evaluate on RAPA_vs_DDIS."
     )
 
+    # 5. Artifact bundle (topology graph + per-arm trajectories +
+    # pre-vs-post comparison + concordance JSON).
+    out_dir = ROOT / "outputs" / "multi_hallmark_calibrate"
+    print(f"\n[5/5] Writing artifacts to {out_dir.relative_to(ROOT)} ...")
+    info = problem.save_outputs(str(out_dir), history, n_save_plot=50)
+    for fname in info["files"]:
+        print(f"      {fname}")
+
 
 if __name__ == "__main__":
     main()
