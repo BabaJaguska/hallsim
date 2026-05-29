@@ -256,6 +256,27 @@ class Process(eqx.Module):
 
     # --- Metadata ------------------------------------------------------------
 
+    def calibratable_params(self) -> list:
+        """Mechanism parameters this Process exposes as fittable.
+
+        Returns a list of :class:`hallsim.calibration.CalibratableParam`
+        descriptors with ``process_name=""`` (the Composite-level
+        aggregator fills in the namespace) and ``field`` either a plain
+        attribute name or ``"parameters.<key>"``.
+
+        Default implementation returns no parameters. Subclasses
+        override to expose their published rate constants, Hill
+        coefficients, etc. — anything that legitimately varies across
+        cell states and that gene-expression / phenotype data informs.
+
+        :class:`Composite.calibration_targets` subtracts hallmark-
+        controlled parameters from the listing before returning to
+        callers, so it's safe for a Process to expose a parameter
+        that's *also* a hallmark target — the discovery API hides it
+        from default Calibrator wiring unless explicitly requested.
+        """
+        return []
+
     def metadata(self) -> dict[str, Any]:
         """Structured metadata for discovery and LLM-assisted composition.
 

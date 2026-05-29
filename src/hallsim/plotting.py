@@ -194,7 +194,10 @@ def plot_composite_run(
     if paths is None:
         paths = list(result.keys)
     if figsize is None:
-        figsize = (4.5 * ncols, 2.6 * max(1, (len(paths) + ncols - 1) // ncols))
+        figsize = (
+            4.5 * ncols,
+            2.6 * max(1, (len(paths) + ncols - 1) // ncols),
+        )
     return plot_trajectories(
         result,
         paths=paths,
@@ -329,7 +332,9 @@ def draw_composite_graph(
             ax=ax,
             alpha=0.85,
             label_pos=0.5,
-            bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7),
+            bbox=dict(
+                boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7
+            ),
         )
     ax.set_axis_off()
     if title:
@@ -352,6 +357,7 @@ def save_run_results(
     all if None), plus optional metadata. Accepts either a single
     SchedulerResult or a ``{label: SchedulerResult}`` mapping.
     """
+
     def _serialize_one(res):
         ts = np.asarray(res.ts).tolist()
         keys = list(paths) if paths is not None else list(res.keys)

@@ -50,7 +50,7 @@ High-level usage::
         reporters=MULTI_HALLMARK_REPORTERS,
         conditions={"ctrl": Condition(...), "DDIS": Condition(...)},
         data={"DDIS_vs_ctrl": ds.delta(...)},
-        params={"rate": ParameterRef("dp14", "parameter_overrides.k", init=1.0)},
+        params={"rate": ParameterRef("dp14", "parameters.k", init=1.0)},
         fit_arms=["DDIS_vs_ctrl"],
         held_out_arms=[],
     )
@@ -244,6 +244,46 @@ def _normalized(v: jnp.ndarray) -> jnp.ndarray:
 
 
 @dataclass(frozen=True)
+class CalibratableParam:
+    """A mechanism parameter exposed by a Process as fittable.
+
+    Returned by ``Process.calibratable_params`` (one per scalar the
+    Process considers a reasonable calibration target) and aggregated
+    by :meth:`Composite.calibration_targets`. Convert to a
+    :class:`ParameterRef` by passing it through ``ParameterRef.from_target``.
+
+    Attributes
+    ----------
+    process_name:
+        Set by the Composite-level aggregator (default empty here so
+        Processes can return self-contained descriptions; aggregator
+        fills in the namespace).
+    field:
+        Same dotted convention as :class:`ParameterRef` /
+        :class:`hallsim.hallmarks.ParameterMapping.param_name` —
+        either a plain attribute or ``"parameters.<key>"``.
+    default:
+        The Process's current value at this field — typically the
+        published rate constant from the source paper / SBML file.
+    clamp:
+        ``(lo, hi)`` suggested box for Calibrator. Defaults to a
+        two-order-of-magnitude span around the default value
+        (``(default/100, default*100)``) when not supplied by the
+        Process — wider span is harmless because Calibrator's step
+        size is what controls actual exploration.
+    description:
+        What the parameter biologically represents, ideally with the
+        source paper. Surfaced in ``simulate info`` and listings.
+    """
+
+    process_name: str
+    field: str
+    default: float
+    clamp: tuple[float, float] | None = None
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class Condition:
     """A named experimental arm — a hallmark severity profile.
 
@@ -275,8 +315,8 @@ class ParameterRef:
     :attr:`hallsim.hallmarks.ParameterMapping.param_name`:
 
     - Plain attribute: ``field="alpha"`` targets ``proc.alpha``.
-    - Dotted: ``field="parameter_overrides.<key>"`` targets a single
-      entry inside an SBMLProcess's parameter_overrides dict.
+    - Dotted: ``field="parameters.<key>"`` targets a single
+      entry inside an SBMLProcess's parameters dict.
 
     Calibrator substitutes ``init`` (or the latest iterate) into this
     location via ``eqx.tree_at`` before each loss evaluation.
@@ -305,7 +345,7 @@ class ParameterRef:
 def _substitute_param(proc, field: str, value: Any):
     """Return a new Process with ``field`` set to ``value`` via eqx.tree_at.
 
-    Handles both plain and dotted (``parameter_overrides.<key>``) forms,
+    Handles both plain and dotted (``parameters.<key>``) forms,
     mirroring :meth:`hallsim.hallmarks.HallmarkHandle.apply` so the
     calibration substitution path and the hallmark substitution path
     use the same convention.
@@ -392,8 +432,11 @@ class CalibrationProblem:
         macro_dt: float = 5.0,
         n_save: int = 6,
         scheduler_kwargs: dict | None = None,
+        hallmark_registry: dict | None = None,
+        allow_hallmark_override: bool = False,
     ) -> None:
         from hallsim.composite import Composite  # local import — avoid cycle
+        from hallsim.hallmarks import HALLMARK_REGISTRY
 
         # Validation pass over the wiring — catch typos early so the
         # JIT trace doesn't fail with a confusing message later.
@@ -420,6 +463,52 @@ class CalibrationProblem:
                     f"params[{pname!r}].process_name={pref.process_name!r} "
                     f"not in composite.processes "
                     f"(have {sorted(composite.processes.keys())})"
+                )
+
+        # Guard rail: hallmark-targeted parameters are knobs set by the
+        # experimental Condition.hallmarks profile, not biology to be
+        # learned from data. Fitting them would let the optimizer adjust
+        # the experiment itself to match observations, which is
+        # degenerate. The rule derives from the registry (no hardcoded
+        # parameter names) so it generalises to any hallmark added
+        # later. Override with allow_hallmark_override=True if you have
+        # a specific reason — but be ready to defend it.
+        reg = (
+            HALLMARK_REGISTRY
+            if hallmark_registry is None
+            else hallmark_registry
+        )
+        if not allow_hallmark_override:
+            hallmark_targets: dict[tuple[str, str], list[str]] = {}
+            for hname, handle in reg.items():
+                for mapping in handle.mappings:
+                    key = (mapping.process_name, mapping.param_name)
+                    hallmark_targets.setdefault(key, []).append(hname)
+            offenders = []
+            for pname, pref in params.items():
+                key = (pref.process_name, pref.field)
+                if key in hallmark_targets:
+                    offenders.append((pname, pref, hallmark_targets[key]))
+            if offenders:
+                msgs = []
+                for pname, pref, hmarks in offenders:
+                    msgs.append(
+                        f"  params[{pname!r}] targets "
+                        f"{pref.process_name}.{pref.field}, which is "
+                        f"set by the {', '.join(repr(h) for h in hmarks)} "
+                        f"hallmark(s)."
+                    )
+                raise ValueError(
+                    "Hallmark-targeted parameters are not valid Calibrator "
+                    "inputs:\n"
+                    + "\n".join(msgs)
+                    + "\n\nHallmark targets are knobs set by "
+                    "Condition.hallmarks per experimental arm, not "
+                    "mechanism parameters to be fit from data. Reach for "
+                    "Composite.calibration_targets() to discover mechanism "
+                    "candidates that aren't hallmark-controlled. Pass "
+                    "allow_hallmark_override=True if you genuinely need to "
+                    "fit through a hallmark target."
                 )
 
         self.composite = composite
@@ -714,7 +803,10 @@ class CalibrationProblem:
         # 2. Per-condition pre-vs-post trajectory overlays
         for cond_name in self.conditions:
             plot_runs_comparison(
-                {"pre-fit": pre_runs[cond_name], "post-fit": post_runs[cond_name]},
+                {
+                    "pre-fit": pre_runs[cond_name],
+                    "post-fit": post_runs[cond_name],
+                },
                 paths=reporter_paths,
                 title=f"{cond_name}: pre vs post",
                 save=str(out / f"trajectories_{cond_name}_pre_vs_post.png"),
@@ -778,7 +870,10 @@ class CalibrationProblem:
             "loss_history": [float(v) for v in history.losses],
             "wall_time_s": float(history.wall_time_s),
             "conditions": {
-                name: {"hallmarks": dict(c.hallmarks), "description": c.description}
+                name: {
+                    "hallmarks": dict(c.hallmarks),
+                    "description": c.description,
+                }
                 for name, c in self.conditions.items()
             },
             "arm_pairs": dict(self.arm_pairs),
@@ -793,9 +888,11 @@ class CalibrationProblem:
                     "gene_symbol": r.gene_symbol,
                     "observable": r.observable,
                     "sign": r.sign,
-                    "summary": r.summary.__name__
-                    if hasattr(r.summary, "__name__")
-                    else type(r.summary).__name__,
+                    "summary": (
+                        r.summary.__name__
+                        if hasattr(r.summary, "__name__")
+                        else type(r.summary).__name__
+                    ),
                 }
                 for r in self.reporters
             ],

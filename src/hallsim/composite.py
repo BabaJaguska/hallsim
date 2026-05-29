@@ -441,3 +441,69 @@ class Composite(eqx.Module):
             groups["default"] = without_ts
 
         return groups
+
+    def calibration_targets(
+        self,
+        *,
+        include_hallmark_targets: bool = False,
+        registry: dict | None = None,
+    ) -> list:
+        """Enumerate mechanism parameters across processes, minus hallmark knobs.
+
+        Walks every process, calls each one's ``calibratable_params()``,
+        fills in the process namespace, and **subtracts every
+        ``(process_name, field)`` pair that's targeted by any
+        :class:`hallsim.hallmarks.ParameterMapping` in the active
+        hallmark registry**. Hallmarks are knobs — the experimenter /
+        modeller sets them via ``Condition.hallmarks[name] = severity``
+        — so their target parameters aren't valid Calibrator inputs.
+        Everything else in those same processes (upstream regulators,
+        downstream rate constants, parallel parameters not touched by
+        any hallmark) remains visible and calibratable.
+
+        Parameters
+        ----------
+        include_hallmark_targets:
+            If True, include hallmark-targeted parameters in the
+            returned list. Defaults to False.
+        registry:
+            Hallmark registry to consult. Defaults to
+            :data:`hallsim.hallmarks.HALLMARK_REGISTRY`.
+
+        Returns
+        -------
+        list of :class:`hallsim.calibration.CalibratableParam`, each
+        with ``process_name`` filled in. Pass any entry through
+        ``ParameterRef(process_name=..., field=..., init=..., clamp=...)``
+        to wire it into a :class:`hallsim.calibration.CalibrationProblem`.
+        """
+        from hallsim.calibration import CalibratableParam
+        from hallsim.hallmarks import HALLMARK_REGISTRY
+
+        reg = HALLMARK_REGISTRY if registry is None else registry
+
+        hallmark_targets: set[tuple[str, str]] = set()
+        for handle in reg.values():
+            for mapping in handle.mappings:
+                hallmark_targets.add(
+                    (mapping.process_name, mapping.param_name)
+                )
+
+        out: list = []
+        for proc_name, proc in self.processes.items():
+            for item in proc.calibratable_params():
+                if (
+                    not include_hallmark_targets
+                    and (proc_name, item.field) in hallmark_targets
+                ):
+                    continue
+                out.append(
+                    CalibratableParam(
+                        process_name=proc_name,
+                        field=item.field,
+                        default=item.default,
+                        clamp=item.clamp,
+                        description=item.description,
+                    )
+                )
+        return out

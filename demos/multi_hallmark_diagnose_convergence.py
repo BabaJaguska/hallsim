@@ -85,7 +85,7 @@ def dp14_alone_at_gi_zero():
     proc = process_from_sbml(
         str(DP14_SBML_PATH),
         name="dp14",
-        parameter_overrides={
+        parameters={
             DP14_MTOR_PHOS_RATE_NAME: DP14_MTOR_PHOS_RATE_DEFAULT,
             DP14_IRRADIATION_RATE_NAME: 0.0,  # explicit zero
         },
@@ -104,7 +104,7 @@ def dp14_alone_at_gi_full():
     proc = process_from_sbml(
         str(DP14_SBML_PATH),
         name="dp14",
-        parameter_overrides={
+        parameters={
             DP14_MTOR_PHOS_RATE_NAME: DP14_MTOR_PHOS_RATE_DEFAULT,
             DP14_IRRADIATION_RATE_NAME: DP14_IRRADIATION_RATE_DEFAULT,
         },

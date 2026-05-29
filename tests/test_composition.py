@@ -296,6 +296,87 @@ class TestComposite:
         assert jnp.allclose(dydt["pool/b"], jnp.array(6.0), atol=1e-6)
 
 
+class TestCalibrationTargets:
+    """Composite.calibration_targets() returns mechanism candidates and
+    subtracts hallmark-controlled knobs."""
+
+    def _composite_with_hallmark_target(self):
+        """Two processes; one has an attribute that's a hallmark target,
+        plus a non-target attribute that should remain calibratable."""
+        from hallsim.hallmarks import HallmarkHandle, ParameterMapping
+        from hallsim.calibration import CalibratableParam
+
+        class Knob(Process):
+            knob: float = 1.0
+            mech: float = 2.0
+
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"x": -self.knob * state["x"]}
+
+            def calibratable_params(self):
+                return [
+                    CalibratableParam(
+                        process_name="",
+                        field="knob",
+                        default=1.0,
+                        clamp=(0.0, 10.0),
+                    ),
+                    CalibratableParam(
+                        process_name="",
+                        field="mech",
+                        default=2.0,
+                        clamp=(0.0, 10.0),
+                    ),
+                ]
+
+        comp = Composite(
+            processes={"k": Knob()},
+            topology={"k": {"x": "pool/x"}},
+            validate=False,
+            semantic_validation=False,
+        )
+        registry = {
+            "Test": HallmarkHandle(
+                name="Test",
+                mappings=[
+                    ParameterMapping(
+                        process_name="k",
+                        param_name="knob",
+                        transform=lambda h, base: base * h,
+                    )
+                ],
+            ),
+        }
+        return comp, registry
+
+    def test_subtracts_hallmark_targets_by_default(self):
+        comp, registry = self._composite_with_hallmark_target()
+        targets = comp.calibration_targets(registry=registry)
+        fields = {t.field for t in targets}
+        assert (
+            "mech" in fields
+        ), "non-hallmark mechanism param should be present"
+        assert "knob" not in fields, "hallmark target should be subtracted"
+
+    def test_include_hallmark_targets_kwarg(self):
+        comp, registry = self._composite_with_hallmark_target()
+        targets = comp.calibration_targets(
+            registry=registry, include_hallmark_targets=True
+        )
+        fields = {t.field for t in targets}
+        assert "knob" in fields, "include_hallmark_targets should re-expose"
+        assert "mech" in fields
+
+    def test_process_name_filled_in_by_aggregator(self):
+        comp, registry = self._composite_with_hallmark_target()
+        targets = comp.calibration_targets(registry=registry)
+        for t in targets:
+            assert t.process_name == "k"
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Scheduler (full ODE solve)
 # ═══════════════════════════════════════════════════════════════════════════

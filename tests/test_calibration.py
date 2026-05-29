@@ -171,12 +171,12 @@ class TestConditionAndParameterRef:
 
         p = ParameterRef(
             process_name="dp14",
-            field="parameter_overrides.k",
+            field="parameters.k",
             init=1.0,
             clamp=(0.0, 10.0),
         )
         assert p.process_name == "dp14"
-        assert p.field == "parameter_overrides.k"
+        assert p.field == "parameters.k"
         assert p.init == 1.0
         assert p.clamp == (0.0, 10.0)
 
@@ -262,6 +262,123 @@ class TestCalibrationProblemValidation:
                 params=params,
                 fit_arms=["NONEXISTENT"],
             )
+
+    def test_hallmark_targeted_param_is_blocked(self):
+        """Guard rail: a ParameterRef pointing at a hallmark target
+        raises with a clear error message naming the hallmark."""
+        from hallsim.calibration import (
+            CalibrationProblem,
+            Condition,
+            ParameterRef,
+        )
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter
+        from hallsim.hallmarks import HallmarkHandle, ParameterMapping
+        from hallsim.process import Port, PortRole, Process
+        import pandas as pd
+
+        class Knob(Process):
+            knob: float = 1.0
+
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"x": -self.knob * state["x"]}
+
+        comp = Composite(
+            processes={"k": Knob()},
+            topology={"k": {"x": "pool/x"}},
+            validate=False,
+            semantic_validation=False,
+        )
+
+        custom_reg = {
+            "Test Hallmark": HallmarkHandle(
+                name="Test Hallmark",
+                mappings=[
+                    ParameterMapping(
+                        process_name="k",
+                        param_name="knob",
+                        transform=lambda h, base: base * h,
+                    ),
+                ],
+            ),
+        }
+        with pytest.raises(ValueError, match="'Test Hallmark'"):
+            CalibrationProblem(
+                composite=comp,
+                reporters=[
+                    GeneReporter(observable="pool/x", gene_symbol="GX")
+                ],
+                conditions={"a": Condition("a", {})},
+                data={"a_vs_a": pd.Series({"GX": 0.0})},
+                arm_pairs={"a_vs_a": ("a", "a")},
+                params={
+                    "bad": ParameterRef(
+                        process_name="k", field="knob", init=1.0
+                    ),
+                },
+                fit_arms=["a_vs_a"],
+                hallmark_registry=custom_reg,
+            )
+
+    def test_allow_hallmark_override_escape_hatch(self):
+        """Guard rail can be bypassed when allow_hallmark_override=True."""
+        from hallsim.calibration import (
+            CalibrationProblem,
+            Condition,
+            ParameterRef,
+        )
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter
+        from hallsim.hallmarks import HallmarkHandle, ParameterMapping
+        from hallsim.process import Port, PortRole, Process
+        import pandas as pd
+
+        class Knob(Process):
+            knob: float = 1.0
+
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"x": -self.knob * state["x"]}
+
+        comp = Composite(
+            processes={"k": Knob()},
+            topology={"k": {"x": "pool/x"}},
+            validate=False,
+            semantic_validation=False,
+        )
+        custom_reg = {
+            "Test": HallmarkHandle(
+                name="Test",
+                mappings=[
+                    ParameterMapping(
+                        process_name="k",
+                        param_name="knob",
+                        transform=lambda h, base: base * h,
+                    )
+                ],
+            ),
+        }
+        # Should construct without raising:
+        CalibrationProblem(
+            composite=comp,
+            reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
+            conditions={"a": Condition("a", {})},
+            data={"a_vs_a": pd.Series({"GX": 0.0})},
+            arm_pairs={"a_vs_a": ("a", "a")},
+            params={
+                "via_override": ParameterRef(
+                    process_name="k", field="knob", init=1.0
+                ),
+            },
+            fit_arms=["a_vs_a"],
+            hallmark_registry=custom_reg,
+            allow_hallmark_override=True,
+        )
 
     def test_params_reference_unknown_process_raises(self):
         from hallsim.calibration import (

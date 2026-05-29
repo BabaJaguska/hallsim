@@ -116,28 +116,72 @@ def main() -> None:
             "DDIS_vs_ctrl": ("DDIS", "ctrl"),
             "RAPA_vs_DDIS": ("RAPA", "DDIS"),
         },
+        # Mechanism candidates — biological rate constants that vary
+        # across cell states / genotypes / disease conditions, that
+        # gene-expression data legitimately informs. Discovered via
+        # composite.calibration_targets() which auto-enumerates every
+        # SBML constant and subtracts hallmark-controlled knobs.
+        #
+        # One rate per reporter axis — no double-coverage. The earlier
+        # version of this demo fit irradiation_rate and gz06_psi (both
+        # hallmark-targeted, blocked by the guard rail now) and also
+        # doubled up DNA_repair + CDKN1A_transcr on the CDKN1A axis;
+        # this version covers four distinct reporter axes:
+        #
+        #   HMOX1   ← dp14.ROS_turnover           (ROS clearance)
+        #   CDKN1A  ← dp14.CDKN1A_transcr_...     (p21 transcription gain)
+        #   CYCS    ← dp14.mitophagy_inactiv_...  (mTOR→mitophagy)
+        #   DDB2    ← gz06.alpha_y                (Mdm2 turnover, p53 ampl.)
+        #
+        # NFKBIA can't be calibrated yet — the multi-hallmark composite
+        # has no coupling from DDIS / rapa to NF-κB (MtorNFkBSuppressor
+        # is parked for the next session).
+        # EIF4EBP1's mTOR phos rate is correctly hallmark-controlled.
         params={
-            "irradiation_rate": ParameterRef(
+            "ROS_turnover": ParameterRef(
                 process_name="dp14",
-                field="parameter_overrides.DNA_damaged_by_irradiation",
-                init=1.0,
-                clamp=(0.0, 1e5),
+                field="parameters.ROS_turnover",
+                init=3.231,
+                clamp=(0.1, 50.0),
                 description=(
-                    "DP14's exogenous-damage rate constant at full DDIS. "
-                    "SBML default 9237.72 (γ-irradiation calibration) "
-                    "produces DNA_damage~28000; effective dose for "
-                    "etoposide DDIS is fit from data."
+                    "DP14's ROS clearance rate. Controls steady-state "
+                    "ROS pool size. Informs HMOX1 reporter via "
+                    "Nrf2/ARE-driven antioxidant response."
                 ),
             ),
-            "gz06_psi": ParameterRef(
-                process_name="gz06",
-                field="parameter_overrides.psi",
-                init=1.0,
-                clamp=(0.0, 10.0),
+            "CDKN1A_transcr": ParameterRef(
+                process_name="dp14",
+                field="parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
+                init=0.085,
+                clamp=(0.001, 5.0),
                 description=(
-                    "GZ06's damage-signal amplitude at full DDIS. "
-                    "Geva-Zatorsky 2006 calibrated ψ near 1.0; fit "
-                    "around that scale."
+                    "p21 (CDKN1A) transcription rate via "
+                    "FoxO3a × DNA_damage. Direct amplitude knob for "
+                    "the CDKN1A reporter — gain on the damage-to-p21 "
+                    "cascade."
+                ),
+            ),
+            "mitophagy_inactiv": ParameterRef(
+                process_name="dp14",
+                field="parameters.mitophagy_inactiv_by_mTORC1_pS2448",
+                init=646.0,
+                clamp=(1.0, 10000.0),
+                description=(
+                    "mTORC1's negative effect on mitophagy. Drives "
+                    "the rapamycin axis (low mTOR → de-suppressed "
+                    "mitophagy → mito turnover). Informs CYCS via "
+                    "Mito_mass_new."
+                ),
+            ),
+            "alpha_y": ParameterRef(
+                process_name="gz06",
+                field="parameters.alpha_y",
+                init=0.8,
+                clamp=(0.01, 10.0),
+                description=(
+                    "GZ06's Mdm2 protein degradation rate. Controls "
+                    "p53 oscillation amplitude. Informs DDB2 via "
+                    "cycle-averaged p53 level."
                 ),
             ),
         },
@@ -147,7 +191,11 @@ def main() -> None:
         macro_dt=MACRO_DT,
         n_save=N_SAVE,
     )
-    print("      6 reporters × 3 conditions × 2 fittable params")
+    print(
+        f"      {len(problem.reporters)} reporters × "
+        f"{len(problem.conditions)} conditions × "
+        f"{len(problem.params)} fittable params"
+    )
 
     # 3. Pre-fit baseline
     print("\n[3/4] Pre-fit concordance (default parameters) ...")

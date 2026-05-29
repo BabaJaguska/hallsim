@@ -10,7 +10,7 @@ one or more Processes.
 Hallmark transforms are **multiplicative of the current calibrated
 base value**, not absolute. A transform receives ``(severity, base)``
 and returns ``base * f(severity)``. This lets a calibration loss
-substitute mechanism parameters via ``parameter_overrides`` and then
+substitute mechanism parameters via ``parameters`` and then
 apply hallmarks at the experimental severity profile without the
 hallmark clobbering the calibrated values.
 
@@ -18,13 +18,13 @@ Because Process instances are immutable Equinox modules, hallmark
 handles work by constructing *new* Process instances with modified
 parameters. Severity is JAX-traceable (pass a ``jnp.ndarray`` and
 ``jax.grad`` flows through), and so is the base value (so Calibrator
-can fit through ``parameter_overrides`` while hallmarks scale by
+can fit through ``parameters`` while hallmarks scale by
 severity).
 
 **Severity is an experimental-design knob, not a fittable parameter.**
 The intended pattern is to set severity for each experimental
 condition (DDIS=1.0, ctrl=0.0, RAPA-rescued=0.3) and fit mechanism
-parameters via ``parameter_overrides`` with Calibrator. Severity-
+parameters via ``parameters`` with Calibrator. Severity-
 differentiability is preserved for sensitivity analysis and severity-
 sweep population studies, not for inferring "what severity does the
 data show" — that would conflate experimental setup with model state.
@@ -58,12 +58,12 @@ class ParameterMapping:
     param_name:
         Name of the Process field to modify. Either a plain attribute
         (``"alpha"``) or a dotted path into a dict-valued field
-        (``"parameter_overrides.<key>"``).
+        (``"parameters.<key>"``).
     transform:
         ``(severity, base) -> new_value``. ``base`` is the current
         value at the target field, read fresh on each hallmark
         application — so any prior substitution into
-        ``parameter_overrides`` (e.g. from a calibration step) flows
+        ``parameters`` (e.g. from a calibration step) flows
         through cleanly. Typically returns ``base * f(severity)``
         where ``f(0) = 1`` for "no perturbation" and ``f(1)`` is the
         full perturbation factor.
@@ -114,9 +114,9 @@ class HallmarkHandle:
 
         ``ParameterMapping.param_name`` may be either a plain attribute
         (e.g. ``"alpha"``) or a dotted path into a dict-valued field
-        (e.g. ``"parameter_overrides.mTORC1_S2448_phos_by_AA"``). The
+        (e.g. ``"parameters.mTORC1_S2448_phos_by_AA"``). The
         dotted form lets a hallmark target a specific key inside the
-        ``parameter_overrides`` dict on an :class:`hallsim.sbml_import.SBMLProcess`,
+        ``parameters`` dict on an :class:`hallsim.sbml_import.SBMLProcess`,
         which is the mechanism for parameterising specific SBML rate
         constants from a hallmark severity.
 
@@ -306,8 +306,7 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ParameterMapping(
                 process_name="dp14",
                 param_name=(
-                    "parameter_overrides."
-                    "mTORC1_S2448_phos_by_AA_n_Akt_pS473"
+                    "parameters." "mTORC1_S2448_phos_by_AA_n_Akt_pS473"
                 ),
                 transform=lambda h, base: base * (0.3 + 0.7 * h),
                 description=(
@@ -347,7 +346,7 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             # rate at full DDIS (the value Calibrator fits).
             ParameterMapping(
                 process_name="dp14",
-                param_name="parameter_overrides.DNA_damaged_by_irradiation",
+                param_name="parameters.DNA_damaged_by_irradiation",
                 transform=lambda h, base: base * h,
                 description=(
                     "Exogenous-damage rate constant (DP14): zero at "
@@ -361,7 +360,7 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             # coupling — the hallmark is the shared knob.
             ParameterMapping(
                 process_name="gz06",
-                param_name="parameter_overrides.psi",
+                param_name="parameters.psi",
                 transform=lambda h, base: base * h,
                 description=(
                     "GZ06 damage-signal parameter: zero at severity=0 "

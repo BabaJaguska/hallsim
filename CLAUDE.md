@@ -91,6 +91,7 @@ The Scheduler is the only runner. There is no separate `Simulator` class. For si
 - There are ZERO users of this at the moment. Backwards compatbility is absolutely not a factor in any design decisions.
 - End-to-end differentiability is a must. An issue in end-to-end differentiability is never to be circumvented, always solved.
 - No sunk-cost reasoning. If a curated / better-validated / more-composable component supersedes existing code, replace it. The fact that we built something earlier is irrelevant to whether it stays — the question is whether it earns its place on biological / architectural grounds today. Drop without ceremony.
+- **No locally-cheaper over architecturally-right.** When the design / diary / project plan already names a tool (`Calibrator`, `Scheduler`, etc.) that fits a coupling / fitting / scheduling problem, use that tool — even when a quick adapter, bridge, or shim is several times less work this session. Cheap adapters around the wrong primitive compound across sessions. The DamagePsiBridge + RangeChecker saga is the canonical example: both were built to work around the absence of cross-model calibration that the project had already planned for. They added free parameters, stiffness, and validation noise that compounded for three weeks until they were removed. Watch for the warning sign: if you find yourself writing "this is a starting calibration, the real value should be learned by Calibrator later" — wire Calibrator now, not later.
 
 ## Documentation style
 - **Module / function docstrings are forward-facing.** Describe what the
@@ -123,4 +124,5 @@ The Scheduler is the only runner. There is no separate `Simulator` class. For si
 - Seek to understand why composites fail to converge, rather than brute forcing different solvers
 - Don't pull models from memory/training. Search BioModels API or other objective sources for what you need instead.
 - Readme is other user facing. Do not write stuff that is just useful to developers there, such as "This is out of scope for preprint". Cringe. Don't embarrass me.
+- Preserve JIT-ability wherver possible. Choose data types and design patterns accordingly.
 - 
