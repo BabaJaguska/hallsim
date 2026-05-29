@@ -4,7 +4,7 @@ __pycache__/
 *$py.class
 .DS_Store
 data/
-models/
+/models/
 docs/diary.md
 /outputs/
 

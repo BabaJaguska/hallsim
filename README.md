@@ -86,10 +86,20 @@ merged = Composite(
 
 HallSim is a *framework* for composing biological models, not a model library. The expectation is that you bring your own Processes — either hand-written, imported from curated SBML on BioModels, or learned via `NeuralODE`. A small set of example composites ships under [`src/hallsim/models/`](src/hallsim/models/) to demonstrate the framework's patterns:
 
-- A **DP14-anchored multi-hallmark composite** ([`multi_hallmark.py`](src/hallsim/models/multi_hallmark.py)) — three independent BioModels SBML imports (DallePezze 2014 + Geva-Zatorsky 2006 + Ihekwaba 2004) stitched via the Genomic Instability hallmark as a shared experimental knob (no internal topology coupling between the SBML models — each responds to the same severity at its own calibrated scale). Spans Cellular Senescence, Deregulated Nutrient Sensing, Genomic Instability, and Inflammaging in one substrate. The current validation composite.
+- A **DP14-anchored multi-hallmark composite** ([`multi_hallmark.py`](src/hallsim/models/multi_hallmark.py)) — three independent BioModels SBML imports (DallePezze 2014 + Geva-Zatorsky 2006 + Ihekwaba 2004) plus one cross-publication mechanistic edge: `MtorNFkBActivator` wires DP14's mTORC1 into the Ihekwaba NF-κB module (mTOR → IKK, activating). DP14↔GZ06 are coupled instead through the Genomic Instability hallmark as a shared experimental knob — each responds to the same severity at its own calibrated scale. Spans Cellular Senescence, Deregulated Nutrient Sensing, Genomic Instability, and Inflammaging in one substrate. The current validation composite.
 - A **stem-cell niche + Sivakumar 2011 crosstalk composite** ([`stem_cell_niche.py`](src/hallsim/models/stem_cell_niche.py)) — niche deterioration mapped to the Stem Cell Exhaustion hallmark, additively composed with the Sivakumar 2011 crosstalk SBML model.
 
 The SBML import path ([`sbml_import.py`](src/hallsim/sbml_import.py)) is one of the framework's main entry points: it auto-generates a Process from any BioModels entry via `sbmltoodejax`, auto-populates every SBML constant into `SBMLProcess.parameters` so the full mechanism surface is immediately discoverable via `Composite.calibration_targets()`, includes a libsbml-driven `<functionDefinition>` inliner that unlocks the large majority of curated models that would otherwise hit "Custom functions are not handled" upstream, pre-flight checks that reject `<event>` blocks and unsupported MathML operators with actionable error messages, and MIRIAM annotation extraction that populates `Port.ontology` from species CVTerms. Bundled SBML files live under [`models/<author><year>/`](models/) for offline use; arbitrary BioModels IDs download to `~/.cache/hallsim/biomodels/` on first import.
+
+The BioModels REST API is live end-to-end: `process_from_sbml(582)` fetches and imports a model by ID, and the curated repository can be searched by keyword via `sbmltoodejax.biomodels_api.search_for_model("genotoxic stress NFkB")` — so models are discoverable, not just retrievable by known ID. Discover-then-import in two calls makes the catalog directly available to an agent composing a new system:
+
+```python
+from sbmltoodejax.biomodels_api import search_for_model
+from hallsim.sbml_import import process_from_sbml
+
+hits = search_for_model("genotoxic stress NFkB")        # -> [{'id': 'MODEL2307130001', ...}]
+proc = process_from_sbml(hits[0]["id"], name="dna_nfkb") # fetch + auto-generate a Process
+```
 
 The hand-written Processes that ship — [`saturating_removal.py`](src/hallsim/models/saturating_removal.py) (Uri Alon damage model), [`kick_event.py`](src/hallsim/models/kick_event.py) (one-shot perturbation EVENT pattern), the [ERiQ](src/hallsim/models/eriq.py) decomposition, and [`neuralode.py`](src/hallsim/models/neuralode.py) — exist either as reference implementations of common patterns or to support the example composites above.
 
