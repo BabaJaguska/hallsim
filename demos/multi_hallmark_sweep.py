@@ -35,7 +35,7 @@ KEYS_OF_INTEREST = (
     "dp14/mTORC1_pS2448",
     "dp14/ROS",
     "dp14/Mitophagy",
-    "nfkb/IkBa",
+    "nfkb/IkBat",
     "bridge/psi",
 )
 ARMS = (

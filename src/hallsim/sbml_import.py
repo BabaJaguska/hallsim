@@ -248,6 +248,17 @@ class SBMLProcess(Process):
     _species_names: tuple[str, ...] = ()
     _species_y0: tuple[float, ...] = ()
     _species_ontology: tuple[dict[str, str], ...] = ()
+    # Seconds per native time unit the SBML rate laws are written in
+    # (day = 86400, hour = 3600, second = 1). Extracted at import; pure
+    # metadata until a composite picks a canonical clock.
+    native_time_seconds: float = 1.0
+    # Chain-rule factor mapping the composite's canonical time to this
+    # model's native time: ``canonical_time_seconds / native_time_seconds``.
+    # 1.0 (the default) runs the model on its own native clock unchanged;
+    # a composite that reconciles units sets this so dt advances every
+    # sub-model by the same real-world duration. See
+    # :meth:`reconciled_to`.
+    time_scale: float = 1.0
     _model: Any = None  # sbmltoodejax model object
     _w0: Any = None
     _c: Any = None
@@ -306,22 +317,53 @@ class SBMLProcess(Process):
         else:
             c = self._c
 
+        # Map canonical time to this model's native time, evaluate the
+        # native rate law there, and scale dy back to canonical time:
+        #   τ = t · time_scale,  dy/dt = (dy/dτ)·time_scale.
+        # Feeding t_native (not t) keeps time-referencing assignment
+        # rules — DP14's piecewise Irradiation / Insulin inputs — on the
+        # model's own clock. time_scale=1.0 leaves both untouched.
+        t_native = t * self.time_scale
         if is_batched:
             dydt = jax.vmap(ratefunc, in_axes=(0, None, None, None))(
-                y, t, self._w0, c
+                y, t_native, self._w0, c
             )
         else:
-            dydt = ratefunc(y, t, self._w0, c)
+            dydt = ratefunc(y, t_native, self._w0, c)
+        dydt = dydt * self.time_scale
 
         return {
             name: dydt[..., i] for i, name in enumerate(self._species_names)
         }
+
+    def reconciled_to(self, canonical_time_seconds: float) -> "SBMLProcess":
+        """Return a copy of this process on a shared canonical clock.
+
+        Sets :attr:`time_scale` to ``canonical_time_seconds /
+        native_time_seconds`` so the rate law (written in native time) is
+        chain-rule-rescaled onto the composite's canonical axis. The
+        Scheduler grouping is already handled by
+        :attr:`~hallsim.process.Process.timescale`, which import sets to
+        :attr:`native_time_seconds` (canonical-independent) — so
+        ``auto_groups`` clusters fast modules (seconds) into a separate,
+        finely-stepped group from slow ones (days) rather than forcing
+        one stiff solve over all.
+
+        ``canonical_time_seconds`` is the real-world duration of one unit
+        of the composite's ``t_span`` (e.g. ``86400.0`` for a day axis).
+        """
+        import equinox as eqx
+
+        scale = canonical_time_seconds / self.native_time_seconds
+        return eqx.tree_at(lambda p: p.time_scale, self, float(scale))
 
     def metadata(self):
         base = super().metadata()
         base["sbml_name"] = self._name
         base["n_species"] = len(self._species_names)
         base["n_parameters"] = len(self._param_names)
+        base["native_time_seconds"] = self.native_time_seconds
+        base["time_scale"] = self.time_scale
         return base
 
     def calibratable_params(self) -> list:
@@ -331,30 +373,26 @@ class SBMLProcess(Process):
         entry in :attr:`parameters` (i.e. every SBML constant — the
         dict is auto-populated at construction). Each entry has field
         ``"parameters.<key>"``, the current value as default, and a
-        two-order-of-magnitude clamp around the value.
+        two-order-of-magnitude clamp around the value. Composes with the
+        base implementation, so any :func:`hallsim.process.calibratable`
+        field declared on a subclass is surfaced alongside the constants.
 
         :meth:`hallsim.composite.Composite.calibration_targets`
         subtracts hallmark targets from the listing — so it's fine to
         expose every parameter here; hallmark-controlled knobs are
         filtered out in the discovery API.
         """
-        from hallsim.calibration import CalibratableParam
+        from hallsim.calibration import CalibratableParam, default_clamp
 
-        out: list = []
+        out = super().calibratable_params()
         for name, value in self.parameters.items():
             v = float(value)
-            if v > 0:
-                clamp = (v / 100.0, v * 100.0)
-            elif v < 0:
-                clamp = (-abs(v) * 100.0 - 10.0, abs(v) * 100.0 + 10.0)
-            else:
-                clamp = (0.0, 10.0)
             out.append(
                 CalibratableParam(
                     process_name="",
                     field=f"parameters.{name}",
                     default=v,
-                    clamp=clamp,
+                    clamp=default_clamp(v),
                     description=f"SBML constant {name!r} on {self._name}",
                 )
             )
@@ -470,6 +508,48 @@ def _extract_species_ontology(xml_path: str) -> dict[str, dict[str, str]]:
                     ontology.setdefault(namespace, identifier)
         result[sp_id] = ontology
     return result
+
+
+def _extract_native_time_seconds(xml_path: str) -> float:
+    """Seconds-per-time-unit the model's rate constants are expressed in.
+
+    SBML rate laws are written in a model-specific time unit. Composing
+    models that disagree (DallePezze 2014 in days, Geva-Zatorsky 2006 in
+    hours, an unannotated model in seconds) silently runs them at
+    different real-world speeds on a shared ``t`` axis. This value is the
+    conversion the composite uses to put every sub-model on one canonical
+    clock (see :attr:`SBMLProcess.time_scale`).
+
+    Resolution order:
+
+    1. The model-level ``timeUnits`` attribute (SBML L3).
+    2. A ``<unitDefinition id="time">`` (the SBML L2 convention; this is
+       where DallePezze 2014's ``second × 86400`` lives).
+    3. The SBML default time unit, ``second`` → ``1.0``.
+
+    A time unit is a product of ``<unit>`` terms; for a well-formed time
+    definition that is a single ``second`` term with a multiplier (and
+    optional power-of-ten scale). Returns ``1.0`` if the file cannot be
+    parsed.
+    """
+    import libsbml
+
+    doc = libsbml.SBMLReader().readSBMLFromFile(str(xml_path))
+    model = doc.getModel()
+    if model is None:
+        return 1.0
+
+    unit_def = model.getUnitDefinition(model.getTimeUnits() or "time")
+    if unit_def is None:
+        return 1.0
+
+    seconds = 1.0
+    for k in range(unit_def.getNumUnits()):
+        u = unit_def.getUnit(k)
+        seconds *= (
+            u.getMultiplier() * 10.0 ** u.getScale()
+        ) ** u.getExponent()
+    return float(seconds)
 
 
 def _load_local_sbml(sbml_path: str):
@@ -646,6 +726,8 @@ def process_from_sbml(
     ontology_map = _extract_species_ontology(xml_path)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
 
+    native_time_seconds = _extract_native_time_seconds(xml_path)
+
     log.info(f"Loaded {len(species_names)} species: {species_names}")
 
     # Resolve any name-indexed accesses against the model's c_indexes.
@@ -685,6 +767,8 @@ def process_from_sbml(
         tuple(float(y0[i]) for i in range(len(species_names))),
     )
     object.__setattr__(proc, "_species_ontology", species_ontology)
+    object.__setattr__(proc, "native_time_seconds", native_time_seconds)
+    object.__setattr__(proc, "time_scale", 1.0)
     object.__setattr__(proc, "_model", model)
     object.__setattr__(proc, "_w0", w0)
     object.__setattr__(proc, "_c", c)
@@ -692,7 +776,14 @@ def process_from_sbml(
     object.__setattr__(proc, "parameters", params_dict)
     object.__setattr__(proc, "_param_names", param_names)
     object.__setattr__(proc, "_param_indexes", param_indexes)
-    if timescale is not None:
-        object.__setattr__(proc, "timescale", timescale)
+    # Default the scheduler timescale to the model's native time unit (a
+    # day-scale model has day-scale dynamics) so auto_groups clusters
+    # mixed-rate composites correctly. Never None for SBML processes, so
+    # reconciled_to / tree_at can replace it without None-leaf ambiguity.
+    object.__setattr__(
+        proc,
+        "timescale",
+        float(timescale) if timescale is not None else native_time_seconds,
+    )
 
     return proc

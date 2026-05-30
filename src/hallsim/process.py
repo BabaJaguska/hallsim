@@ -31,11 +31,45 @@ Example
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 from typing import Any
 
 import equinox as eqx
 import jax.numpy as jnp
+
+
+def calibratable(
+    default,
+    *,
+    clamp: "tuple[float, float] | None" = None,
+    description: str = "",
+):
+    """Declare a Process field as a fittable mechanism parameter.
+
+    Use in place of a plain default at the field-declaration site::
+
+        class MyEdge(Process):
+            k_act: float = calibratable(
+                0.02, description="edge strength; fit vs the NFKBIA reporter"
+            )
+            K_mtor: float = 4.0  # measurement-grounded — stays fixed
+
+    Every field marked this way is discovered automatically by
+    :meth:`Process.calibratable_params` and surfaced through
+    :meth:`hallsim.composite.Composite.calibration_targets`. Fields left
+    as plain defaults stay out of the calibration surface. ``clamp``
+    defaults to a two-order-of-magnitude box around the current value
+    (see :func:`hallsim.calibration.default_clamp`).
+    """
+    return eqx.field(
+        default=default,
+        metadata={
+            "calibratable": True,
+            "clamp": clamp,
+            "description": description,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -264,10 +298,14 @@ class Process(eqx.Module):
         aggregator fills in the namespace) and ``field`` either a plain
         attribute name or ``"parameters.<key>"``.
 
-        Default implementation returns no parameters. Subclasses
-        override to expose their published rate constants, Hill
-        coefficients, etc. — anything that legitimately varies across
-        cell states and that gene-expression / phenotype data informs.
+        Discovery is generic: every field declared with
+        :func:`calibratable` is surfaced automatically, with its current
+        value as the default and a two-order-of-magnitude clamp unless
+        the field supplied its own. A Process exposes a rate constant by
+        declaring it ``k: float = calibratable(...)`` instead of a plain
+        default — no per-Process enumeration body. Subclasses with a
+        non-field parameter surface (e.g. ``SBMLProcess``'s constants
+        dict) override and extend ``super().calibratable_params()``.
 
         :class:`Composite.calibration_targets` subtracts hallmark-
         controlled parameters from the listing before returning to
@@ -275,7 +313,23 @@ class Process(eqx.Module):
         that's *also* a hallmark target — the discovery API hides it
         from default Calibrator wiring unless explicitly requested.
         """
-        return []
+        from hallsim.calibration import CalibratableParam, default_clamp
+
+        out: list = []
+        for f in dataclasses.fields(self):
+            if not f.metadata.get("calibratable"):
+                continue
+            value = float(getattr(self, f.name))
+            out.append(
+                CalibratableParam(
+                    process_name="",
+                    field=f.name,
+                    default=value,
+                    clamp=f.metadata.get("clamp") or default_clamp(value),
+                    description=f.metadata.get("description", ""),
+                )
+            )
+        return out
 
     def metadata(self) -> dict[str, Any]:
         """Structured metadata for discovery and LLM-assisted composition.

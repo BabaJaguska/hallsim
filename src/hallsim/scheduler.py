@@ -178,7 +178,15 @@ class Scheduler:
         MAPK; the implicit solver's Newton-iteration overhead is not
         recouped by step-count savings on mildly-stiff oscillators.
     rtol, atol:
-        Relative and absolute tolerances for adaptive stepping.
+        Relative and absolute tolerances for adaptive stepping. Default
+        ``rtol=1e-6, atol=1e-9``. Oscillatory subsystems (p53–Mdm2,
+        NF-κB, cell cycle) need accuracy-limited stepping: an explicit
+        solver at loose tolerance injects energy and a bounded
+        oscillation spirals out ("numerical anti-damping"). The
+        Geva-Zatorsky 2006 p53 oscillator, for instance, diverges to
+        ~300× its amplitude at ``rtol=1e-4`` and is bounded from
+        ``rtol=1e-5`` down. ``1e-6`` keeps a safety margin past that
+        threshold.
     max_steps:
         Safety limit on solver steps per macro step.
     dt0:
@@ -245,8 +253,8 @@ class Scheduler:
     def __init__(
         self,
         solver: dfx.AbstractSolver | None = None,
-        rtol: float = 1e-3,
-        atol: float = 1e-6,
+        rtol: float = 1e-6,
+        atol: float = 1e-9,
         max_steps: int = 4_000_000,
         dt0: float = 1e-3,
         groups: dict[str, list[str]] | None = None,

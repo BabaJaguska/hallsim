@@ -321,7 +321,7 @@ class TestMultiHallmarkReporters:
             "dp14/CDKN1A": jnp.linspace(0, 10, n_time),
             "gz06/x": jnp.linspace(0, 1, n_time),
             "dp14/ROS": jnp.linspace(0, 5, n_time),
-            "nfkb/IkBa": jnp.linspace(0, 2, n_time),
+            "nfkb/IkBat": jnp.linspace(0, 2, n_time),
             "dp14/Mito_mass_new": jnp.linspace(0, 3, n_time),
             "dp14/mTORC1_pS2448": jnp.linspace(0, 4, n_time),
         }

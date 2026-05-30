@@ -283,6 +283,21 @@ class CalibratableParam:
     description: str = ""
 
 
+def default_clamp(value: float) -> tuple[float, float]:
+    """Two-order-of-magnitude box around a parameter's current value.
+
+    The convention used when a Process doesn't supply an explicit clamp:
+    a wide span is harmless because Calibrator's step size controls
+    actual exploration. Handles positive, negative, and zero values.
+    """
+    v = float(value)
+    if v > 0:
+        return (v / 100.0, v * 100.0)
+    if v < 0:
+        return (-abs(v) * 100.0 - 10.0, abs(v) * 100.0 + 10.0)
+    return (0.0, 10.0)
+
+
 @dataclass(frozen=True)
 class Condition:
     """A named experimental arm — a hallmark severity profile.

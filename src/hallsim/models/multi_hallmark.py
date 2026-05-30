@@ -90,12 +90,10 @@ compares against transcriptomic data):
 - EIF4EBP1 → ``dp14/mTORC1_pS2448`` (kinase-level proxy)
 - CYCS → ``dp14/Mito_mass_new`` (biogenesis proxy)
 - DDB2 → ``gz06/x`` (p53 level proxy; DDB2 is a direct p53 target)
-- NFKBIA → ``nfkb/IkBa`` (direct state). NOTE: ``IkBa`` is the IκBα
-  *protein*, which moves inversely to NF-κB activity (more NF-κB → more
-  IκBα degradation). Transcriptomic NFKBIA measures the *transcript*
-  (``IkBat``), an NF-κB target that rises *with* activity. Mapping the
-  reporter to the protein vs the transcript flips the expected sign —
-  reconcile before reading NFKBIA concordance off this composite.
+- NFKBIA → ``nfkb/IkBat`` (IκBα transcript). Transcriptomic NFKBIA
+  measures the IκBα *transcript*, an NF-κB target that rises *with*
+  activity — not the cytoplasmic IκBα *protein* (``nfkb/IkBa``), whose
+  abundance moves inversely to activity through IKK-driven degradation.
 - HMOX1 → ``dp14/ROS`` (oxidative-stress proxy; curated Nrf2/HMOX1
   models on BioModels are sparse so this is the best available until
   a curated Nrf2 module is identified or implemented)
@@ -156,6 +154,16 @@ DP14_IRRADIATION_RATE_NAME = "DNA_damaged_by_irradiation"
 GZ06_PSI_NAME = "psi"
 GZ06_PSI_DEFAULT = 1.0
 
+# Canonical clock for the composite: one t_span unit = one day. DP14
+# (the senescence spine) is natively in days, so it runs unchanged;
+# GZ06 (hours) and NFKB (seconds) are chain-rule-rescaled onto this axis
+# by SBMLProcess.reconciled_to so dt advances every sub-model by the same
+# real-world duration. The day scale matches the validation experiment
+# (GSE248823 is a D00–D14 time course) and the senescence dynamics we
+# read out; the faster modules settle to their attractor / cycle-average
+# on this axis, which is what bulk transcriptomics sampled per-day sees.
+CANONICAL_TIME_SECONDS = 86400.0
+
 
 def build_multi_hallmark_composite(*, validate: bool = True):
     """Compose DP14 + GZ06 + Ihekwaba into one multi-hallmark composite.
@@ -173,6 +181,9 @@ def build_multi_hallmark_composite(*, validate: bool = True):
     :func:`hallsim.apply_hallmarks` to get treated / control variants
     (see module docstring).
     """
+    nfkb = process_from_sbml(str(NFKB_SBML_PATH), name="nfkb").reconciled_to(
+        CANONICAL_TIME_SECONDS
+    )
     processes: dict = {
         "dp14": process_from_sbml(
             str(DP14_SBML_PATH),
@@ -181,8 +192,8 @@ def build_multi_hallmark_composite(*, validate: bool = True):
                 DP14_MTOR_PHOS_RATE_NAME: DP14_MTOR_PHOS_RATE_DEFAULT,
                 DP14_IRRADIATION_RATE_NAME: DP14_IRRADIATION_RATE_DEFAULT,
             },
-        ),
-        "nfkb": process_from_sbml(str(NFKB_SBML_PATH), name="nfkb"),
+        ).reconciled_to(CANONICAL_TIME_SECONDS),
+        "nfkb": nfkb,
         # GZ06's psi is driven by the Genomic Instability hallmark at
         # GZ06's own calibrated scale (~1.0 at full DDIS), not by a
         # topology edge from DP14. Hallmark severity simultaneously
@@ -193,12 +204,14 @@ def build_multi_hallmark_composite(*, validate: bool = True):
             str(GZ06_SBML_PATH),
             name="gz06",
             parameters={GZ06_PSI_NAME: GZ06_PSI_DEFAULT},
-        ),
+        ).reconciled_to(CANONICAL_TIME_SECONDS),
         # mTORC1 → IKK crosstalk edge: couples DP14's nutrient-sensing
         # network to the NF-κB module so rapamycin (mTOR ↓) suppresses
         # NF-κB and the NFKBIA reporter responds. Activating sign per
-        # Dan 2008 / Laberge 2015.
-        "mtor_nfkb": MtorNFkBActivator(),
+        # Dan 2008 / Laberge 2015. Shares NFKB's timescale so IKK's full
+        # derivative (intrinsic + mTOR drive) is solved in one group; the
+        # slow mTOR input is read frozen across the fast macro-step.
+        "mtor_nfkb": MtorNFkBActivator(timescale=nfkb.timescale),
     }
     # The mtor_nfkb edge reads DP14's active mTORC1 and writes additively
     # to the NF-κB module's IKK pool. The three SBML processes carry no

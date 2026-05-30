@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from hallsim.process import Port, PortRole, Process
+from hallsim.process import Port, PortRole, Process, calibratable
 from hallsim.utils import h_act
 
 
@@ -76,9 +76,15 @@ class MtorNFkBActivator(Process):
 
     timescale: float | None = None  # Joins the composite's default group
 
-    k_act: float = 0.02
-    K_mtor: float = 4.0
-    n: float = 2.0
+    k_act: float = calibratable(
+        0.02,
+        description=(
+            "mTORC1 → IKK edge strength; fit against the NFKBIA reporter "
+            "across the rapamycin/DDIS arms."
+        ),
+    )
+    K_mtor: float = 4.0  # measurement-grounded (DP14 mTORC1 range) — fixed
+    n: float = 2.0  # Hill cooperativity — fixed
 
     def ports_schema(self):
         return {

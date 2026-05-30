@@ -230,12 +230,16 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         reference="Alam & Cook 2007, Antioxid Redox Signal 9:2499–2511",
     ),
     GeneReporter(
-        observable="nfkb/IkBa",
+        observable="nfkb/IkBat",
         gene_symbol="NFKBIA",
         sign=+1,
         description=(
-            "IκBα — direct NF-κB target via the autoregulatory negative "
-            "feedback loop. Direct state in Ihekwaba 2004."
+            "IκBα transcript — direct NF-κB target via the autoregulatory "
+            "negative feedback loop. Maps to Ihekwaba 2004's IκBα mRNA "
+            "species (IkBat), which rises with NF-κB transcriptional "
+            "activity. Transcriptomic NFKBIA measures the transcript, not "
+            "the cytoplasmic protein (IkBa), whose abundance moves "
+            "inversely to activity through IKK-driven degradation."
         ),
         reference="Sun et al. 1993, Science 259:1912–1915",
     ),

@@ -125,4 +125,50 @@ The Scheduler is the only runner. There is no separate `Simulator` class. For si
 - Don't pull models from memory/training. Search BioModels API or other objective sources for what you need instead.
 - Readme is other user facing. Do not write stuff that is just useful to developers there, such as "This is out of scope for preprint". Cringe. Don't embarrass me.
 - Preserve JIT-ability wherver possible. Choose data types and design patterns accordingly.
-- 
+
+## Model intake protocol — READ BEFORE TRUSTING A COMPOSITE
+
+A composite is only as trustworthy as its parts, and the most dangerous
+failures are silent: a model that *looks* like it ran but produced
+numerical garbage. Before importing a new model, composing it, or
+believing any composite output, screen each constituent **on its own**.
+
+**The three failure modes to screen for (every new model, every time):**
+
+1. **Exploding** — unbounded growth / NaN / Inf. Usually *numerical, not
+   biological*: an explicit solver at loose tolerance pumps energy into
+   an oscillator until it diverges ("numerical anti-damping"). A
+   published, curated oscillator that "blows up on its own" is almost
+   always the solver, not the model.
+2. **Vanishing** — every state collapses to ~0; the subsystem lost its
+   dynamics and silently contributes nothing.
+3. **Tolerance-sensitive** — the load-bearing check. Run the model at a
+   loose and a tight solver tolerance. **If the trajectory changes
+   materially, the result is solver-dependent and is not yet a result.**
+   A bounded, non-vanishing, tolerance-*insensitive* trajectory is one
+   you can trust. (This single check would have caught the canonical
+   example below.)
+
+**How to screen — use the tooling, don't eyeball:**
+- `hallsim.diagnostics.screen_process(proc, t_end)` /
+  `screen_composite(comp, t_end)` — returns a pass/flag `ScreenReport`
+  per process; `assert all(r.ok for r in reports)` in a test.
+- `demos/subsystem_diagnostics.py` — the visual version: plots each
+  subsystem solo on its native clock.
+
+**Solver tolerance.** Scheduler default is `rtol=1e-6, atol=1e-9` —
+chosen because oscillatory biology (p53–Mdm2, NF-κB, cell cycle, MAPK)
+needs accuracy-limited stepping. Do **not** loosen it for a speed-up
+without screening every oscillator in the system first. Canonical
+example: Geva-Zatorsky 2006 p53 (BIOMD0000000157) is a clean bounded
+oscillator that *diverges to ~300× its amplitude and goes negative* at
+`rtol=1e-4`, and is bounded from `rtol=1e-5` down. Nothing in the model
+changed — only the tolerance.
+
+**Time units.** Composed SBML models often declare different native time
+units (DallePezze 2014 = days, Geva-Zatorsky 2006 = hours, an
+unannotated model = seconds). `SBMLProcess` extracts `native_time_seconds`
+at import; `reconciled_to(canonical_seconds)` puts a model on the
+composite's shared clock via chain-rule rescaling. If you compose SBML
+models without reconciling, they run at different real-world speeds on a
+shared `t` and the result is meaningless — screen for it.

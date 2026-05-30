@@ -67,7 +67,7 @@ def main():
         "dp14/DNA_damage",
         "dp14/CDKN1A",
         "dp14/mTORC1_pS2448",
-        "nfkb/IkBa",
+        "nfkb/IkBat",
         "gz06/x",
         "gz06/y",
     ]

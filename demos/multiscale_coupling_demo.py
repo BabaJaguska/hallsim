@@ -135,11 +135,11 @@ def build_composite():
 
 # ── Run comparisons ──────────────────────────────────────────────────
 
-def run_monolithic(composite, t_span, dt):
+def run_monolithic(composite, t_span, macro_dt, save_dt=None):
     """Reference: single-group solve via the Scheduler fast path
     (no manual groups → single Diffrax solve over the whole t_span)."""
     return Scheduler().run(
-        composite, t_span=t_span, macro_dt=dt, save_dt=dt
+        composite, t_span=t_span, macro_dt=macro_dt, save_dt=save_dt or macro_dt
     )
 
 
