@@ -320,10 +320,11 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
     "Genomic Instability": HallmarkHandle(
         name="Genomic Instability",
         description=(
-            "Exogenous DNA damage source. Drives ERiQ's damage_repair "
-            "(eta), DP14's DNA_damaged_by_irradiation rate, and GZ06's "
-            "psi independently — each at its own calibrated scale. "
-            "Same severity knob, no internal coupling between models."
+            "Exogenous DNA damage exposure. Drives ERiQ's damage_repair "
+            "(eta), DP14's Irradiation exposure input, and GZ06's psi — "
+            "severity is the normalized exposure level (0=none, 1=full). "
+            "The per-exposure damage potency is a mechanism parameter fit "
+            "separately, not part of this dial."
         ),
         category="Primary",
         references=[
@@ -341,17 +342,23 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
                 transform=lambda h, base: base * (1.0 + h * 4.0),
                 description="Damage production rate scales 1x→5x with instability (ERiQ-based composites)",
             ),
-            # DP14-based composites: severity-driven dose. severity=0 → 0
-            # (no irradiation); severity=1 → base. Base is the calibrated
-            # rate at full DDIS (the value Calibrator fits).
+            # DP14-based composites: severity IS the exogenous-exposure
+            # level. severity maps directly onto DP14's `Irradiation`
+            # boundary input (0 = no exposure, 1 = full exposure) — an
+            # identity dial, not a scaled rate constant. The damage
+            # *potency* per unit exposure (`DNA_damaged_by_irradiation`) is
+            # a mechanism parameter Calibrator fits separately; severity
+            # never touches it. DDIS is modeled as a *sustained* exposure
+            # (HallSim holds the boundary input constant), not DP14's acute
+            # γ pulse — appropriate for etoposide, a continuous insult.
             ParameterMapping(
                 process_name="dp14",
-                param_name="parameters.DNA_damaged_by_irradiation",
-                transform=lambda h, base: base * h,
+                param_name="parameters.Irradiation",
+                transform=lambda h, base: h,
                 description=(
-                    "Exogenous-damage rate constant (DP14): zero at "
-                    "severity=0 (no irradiation), full base at "
-                    "severity=1 (DDIS dose)"
+                    "Exogenous-exposure level (DP14 Irradiation input): "
+                    "0 at severity=0 (no exposure), full at severity=1 "
+                    "(sustained DDIS exposure)"
                 ),
             ),
             # GZ06 (Geva-Zatorsky 2006 p53-Mdm2 oscillator): the same

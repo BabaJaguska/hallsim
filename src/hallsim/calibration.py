@@ -61,6 +61,7 @@ High-level usage::
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,6 +80,8 @@ if TYPE_CHECKING:
     from hallsim.composite import Composite
     from hallsim.gene_reporters import GeneReporter
 
+
+log = logging.getLogger(__name__)
 
 ParamPytree = Any  # PyTree of jnp.ndarrays / scalars
 
@@ -448,7 +451,6 @@ class CalibrationProblem:
         n_save: int = 6,
         scheduler_kwargs: dict | None = None,
         hallmark_registry: dict | None = None,
-        allow_hallmark_override: bool = False,
     ) -> None:
         from hallsim.composite import Composite  # local import — avoid cycle
         from hallsim.hallmarks import HALLMARK_REGISTRY
@@ -480,51 +482,72 @@ class CalibrationProblem:
                     f"(have {sorted(composite.processes.keys())})"
                 )
 
-        # Guard rail: hallmark-targeted parameters are knobs set by the
-        # experimental Condition.hallmarks profile, not biology to be
-        # learned from data. Fitting them would let the optimizer adjust
-        # the experiment itself to match observations, which is
-        # degenerate. The rule derives from the registry (no hardcoded
-        # parameter names) so it generalises to any hallmark added
-        # later. Override with allow_hallmark_override=True if you have
-        # a specific reason — but be ready to defend it.
+        # Guard rail: protect severity *dials*, not the magnitudes they
+        # scale. A hallmark transform is `value = transform(severity, base)`
+        # where `base` is the parameter's current value. If the transform
+        # depends on `base` (e.g. `base * f(severity)`), fitting that
+        # parameter calibrates the magnitude full severity maps to —
+        # legitimate, and severity keeps its 0→1 meaning. If the transform
+        # *ignores* `base` (severity replaces the value — the parameter IS
+        # the experimenter's dial, e.g. an exposure level set directly to
+        # the severity), fitting it is degenerate: severity would overwrite
+        # the fitted value. Block only that case. The test probes each
+        # transform with two distinct bases — no hardcoded parameter names,
+        # so it generalises to any hallmark.
         reg = (
             HALLMARK_REGISTRY
             if hallmark_registry is None
             else hallmark_registry
         )
-        if not allow_hallmark_override:
-            hallmark_targets: dict[tuple[str, str], list[str]] = {}
-            for hname, handle in reg.items():
-                for mapping in handle.mappings:
-                    key = (mapping.process_name, mapping.param_name)
-                    hallmark_targets.setdefault(key, []).append(hname)
-            offenders = []
-            for pname, pref in params.items():
-                key = (pref.process_name, pref.field)
-                if key in hallmark_targets:
-                    offenders.append((pname, pref, hallmark_targets[key]))
-            if offenders:
-                msgs = []
-                for pname, pref, hmarks in offenders:
-                    msgs.append(
-                        f"  params[{pname!r}] targets "
-                        f"{pref.process_name}.{pref.field}, which is "
-                        f"set by the {', '.join(repr(h) for h in hmarks)} "
-                        f"hallmark(s)."
-                    )
-                raise ValueError(
-                    "Hallmark-targeted parameters are not valid Calibrator "
-                    "inputs:\n"
-                    + "\n".join(msgs)
-                    + "\n\nHallmark targets are knobs set by "
-                    "Condition.hallmarks per experimental arm, not "
-                    "mechanism parameters to be fit from data. Reach for "
-                    "Composite.calibration_targets() to discover mechanism "
-                    "candidates that aren't hallmark-controlled. Pass "
-                    "allow_hallmark_override=True if you genuinely need to "
-                    "fit through a hallmark target."
+        hallmark_targets: dict[tuple[str, str], list[tuple[str, Any]]] = {}
+        for hname, handle in reg.items():
+            for mapping in handle.mappings:
+                key = (mapping.process_name, mapping.param_name)
+                hallmark_targets.setdefault(key, []).append(
+                    (hname, mapping.transform)
                 )
+
+        def _ignores_base(transform) -> bool:
+            try:
+                return float(transform(0.5, 1.0)) == float(transform(0.5, 2.0))
+            except Exception:
+                return False  # can't probe → don't block
+
+        offenders = []
+        for pname, pref in params.items():
+            entries = hallmark_targets.get((pref.process_name, pref.field))
+            if not entries:
+                continue
+            if all(_ignores_base(t) for _, t in entries):
+                offenders.append((pname, pref, [h for h, _ in entries]))
+            else:
+                log.info(
+                    "Calibration param %r (%s.%s) is the magnitude scaled "
+                    "by the %s hallmark(s); severity multiplies the fitted "
+                    "value per arm (dial semantics preserved).",
+                    pname,
+                    pref.process_name,
+                    pref.field,
+                    ", ".join(h for h, _ in entries),
+                )
+        if offenders:
+            msgs = []
+            for pname, pref, hmarks in offenders:
+                msgs.append(
+                    f"  params[{pname!r}] targets {pref.process_name}."
+                    f"{pref.field}, a pure severity dial set by the "
+                    f"{', '.join(repr(h) for h in hmarks)} hallmark(s)."
+                )
+            raise ValueError(
+                "Severity dials are not valid Calibrator inputs:\n"
+                + "\n".join(msgs)
+                + "\n\nThese parameters are set directly by "
+                "Condition.hallmarks severity (the transform discards the "
+                "parameter's own value), so fitting them is degenerate — "
+                "severity would overwrite the fit. Fit the mechanism "
+                "magnitude the dial scales (e.g. a per-exposure potency) "
+                "instead."
+            )
 
         self.composite = composite
         self.reporters = reporters
@@ -591,7 +614,7 @@ class CalibrationProblem:
         out = []
         for rep, idx in zip(self.reporters, self._reporter_indices):
             traj = res.ys[..., idx]
-            out.append(rep.summary(traj))
+            out.append(rep.summary(res.ts, traj))
         return jnp.stack([jnp.asarray(o) for o in out])
 
     # ── Loss / fit / evaluate ─────────────────────────────────────
@@ -695,7 +718,7 @@ class CalibrationProblem:
             out: dict[str, float] = {}
             for rep, idx in zip(self.reporters, self._reporter_indices):
                 traj = res.ys[..., idx]
-                out[rep.observable] = float(rep.summary(traj))
+                out[rep.observable] = float(rep.summary(res.ts, traj))
             obs_cache[cond_name] = out
             return out
 

@@ -105,6 +105,7 @@ from pathlib import Path
 
 from hallsim.composite import Composite
 from hallsim.models.mtor_nfkb import MtorNFkBActivator
+from hallsim.models.running_integral import RunningIntegral
 from hallsim.sbml_import import process_from_sbml
 
 _MODELS_DIR = Path(__file__).parent.parent.parent.parent / "models"
@@ -184,6 +185,15 @@ def build_multi_hallmark_composite(*, validate: bool = True):
     nfkb = process_from_sbml(str(NFKB_SBML_PATH), name="nfkb").reconciled_to(
         CANONICAL_TIME_SECONDS
     )
+    # GZ06's psi is driven by the Genomic Instability hallmark at GZ06's
+    # own calibrated scale (~1.0 at full DDIS), not by a topology edge from
+    # DP14. Hallmark severity simultaneously sets DP14's irradiation
+    # exposure and GZ06's psi — same knob, independent regimes.
+    gz06 = process_from_sbml(
+        str(GZ06_SBML_PATH),
+        name="gz06",
+        parameters={GZ06_PSI_NAME: GZ06_PSI_DEFAULT},
+    ).reconciled_to(CANONICAL_TIME_SECONDS)
     processes: dict = {
         "dp14": process_from_sbml(
             str(DP14_SBML_PATH),
@@ -194,17 +204,7 @@ def build_multi_hallmark_composite(*, validate: bool = True):
             },
         ).reconciled_to(CANONICAL_TIME_SECONDS),
         "nfkb": nfkb,
-        # GZ06's psi is driven by the Genomic Instability hallmark at
-        # GZ06's own calibrated scale (~1.0 at full DDIS), not by a
-        # topology edge from DP14. Hallmark severity simultaneously
-        # sets DP14's irradiation rate and GZ06's psi — same knob,
-        # independent regimes. Exposed via parameters only
-        # (no state_driven_parameters — there's no topology source to wire to).
-        "gz06": process_from_sbml(
-            str(GZ06_SBML_PATH),
-            name="gz06",
-            parameters={GZ06_PSI_NAME: GZ06_PSI_DEFAULT},
-        ).reconciled_to(CANONICAL_TIME_SECONDS),
+        "gz06": gz06,
         # mTORC1 → IKK crosstalk edge: couples DP14's nutrient-sensing
         # network to the NF-κB module so rapamycin (mTOR ↓) suppresses
         # NF-κB and the NFKBIA reporter responds. Activating sign per
@@ -212,16 +212,33 @@ def build_multi_hallmark_composite(*, validate: bool = True):
         # derivative (intrinsic + mTOR drive) is solved in one group; the
         # slow mTOR input is read frozen across the fast macro-step.
         "mtor_nfkb": MtorNFkBActivator(timescale=nfkb.timescale),
+        # Phase-insensitive readouts for the two oscillating reporters.
+        # Each RunningIntegral integrates its oscillator (∫x, ∫IkBat)
+        # *in its source's group* (matched timescale) so the integral is
+        # taken at the oscillation's own resolution; the DDB2 / NFKBIA
+        # reporters read the trailing-window mean off these via
+        # `window_mean`. Replaces reading the phase-dependent endpoint.
+        "gz06_x_integral": RunningIntegral(timescale=gz06.timescale),
+        "nfkb_ikbat_integral": RunningIntegral(timescale=nfkb.timescale),
     }
     # The mtor_nfkb edge reads DP14's active mTORC1 and writes additively
-    # to the NF-κB module's IKK pool. The three SBML processes carry no
-    # topology entries, so each auto-prefixes to its own ``<name>/``
-    # namespace; only this edge crosses namespaces.
+    # to the NF-κB module's IKK pool. The RunningIntegral observers read an
+    # oscillator and write its cumulative integral to a new path. The SBML
+    # processes carry no topology entries, so each auto-prefixes to its own
+    # ``<name>/`` namespace; only these wires cross namespaces.
     topology: dict = {
         "mtor_nfkb": {
             "mTORC1_pS2448": "dp14/mTORC1_pS2448",
             "IKK": "nfkb/IKK",
-        }
+        },
+        "gz06_x_integral": {
+            "source": "gz06/x",
+            "integral": "gz06/x_integral",
+        },
+        "nfkb_ikbat_integral": {
+            "source": "nfkb/IkBat",
+            "integral": "nfkb/IkBat_integral",
+        },
     }
     return Composite(
         processes=processes,

@@ -27,6 +27,15 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+# float64: the DP14 forward-mode sensitivities are large near the damage
+# regime and overflow float32 to NaN during the calibration JVP (the
+# primal solve is fine in float32; only the tangent overflows). Enable
+# before any JAX array is created.
+import jax
+
+jax.config.update("jax_enable_x64", True)
+import diffrax as dfx
+
 from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
 from hallsim.gene_reporters import (
     MULTI_HALLMARK_REPORTERS,
@@ -118,26 +127,35 @@ def main() -> None:
         },
         # Mechanism candidates — biological rate constants that vary
         # across cell states / genotypes / disease conditions, that
-        # gene-expression data legitimately informs. Discovered via
-        # composite.calibration_targets() which auto-enumerates every
-        # SBML constant and subtracts hallmark-controlled knobs.
+        # gene-expression data legitimately informs.
         #
-        # One rate per reporter axis — no double-coverage. The earlier
-        # version of this demo fit irradiation_rate and gz06_psi (both
-        # hallmark-targeted, blocked by the guard rail now) and also
-        # doubled up DNA_repair + CDKN1A_transcr on the CDKN1A axis;
-        # this version covers four distinct reporter axes:
-        #
+        #   etoposide_potency ← dp14.DNA_damaged_by_irradiation
+        #                       (damage per unit exposure — the dose knob.
+        #                        Severity sets the Irradiation *level*; this
+        #                        is what "full exposure" means in DP14 units,
+        #                        recalibrated from DallePezze's γ value for
+        #                        etoposide. No longer hallmark-targeted, so
+        #                        it is a plain fittable mechanism parameter.)
         #   HMOX1   ← dp14.ROS_turnover           (ROS clearance)
         #   CDKN1A  ← dp14.CDKN1A_transcr_...     (p21 transcription gain)
         #   CYCS    ← dp14.mitophagy_inactiv_...  (mTOR→mitophagy)
         #   DDB2    ← gz06.alpha_y                (Mdm2 turnover, p53 ampl.)
         #
-        # NFKBIA can't be calibrated yet — the multi-hallmark composite
-        # has no coupling from DDIS / rapa to NF-κB (MtorNFkBSuppressor
-        # is parked for the next session).
         # EIF4EBP1's mTOR phos rate is correctly hallmark-controlled.
         params={
+            "etoposide_potency": ParameterRef(
+                process_name="dp14",
+                field="parameters.DNA_damaged_by_irradiation",
+                init=10.0,
+                clamp=(0.01, 10000.0),
+                description=(
+                    "DNA damage produced per unit Irradiation exposure. "
+                    "DallePezze's published 9237.72 is the γ-irradiation "
+                    "value (drives DNA_damage to ~28k); fit here to the "
+                    "etoposide DDIS regime. Severity sets the exposure "
+                    "level, not this potency."
+                ),
+            ),
             "ROS_turnover": ParameterRef(
                 process_name="dp14",
                 field="parameters.ROS_turnover",
@@ -190,6 +208,17 @@ def main() -> None:
         t_end=T_END,
         macro_dt=MACRO_DT,
         n_save=N_SAVE,
+        # DP14's mitochondrial subsystem is stiff (λ≈-5000/day); an
+        # explicit solver makes the forward sensitivity overflow to NaN.
+        # A stiff (implicit, A-stable) solver integrates the variational
+        # equation stably. Provisional global setting; per-group
+        # auto-selection is the planned refinement.
+        scheduler_kwargs={
+            "solver": dfx.Kvaerno3(),
+            "rtol": 1e-6,
+            "atol": 1e-4,
+            "max_steps": 200_000,
+        },
     )
     print(
         f"      {len(problem.reporters)} reporters × "

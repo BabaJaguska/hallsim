@@ -26,6 +26,7 @@ from hallsim.gene_reporters import (
     derive_observables,
     last_value,
     log2_fold_change,
+    window_mean,
 )
 
 
@@ -225,33 +226,16 @@ class TestComputeConcordance:
 class TestTrajectorySummaries:
 
     def test_last_value_picks_endpoint(self):
+        ts = jnp.arange(5, dtype=jnp.float32)
         y = jnp.asarray([1.0, 2.0, 3.0, 4.0, 5.0])
-        assert float(last_value(y)) == pytest.approx(5.0)
+        assert float(last_value(ts, y)) == pytest.approx(5.0)
 
     def test_cycle_average_quarter(self):
         # Linear ramp 0..99 (100 points). Last 25% are 75..99, mean = 87.
         y = jnp.arange(100, dtype=jnp.float32)
+        ts = jnp.arange(100, dtype=jnp.float32)
         s = cycle_average(0.25)
-        assert float(s(y)) == pytest.approx(87.0)
-
-    def test_cycle_average_full_trajectory(self):
-        y = jnp.arange(10, dtype=jnp.float32)
-        s = cycle_average(1.0)
-        assert float(s(y)) == pytest.approx(4.5)
-
-    def test_cycle_average_phase_insensitive_on_oscillator(self):
-        # Two trajectories of pure sinusoid with different phases at
-        # endpoint. The cycle_average of the last several cycles should
-        # match (both ≈ 0); endpoints differ by ~2.
-        t = jnp.linspace(0, 20 * jnp.pi, 2000)
-        y1 = jnp.sin(t)
-        y2 = jnp.sin(t + 1.3)
-        s = cycle_average(0.5)
-        # Endpoint readouts differ significantly...
-        assert abs(float(y1[-1]) - float(y2[-1])) > 0.5
-        # ...but cycle-averaged readouts both ≈ 0.
-        assert abs(float(s(y1))) < 0.05
-        assert abs(float(s(y2))) < 0.05
+        assert float(s(ts, y)) == pytest.approx(87.0)
 
     def test_cycle_average_rejects_invalid_fraction(self):
         with pytest.raises(ValueError):
@@ -259,26 +243,30 @@ class TestTrajectorySummaries:
         with pytest.raises(ValueError):
             cycle_average(1.5)
 
-    def test_ddb2_reporter_uses_cycle_average(self):
-        ddb2 = next(r for r in CANONICAL_REPORTERS if r.gene_symbol == "DDB2")
-        # Sinusoidal oscillator-style trajectory.
-        t = jnp.linspace(0, 20 * jnp.pi, 1000)
-        # cycle_average should ≈ 5.0 (the mean), not 5 + sin(20π) ≈ 5.0
-        # at endpoint by accident — pick a phase that makes endpoint != mean.
-        y_offset = 5.0 + jnp.sin(t + 1.7)
-        assert abs(float(ddb2.summary(y_offset)) - 5.0) < 0.05
-        # last_value would give a phase-dependent value.
-        assert abs(float(y_offset[-1]) - 5.0) > 0.1
+    def test_window_mean_is_exact_flat_mean(self):
+        # source = 5 + sin(t); its exact integral A = 5t - cos(t) + 1
+        # (so A(0)=0). window_mean over the last save interval recovers the
+        # flat mean of the source, phase-insensitively. With save points on
+        # multiples of 4π the boundary cos terms cancel → exactly 5.0.
+        ts = jnp.linspace(0.0, 20 * jnp.pi, 6)
+        A = 5.0 * ts - jnp.cos(ts) + 1.0  # cumulative ∫(5+sin)
+        s = window_mean()
+        assert float(s(ts, A)) == pytest.approx(5.0, abs=1e-4)
+
+    def test_window_mean_rejects_invalid_n(self):
+        with pytest.raises(ValueError):
+            window_mean(0)
 
     def test_derive_observable_summaries_collapses_trajectory(self):
         # Build a trajectory by tiling the homeostatic state along
-        # a time axis and adding a sinusoidal wiggle to one channel.
+        # a time axis.
         n_time = 200
+        ts = jnp.linspace(0.0, 1.0, n_time)
         state_traj = {
             k: jnp.broadcast_to(v, (n_time,))
             for k, v in _stub_eriq_state().items()
         }
-        out = derive_observable_summaries(state_traj)
+        out = derive_observable_summaries(ts, state_traj)
         for r in CANONICAL_REPORTERS:
             assert r.observable in out
             assert jnp.isfinite(out[r.observable])
@@ -306,26 +294,31 @@ class TestMultiHallmarkReporters:
         genes = [r.gene_symbol for r in MULTI_HALLMARK_REPORTERS]
         assert len(genes) == len(set(genes))
 
-    def test_ddb2_uses_cycle_average(self):
+    def test_ddb2_uses_window_mean(self):
+        # DDB2 reads the gz06/x_integral path (∫x) via window_mean, which
+        # recovers the flat trailing mean of x. Feed the exact integral of
+        # 5 + sin(t): A = 5t - cos(t) + 1; on a 4π save grid the cos
+        # boundary terms cancel → mean = 5.0, phase-insensitively.
         ddb2 = next(
             r for r in MULTI_HALLMARK_REPORTERS if r.gene_symbol == "DDB2"
         )
-        # Sinusoid centered at 5: endpoint phase-dependent, mean ≈ 5.
-        t = jnp.linspace(0, 20 * jnp.pi, 1000)
-        traj = 5.0 + jnp.sin(t + 1.7)
-        assert abs(float(ddb2.summary(traj)) - 5.0) < 0.05
+        assert ddb2.observable == "gz06/x_integral"
+        ts = jnp.linspace(0.0, 20 * jnp.pi, 6)
+        A = 5.0 * ts - jnp.cos(ts) + 1.0
+        assert abs(float(ddb2.summary(ts, A)) - 5.0) < 1e-4
 
     def test_derive_multi_hallmark_summaries(self):
         n_time = 20
+        ts = jnp.linspace(0.0, 25.0, n_time)
         traj = {
             "dp14/CDKN1A": jnp.linspace(0, 10, n_time),
-            "gz06/x": jnp.linspace(0, 1, n_time),
+            "gz06/x_integral": jnp.linspace(0, 1, n_time),
             "dp14/ROS": jnp.linspace(0, 5, n_time),
-            "nfkb/IkBat": jnp.linspace(0, 2, n_time),
+            "nfkb/IkBat_integral": jnp.linspace(0, 2, n_time),
             "dp14/Mito_mass_new": jnp.linspace(0, 3, n_time),
             "dp14/mTORC1_pS2448": jnp.linspace(0, 4, n_time),
         }
-        out = derive_multi_hallmark_summaries(traj)
+        out = derive_multi_hallmark_summaries(ts, traj)
         for r in MULTI_HALLMARK_REPORTERS:
             assert r.observable in out
             assert jnp.isfinite(out[r.observable])

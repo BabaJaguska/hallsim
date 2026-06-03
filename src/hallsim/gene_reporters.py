@@ -40,31 +40,57 @@ from hallsim.models.eriq import _compute_algebraic
 # ── Trajectory summaries ───────────────────────────────────────────
 
 
-def last_value(y):
-    """Default trajectory summary: take the endpoint value."""
+def last_value(ts, y):
+    """Default trajectory summary: the endpoint value (time axis ignored)."""
     return y[-1] if hasattr(y, "__getitem__") and hasattr(y, "shape") else y
 
 
-def cycle_average(fraction: float = 0.25):
-    """Summary that averages the last ``fraction`` of a trajectory.
+def window_mean(n_intervals: int = 1):
+    """Exact mean of an observable over the trailing save window(s).
 
-    Use for observables routed through an oscillating state — at the
-    final sample the oscillator's phase is arbitrary, so a pointwise
-    readout has phase-dependent noise that dominates the signal. The
-    mean over the last fraction of the trajectory is phase-insensitive
-    and matches what bulk transcriptomics measures: a population
-    average over cells at random oscillator phases.
+    For an observable routed through a
+    :class:`hallsim.models.running_integral.RunningIntegral` — whose path
+    holds the cumulative integral ``A = ∫₀ᵗ source`` — the mean of the
+    source over the last ``n_intervals`` save intervals is, by the
+    fundamental theorem of calculus::
+
+        ⟨source⟩ = (A[-1] - A[-1-n]) / (ts[-1] - ts[-1-n])
+
+    This is the phase-insensitive readout for oscillating species. It is a
+    *flat* window mean (no weighting bias, unlike an exponential moving
+    average), exact regardless of save resolution (the integral is taken
+    at the solver's own fine steps, not the coarse save grid), and its
+    calibration sensitivity stays bounded when the window is a fixed
+    fraction of the run. Dividing by elapsed time keeps it in the
+    observable's own units, commensurable with endpoint reporters.
+    """
+    if n_intervals < 1:
+        raise ValueError(f"n_intervals must be >= 1; got {n_intervals!r}")
+
+    def summarize(ts, y):
+        return (y[-1] - y[-1 - n_intervals]) / (ts[-1] - ts[-1 - n_intervals])
+
+    return summarize
+
+
+def cycle_average(fraction: float = 0.25):
+    """Mean over the last ``fraction`` of the *saved* trajectory points.
+
+    Phase-insensitive only when the saves resolve the oscillation; with a
+    coarse save grid the points are aliased and this degrades to ~the
+    endpoint. Prefer :func:`window_mean` over a
+    :class:`~hallsim.models.running_integral.RunningIntegral`, which is
+    exact at any save resolution. Kept for fine-save trajectories.
 
     Parameters
     ----------
     fraction:
-        Fraction of the trajectory to average over. Default 0.25
-        (the last quarter, typically several cycles for our oscillators).
+        Fraction of the saved points to average over (default 0.25).
     """
     if not 0 < fraction <= 1:
         raise ValueError(f"fraction must be in (0, 1]; got {fraction!r}")
 
-    def summarize(y):
+    def summarize(ts, y):
         n = int(y.shape[0])
         k = max(1, int(round(n * fraction)))
         return y[-k:].mean(axis=0)
@@ -202,7 +228,7 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         reference="el-Deiry et al. 1993, Cell 75:817–825",
     ),
     GeneReporter(
-        observable="gz06/x",
+        observable="gz06/x_integral",
         gene_symbol="DDB2",
         sign=+1,
         description=(
@@ -210,13 +236,15 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
             "transcription target. Maps to GZ06's p53 protein (x) which "
             "is the actual p53 dynamic in the composite; CDKN1A in DP14 "
             "is FoxO-driven, not p53-driven, so DDB2 needs its own "
-            "mechanistic counterpart. GZ06's p53 oscillates after "
-            "damage, so the summary is a cycle-average — phase-"
-            "insensitive and matches bulk transcriptomics' implicit "
-            "population averaging over cells at random cycle phases."
+            "mechanistic counterpart. GZ06's p53 oscillates after damage, "
+            "so we read the exact trailing-window mean of x: a "
+            "RunningIntegral writes ∫x to `gz06/x_integral` and "
+            "window_mean differences it — phase-insensitive, matching "
+            "bulk transcriptomics' population averaging over random cycle "
+            "phases, with a bounded calibration gradient."
         ),
         reference="Hwang et al. 1999, Nature 401:430–432",
-        summary=cycle_average(0.25),
+        summary=window_mean(),
     ),
     GeneReporter(
         observable="dp14/ROS",
@@ -230,7 +258,7 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         reference="Alam & Cook 2007, Antioxid Redox Signal 9:2499–2511",
     ),
     GeneReporter(
-        observable="nfkb/IkBat",
+        observable="nfkb/IkBat_integral",
         gene_symbol="NFKBIA",
         sign=+1,
         description=(
@@ -239,9 +267,15 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
             "species (IkBat), which rises with NF-κB transcriptional "
             "activity. Transcriptomic NFKBIA measures the transcript, not "
             "the cytoplasmic protein (IkBa), whose abundance moves "
-            "inversely to activity through IKK-driven degradation."
+            "inversely to activity through IKK-driven degradation. NF-κB "
+            "oscillates, so we read the exact trailing-window mean of "
+            "IkBat: a RunningIntegral writes ∫IkBat to "
+            "`nfkb/IkBat_integral` and window_mean differences it — "
+            "phase-insensitive, with a bounded calibration gradient (same "
+            "treatment as the DDB2/p53 oscillator reporter)."
         ),
         reference="Sun et al. 1993, Science 259:1912–1915",
+        summary=window_mean(),
     ),
     GeneReporter(
         observable="dp14/Mito_mass_new",
@@ -267,6 +301,7 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
 
 
 def derive_multi_hallmark_summaries(
+    ts,
     state_trajectory: dict,
     reporters: list[GeneReporter] | None = None,
 ) -> dict[str, Any]:
@@ -274,6 +309,10 @@ def derive_multi_hallmark_summaries(
 
     Parameters
     ----------
+    ts:
+        Save times, shape ``(n_time,)`` — the axis of each trajectory.
+        Passed to the summary so time-aware summaries (e.g.
+        :func:`window_mean`) can compute a per-time mean.
     state_trajectory:
         ``{store_path: jnp.ndarray}`` with each array shaped
         ``(n_time, ...)``. Typically the result of
@@ -289,7 +328,7 @@ def derive_multi_hallmark_summaries(
     if reporters is None:
         reporters = MULTI_HALLMARK_REPORTERS
     return {
-        rep.observable: rep.summary(state_trajectory[rep.observable])
+        rep.observable: rep.summary(ts, state_trajectory[rep.observable])
         for rep in reporters
         if rep.observable in state_trajectory
     }
@@ -337,6 +376,7 @@ def derive_observables(state: dict) -> dict[str, Any]:
 
 
 def derive_observable_summaries(
+    ts,
     state_trajectory: dict,
     reporters: list[GeneReporter] | None = None,
 ) -> dict[str, Any]:
@@ -367,7 +407,7 @@ def derive_observable_summaries(
         reporters = CANONICAL_REPORTERS
     obs_traj = derive_observables(state_trajectory)
     return {
-        rep.observable: rep.summary(obs_traj[rep.observable])
+        rep.observable: rep.summary(ts, obs_traj[rep.observable])
         for rep in reporters
         if rep.observable in obs_traj
     }

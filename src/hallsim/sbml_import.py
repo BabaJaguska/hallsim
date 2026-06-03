@@ -273,6 +273,18 @@ class SBMLProcess(Process):
     # time and look up current values by name, JIT-safe).
     _param_names: tuple[str, ...] = ()
     _param_indexes: tuple[int, ...] = ()
+    # Boundary-input species (e.g. Irradiation, Insulin) are the model's
+    # experimental input ports. They live in the SBML `w` vector, not `c`,
+    # but are exposed through the same `parameters` surface; these parallel
+    # tuples route their current values into `_w0` at derivative time.
+    _w_names: tuple[str, ...] = ()
+    _w_indexes: tuple[int, ...] = ()
+    # Inert "sink" species (written by degradation reactions, read by
+    # nothing — e.g. a `Nil` degradation collector). Integrating them is
+    # pointless and lets them accumulate unboundedly, wrecking the state's
+    # numerical scaling. Their derivative is frozen to 0 (treated as a
+    # boundary species), which is exact since no rate law reads them.
+    _frozen_indices: tuple[int, ...] = ()
 
     def ports_schema(self):
         return {
@@ -298,10 +310,11 @@ class SBMLProcess(Process):
         # and works under jax.vmap'd / batched Scheduler runs without
         # extra vmap'ing at the composite level.
         y = jnp.stack([state[name] for name in self._species_names], axis=-1)
-        ratefunc = getattr(
-            getattr(self._model, "modelstepfunc", self._model),
-            "ratefunc",
-        )
+        host = getattr(self._model, "modelstepfunc", self._model)
+        ratefunc = host.ratefunc
+        # AssignmentRule recomputes the `w` vector (observables, computed
+        # totals, time-dependent inputs) from the current state each step.
+        assignmentfunc = getattr(host, "assignmentfunc", None)
         is_batched = y.ndim > 1
 
         # Build the constants vector. parameters.<key> entries
@@ -320,17 +333,51 @@ class SBMLProcess(Process):
         # Map canonical time to this model's native time, evaluate the
         # native rate law there, and scale dy back to canonical time:
         #   τ = t · time_scale,  dy/dt = (dy/dτ)·time_scale.
-        # Feeding t_native (not t) keeps time-referencing assignment
-        # rules — DP14's piecewise Irradiation / Insulin inputs — on the
-        # model's own clock. time_scale=1.0 leaves both untouched.
+        # Feeding t_native (not t) keeps time-referencing assignment rules
+        # on the model's own clock. time_scale=1.0 leaves both untouched.
         t_native = t * self.time_scale
+
+        # Evaluate the SBML assignment rules from the *current* state rather
+        # than freezing `w` at its initial value. A state-dependent rule
+        # that feeds a rate law (a conserved moiety, a computed total) is
+        # then correct instead of silently stuck at t=0; SBML observables
+        # (`*_obs`) are likewise computed live.
+        w_batched = False
+        if assignmentfunc is not None:
+            if is_batched:
+                w = jax.vmap(assignmentfunc, in_axes=(0, None, None, None))(
+                    y, self._w0, c, t_native
+                )
+                w_batched = True
+            else:
+                w = assignmentfunc(y, self._w0, c, t_native)
+        else:
+            w = self._w0
+
+        # Boundary inputs (Irradiation, Insulin, …) are experimenter knobs:
+        # the current `parameters` value overrides whatever the model's own
+        # (often time-pulse) assignment rule computed, so a sustained
+        # severity-driven exposure wins over the source model's transient.
+        if self._w_indexes:
+            w_indexes = jnp.asarray(self._w_indexes)
+            w_values = jnp.asarray([self.parameters[n] for n in self._w_names])
+            w = w.at[..., w_indexes].set(w_values)
+
         if is_batched:
-            dydt = jax.vmap(ratefunc, in_axes=(0, None, None, None))(
-                y, t_native, self._w0, c
+            w_in = 0 if w_batched else None
+            dydt = jax.vmap(ratefunc, in_axes=(0, None, w_in, None))(
+                y, t_native, w, c
             )
         else:
-            dydt = ratefunc(y, t_native, self._w0, c)
+            dydt = ratefunc(y, t_native, w, c)
         dydt = dydt * self.time_scale
+
+        # Freeze inert sink species (written by degradation, read by
+        # nothing) so they don't accumulate and wreck the state scaling.
+        # Exact: no rate law reads them, so zeroing their rate changes no
+        # other trajectory.
+        if self._frozen_indices:
+            dydt = dydt.at[..., jnp.asarray(self._frozen_indices)].set(0.0)
 
         return {
             name: dydt[..., i] for i, name in enumerate(self._species_names)
@@ -634,6 +681,117 @@ def _load_local_sbml(sbml_path: str):
         os.unlink(tmp_py)
 
 
+def _collect_boundary_inputs(xml_path: str) -> set[str]:
+    """Boundary species that are exogenous inputs, not observable outputs.
+
+    A boundary species in SBML is imposed on the model rather than computed
+    by its reactions — i.e. an input port. Those whose assignment rule
+    references only ``time`` and constants (or that have no rule) are
+    experimental forcing inputs (DallePezze 2014's ``Irradiation``,
+    ``Insulin``, ``Amino_Acids``); HallSim surfaces them as settable
+    ``parameters`` so hallmarks / Calibrator can drive them. Boundary
+    species whose rule references other species are observable readouts (the
+    ``_obs`` outputs) and are left alone.
+
+    Returns the set of input-species ids. Empty if the file cannot be parsed.
+    """
+    import re
+
+    import libsbml
+
+    doc = libsbml.SBMLReader().readSBMLFromFile(str(xml_path))
+    model = doc.getModel()
+    if model is None:
+        return set()
+
+    species_ids = {
+        model.getSpecies(i).getId() for i in range(model.getNumSpecies())
+    }
+    rule_formula: dict[str, str] = {}
+    for i in range(model.getNumRules()):
+        r = model.getRule(i)
+        if r.isSetVariable() and r.isSetMath():
+            rule_formula[r.getVariable()] = libsbml.formulaToString(
+                r.getMath()
+            )
+
+    inputs: set[str] = set()
+    for i in range(model.getNumSpecies()):
+        s = model.getSpecies(i)
+        if not s.getBoundaryCondition():
+            continue
+        sid = s.getId()
+        formula = rule_formula.get(sid)
+        if formula is None:
+            inputs.add(sid)  # constant boundary species, no rule
+            continue
+        references_species = any(
+            re.search(r"\b" + re.escape(other) + r"\b", formula)
+            for other in species_ids
+        )
+        if not references_species:
+            inputs.add(sid)
+    return inputs
+
+
+def _detect_inert_sinks(xml_path: str) -> set[str]:
+    """Species that are written by reactions but read by nothing.
+
+    A degradation "sink" (conventionally named ``Nil``/``Sink``/``∅``):
+    reactions dump degraded material into it as a formal product, but no
+    rate law or rule ever reads it. Integrating such a species is
+    pointless and, because it only accumulates, it grows without bound
+    (a "total-degraded" counter) — ruining the state's numerical scaling.
+    It should be a boundary species. We detect it (read by no kinetic law
+    or rule, yet a product of some reaction) so the caller can freeze it.
+
+    Returns the set of inert-sink species ids. Empty if unparseable.
+    """
+    import re
+
+    import libsbml
+
+    doc = libsbml.SBMLReader().readSBMLFromFile(str(xml_path))
+    model = doc.getModel()
+    if model is None:
+        return set()
+
+    # Every identifier that appears in a kinetic law or rule expression —
+    # i.e. every quantity the dynamics actually read.
+    read: set[str] = set()
+    for i in range(model.getNumReactions()):
+        kl = model.getReaction(i).getKineticLaw()
+        if kl is not None and kl.isSetMath():
+            read.update(
+                re.findall(
+                    r"[A-Za-z_]\w*", libsbml.formulaToString(kl.getMath())
+                )
+            )
+    for i in range(model.getNumRules()):
+        r = model.getRule(i)
+        if r.isSetMath():
+            read.update(
+                re.findall(
+                    r"[A-Za-z_]\w*", libsbml.formulaToString(r.getMath())
+                )
+            )
+
+    sinks: set[str] = set()
+    for i in range(model.getNumSpecies()):
+        s = model.getSpecies(i)
+        sid = s.getId()
+        if s.getBoundaryCondition() or sid in read:
+            continue
+        is_product = any(
+            model.getReaction(j).getProduct(k).getSpecies() == sid
+            for j in range(model.getNumReactions())
+            for k in range(model.getReaction(j).getNumProducts())
+        )
+        if is_product:
+            sinks.add(sid)
+    return sinks
+
+
 def process_from_sbml(
     model_id: int | str,
     name: str | None = None,
@@ -734,29 +892,64 @@ def process_from_sbml(
     c_indexes = getattr(
         getattr(model, "modelstepfunc", model), "c_indexes", None
     ) or getattr(model, "c_indexes", None)
+    w_indexes_map = (
+        getattr(getattr(model, "modelstepfunc", model), "w_indexes", None)
+        or getattr(model, "w_indexes", None)
+        or {}
+    )
 
-    # Auto-populate `parameters` with every SBML constant at its
-    # published default, then apply any user-supplied overrides on
-    # top. This exposes the full mechanism surface for
-    # Composite.calibration_targets / hallmark substitution /
-    # Calibrator fitting without per-composite hand-curation.
+    # Auto-populate `parameters` with every SBML constant at its published
+    # default. This exposes the full mechanism surface for
+    # Composite.calibration_targets / hallmark substitution / Calibrator
+    # fitting without per-composite hand-curation.
     if c_indexes is None:
         params_dict = {}
         param_names = ()
         param_indexes = ()
     else:
         params_dict = {n: float(c[i]) for n, i in c_indexes.items()}
-        if parameters:
-            missing = [p for p in parameters if p not in c_indexes]
-            if missing:
-                raise KeyError(
-                    f"parameters {missing} not found in SBML "
-                    f"constants. Available: {sorted(c_indexes.keys())}"
-                )
-            for n, v in parameters.items():
-                params_dict[n] = float(v)
-        param_names = tuple(params_dict.keys())
+        param_names = tuple(c_indexes.keys())
         param_indexes = tuple(c_indexes[n] for n in param_names)
+
+    # Boundary-input species (Irradiation, Insulin, …) are the model's
+    # experimental input ports. Surface them through the same `parameters`
+    # dict as constants, routed into the `w` vector at derivative time.
+    boundary_inputs = _collect_boundary_inputs(xml_path) & set(w_indexes_map)
+    params_dict.update(
+        {n: float(w0[w_indexes_map[n]]) for n in boundary_inputs}
+    )
+    w_names = tuple(sorted(boundary_inputs))
+    w_index_tuple = tuple(w_indexes_map[n] for n in w_names)
+
+    # Inert sink species (written by degradation, read by nothing) are
+    # frozen so they don't accumulate and ruin the state scaling.
+    inert_sinks = _detect_inert_sinks(xml_path)
+    frozen_indices = tuple(
+        i for i, n in enumerate(species_names) if n in inert_sinks
+    )
+    if frozen_indices:
+        log.warning(
+            "%s: inert sink species %s are written but read by nothing; "
+            "freezing them (treated as boundary). Consider marking "
+            "boundaryCondition=true in the source SBML.",
+            name,
+            [species_names[i] for i in frozen_indices],
+        )
+
+    # Apply user overrides against the combined settable surface
+    # (constants + boundary inputs).
+    if parameters:
+        settable = set(c_indexes or ()) | boundary_inputs
+        missing = [p for p in parameters if p not in settable]
+        if missing:
+            raise KeyError(
+                f"parameters {missing} not found in SBML constants or "
+                f"boundary inputs. Available constants: "
+                f"{sorted(c_indexes or ())}; boundary inputs: "
+                f"{sorted(boundary_inputs)}"
+            )
+        for n, v in parameters.items():
+            params_dict[n] = float(v)
 
     proc = object.__new__(SBMLProcess)
     # Set fields directly (bypassing __init__ since this is a dynamic construction)
@@ -776,6 +969,9 @@ def process_from_sbml(
     object.__setattr__(proc, "parameters", params_dict)
     object.__setattr__(proc, "_param_names", param_names)
     object.__setattr__(proc, "_param_indexes", param_indexes)
+    object.__setattr__(proc, "_w_names", w_names)
+    object.__setattr__(proc, "_w_indexes", w_index_tuple)
+    object.__setattr__(proc, "_frozen_indices", frozen_indices)
     # Default the scheduler timescale to the model's native time unit (a
     # day-scale model has day-scale dynamics) so auto_groups clusters
     # mixed-rate composites correctly. Never None for SBML processes, so

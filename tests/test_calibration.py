@@ -263,9 +263,11 @@ class TestCalibrationProblemValidation:
                 fit_arms=["NONEXISTENT"],
             )
 
-    def test_hallmark_targeted_param_is_blocked(self):
-        """Guard rail: a ParameterRef pointing at a hallmark target
-        raises with a clear error message naming the hallmark."""
+    def test_pure_dial_param_is_blocked(self):
+        """Guard rail: fitting a parameter whose hallmark transform IGNORES
+        the base value (severity replaces it — a pure dial, e.g. an
+        exposure level set directly to the severity) is degenerate and
+        raises, naming the hallmark."""
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
@@ -293,6 +295,7 @@ class TestCalibrationProblemValidation:
             semantic_validation=False,
         )
 
+        # Transform ignores `base` — severity IS the value (a pure dial).
         custom_reg = {
             "Test Hallmark": HallmarkHandle(
                 name="Test Hallmark",
@@ -300,7 +303,7 @@ class TestCalibrationProblemValidation:
                     ParameterMapping(
                         process_name="k",
                         param_name="knob",
-                        transform=lambda h, base: base * h,
+                        transform=lambda h, base: h,
                     ),
                 ],
             ),
@@ -315,7 +318,7 @@ class TestCalibrationProblemValidation:
                 data={"a_vs_a": pd.Series({"GX": 0.0})},
                 arm_pairs={"a_vs_a": ("a", "a")},
                 params={
-                    "bad": ParameterRef(
+                    "dial": ParameterRef(
                         process_name="k", field="knob", init=1.0
                     ),
                 },
@@ -323,8 +326,12 @@ class TestCalibrationProblemValidation:
                 hallmark_registry=custom_reg,
             )
 
-    def test_allow_hallmark_override_escape_hatch(self):
-        """Guard rail can be bypassed when allow_hallmark_override=True."""
+    def test_scaled_magnitude_param_is_fittable(self):
+        """A parameter scaled by a multiplicative hallmark transform
+        (``base * f(severity)``) is the magnitude that full severity maps
+        to — legitimately fittable (severity keeps its 0→1 meaning), so
+        construction does NOT raise. This is the case the dial-only guard
+        rail must let through."""
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
@@ -351,6 +358,7 @@ class TestCalibrationProblemValidation:
             validate=False,
             semantic_validation=False,
         )
+        # Transform depends on `base` — fitting it calibrates the magnitude.
         custom_reg = {
             "Test": HallmarkHandle(
                 name="Test",
@@ -371,13 +379,12 @@ class TestCalibrationProblemValidation:
             data={"a_vs_a": pd.Series({"GX": 0.0})},
             arm_pairs={"a_vs_a": ("a", "a")},
             params={
-                "via_override": ParameterRef(
+                "magnitude": ParameterRef(
                     process_name="k", field="knob", init=1.0
                 ),
             },
             fit_arms=["a_vs_a"],
             hallmark_registry=custom_reg,
-            allow_hallmark_override=True,
         )
 
     def test_params_reference_unknown_process_raises(self):
