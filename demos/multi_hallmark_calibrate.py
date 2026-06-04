@@ -34,7 +34,6 @@ from pathlib import Path
 import jax
 
 jax.config.update("jax_enable_x64", True)
-import diffrax as dfx
 
 from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
 from hallsim.gene_reporters import (
@@ -208,17 +207,11 @@ def main() -> None:
         t_end=T_END,
         macro_dt=MACRO_DT,
         n_save=N_SAVE,
-        # DP14's mitochondrial subsystem is stiff (λ≈-5000/day); an
-        # explicit solver makes the forward sensitivity overflow to NaN.
-        # A stiff (implicit, A-stable) solver integrates the variational
-        # equation stably. Provisional global setting; per-group
-        # auto-selection is the planned refinement.
-        scheduler_kwargs={
-            "solver": dfx.Kvaerno3(),
-            "rtol": 1e-6,
-            "atol": 1e-4,
-            "max_steps": 200_000,
-        },
+        # Solvers are chosen per group automatically: both DP14+GZ06
+        # (λ≈-3e5) and NF-κB (λ≈-1.7e4) are stiff, so the Scheduler routes
+        # them to an implicit (A-stable) solver with a magnitude-scaled
+        # vector atol — which is what keeps the forward sensitivity from
+        # overflowing to NaN. No solver pinned here.
     )
     print(
         f"      {len(problem.reporters)} reporters × "
@@ -238,9 +231,11 @@ def main() -> None:
     print_concordance(pre_results)
 
     # 4. Fit + post-fit concordance
-    print("\n[4/4] Fitting (20 Adam steps, forward-mode autodiff) ...")
+    print("\n[4/4] Fitting (20 Adam steps, reverse-mode autodiff) ...")
     t0 = time.time()
-    history = problem.fit(steps=20, learning_rate=0.05, verbose=True)
+    history = problem.fit(
+        steps=20, mode="reverse", learning_rate=0.05, verbose=True
+    )
     print(f"\n      Fit ran in {time.time()-t0:.1f}s")
     print(f"      {history}")
 

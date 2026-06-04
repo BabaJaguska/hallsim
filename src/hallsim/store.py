@@ -33,9 +33,14 @@ def build_initial_store(
         for port_name, port in proc.ports_schema().items():
             store_path = topo.get(port_name, port_name)
             if store_path not in store:
-                store[store_path] = jnp.asarray(
-                    port.default, dtype=jnp.float32
-                )
+                # No explicit dtype: honor the global JAX default (float64
+                # when jax_enable_x64 is set, float32 otherwise). A
+                # hardcoded float32 here forced the *entire integration
+                # state* to float32 even under x64, so an adaptive solver
+                # at rtol=1e-6 (below the float32 floor) thrashed on stiff
+                # systems — the state-side half of the precision bug whose
+                # RHS-side half was sbmltoodejax's float32 codegen.
+                store[store_path] = jnp.asarray(port.default)
     return store
 
 

@@ -659,6 +659,21 @@ def _load_local_sbml(sbml_path: str):
         if "eqx.static_field()" in code:
             code = code.replace("eqx.static_field()", "eqx.field(static=True)")
             patched = True
+        # Patch hardcoded float32 → float64. sbmltoodejax emits the
+        # stoichiometric matrix, constants, and rate vectors as
+        # ``dtype=jnp.float32``; an explicit dtype overrides the global
+        # ``jax_enable_x64`` setting, so the RHS is computed at float32
+        # precision (~1e-7) even when HallSim runs in float64. With an
+        # adaptive controller at ``rtol=1e-6`` (below the float32 floor)
+        # the embedded error estimate is dominated by float32 roundoff
+        # and the step controller thrashes — ~57% step rejection that
+        # masquerades as stiffness, defeating implicit solvers. float64
+        # constants let the controller actually meet tolerance. (With
+        # ``jax_enable_x64`` off, JAX downcasts float64 → float32, so this
+        # is a no-op rather than a precision promotion.)
+        if "float32" in code:
+            code = code.replace("float32", "float64")
+            patched = True
         if patched:
             with open(tmp_py, "w") as f:
                 f.write(code)

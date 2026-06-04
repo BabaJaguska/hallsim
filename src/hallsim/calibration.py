@@ -570,6 +570,19 @@ class CalibrationProblem:
         )
         # Reuse the Composite type for re-construction in the loss.
         self._Composite = Composite
+        # One persistent Scheduler across the eager evaluate pass and the
+        # differentiated loss, so its per-group stiffness verdict (which
+        # must be measured with concrete params) is resolved once and
+        # reused under tracing. Adjoint is chosen per run, not per
+        # instance.
+        from hallsim.scheduler import Scheduler
+
+        self._scheduler = Scheduler(**self.scheduler_kwargs)
+        self._warmed_up = False
+        # Autodiff direction the loss is currently being differentiated in;
+        # set by fit(), read by _simulate_condition to pick the matching
+        # diffeqsolve adjoint. evaluate() runs eagerly (no autodiff).
+        self._fit_mode = "forward"
 
     # ── Internal: per-condition simulation ────────────────────────
 
@@ -583,32 +596,39 @@ class CalibrationProblem:
             )
         return new
 
-    def _simulate_condition(self, processes: dict, condition: Condition):
-        """Apply hallmarks + run Scheduler for one condition. Returns the
-        per-reporter ``summary``-collapsed observable values (a jnp array
-        of length ``len(reporters)``)."""
+    def _condition_composite(self, processes: dict, condition: Condition):
+        """Apply a condition's hallmark severities and wire a composite."""
         from hallsim.hallmarks import apply_hallmarks
-        from hallsim.scheduler import Scheduler
 
         procs = apply_hallmarks(processes, condition.hallmarks)
-        comp = self._Composite(
+        return self._Composite(
             processes=procs,
             topology=self.composite.topology,
             validate=False,
             semantic_validation=False,
         )
-        sched = Scheduler(
-            adjoint=dfx.ForwardMode(),
-            **self.scheduler_kwargs,
-        )
+
+    def _simulate_condition(self, processes: dict, condition: Condition):
+        """Apply hallmarks + run Scheduler for one condition. Returns the
+        per-reporter ``summary``-collapsed observable values (a jnp array
+        of length ``len(reporters)``)."""
+        comp = self._condition_composite(processes, condition)
         y0 = comp.initial_state_vec()
         save_dt = max(1e-6, self.t_end / max(1, self.n_save - 1))
-        res = sched.run(
+        # The diffeqsolve adjoint must match the outer autodiff: ForwardMode
+        # under a JVP (forward fit), the default recursive-checkpoint reverse
+        # adjoint under a VJP (reverse fit). A ForwardMode solve cannot be
+        # reverse-differentiated (its inner while-loop has dynamic bounds).
+        adjoint = (
+            dfx.ForwardMode() if self._fit_mode == "forward" else None
+        )
+        res = self._scheduler.run(
             comp,
             t_span=(0.0, self.t_end),
             macro_dt=self.macro_dt,
             y0=y0,
             save_dt=save_dt,
+            adjoint=adjoint,
         )
         # res.ys is (n_save, ..., n_vars). Trailing-axis convention.
         out = []
@@ -653,21 +673,57 @@ class CalibrationProblem:
             per_arm_losses.append(jnp.mean((sim_norm - data_norm) ** 2))
         return jnp.mean(jnp.stack(per_arm_losses))
 
+    def warm_up(self, param_values: dict[str, jnp.ndarray]) -> None:
+        """Resolve the Scheduler's per-group solvers eagerly.
+
+        The auto-solver split measures each group's Jacobian spectrum,
+        which needs concrete parameters — impossible once the loss is
+        under forward-mode JVP. Running one representative condition's
+        composite through ``Scheduler.warm_up`` at ``param_values`` caches
+        the verdict (keyed by structure) so every traced loss evaluation
+        reuses it. Idempotent.
+        """
+        if self._warmed_up:
+            return
+        substituted = self._substitute(self.composite.processes, param_values)
+        any_cond = next(iter(self.conditions.values()))
+        comp = self._condition_composite(substituted, any_cond)
+        self._scheduler.warm_up(
+            comp, (0.0, self.t_end), macro_dt=self.macro_dt
+        )
+        self._warmed_up = True
+
     def fit(
         self,
         *,
         steps: int = 40,
+        mode: str = "forward",
         **calibrator_kwargs,
     ) -> CalibrationHistory:
+        """Fit the mechanism parameters.
+
+        ``mode`` selects the autodiff direction. ``"forward"`` JVPs along
+        each parameter basis (cost scales with parameter count) and is
+        robust through the multi-rate macro loop. ``"reverse"`` is a
+        single VJP (cost independent of parameter count, the way neural
+        networks train) — much cheaper for several parameters, now that
+        the phase-insensitive ``window_mean`` summaries make the reverse
+        pass through the oscillators well-behaved.
+        """
         init = {k: jnp.asarray(p.init) for k, p in self.params.items()}
         clamps = {
             k: p.clamp for k, p in self.params.items() if p.clamp is not None
         }
+        self._fit_mode = mode
+        # Measure stiffness with concrete params before the loss goes
+        # under autodiff — the per-group solver verdict can't be computed
+        # from tracers.
+        self.warm_up(init)
         cal = Calibrator(
             loss_fn=self.loss,
             init_params=init,
             clamps=clamps or None,
-            mode="forward",
+            mode=mode,
             **calibrator_kwargs,
         )
         return cal.fit(steps=steps)
@@ -684,12 +740,9 @@ class CalibrationProblem:
         wall-time is faster (no forward-mode unfold).
         """
         from hallsim.gene_reporters import compute_concordance
-        from hallsim.hallmarks import apply_hallmarks
-        from hallsim.scheduler import Scheduler
         import pandas as pd
 
         substituted = self._substitute(self.composite.processes, param_values)
-        sched = Scheduler(**self.scheduler_kwargs)
 
         # Per-condition simulation cache.
         obs_cache: dict[str, dict[str, float]] = {}
@@ -697,18 +750,12 @@ class CalibrationProblem:
         def obs_for(cond_name: str) -> dict[str, float]:
             if cond_name in obs_cache:
                 return obs_cache[cond_name]
-            procs = apply_hallmarks(
-                substituted, self.conditions[cond_name].hallmarks
-            )
-            comp = self._Composite(
-                processes=procs,
-                topology=self.composite.topology,
-                validate=False,
-                semantic_validation=False,
+            comp = self._condition_composite(
+                substituted, self.conditions[cond_name]
             )
             y0 = comp.initial_state_vec()
             save_dt = max(1e-6, self.t_end / max(1, self.n_save - 1))
-            res = sched.run(
+            res = self._scheduler.run(
                 comp,
                 t_span=(0.0, self.t_end),
                 macro_dt=self.macro_dt,
@@ -753,24 +800,14 @@ class CalibrationProblem:
         ``{cond_name: SchedulerResult}``. Uses the Scheduler's default
         adjoint (no forward-mode JVP), so wall-time is fast — meant
         for post-fit visualisation, not loss evaluation."""
-        from hallsim.hallmarks import apply_hallmarks
-        from hallsim.scheduler import Scheduler
-
         substituted = self._substitute(self.composite.processes, param_values)
-        sched = Scheduler(**self.scheduler_kwargs)
         n = n_save if n_save is not None else self.n_save
         save_dt = max(1e-6, self.t_end / max(1, n - 1))
         results: dict = {}
         for cond_name, cond in self.conditions.items():
-            procs = apply_hallmarks(substituted, cond.hallmarks)
-            comp = self._Composite(
-                processes=procs,
-                topology=self.composite.topology,
-                validate=False,
-                semantic_validation=False,
-            )
+            comp = self._condition_composite(substituted, cond)
             y0 = comp.initial_state_vec()
-            results[cond_name] = sched.run(
+            results[cond_name] = self._scheduler.run(
                 comp,
                 t_span=(0.0, self.t_end),
                 macro_dt=self.macro_dt,

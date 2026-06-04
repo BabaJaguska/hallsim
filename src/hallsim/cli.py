@@ -420,6 +420,41 @@ def multiscale(t1, macro_dt):
     click.echo(f"Alarm triggered: {'yes' if float(alarm[-1]) > 0.5 else 'no'}")
 
 
+@simulate.command("stiffness")
+@click.option(
+    "--macro-dt",
+    default=5.0,
+    show_default=True,
+    help="Solve interval the stability-substep budget is measured against.",
+)
+def stiffness(macro_dt):
+    """Report the per-group stiffness verdict of the flagship composite.
+
+    Linearizes each auto-group at its initial state, measures the
+    Jacobian spectrum, and shows which solver class the Scheduler would
+    auto-select. Use it on any composite via
+    ``hallsim.stiffness.analyze_groups``.
+    """
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+    from hallsim.stiffness import analyze_groups
+
+    comp = build_multi_hallmark_composite()
+    report = analyze_groups(comp, dt=macro_dt)
+    click.echo(f"Per-group stiffness @ macro_dt={macro_dt}")
+    click.echo("=" * 60)
+    for verdict in report.values():
+        click.echo(str(verdict))
+    click.echo()
+    click.echo(
+        "STIFF groups are integrated implicitly (Kvaerno5 + scaled vector "
+        "atol); the rest explicitly (Tsit5). Stiffness index = "
+        "max|Re λ| × macro_dt = stability-limited substeps per interval."
+    )
+
+
 @simulate.command("info")
 def info():
     """Show info about the composable architecture."""
@@ -469,6 +504,9 @@ def info():
     )
     click.echo(
         "  simulate validate-demo    — demo: validation catching unit/semantic issues"
+    )
+    click.echo(
+        "  simulate stiffness        — per-group Jacobian-spectrum solver verdict"
     )
     click.echo("  simulate info             — this help")
     click.echo()

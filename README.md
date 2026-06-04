@@ -243,6 +243,35 @@ problem.save_outputs("outputs/run/", history)   # graph.png, trajectories_*.png,
 
 The full runnable validation against GSE248823 (etoposide DDIS ± rapamycin) is in [`demos/multi_hallmark_calibrate.py`](demos/multi_hallmark_calibrate.py).
 
+### Differentiable calibration of stiff multi-model composites
+
+The composite is calibrated by gradient descent **through the ODE solve** — the
+same reverse-mode autodiff that trains neural networks, applied to mechanism
+parameters spread across independently-published SBML models. Two ingredients
+make this work on stiff biochemical systems:
+
+- **A stiff solver with a proper Newton root finder.** Stiff subsystems make an
+  explicit solver's *sensitivity* (the gradient) blow up even when the forward
+  trajectory is fine. The Scheduler auto-detects stiffness per timescale group
+  (`hallsim.stiffness.analyze_groups`) and routes stiff groups to an A-stable
+  implicit solver (`Kvaerno5` with a Newton root finder); non-stiff groups stay
+  on a cheap explicit solver.
+- **End-to-end float64.** Adaptive error control at `rtol=1e-6` requires the
+  state *and* the right-hand side to be double precision; a single hardcoded
+  `float32` anywhere silently caps precision and makes an implicit solver reject
+  most of its steps.
+
+**Validation in progress.** On GSE248823, fitting the mechanism parameters
+on one arm (DDIS vs control) improves that arm's concordance, but the **held-out**
+arm (rapamycin vs DDIS) does **not** improve — the current composite's models are
+*co-simulated under shared hallmark dials but not yet mechanistically coupled
+tightly enough* for a rapamycin (mTOR) perturbation to propagate to the readouts.
+The contribution here atm is making stiff, composed,
+multi-model systems **differentiably calibratable at all**, plus a held-out test
+that diagnoses where the *model* (not the method) falls short — which motivates
+adding curated cross-model coupling (e.g. a damage/p53 → NF-κB crosstalk model)
+or a learned coupling edge.
+
 ---
 
 ## Getting Started

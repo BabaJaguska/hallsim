@@ -44,10 +44,19 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 import diffrax as dfx
+import equinox as eqx
+import jax
 import jax.numpy as jnp
+import numpy as np
+import optimistix as optx
 
 from hallsim.composite import Composite
 from hallsim.process import PortRole
+from hallsim.stiffness import (
+    DEFAULT_MAX_EXPLICIT_SUBSTEPS,
+    GroupStiffness,
+    analyze_groups,
+)
 
 # Float epsilon for floating-point time comparisons in the macro-step loop
 # (start/end of run, save_dt alignment, dt_step alignment for discrete
@@ -63,6 +72,35 @@ class EventRecord:
     time: float
     process: str
     delta: dict[str, jnp.ndarray]
+
+
+@dataclass
+class GroupIntegrator:
+    """Resolved per-group solver + step-size controller.
+
+    One of these is produced for each continuous group by
+    :meth:`Scheduler._resolve_integrators` and used for that group's
+    ``diffeqsolve``. The split is automatic: stiff groups get an implicit
+    (A-stable) solver and a magnitude-scaled vector ``atol``; the rest
+    keep the cheaper explicit solver and the scalar controller.
+
+    Attributes
+    ----------
+    solver:
+        Diffrax solver for this group.
+    controller:
+        Step-size controller for this group.
+    stiff:
+        Whether stiffness analysis flagged this group.
+    info:
+        The :class:`~hallsim.stiffness.GroupStiffness` verdict (``None``
+        in manual-solver mode, where no analysis runs).
+    """
+
+    solver: dfx.AbstractSolver
+    controller: dfx.AbstractStepSizeController
+    stiff: bool
+    info: GroupStiffness | None = None
 
 
 @dataclass
@@ -164,19 +202,35 @@ class Scheduler:
     Parameters
     ----------
     solver:
-        Diffrax solver instance.  Default: ``Tsit5()`` — explicit RK5
-        with adaptive stepping, fast and robust for the majority of
-        biological composites (signaling cascades, oscillators, mass-
-        action kinetics with moderate rate constants). For known-stiff
-        systems (genome-scale metabolism, reaction-diffusion with
-        widely-separated timescales, problems where step-size is
-        stability-limited rather than accuracy-limited) pass an implicit
-        solver explicitly, e.g. ``Scheduler(solver=dfx.Kvaerno5())``.
-        Empirically Tsit5 outperforms Kvaerno5 by ~4× on the
-        ``damage_p53_eriq`` composite (six processes, three timescales,
-        SBML-imported p53-Mdm2 oscillator) and ~3× on Kholodenko 2000
-        MAPK; the implicit solver's Newton-iteration overhead is not
-        recouped by step-count savings on mildly-stiff oscillators.
+        Diffrax solver instance. Default ``None`` enables **automatic
+        per-group selection**: each continuous group's local Jacobian
+        spectrum is measured once (eagerly) via
+        :func:`hallsim.stiffness.analyze_groups`, and stiff groups get an
+        implicit A-stable solver (``implicit_solver``, default
+        ``Kvaerno5()``) with a magnitude-scaled vector ``atol`` while the
+        rest get an explicit one (``explicit_solver``, default
+        ``Tsit5()``) with the scalar controller. This is what keeps a
+        composite that mixes a fast dissipative subsystem (DallePezze
+        2014 mitochondria, λ≈-3e5 — explicit forward-sensitivity
+        overflows) with cheap signaling cascades solvable end-to-end and
+        differentiable, with no human picking solvers. Pass an explicit
+        ``solver`` to **disable** the automatic split and use that one
+        solver for every group (the scalar controller throughout) — e.g.
+        ``Scheduler(solver=dfx.Tsit5())`` for a known non-stiff system
+        where the per-group analysis is unnecessary overhead.
+    explicit_solver, implicit_solver:
+        The two solvers the automatic split chooses between. Defaults
+        ``Tsit5()`` (explicit, ~4× faster than Kvaerno on mildly-stiff
+        oscillators like ``damage_p53_eriq``) and ``Kvaerno5()``
+        (implicit, A-stable — the diffrax analogue of CVODE's stiff BDF,
+        stable on stiff forward sensitivities). Ignored when ``solver``
+        is set.
+    max_explicit_substeps:
+        Stiffness threshold forwarded to the analyzer: a group is stiff
+        when its fastest decay rate × ``macro_dt`` (stability-limited
+        substeps per solve interval) exceeds this. Default 100 — a wide
+        margin between mildly-multiscale-but-slow systems (ERiQ, ~3–26)
+        and genuinely stiff ones (~1e4+).
     rtol, atol:
         Relative and absolute tolerances for adaptive stepping. Default
         ``rtol=1e-6, atol=1e-9``. Oscillatory subsystems (p53–Mdm2,
@@ -186,7 +240,13 @@ class Scheduler:
         Geva-Zatorsky 2006 p53 oscillator, for instance, diverges to
         ~300× its amplitude at ``rtol=1e-4`` and is bounded from
         ``rtol=1e-5`` down. ``1e-6`` keeps a safety margin past that
-        threshold.
+        threshold. For stiff groups ``atol`` is the *floor* of a vector
+        tolerance ``max(atol, atol_scale·|y0|)`` so a state at 1e6 isn't
+        held to 1e-9 absolute (which would force stability-tiny steps)
+        while a state at 1e-4 still gets a tight tolerance.
+    atol_scale:
+        Relative coefficient of the stiff-group vector ``atol`` (default
+        ``1e-6``). Per state, ``atol_i = max(atol, atol_scale·|y0_i|)``.
     max_steps:
         Safety limit on solver steps per macro step.
     dt0:
@@ -243,6 +303,14 @@ class Scheduler:
         Minimum allowed ``macro_dt``.  Default: ``macro_dt / 64``.
     adaptive_dt_max:
         Maximum allowed ``macro_dt``.  Default: ``macro_dt * 4``.
+    throw:
+        If ``True`` (default), a group whose ``diffeqsolve`` does not
+        return ``RESULTS.successful`` raises a clear error naming the
+        group, its solver, and the failure reason (via ``eqx.error_if``,
+        so it works under JIT/grad too). If ``False``, the run continues
+        and the per-group ``RESULTS`` code is recorded in
+        ``result.stats[group]['result']`` for inspection — the
+        transparent path for diagnosing a non-converging composite.
     progress:
         If ``True``, show a tqdm progress bar over macro steps. Default
         ``False`` because the Python-side ``pbar.update(1)`` is a side
@@ -257,6 +325,10 @@ class Scheduler:
         atol: float = 1e-9,
         max_steps: int = 4_000_000,
         dt0: float = 1e-3,
+        explicit_solver: dfx.AbstractSolver | None = None,
+        implicit_solver: dfx.AbstractSolver | None = None,
+        atol_scale: float = 1e-6,
+        max_explicit_substeps: float = DEFAULT_MAX_EXPLICIT_SUBSTEPS,
         groups: dict[str, list[str]] | None = None,
         coupling_mode: str = "frozen",
         splitting: str = "lie",
@@ -268,6 +340,7 @@ class Scheduler:
         adaptive_dt_min: float | None = None,
         adaptive_dt_max: float | None = None,
         adjoint: dfx.AbstractAdjoint | None = None,
+        throw: bool = True,
         debug: bool = False,
         progress: bool = False,
     ) -> None:
@@ -291,14 +364,38 @@ class Scheduler:
                 "(O(macro_dt^p) splitting error), or splitting='strang' "
                 "with coupling_mode='frozen' (O(macro_dt^2))."
             )
-        self.solver = solver or dfx.Tsit5()
+        # Automatic per-group solver selection is on unless the caller
+        # pins a single `solver`. In auto mode the analyzer chooses
+        # between `explicit_solver` and `implicit_solver` per group; in
+        # manual mode `self.solver` is used for every group.
+        self.auto_solver = solver is None
+        self.explicit_solver = explicit_solver or dfx.Tsit5()
+        # Default stiff solver is Kvaerno5 with a **Newton** root finder.
+        # diffrax's default `VeryChord` (stale-Jacobian chord, 10 iters)
+        # rejects ~50% of steps on real biochemical RHSs; a true Newton
+        # solve (fresh Jacobian — what CVODE does) cuts that to a few %.
+        self.implicit_solver = implicit_solver or dfx.Kvaerno5(
+            root_finder=optx.Newton(rtol=rtol, atol=atol)
+        )
+        self.solver = solver or self.explicit_solver
+        self.atol_scale = atol_scale
+        self.max_explicit_substeps = max_explicit_substeps
+        self.rtol = rtol
+        self.atol = atol
         self.controller = dfx.PIDController(rtol=rtol, atol=atol)
+        # Per-(group structure) cache of resolved integrators. Keyed by a
+        # structural signature so the eager resolution (concrete params)
+        # is reused under later grad/jvp/vmap tracing, where the Jacobian
+        # eigenvalues would be tracers.
+        self._integrator_cache: dict[Any, dict[str, GroupIntegrator]] = {}
+        self._warned_cold_trace = False
         # Adjoint method used by every diffeqsolve in this run.
         # Default (None) → diffrax picks RecursiveCheckpointAdjoint, which
         # is memory-cheap but step-expensive. For calibration through
         # stiff/oscillatory composites, pass dfx.BacksolveAdjoint() for
         # near-forward-cost backward passes.
         self.adjoint = adjoint or dfx.RecursiveCheckpointAdjoint()
+        self.throw = throw
         self.max_steps = max_steps
         self.dt0 = dt0
         self.manual_groups = groups
@@ -321,6 +418,7 @@ class Scheduler:
         macro_dt: float = 1.0,
         y0: jnp.ndarray | None = None,
         save_dt: float | None = None,
+        adjoint: dfx.AbstractAdjoint | None = None,
     ) -> SchedulerResult:
         """Run the composite with multi-rate scheduling.
 
@@ -347,12 +445,19 @@ class Scheduler:
             Save interval for trajectory output.  If ``None``, saves at
             every macro step.  If larger than ``macro_dt``, saves less
             frequently.
+        adjoint:
+            Per-run override of the differentiation method. ``None`` uses
+            the constructor's ``adjoint``. Pass ``dfx.ForwardMode()`` for
+            forward-mode calibration without changing scheduler identity,
+            so one Scheduler instance (and its stiffness cache) serves
+            both the eager evaluate pass and the differentiated loss.
 
         Returns
         -------
         :class:`SchedulerResult`
         """
         t0, t1 = t_span
+        adjoint = adjoint if adjoint is not None else self.adjoint
 
         # Flat state layout — pinned for the whole run. y0 is a tensor in
         # trailing-axis convention; for batched-population runs it has
@@ -411,6 +516,15 @@ class Scheduler:
             if continuous:
                 groups = {"default": list(continuous.keys())}
 
+        # Resolve the per-group solver + step-size controller. In auto
+        # mode this measures each group's Jacobian spectrum once (eagerly)
+        # and routes stiff groups to the implicit solver + scaled vector
+        # atol; the verdict is cached by structure so later traced runs
+        # reuse it.
+        integrators = self._resolve_integrators(
+            composite, groups, state, t0, macro_dt
+        )
+
         # ─── Fast path: single continuous group, no events, no
         # discrete, no adaptive macro_dt ───────────────────────────────
         # Skip the macro-step loop entirely. One ``diffeqsolve`` over
@@ -429,35 +543,40 @@ class Scheduler:
         if fast_path_eligible:
             (gname,) = groups.keys()
             (proc_names,) = groups.values()
+            integ = integrators[gname]
             rhs_fn, _ = composite.build_rhs(proc_names)
             save_step = save_dt if save_dt is not None else macro_dt
             save_ts = jnp.arange(t0, t1 + save_step / 2, save_step)
             save_ts = save_ts[save_ts <= t1]
             sol = dfx.diffeqsolve(
                 dfx.ODETerm(rhs_fn),
-                self.solver,
+                integ.solver,
                 t0=t0,
                 t1=t1,
                 dt0=min(self.dt0, t1 - t0),
                 y0=state,
                 saveat=dfx.SaveAt(ts=save_ts),
-                stepsize_controller=self.controller,
-                adjoint=self.adjoint,
+                stepsize_controller=integ.controller,
+                adjoint=adjoint,
                 max_steps=self.max_steps,
+                throw=False,
             )
+            ys = self._guard_result(sol.ys, sol, gname, integ)
             stats = {
                 gname: {
                     "num_macro_steps": 1,
-                    "num_solver_steps": (
-                        int(sol.stats["num_steps"])
-                        if hasattr(sol, "stats") and "num_steps" in sol.stats
-                        else None
+                    "num_solver_steps": sol.stats.get("num_steps"),
+                    "num_rejected_steps": sol.stats.get(
+                        "num_rejected_steps", 0
                     ),
+                    "result": sol.result,
+                    "solver": type(integ.solver).__name__,
+                    "stiff": integ.stiff,
                 }
             }
             return SchedulerResult(
                 ts=sol.ts,
-                ys=sol.ys,
+                ys=ys,
                 keys=keys,
                 events=[],
                 stats=stats,
@@ -473,15 +592,8 @@ class Scheduler:
         for gname, proc_names in groups.items():
             fn, _ = composite.build_rhs(proc_names)
             group_rhs[gname] = fn
-            written: set[int] = set()
-            for pname in proc_names:
-                proc = composite.processes[pname]
-                proc_topo = composite.topology[pname]
-                for port, p in proc.ports_schema().items():
-                    if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
-                        written.add(key_to_idx[proc_topo[port]])
-            group_write_idxs[gname] = jnp.array(
-                sorted(written), dtype=jnp.int32
+            group_write_idxs[gname] = composite.evolved_indices(
+                proc_names, keys
             )
 
         # Precompute per-process index maps for discrete/event handlers.
@@ -510,10 +622,27 @@ class Scheduler:
         # Event log
         events: list[EventRecord] = []
 
-        # Per-group stats
+        # Per-group stats — carries the resolved solver, stiffness verdict,
+        # and the latest diffeqsolve RESULTS code so a non-converging
+        # composite is inspectable through the API (throw=False).
         stats: dict[str, Any] = {
-            gname: {"num_macro_steps": 0} for gname in groups
+            gname: {
+                "num_macro_steps": 0,
+                "num_solver_steps": 0,
+                "num_rejected_steps": 0,
+                "result": dfx.RESULTS.successful,
+                "solver": type(integrators[gname].solver).__name__,
+                "stiff": integrators[gname].stiff,
+            }
+            for gname in groups
         }
+
+        def _record(gname: str, diag) -> None:
+            result, n_steps, n_rej = diag
+            st = stats[gname]
+            st["num_solver_steps"] = st["num_solver_steps"] + n_steps
+            st["num_rejected_steps"] = st["num_rejected_steps"] + n_rej
+            st["result"] = result
 
         # Adaptive macro_dt state
         current_macro_dt = macro_dt
@@ -561,29 +690,35 @@ class Scheduler:
                 t_mid = t + (t_next - t) / 2.0
                 items = list(group_rhs.items())
                 for gname, rhs_fn in items:
-                    state, last_dt = self._solve_group(
+                    state, last_dt, diag = self._solve_group(
                         rhs_fn,
                         state,
                         keys,
                         t,
                         t_mid,
+                        integ=integrators[gname],
+                        adjoint=adjoint,
                         group_name=gname,
                         dt0_hint=group_dt0_hint.get(gname),
                     )
                     group_dt0_hint[gname] = last_dt
                     stats[gname]["num_macro_steps"] += 1
+                    _record(gname, diag)
                 for gname, rhs_fn in reversed(items):
-                    state, last_dt = self._solve_group(
+                    state, last_dt, diag = self._solve_group(
                         rhs_fn,
                         state,
                         keys,
                         t_mid,
                         t_next,
+                        integ=integrators[gname],
+                        adjoint=adjoint,
                         group_name=gname,
                         dt0_hint=group_dt0_hint.get(gname),
                     )
                     group_dt0_hint[gname] = last_dt
                     stats[gname]["num_macro_steps"] += 1
+                    _record(gname, diag)
             else:
                 # Lie splitting: sequential, one pass
                 prev_interpolant = None
@@ -598,20 +733,25 @@ class Scheduler:
                                 t_next,
                                 prev_interpolant,
                                 prev_idxs,
+                                integ=integrators[gname],
+                                adjoint=adjoint,
                             )
                         )
                         prev_idxs = group_write_idxs[gname]
                     else:
-                        state, last_dt = self._solve_group(
+                        state, last_dt, diag = self._solve_group(
                             rhs_fn,
                             state,
                             keys,
                             t,
                             t_next,
+                            integ=integrators[gname],
+                            adjoint=adjoint,
                             group_name=gname,
                             dt0_hint=group_dt0_hint.get(gname),
                         )
                         group_dt0_hint[gname] = last_dt
+                        _record(gname, diag)
                     stats[gname]["num_macro_steps"] += 1
 
             # Adaptive macro_dt: measure coupling residual and adjust
@@ -698,6 +838,168 @@ class Scheduler:
             ts=ts, ys=ys, keys=keys, events=events, stats=stats
         )
 
+    @staticmethod
+    def _integrator_signature(groups, state, macro_dt):
+        """Structural key for the integrator cache.
+
+        Depends only on group→process structure, state width, and
+        ``macro_dt`` (which sets the stiffness threshold) — never on
+        state *values*. So the eager resolution (concrete params) is
+        reused under later traced runs of the same composite, even across
+        conditions whose ``y0`` differ slightly.
+        """
+        gstruct = tuple(
+            sorted((g, tuple(sorted(procs))) for g, procs in groups.items())
+        )
+        return (gstruct, int(state.shape[-1]), float(macro_dt))
+
+    def _resolve_integrators(
+        self,
+        composite: Composite,
+        groups: dict[str, list[str]],
+        state: jnp.ndarray,
+        t0: float,
+        macro_dt: float,
+    ) -> dict[str, GroupIntegrator]:
+        """Pick a solver + step-size controller for each group.
+
+        Manual mode (an explicit ``solver`` was given): every group uses
+        it with the scalar controller. Auto mode: each group's local
+        Jacobian spectrum is measured once via
+        :func:`hallsim.stiffness.analyze_groups`; stiff groups get the
+        implicit solver and a magnitude-scaled vector ``atol``, the rest
+        the explicit solver and the scalar controller.
+
+        The result is cached by structural signature so the analysis runs
+        once, eagerly. Under grad/jvp/vmap the Jacobian eigenvalues would
+        be tracers — so a traced call with a cold cache raises, directing
+        the caller to :meth:`warm_up` first (the calibration path does
+        this automatically).
+        """
+        sig = self._integrator_signature(groups, state, macro_dt)
+        cached = self._integrator_cache.get(sig)
+        if cached is not None:
+            return cached
+
+        if not self.auto_solver:
+            integ = {
+                g: GroupIntegrator(self.solver, self.controller, stiff=False)
+                for g in groups
+            }
+            self._integrator_cache[sig] = integ
+            return integ
+
+        def _all_explicit():
+            return {
+                g: GroupIntegrator(
+                    self.explicit_solver, self.controller, stiff=False
+                )
+                for g in groups
+            }
+
+        # Stiffness analysis needs a concrete Jacobian. Under tracing
+        # (grad/jvp/vmap) with no warmed cache we cannot measure it, so
+        # fall back to the explicit solver — the historical default, which
+        # makes `jax.grad(run)` work out of the box on non-stiff composites
+        # without a warm-up. **Not cached**, so a later eager call still
+        # resolves the per-group implicit treatment. Stiff systems should
+        # `warm_up` (or first run eagerly) to get the implicit solver under
+        # differentiation; an un-warmed stiff grad behaves exactly as it
+        # did before per-group selection existed (explicit).
+        state_traced = isinstance(state, jax.core.Tracer)
+        try:
+            report = (
+                None
+                if state_traced
+                else analyze_groups(
+                    composite,
+                    y0=state,
+                    groups=groups,
+                    t0=t0,
+                    dt=macro_dt,
+                    max_explicit_substeps=self.max_explicit_substeps,
+                )
+            )
+        except RuntimeError:
+            # analyze_groups hit JAX tracers in the RHS (params under
+            # differentiation) — same cold-trace situation.
+            report = None
+        except np.linalg.LinAlgError:
+            # Eigenvalue solve didn't converge (degenerate/non-finite
+            # Jacobian). Fall back to explicit and cache it — this is a
+            # deterministic property of the composite, not a trace artifact.
+            log.warning(
+                "stiffness analysis failed to converge; using the explicit "
+                "solver for all groups"
+            )
+            integ = _all_explicit()
+            self._integrator_cache[sig] = integ
+            return integ
+
+        if report is None:
+            if not self._warned_cold_trace:
+                log.debug(
+                    "Scheduler auto solver selection skipped under tracing "
+                    "(no warmed cache); using the explicit solver. warm_up() "
+                    "eagerly to get the implicit solver for stiff groups."
+                )
+                self._warned_cold_trace = True
+            return _all_explicit()
+        # Vector atol for stiff groups: loosen absolute tolerance on
+        # large-magnitude states (which would otherwise force
+        # stability-tiny steps) while keeping a tight floor near zero.
+        atol_vec = jnp.maximum(self.atol, self.atol_scale * jnp.abs(state))
+        integ: dict[str, GroupIntegrator] = {}
+        for g, verdict in report.items():
+            if verdict.stiff:
+                integ[g] = GroupIntegrator(
+                    self.implicit_solver,
+                    dfx.PIDController(rtol=self.rtol, atol=atol_vec),
+                    stiff=True,
+                    info=verdict,
+                )
+            else:
+                integ[g] = GroupIntegrator(
+                    self.explicit_solver,
+                    self.controller,
+                    stiff=False,
+                    info=verdict,
+                )
+            if self.debug:
+                log.info("  stiffness: %s", verdict)
+        self._integrator_cache[sig] = integ
+        return integ
+
+    def warm_up(
+        self,
+        composite: Composite,
+        t_span: tuple[float, float],
+        macro_dt: float = 1.0,
+        y0: jnp.ndarray | None = None,
+    ) -> dict[str, GroupIntegrator]:
+        """Eagerly resolve and cache this composite's per-group solvers.
+
+        Run once with concrete parameters before differentiating through
+        :meth:`run` (forward- or reverse-mode), so the stiffness analysis
+        — which needs concrete Jacobian eigenvalues — happens outside the
+        trace and the verdict is cached for the traced runs. Returns the
+        resolved integrators for inspection.
+        """
+        keys = composite.store_keys()
+        state = (
+            composite.initial_state_vec(keys)
+            if y0 is None
+            else jnp.asarray(y0)
+        )
+        groups = self.manual_groups or composite.auto_groups()
+        if not groups:
+            continuous = composite.continuous_processes()
+            if continuous:
+                groups = {"default": list(continuous.keys())}
+        return self._resolve_integrators(
+            composite, groups, state, t_span[0], macro_dt
+        )
+
     def _solve_group(
         self,
         rhs_fn,
@@ -705,19 +1007,30 @@ class Scheduler:
         keys: list[str],
         t0: float,
         t1: float,
+        integ: GroupIntegrator,
+        adjoint: dfx.AbstractAdjoint,
         group_name: str = "",
         dt0_hint: float | None = None,
     ) -> tuple[jnp.ndarray, float]:
         """Solve one continuous group from t0 to t1 on the flat state.
 
-        Returns ``(final_state_vec, last_dt_estimate)``. The
+        Uses the group's resolved ``integ`` (solver + step-size
+        controller — implicit + scaled vector atol for a stiff group,
+        explicit + scalar controller otherwise).
+
+        Returns ``(final_state_vec, last_dt_estimate, diag)``. The
         ``last_dt_estimate`` is ``(t1-t0)/num_steps`` and is meant to be
         passed back as the next macro-step's ``dt0_hint`` for this
         group, so the adaptive controller doesn't restart from
-        ``self.dt0`` every macro step.
+        ``self.dt0`` every macro step. ``diag`` is a
+        ``(result, num_steps, num_rejected)`` triple recorded into stats.
         """
         if t1 <= t0:
-            return state_vec, (dt0_hint if dt0_hint is not None else self.dt0)
+            return (
+                state_vec,
+                (dt0_hint if dt0_hint is not None else self.dt0),
+                (dfx.RESULTS.successful, 0, 0),
+            )
 
         state_before = jnp.asarray(state_vec) if self.debug else None
 
@@ -725,24 +1038,33 @@ class Scheduler:
         # available; clamp to the remaining interval.
         dt0_base = dt0_hint if dt0_hint is not None else self.dt0
         term = dfx.ODETerm(rhs_fn)
+        # throw=False so a failed solve returns its RESULTS code instead
+        # of crashing opaquely; _guard_result re-raises a labelled error
+        # when self.throw, else the code is surfaced in stats.
         sol = dfx.diffeqsolve(
             term,
-            self.solver,
+            integ.solver,
             t0=t0,
             t1=t1,
             dt0=min(dt0_base, t1 - t0),
             y0=state_vec,
             saveat=dfx.SaveAt(t1=True),
-            stepsize_controller=self.controller,
-            adjoint=self.adjoint,
+            stepsize_controller=integ.controller,
+            adjoint=adjoint,
             max_steps=self.max_steps,
+            throw=False,
         )
 
-        final_vec = sol.ys[-1]
+        final_vec = self._guard_result(sol.ys[-1], sol, group_name, integ)
         # Estimate "what step size did the controller settle at?" by
         # averaging over the macro interval. This is a robust proxy that
         # doesn't depend on Diffrax's internal controller_state API.
         last_dt = (t1 - t0) / jnp.maximum(sol.stats["num_steps"], 1)
+        diag = (
+            sol.result,
+            sol.stats["num_steps"],
+            sol.stats["num_rejected_steps"],
+        )
 
         if self.debug:
             n_steps = int(sol.stats["num_steps"])
@@ -755,11 +1077,33 @@ class Scheduler:
             log.info(
                 f"  [{group_name}] [{t0:.1f} → {t1:.1f}]: "
                 f"{n_steps} steps ({n_rejected} rej) | "
+                f"result={sol.result} | "
                 f"max Δ: {max_delta_key}={max_delta:.4g}"
                 + (" *** NaN ***" if any_nan else "")
             )
 
-        return final_vec, last_dt
+        return final_vec, last_dt, diag
+
+    def _guard_result(self, value, sol, group_name: str, integ):
+        """Re-raise a labelled error on a failed solve when ``self.throw``.
+
+        ``eqx.error_if`` bakes the check into ``value`` so it fires both
+        eagerly and under JIT/grad; with ``throw=False`` it is a no-op
+        and the ``RESULTS`` code reaches stats instead.
+        """
+        if not self.throw:
+            return value
+        reason = (
+            f"Scheduler: continuous group {group_name!r} did not solve "
+            f"to RESULTS.successful (solver="
+            f"{type(integ.solver).__name__}, stiff={integ.stiff}). "
+            f"Re-run with Scheduler(throw=False) to record the RESULTS "
+            f"code in result.stats[{group_name!r}]['result'] and "
+            f"diagnose (max_steps vs implicit/Newton divergence)."
+        )
+        return eqx.error_if(
+            value, sol.result != dfx.RESULTS.successful, reason
+        )
 
     def _solve_group_interpolated(
         self,
@@ -769,6 +1113,9 @@ class Scheduler:
         t1: float,
         prev_interpolant: Any | None = None,
         prev_idxs: jnp.ndarray | None = None,
+        *,
+        integ: GroupIntegrator,
+        adjoint: dfx.AbstractAdjoint,
     ) -> tuple[jnp.ndarray, Any]:
         """Solve one group with dense output, splicing the previous group's
         evolving variables in via interpolation.
@@ -805,18 +1152,20 @@ class Scheduler:
         term = dfx.ODETerm(rhs_to_solve)
         sol = dfx.diffeqsolve(
             term,
-            self.solver,
+            integ.solver,
             t0=t0,
             t1=t1,
             dt0=min(self.dt0, t1 - t0),
             y0=state_vec,
             saveat=dfx.SaveAt(t1=True, dense=True),
-            stepsize_controller=self.controller,
-            adjoint=self.adjoint,
+            stepsize_controller=integ.controller,
+            adjoint=adjoint,
             max_steps=self.max_steps,
+            throw=False,
         )
 
-        return sol.ys[-1], sol.interpolation
+        final_vec = self._guard_result(sol.ys[-1], sol, "interpolated", integ)
+        return final_vec, sol.interpolation
 
     @staticmethod
     def _is_due(t: float, t_next: float, dt_step: float) -> bool:

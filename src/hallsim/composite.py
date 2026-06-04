@@ -331,6 +331,46 @@ class Composite(eqx.Module):
 
         return rhs, keys
 
+    def evolved_indices(
+        self,
+        proc_names: list[str] | None = None,
+        keys: list[str] | None = None,
+    ) -> jnp.ndarray:
+        """Trailing-axis indices a set of processes writes derivatives to.
+
+        The union of store indices targeted by every ``EVOLVED`` /
+        ``EXCLUSIVE`` port of the named processes — i.e. the state
+        components that actually evolve when ``build_rhs(proc_names)`` is
+        integrated (all other indices keep a zero derivative). Used to
+        restrict a group's Jacobian to its own dynamics for stiffness
+        analysis and to scope coupling splices.
+
+        Parameters
+        ----------
+        proc_names:
+            Subset of processes. ``None`` (default) uses every CONTINUOUS
+            process.
+        keys:
+            Store layout. ``None`` uses :meth:`store_keys`.
+
+        Returns
+        -------
+        ``jnp.ndarray`` of sorted int32 indices.
+        """
+        if proc_names is None:
+            proc_names = list(self.continuous_processes().keys())
+        if keys is None:
+            keys = self.store_keys()
+        key_to_idx = {k: i for i, k in enumerate(keys)}
+        written: set[int] = set()
+        for pname in proc_names:
+            proc = self.processes[pname]
+            proc_topo = self.topology[pname]
+            for port, p in proc.ports_schema().items():
+                if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
+                    written.add(key_to_idx[proc_topo[port]])
+        return jnp.array(sorted(written), dtype=jnp.int32)
+
     # -----------------------------------------------------------------
     # Initial state
     # -----------------------------------------------------------------
