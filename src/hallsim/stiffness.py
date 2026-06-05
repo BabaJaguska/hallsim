@@ -263,6 +263,17 @@ def analyze_groups(
     state = composite.initial_state_vec(keys) if y0 is None else jnp.asarray(y0)
     groups = groups if groups is not None else composite.auto_groups()
 
+    # A batched (population) y0 has trailing axis n_vars and one leading row
+    # per individual. The solver choice is a structural property of the shared
+    # rate laws — essentially constant across a perturbation population — so
+    # linearize about one representative member. This keeps the Jacobian 2-D;
+    # jacfwd on a batched state would yield a (batch, n_vars, batch, n_vars)
+    # tensor that eigvals cannot consume. Heterogeneous-parameter populations
+    # spanning a stiff/non-stiff boundary are out of this assumption's scope —
+    # warm_up on the stiffest member if a population straddles it.
+    if state.ndim > 1:
+        state = state.reshape(-1, state.shape[-1])[0]
+
     out: dict[str, GroupStiffness] = {}
     for gname, proc_names in groups.items():
         idxs = np.asarray(composite.evolved_indices(proc_names, keys))

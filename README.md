@@ -173,6 +173,27 @@ On a GPU this is near-flat in `batch` — kernel launch dominates over
 per-cell compute. On CPU, scaling is sub-linear because Python overhead
 amortizes across the batch.
 
+[`demos/bench_population.py`](demos/bench_population.py) quantifies this on
+an imported SBML model (Sivakumar 2011 Wnt, BIOMD0000000397, 49 species),
+simulating a heterogeneous population of `N` cells as one batched float64
+GPU solve versus a tellurium / libRoadRunner loop (one CVODE solve per
+cell). Both run in double precision and agree to <0.01% per species:
+
+| population `N` | HallSim (Tesla T4, batched f64) | tellurium (CPU loop) | speedup |
+|---:|---:|---:|---:|
+| 1 | 0.028 s | 0.002 s | 0.1× |
+| 16 | 0.037 s | 0.027 s | 0.7× |
+| 64 | 0.038 s | 0.108 s | 2.8× |
+| 256 | 0.132 s | 0.433 s | 3.3× |
+| 1024 | 0.339 s | 1.73 s | 5.1× |
+| 4096 | 1.35 s | 6.87 s | 5.1× |
+
+HallSim's wall time stays near-flat until the batch fills the device, then
+grows sub-linearly; the serial loop is linear in `N`. The crossover is
+around `N≈30`, widening to ~5× as the population grows. The same batched
+call is differentiable — one `jax.grad` yields ∂trajectory/∂parameters for
+the entire population at once.
+
 ### Data validation (gene reporters, calibration, held-out splits)
 
 HallSim mechanistic states are validated against transcriptomic data via **single-gene reporters** in [`hallsim.gene_reporters`](src/hallsim/gene_reporters.py): one canonical reporter gene per mechanistic store path, with literature-anchored sign expectations and a per-reporter trajectory summary (defaults to the endpoint; oscillator-driven reporters like DDB2 use a cycle-averaged readout). The multi-hallmark composite uses these reporters:

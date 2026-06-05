@@ -546,8 +546,12 @@ class Scheduler:
             integ = integrators[gname]
             rhs_fn, _ = composite.build_rhs(proc_names)
             save_step = save_dt if save_dt is not None else macro_dt
-            save_ts = jnp.arange(t0, t1 + save_step / 2, save_step)
-            save_ts = save_ts[save_ts <= t1]
+            # Fixed-length save grid t0..t1 inclusive. Computing the count as a
+            # Python int (not a boolean mask over arange) keeps this jit-safe:
+            # under jit every array is a tracer, so `arange[arange <= t1]` would
+            # raise NonConcreteBooleanIndexError.
+            n_save = int(round((t1 - t0) / save_step)) + 1
+            save_ts = t0 + save_step * jnp.arange(n_save)
             sol = dfx.diffeqsolve(
                 dfx.ODETerm(rhs_fn),
                 integ.solver,
