@@ -1,0 +1,12 @@
+{
+  "model": "models/dallepezze2014/dallepezze2014_BIOMD0000000582.xml",
+  "t_end": 10.0,
+  "n_save": 21,
+  "chunk": 32,
+  "n_sweep": [1, 8, 32, 128],
+  "nproc": 8,
+  "perturb_sigma": 0.1,
+  "seed": 0,
+  "plot": "demos/plots/bench_population_dallepezze.png",
+  "_note": "Stiff model. Nominal trajectories diverge from tellurium (20-277%) pending fidelity debug; timings not yet trustworthy."
+}

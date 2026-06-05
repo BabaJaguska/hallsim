@@ -29,10 +29,21 @@ from hallsim.sbml_import import process_from_sbml
 from hallsim.composite import Composite
 from hallsim.scheduler import Scheduler
 
-MODEL = "models/sivakumar2011/wnt_BIOMD0000000397.xml"
-T_END = 20.0
-N_SAVE = 21
-CHUNK = 64  # max batch per GPU solve before T4 float64 OOM
+import json
+
+# Config file (JSON, configs/ convention). Override the path as argv[1].
+CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else "configs/bench_population.json"
+with open(CONFIG_PATH) as f:
+    cfg = json.load(f)
+MODEL = cfg["model"]
+T_END = float(cfg["t_end"])
+N_SAVE = int(cfg["n_save"])
+CHUNK = int(cfg["chunk"])  # batch per GPU solve (memory cap)
+NS = list(cfg["n_sweep"])
+SIGMA = float(cfg.get("perturb_sigma", 0.1))
+SEED = int(cfg.get("seed", 0))
+NPROC = int(cfg.get("nproc", 8))
+PLOT_PATH = cfg.get("plot", "demos/plots/bench_population.png")
 
 
 def log(*a):
@@ -64,15 +75,15 @@ def _solve(y0):
                      save_dt=T_END / (N_SAVE - 1), y0=y0).ys
 
 
-def make_population(N, dim, seed=0):
-    """N per-species perturbation factors: 1 + 0.1 * normal, shape (N, dim).
+def make_population(N, dim, seed=SEED):
+    """N per-species perturbation factors: 1 + SIGMA * normal, shape (N, dim).
 
     Each tool gets its own matrix sized to its own species count (hallsim and
     roadrunner enumerate species differently); same distribution + seed, so the
     workload is equivalent even though the exact values differ.
     """
     rng = np.random.default_rng(seed)
-    return 1.0 + 0.1 * rng.standard_normal((N, dim))
+    return 1.0 + SIGMA * rng.standard_normal((N, dim))
 
 
 def hallsim_run(factors):
@@ -120,36 +131,53 @@ for sp in species[:6]:
         rel = abs(h - t) / (abs(t) + 1e-12)
         log(f"  {sp}: hallsim={h:.4g}  tellurium={t:.4g}  rel_diff={rel:.2%}")
 
-# ----- benchmark sweep -----
-Ns = [int(x) for x in sys.argv[1].split(",")] if len(sys.argv) > 1 \
-    else [1, 8, 32, 128, 512]
-log(f"\n=== benchmark sweep: N = {Ns} (CHUNK={CHUNK}) ===")
-
-rows = []
-for N in Ns:
+# ----- hallsim sweep (this process, GPU) -----
+log(f"\n=== hallsim sweep: N = {NS} (CHUNK={CHUNK}) ===")
+htimes = {}
+for N in NS:
     fac_h = make_population(N, n_vars)
-    fac_t = make_population(N, len(fs))
     hallsim_run(fac_h)  # compile this N's chunk shape(s) before timing
-    t0 = time.time(); hallsim_run(fac_h); th = time.time() - t0
-    t0 = time.time(); tellurium_run(fac_t); tt = time.time() - t0
-    speedup = tt / th
-    rows.append((N, th, tt, speedup))
-    log(f"  N={N:>5}  hallsim={th:7.3f}s  tellurium={tt:7.3f}s  "
-        f"speedup={speedup:5.1f}x")
+    t0 = time.time(); hallsim_run(fac_h); htimes[N] = time.time() - t0
+    log(f"  N={N:>5}  hallsim={htimes[N]:7.3f}s")
+
+# ----- tellurium sweep (separate JAX-free process: serial + NPROC-core) -----
+# A subprocess (fork+exec) so its multiprocessing pool never inherits this
+# process's CUDA context — fork-after-CUDA-init is unsafe.
+import subprocess
+log(f"\n=== tellurium sweep (subprocess, serial + {NPROC}-core) ===")
+proc_out = subprocess.run(
+    [sys.executable, "demos/_bench_tellurium.py", CONFIG_PATH],
+    capture_output=True, text=True)
+if proc_out.returncode != 0:
+    log("tellurium subprocess FAILED:\n", proc_out.stderr[-2000:])
+    sys.exit(1)
+tel = json.loads(proc_out.stdout.strip().splitlines()[-1])
+
+# ----- combine + report -----
+rows = []
+for N in NS:
+    th = htimes[N]
+    ts = tel[str(N)]["serial"]
+    tp = tel[str(N)]["parallel"]
+    rows.append((N, th, ts, tp))
+    log(f"  N={N:>5}  hallsim(1 T4)={th:7.3f}s  tellurium(1)={ts:7.3f}s  "
+        f"tellurium({NPROC})={tp:7.3f}s  | vs1core={ts/th:4.1f}x  "
+        f"vs{NPROC}core={tp/th:4.1f}x")
 
 # ----- plot -----
 arr = np.array(rows)
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-ax1.loglog(arr[:, 0], arr[:, 1], "o-", label="hallsim (GPU, batched f64)")
-ax1.loglog(arr[:, 0], arr[:, 2], "s-", label="tellurium (CPU, loop)")
+ax1.loglog(arr[:, 0], arr[:, 1], "o-", label="hallsim (1 Tesla T4, batched f64)")
+ax1.loglog(arr[:, 0], arr[:, 2], "s-", label="tellurium (1 CPU core)")
+ax1.loglog(arr[:, 0], arr[:, 3], "^-", label=f"tellurium ({NPROC} CPU cores)")
 ax1.set_xlabel("population size N"); ax1.set_ylabel("wall time (s)")
 ax1.set_title("Population simulation: wall time vs N"); ax1.legend(); ax1.grid(True, which="both", alpha=0.3)
-ax2.semilogx(arr[:, 0], arr[:, 3], "d-", color="green")
+ax2.semilogx(arr[:, 0], arr[:, 2] / arr[:, 1], "s-", label="vs 1 core")
+ax2.semilogx(arr[:, 0], arr[:, 3] / arr[:, 1], "^-", label=f"vs {NPROC} cores")
 ax2.axhline(1.0, ls="--", color="gray")
-ax2.set_xlabel("population size N"); ax2.set_ylabel("speedup (tellurium / hallsim)")
-ax2.set_title("hallsim speedup over tellurium"); ax2.grid(True, which="both", alpha=0.3)
+ax2.set_xlabel("population size N"); ax2.set_ylabel("hallsim speedup (tellurium / hallsim)")
+ax2.set_title("hallsim speedup over tellurium"); ax2.legend(); ax2.grid(True, which="both", alpha=0.3)
 plt.tight_layout()
-out = "demos/plots/bench_population.png"
-plt.savefig(out, dpi=120)
-log(f"\nsaved {out}")
+plt.savefig(PLOT_PATH, dpi=120)
+log(f"\nsaved {PLOT_PATH}")
 log("DONE")

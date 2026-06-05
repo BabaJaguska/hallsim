@@ -1,0 +1,11 @@
+{
+  "model": "models/sivakumar2011/wnt_BIOMD0000000397.xml",
+  "t_end": 20.0,
+  "n_save": 21,
+  "chunk": 64,
+  "n_sweep": [1, 16, 64, 256, 1024, 4096],
+  "nproc": 8,
+  "perturb_sigma": 0.1,
+  "seed": 0,
+  "plot": "demos/plots/bench_population.png"
+}
