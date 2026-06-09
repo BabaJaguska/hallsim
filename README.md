@@ -25,7 +25,7 @@ HallSim's goal is to enable compositional co-simulation of reusable systems-biol
 
 ## Architecture
 
-![HallSim Architecture](hallsim_architecture.png)
+![HallSim Architecture](docs/assets/hallsim_architecture.png)
 
 HallSim is built on a **composable architecture** using JAX/Equinox/Diffrax. Design borrows composition semantics from Vivarium [3] and scheduling concepts from Ptolemy II [5], implemented natively on JAX for GPU acceleration and differentiability.
 

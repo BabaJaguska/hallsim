@@ -221,4 +221,4 @@ cython_debug/
 *.mp4
 
 # Allow specific image
-!hallsim_architecture.png
+!docs/assets/hallsim_architecture.png
