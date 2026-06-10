@@ -17,7 +17,7 @@ lint:
 	flake8 --ignore E501,E402,W504,W503,E226,E203 tests/
 
 test:
-	pytest tests/
+	pytest tests/ -m "not slow and not network"
 
 run:
 	simulate basic

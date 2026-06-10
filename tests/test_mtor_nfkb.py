@@ -3,6 +3,7 @@ the multi-hallmark composite."""
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from hallsim.models.mtor_nfkb import MtorNFkBActivator
 from hallsim.process import PortRole
@@ -59,7 +60,13 @@ class TestMtorNFkBActivator:
         assert jnp.isfinite(gk) and gk > 0
 
 
+@pytest.mark.network
 class TestMultiHallmarkWiring:
+    # Builds the full multi-hallmark composite, which loads the DP14 and
+    # Ihekwaba SBML models. Those files are not bundled in the repo, so on
+    # a clean checkout (CI) they download from BioModels — deselected from
+    # the default `make test` run via `-m "not network"`. Runs locally with
+    # `pytest tests/test_mtor_nfkb.py`.
     def test_edge_present_and_validates(self):
         from hallsim.models.multi_hallmark import (
             build_multi_hallmark_composite,

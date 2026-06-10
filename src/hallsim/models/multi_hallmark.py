@@ -43,8 +43,12 @@ The one cross-publication mechanistic edge:
   Laberge 2015. This is the composite's first inter-model port wiring;
   DP14↔GZ06 remain coupled only through the shared hallmark severity.
 
-All three SBML files are bundled under ``models/<author><year>/`` and
-loaded from disk; no network access at import time.
+Geva-Zatorsky 2006 ships vendored under ``models/zatorsky2006/`` and
+loads from disk. DallePezze 2014 and Ihekwaba 2004 are not vendored in
+the repo: on a clean checkout they download from BioModels on first
+import (by their BIOMD ids) and cache under
+``~/.cache/hallsim/biomodels/``, so the first build needs network
+access.
 
 Experimental conditions and pharmacological interventions both enter
 through the hallmark layer. The DDIS+rapa experiment is a two-hallmark

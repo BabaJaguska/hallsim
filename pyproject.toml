@@ -36,4 +36,5 @@ simulate = "hallsim.cli:simulate"
 testpaths = ["tests"]
 markers = [
   "slow: tests that take more than ~10s (typically multi-process Scheduler runs); deselect with '-m \"not slow\"'",
+  "network: tests that need network access or un-bundled SBML downloads; deselected in CI via '-m \"not network\"'",
 ]
