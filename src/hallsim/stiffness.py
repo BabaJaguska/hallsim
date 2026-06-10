@@ -260,7 +260,9 @@ def analyze_groups(
             "grad/jvp/vmap."
         )
     keys = composite.store_keys()
-    state = composite.initial_state_vec(keys) if y0 is None else jnp.asarray(y0)
+    state = (
+        composite.initial_state_vec(keys) if y0 is None else jnp.asarray(y0)
+    )
     groups = groups if groups is not None else composite.auto_groups()
 
     # A batched (population) y0 has trailing axis n_vars and one leading row

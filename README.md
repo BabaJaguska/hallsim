@@ -1,25 +1,26 @@
-# HallSim: A Modular, Multi-Scale Simulator for Aging Biology
+# HallSim: A Differentiable, Composable Multi-Scale Simulator for Aging Biology
 [![Basic CI/CD Workflow](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml/badge.svg)](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml)
+
+**HallSim composes independently-published systems-biology models into one multi-scale dynamical system — and calibrates the whole thing by gradient descent through the ODE solve.** Built on JAX/Equinox/Diffrax, with a focus on aging biology, where no single model captures the crosstalk between hallmarks.
+
+- **End-to-end differentiable.** The entire composite — multiple stiff (SBML) models, operator-split across timescales — is a single differentiable function. Mechanism parameters spread across separate publications are fit with the same reverse-mode autodiff that trains neural networks, *through* the stiff ODE solve. GPU friendly. Demo with held-out validation. See [Differentiable calibration of stiff multi-model composites](#differentiable-calibration-of-stiff-multi-model-composites).
+- **Agent-friendly by construction.** A model is discovered and imported from BioModels in two calls (`search_for_model` → `process_from_sbml`), wired by a plain `{process: {port: path}}` topology dict, and its fittable parameters self-document via `Composite.calibration_targets()`. Can accept custom models and neuralODE models as well. Typed ports carry units and ontology annotations, and `analyze_composability` proposes how to merge overlapping models. The framework is meant for an LLM agent to assemble and calibrate a digital twin without bespoke glue code.
 
 ## Background & Motivation
 
 Aging is a complex, network-level phenomenon. Its hallmarks — such as mitochondrial dysfunction, genomic instability, and altered intercellular communication — do not act in isolation. Instead, they form dense webs of feedback and crosstalk.
 
-Traditional approaches to modeling aging have been reductionist. Inspired by conceptual frameworks like Cohen et al. (2022) [1], HallSim aims to embrace complex systems theory and explore emergent properties of aging arising from loss of resilience across multiple sub-systems.
-
-Existing bio simulation tools and model repositories provide standardized formats and simulation capabilities for individual dynamical models, but they generally lack support for composable model libraries — i.e., reusable modules with defined high-level interfaces that can be assembled into heterogeneous larger multi-scale dynamical systems.
-
-HallSim's goal is to enable compositional co-simulation of reusable systems-biology modules, with a focus on aging biology.
+Traditional approaches to modeling aging have been reductionist. Inspired by conceptual frameworks like Cohen et al. (2022) [1], HallSim embraces complex systems theory to explore emergent properties of aging arising from loss of resilience across multiple sub-systems. Existing tools and repositories standardize and simulate individual dynamical models well, but generally lack support for composable model libraries — reusable modules with high-level interfaces that assemble into heterogeneous multi-scale systems. HallSim closes that gap JAX-native, so composition buys differentiability, JIT, and batched populations for free.
 
 ---
 
 ## Project Goals
 
-* Build a modular, multi-scale simulator for aging biology
-* Allow plug-and-play modules with exposed high-level abstractions corresponding to 12 hallmarks of aging [2]
-* Enable simulation of aging trajectories, interventions, and emergent phenotypes
-* Validate simulations against real experimental data (ssGSEA pathway scores from scRNA-seq)
-* Serve as an educational tool and in-silico testbed for perturbations (rapamycin, caloric restriction, etc.)
+* A composable, differentiable, multi-scale simulator for aging biology — bring your own modules (hand-written, SBML-imported, or learned via `NeuralODE`)
+* High-level severity handles for the 12 hallmarks of aging [2] (4 mapped today — see [Hallmark Handles](#hallmark-handles) — each new one a single handle away)
+* Calibrate interventions and emergent phenotypes against real experimental data, with held-out validation (ssGSEA pathway scores, gene-reporter concordance)
+* Make multi-model composition tractable for AI agents building digital twins
+* Serve as an educational in-silico testbed for perturbations (rapamycin, caloric restriction, etc.)
 
 ---
 
@@ -87,7 +88,6 @@ merged = Composite(
 HallSim is a *framework* for composing biological models, not a model library. The expectation is that you bring your own Processes — either hand-written, imported from curated SBML on BioModels, or learned via `NeuralODE`. A small set of example composites ships under [`src/hallsim/models/`](src/hallsim/models/) to demonstrate the framework's patterns:
 
 - A **DP14-anchored multi-hallmark composite** ([`multi_hallmark.py`](src/hallsim/models/multi_hallmark.py)) — three independent BioModels SBML imports (DallePezze 2014 + Geva-Zatorsky 2006 + Ihekwaba 2004) plus one cross-publication mechanistic edge: `MtorNFkBActivator` wires DP14's mTORC1 into the Ihekwaba NF-κB module (mTOR → IKK, activating). DP14↔GZ06 are coupled instead through the Genomic Instability hallmark as a shared experimental knob — each responds to the same severity at its own calibrated scale. Spans Cellular Senescence, Deregulated Nutrient Sensing, Genomic Instability, and Inflammaging in one substrate. The current validation composite.
-- A **stem-cell niche + Sivakumar 2011 crosstalk composite** ([`stem_cell_niche.py`](src/hallsim/models/stem_cell_niche.py)) — niche deterioration mapped to the Stem Cell Exhaustion hallmark, additively composed with the Sivakumar 2011 crosstalk SBML model.
 
 The SBML import path ([`sbml_import.py`](src/hallsim/sbml_import.py)) is one of the framework's main entry points: it auto-generates a Process from any BioModels entry via `sbmltoodejax`, auto-populates every SBML constant into `SBMLProcess.parameters` so the full mechanism surface is immediately discoverable via `Composite.calibration_targets()`, includes a libsbml-driven `<functionDefinition>` inliner that unlocks the large majority of curated models that would otherwise hit "Custom functions are not handled" upstream, pre-flight checks that reject `<event>` blocks and unsupported MathML operators with actionable error messages, and MIRIAM annotation extraction that populates `Port.ontology` from species CVTerms. Bundled SBML files live under [`models/<author><year>/`](models/) for offline use; arbitrary BioModels IDs download to `~/.cache/hallsim/biomodels/` on first import.
 
@@ -137,17 +137,6 @@ calibrated values — both `severity` and `base` are differentiable
 through `apply_hallmarks`.
 
 **Pharmacological interventions belong on the hallmark layer they perturb**, not as separate Processes. Rapamycin targets mTORC1 → maps to Deregulated Nutrient Sensing. The same hallmark applies to ERiQ-based composites (targets ERiQ's `GLYCOL_SA`) and to DP14-based composites (targets DP14's `mTORC1_S2448_phos_by_AA_n_Akt_pS473`) without changing how the user calls `apply_hallmarks`.
-
-**Stem Cell Exhaustion** is mapped to the Sivakumar2011 crosstalk model via the `StemCellNiche` process, which contributes severity-dependent decay to Wnt, EGF, Shh, and Notch signaling:
-
-```python
-from hallsim.models.stem_cell_niche import build_niche_crosstalk
-from hallsim.scheduler import Scheduler
-
-comp = build_niche_crosstalk(severity=0.6)  # moderate niche deterioration
-result = Scheduler().run(comp, t_span=(0.0, 100.0), macro_dt=0.5, save_dt=0.5)
-# Wnt, EGF, Shh, Notch ligands decline with severity
-```
 
 **Genomic Instability** in the multi-hallmark composite drives both DP14's `DNA_damaged_by_irradiation` rate constant and GZ06's `psi` damage-signal parameter, each at its own model's calibrated scale. Same severity, no internal topology coupling between the SBML models — the hallmark is the shared knob, so cross-model coupling is mediated at the experimental-condition level rather than via state-into-constant patching (a foot-gun the framework deliberately doesn't expose). The composite spans Cellular Senescence, Deregulated Nutrient Sensing, Genomic Instability, and Inflammaging in one substrate.
 
@@ -235,11 +224,7 @@ results = problem.evaluate(history.final_params)
 problem.save_outputs("outputs/run/", history)   # graph.png, trajectories_*.png, summary.json
 ```
 
-**Three principles enforced by the framework:**
-
-1. **Hallmark-targeted parameters are not fittable by default.** Hallmarks represent experimental conditions (DDIS severity, rapamycin treatment) — knobs the experimenter set per arm, not biology to be inferred from data. `Composite.calibration_targets()` subtracts them from discovery; `CalibrationProblem.__init__` raises if you pass one as a `ParameterRef`, naming the hallmark that controls it. Escape hatch: `allow_hallmark_override=True`.
-2. **`Process.calibratable_params()` is the self-documenting discovery API.** Each Process declares its own fittable scalars; `Composite.calibration_targets()` aggregates with namespaced names. `SBMLProcess` auto-returns every SBML constant with a published default and a two-OOM clamp — no per-composite hand-curated list anywhere.
-3. **Held-out splits are mandatory.** Calibrate on one arm, evaluate on a held-out arm via `problem.evaluate(...)`. Same-data calibrate-and-evaluate is curve-fit, not concordance.
+The calibration API enforces three principles — hallmark knobs aren't fittable by default, parameter discovery is self-documenting (`Composite.calibration_targets()`), and held-out splits are mandatory. Details in [docs/development.md](docs/development.md#calibration-principles).
 
 The full runnable validation against GSE248823 (etoposide DDIS ± rapamycin) is in [`demos/multi_hallmark_calibrate.py`](demos/multi_hallmark_calibrate.py).
 
@@ -404,150 +389,29 @@ oscillator/integrator system with macro_dt=2.0:
 - Lie (interpolated): ~2.4x error reduction on slow coupling variable
 - Strang: ~2.3x error reduction on slow coupling variable
 
-Parameters are JAX arrays, so you can differentiate through entire simulations.
-`build_rhs()` returns a flat `(rhs_fn, keys)` pair — flat-vector state is what
-JAX/Diffrax compile fastest, and `flatten`/`unflatten` convert at the boundary:
-
-```python
-import jax
-
-def loss(rate):
-    proc = Decay(rate=rate)
-    comp = Composite(
-        processes={"decay": proc},
-        topology={"decay": {"x": "pool/x"}},
-        validate=False,
-    )
-    rhs, keys = comp.build_rhs()
-    y_vec = comp.flatten({"pool/x": jnp.array(1.0)}, keys)
-    dy_vec = rhs(0.0, y_vec)
-    return dy_vec[keys.index("pool/x")] ** 2
-
-grad = jax.grad(loss)(0.1)  # d(loss)/d(rate)
-```
+Parameters are JAX arrays, so you can `jax.grad` through an entire
+simulation. `build_rhs()` returns a flat `(rhs_fn, keys)` pair — flat-vector
+state is what JAX/Diffrax compile fastest, and `flatten`/`unflatten` convert
+at the boundary. See [Differentiable calibration of stiff multi-model
+composites](#differentiable-calibration-of-stiff-multi-model-composites) for
+the real, multi-model version.
 
 ---
 
 ## Dev Instructions
 
-- `pyproject.toml` is the single source of dependencies.
-- To add a model, define a new `Process` subclass in `src/hallsim/models/`.
-- Models are aggregated on an additive basis in the ODE RHS via EVOLVED ports. If your model's effect is supposed to be multiplicative, consider using a separate store path and an INPUT port to read the other variable.
-
-### Key files
-
-```
-src/hallsim/
-  process.py           — Process base class (Port, PortRole, ProcessKind, calibratable_params)
-  store.py             — Store utilities (build, extract, route, validate)
-  composite.py         — Composite: topology wiring, auto-grouping, calibration_targets() discovery
-  scheduler.py         — The runner: multi-rate orchestration + single-group fast path
-  validation.py        — Semantic validation subsystems + analyze_composability
-  hallmarks.py         — HallmarkHandle, ParameterMapping (multiplicative transforms), HALLMARK_REGISTRY
-  gene_reporters.py    — GeneReporter, MULTI_HALLMARK_REPORTERS, GeneExpressionDataset, cycle_average + last_value summaries
-  calibration.py       — Calibrator (forward/reverse autodiff) + CalibrationProblem + Condition + ParameterRef + CalibratableParam (high-level framework)
-  sbml_import.py       — process_from_sbml (auto-populates `parameters` from every SBML constant; libsbml functionDefinition inliner; MIRIAM ontology extraction; pre-flight checks)
-  plotting.py          — plot_composite_run, plot_runs_comparison, draw_composite_graph, save_run_results
-  cli.py               — CLI entry points (simulate command group)
-  models/
-    multi_hallmark.py     — DP14 + GZ06 + Ihekwaba multi-publication composite (current validation substrate)
-    stem_cell_niche.py    — Niche deterioration + Sivakumar 2011 crosstalk
-    eriq.py               — ERiQ Energy Restriction in Quiescence (3 Processes)
-    saturating_removal.py — Uri Alon damage model
-    kick_event.py         — One-shot perturbation EVENT Process
-    neuralode.py          — NeuralODE Process + training infrastructure
-```
+To add a model, subclass `Process` in `src/hallsim/models/` and wire it
+via topology.
 
 ---
 
 ## Roadmap
 
-### Scheduler & Multi-Scale
-
-* [ ] Combine Strang splitting + interpolated coupling (currently mutually exclusive)
-* [ ] Event-bearing and adaptive_dt composites under batched `y0` (currently
-  rejected at `Scheduler.run` entry — both rely on Python-side branching that
-  doesn't compose with `vmap`)
-* [ ] Waveform relaxation (Gauss-Seidel iteration at sync points, from FSI/PLL analogy)
-* [ ] Anderson acceleration for waveform relaxation convergence
-* [ ] Mori-Zwanzig memory kernel for fast→slow coupling (captures history effects)
-* [ ] Coupling residual spectral monitoring (early-warning diagnostic)
-* [ ] IFT-based adjoint at sync boundaries (for gradient-based optimization)
-* [ ] IMEX (implicit-explicit) solver for stiff multi-scale systems
-
-See [crossgen-suggestions.md](docs/crossgen-suggestions.md) for full analysis.
-
-### Models & Validation
-
-* [ ] **Lipid-metabolism extension** — Tighanimine et al. 2024 (*Nat Metab*, the paper behind GSE248823) identified a G3P/PEtn homeostatic switch as *causal* for senescence (p53 → glycerol kinase activation drives G3P↑; PCYT2 post-translational inactivation drives PEtn↑; lipid droplet biogenesis is the downstream effect). Adding a `LipidMetabolism` Process (states: G3P, PEtn; inputs: `p53_activity`, a PCYT2-PTM proxy; outputs: a senescence-amplifying signal that feeds back into the SASP axis) would let HallSim test their causal claim *in silico* — and the GSE248824 SuperSeries includes the paired metabolomics needed to validate it. HallSim recapitulates the G3P/PEtn → senescence amplification loop and predicts G3PP/ETNPPL overexpression as senomorphic.
-* [ ] **Trajectory-level validation** — GSE248823 has 3 timepoints per arm (DDIS: D00/D07/D14, OIS: D00/D04/D07). Current concordance uses two-endpoint deltas; matching predicted vs. measured pathway-score *trajectories* (rate of change, time-constant ordering across pathways) would be a substantially stronger validation than scalar deltas.
-* [ ] Validate against scRNA-seq (Tabula Muris Senis, Ma 2020 caloric restriction) — pseudobulk ssGSEA
-* [ ] PINNs: physics-informed loss for NeuralODE training
-
-#### Stochastic DISCRETE / Gillespie support
-
-Several aging mechanisms are intrinsically stochastic at the single-cell
-scale and not well-described by the ODE mean-field:
-
-* **Telomere shortening** — discrete length loss (≈50–200 bp) per
-  division; aggregate length depends on division-history sampling
-* **Somatic mutation accumulation** — Poisson process per genome per
-  cell-cycle; rate is the Genomic Instability hallmark
-* **Senescence entry** — threshold-on-stochastic-state transition
-  (DDR signal accumulates by jumps; entry fires once threshold crossed)
-
-The framework already has the right abstraction (`ProcessKind.DISCRETE`
-with `update(t, state) -> delta` and `ProcessKind.EVENT` with
-`condition`/`handler`). What's missing is:
-
-* PRNG plumbing — pass a `jax.random.PRNGKey` into the Scheduler and
-  thread split keys to each stochastic Process
-* A `StochasticDiscrete` example Process (telomere-shortening or
-  per-genome mutation Poisson) demonstrating the contract
-* Population-level statistics via batched y0 with per-cell PRNG keys
-  (the existing batched-IC machinery already gives the cell axis;
-  we just need the key axis alongside it)
-
-#### Multi-cell / inter-cell communication
-
-Batched y0 currently gives **N independent cells** — every batch element
-runs in isolation. Tissue-level aging biology (niche signaling, paracrine
-SASP, contact inhibition) requires cells that *exchange state*. Two
-plausible architectures:
-
-* **Mean-field paracrine.** Each cell reads a population aggregate of a
-  secreted factor (e.g. SASP-IL6 = mean of all senescent cells'
-  secretion). Implementation: a `PopulationAggregate` Process that
-  reduces along the batch axis and writes a shared store path read by
-  every cell. Works inside one `Scheduler.run` call; gradients flow.
-* **Spatial / graph-coupled.** Cells live on a graph (epithelium
-  topology, niche geometry); communication is along edges. Reaction-
-  diffusion or graph-Laplacian coupling. Heavier — needs a spatial
-  state representation orthogonal to the per-cell trailing axis.
-
-Concrete first-cut deliverable: a `PopulationAggregate` Process and a
-SASP-propagation demo where the senescence fraction in a population
-modulates each individual cell's p53 baseline. Demonstrates that
-HallSim's composability extends to inter-cell coupling without leaving
-the JAX-native execution model. Out of scope for the preprint; designed
-as the natural follow-up paper.
-
-#### Other queued items
-
-* [ ] LLM agent-assisted model composition
-* [ ] FBA / genome-scale metabolism via `jaxopt`-based LP — couples
-  ERiQ signaling state to BiGG-scale flux distributions with gradients
-* [ ] 3D spatial diffusion & ECM modelling
-
-### SBML Import
-
-* [ ] **Translate SBML events into `ProcessKind.EVENT`** — generic event translator,
-  so models with discontinuous state resets (Proctor 2008 BIOMD0000000188 and
-  ~10–20% of curated BioModels) become importable. Diffrax 0.5+ already supports
-  events natively; HallSim already has `ProcessKind.EVENT`. The missing piece is
-  parsing SBML event MathML (trigger expressions, assignments, delays, persistence)
-  and emitting the corresponding `condition` / `handler` methods. Most useful
-  long-term enhancement to the SBML pipeline.
+Planned work spans the Scheduler (waveform relaxation, IMEX, Mori-Zwanzig
+coupling), models & validation (lipid-metabolism extension, trajectory-level
+validation, stochastic/Gillespie support, multi-cell communication), and
+SBML import (event translation). Full list in
+[docs/roadmap.md](docs/roadmap.md).
 
 ---
 

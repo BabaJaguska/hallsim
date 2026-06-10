@@ -619,9 +619,7 @@ class CalibrationProblem:
         # under a JVP (forward fit), the default recursive-checkpoint reverse
         # adjoint under a VJP (reverse fit). A ForwardMode solve cannot be
         # reverse-differentiated (its inner while-loop has dynamic bounds).
-        adjoint = (
-            dfx.ForwardMode() if self._fit_mode == "forward" else None
-        )
+        adjoint = dfx.ForwardMode() if self._fit_mode == "forward" else None
         res = self._scheduler.run(
             comp,
             t_span=(0.0, self.t_end),

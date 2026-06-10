@@ -1,8 +1,11 @@
 """Hallmark handles — high-level control interface for aging biology.
 
-Each of the 12 hallmarks of aging (Lopez-Otin et al., 2023) is
-represented as a 0-1 severity handle that modulates parameters across
-one or more Processes.
+A hallmark of aging (Lopez-Otin et al., 2023) is represented as a 0-1
+severity handle that modulates parameters across one or more Processes.
+The abstraction targets all 12 hallmarks; :data:`HALLMARK_REGISTRY`
+maps 4 today — Stem Cell Exhaustion, Mitochondrial Dysfunction,
+Deregulated Nutrient Sensing, and Genomic Instability — and each new
+one is a single :class:`HallmarkHandle` entry away.
 
     severity = 0.0  ->  healthy / optimal
     severity = 1.0  ->  severely impaired
