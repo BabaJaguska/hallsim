@@ -173,3 +173,8 @@ at import; `reconciled_to(canonical_seconds)` puts a model on the
 composite's shared clock via chain-rule rescaling. If you compose SBML
 models without reconciling, they run at different real-world speeds on a
 shared `t` and the result is meaningless — screen for it.
+
+## misc
+- Use the venv if there's an associated venv my dude.
+- Use framework defaults unless justified
+- before composing an sbml model, test it with sbmltoodejax and with our framework. then proceed to compose.

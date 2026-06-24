@@ -435,9 +435,6 @@ def stiffness(macro_dt):
     auto-select. Use it on any composite via
     ``hallsim.stiffness.analyze_groups``.
     """
-    import jax
-
-    jax.config.update("jax_enable_x64", True)
     from hallsim.models.multi_hallmark import build_multi_hallmark_composite
     from hallsim.stiffness import analyze_groups
 

@@ -39,6 +39,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from hallsim.config import DEFAULT_MAX_EXPLICIT_SUBSTEPS
+
 if TYPE_CHECKING:
     from hallsim.composite import Composite
 
@@ -48,19 +50,6 @@ if TYPE_CHECKING:
 # that would otherwise blow the ratio up for any system with a
 # conservation law or an oscillator sitting near the imaginary axis.
 _ACTIVE_FLOOR_FRAC = 1e-9
-
-# Default classifier knob. The stiffness index ``spectral_abscissa × dt``
-# is the number of stability-limited substeps an explicit method would be
-# forced to take across one solve interval (its step is bounded by
-# ``Δt ≲ 2/|λ|``). Below this many, explicit integration is cheap and
-# robust; far above it, the explicit step is stability- not
-# accuracy-limited — that is stiffness, and an implicit (A-stable) solver
-# wins. The canonical cases separate by orders of magnitude: a mildly
-# multiscale but slow oscillator (ERiQ, index ~3–26 at its usual
-# ``macro_dt``) sits well below; a fast dissipative subsystem (DallePezze
-# 2014 mitochondria λ≈-3e5, Ihekwaba NF-κB λ≈-1.7e4, index ~1e4–1e6) sits
-# far above. 100 leaves a wide margin on both sides.
-DEFAULT_MAX_EXPLICIT_SUBSTEPS = 100.0
 
 
 @dataclass

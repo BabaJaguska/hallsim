@@ -42,6 +42,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from hallsim.composite import Composite
+from hallsim.config import DEFAULT_ATOL, DEFAULT_MAX_STEPS
 from hallsim.scheduler import Scheduler
 
 
@@ -124,7 +125,7 @@ def screen_process(
     tol_rel_threshold: float = 0.05,
     growth_threshold: float = 1e3,
     n_save: int = 400,
-    max_steps: int = 500_000,
+    max_steps: int = DEFAULT_MAX_STEPS,
 ) -> ScreenReport:
     """Screen one process solo over ``[0, t_end]`` native time units.
 
@@ -144,11 +145,14 @@ def screen_process(
     name = getattr(proc, "_name", type(proc).__name__)
 
     try:
+        # atol is held at the production default across both runs so the
+        # loose-vs-tight comparison isolates rtol sensitivity (and the
+        # screen integrates exactly what the Scheduler does in production).
         y_tight = _solo_run(
-            proc, t_end, rtol_tight, rtol_tight * 1e-3, n_save, max_steps
+            proc, t_end, rtol_tight, DEFAULT_ATOL, n_save, max_steps
         )
         y_loose = _solo_run(
-            proc, t_end, rtol_loose, rtol_loose * 1e-3, n_save, max_steps
+            proc, t_end, rtol_loose, DEFAULT_ATOL, n_save, max_steps
         )
     except Exception as exc:  # max_steps / non-finite blow the solve up
         return ScreenReport(

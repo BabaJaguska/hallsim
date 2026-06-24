@@ -51,9 +51,16 @@ import numpy as np
 import optimistix as optx
 
 from hallsim.composite import Composite
+from hallsim.config import (
+    DEFAULT_ATOL,
+    DEFAULT_ATOL_SCALE,
+    DEFAULT_DT0,
+    DEFAULT_MAX_EXPLICIT_SUBSTEPS,
+    DEFAULT_MAX_STEPS,
+    DEFAULT_RTOL,
+)
 from hallsim.process import PortRole
 from hallsim.stiffness import (
-    DEFAULT_MAX_EXPLICIT_SUBSTEPS,
     GroupStiffness,
     analyze_groups,
 )
@@ -321,13 +328,13 @@ class Scheduler:
     def __init__(
         self,
         solver: dfx.AbstractSolver | None = None,
-        rtol: float = 1e-6,
-        atol: float = 1e-9,
-        max_steps: int = 4_000_000,
-        dt0: float = 1e-3,
+        rtol: float = DEFAULT_RTOL,
+        atol: float = DEFAULT_ATOL,
+        max_steps: int = DEFAULT_MAX_STEPS,
+        dt0: float = DEFAULT_DT0,
         explicit_solver: dfx.AbstractSolver | None = None,
         implicit_solver: dfx.AbstractSolver | None = None,
-        atol_scale: float = 1e-6,
+        atol_scale: float = DEFAULT_ATOL_SCALE,
         max_explicit_substeps: float = DEFAULT_MAX_EXPLICIT_SUBSTEPS,
         groups: dict[str, list[str]] | None = None,
         coupling_mode: str = "frozen",

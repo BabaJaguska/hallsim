@@ -20,6 +20,15 @@ state variables to canonical reporter genes, evaluated by sign agreement
 and Spearman concordance.
 """
 
+# SBML-derived ODEs are integrated in float64. In float32 the RHS noise
+# floor (~1e-7 relative) masquerades as stiffness — it inflates adaptive
+# step counts by an order of magnitude and can flip the stiffness verdict.
+# Enabling x64 at import keeps screening, tests, scripts, and the CLI all
+# at the same production precision.
+import jax as _jax
+
+_jax.config.update("jax_enable_x64", True)
+
 from hallsim.calibration import (
     CalibrationProblem,
     Calibrator,
