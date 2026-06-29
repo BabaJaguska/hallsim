@@ -178,3 +178,4 @@ shared `t` and the result is meaningless — screen for it.
 - Use the venv if there's an associated venv my dude.
 - Use framework defaults unless justified
 - before composing an sbml model, test it with sbmltoodejax and with our framework. then proceed to compose.
+- code should be self-explanatory; minimize comments

@@ -32,12 +32,24 @@ Use :func:`screen_process` when bringing a single model in, and
 :func:`screen_composite` (pass a per-model window dict) before trusting a
 composite. The companion ``demos/subsystem_diagnostics.py`` is the visual
 version — it plots each subsystem solo.
+
+**Is it the model or is it us?** When the screen flags an SBML-imported
+model as exploding/unintegrable, the screen runs a second, independent
+integration with **sbmltoodejax's own** stepper (the generated
+``ModelStep``, which bakes the upstream odeint + its generation-time
+tolerances) and reports the verdict via ``ScreenReport.framework_suspect``.
+A model that HallSim fails but sbmltoodejax integrates bounded-and-finite
+is a *framework* problem (solver config, atol scale, timescale grouping),
+not a bad model — the decisive check that separates the two failure modes
+in one shot.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+import diffrax as dfx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -62,11 +74,14 @@ class ScreenReport:
     max_abs: float
     tol_rel_diff: float
     detail: str = ""
+    framework_suspect: bool = False
+    tunes: bool | None = None
 
     @property
     def ok(self) -> bool:
-        return not (
-            self.exploding or self.vanishing or self.tolerance_sensitive
+        return (
+            not (self.exploding or self.vanishing or self.tolerance_sensitive)
+            and self.tunes is not False
         )
 
     def __str__(self) -> str:
@@ -77,6 +92,10 @@ class ScreenReport:
             flags.append("VANISHING")
         if self.tolerance_sensitive:
             flags.append("TOLERANCE-SENSITIVE")
+        if self.tunes is False:
+            flags.append("NON-TUNABLE")
+        if self.framework_suspect:
+            flags.append("FRAMEWORK-SUSPECT")
         verdict = "ok" if self.ok else " + ".join(flags)
         return (
             f"{self.name:>14}: {verdict:<38} "
@@ -100,12 +119,7 @@ def _on_native_clock(process):
 
 
 def _solo_run(process, t_end, rtol, atol, n_save, max_steps):
-    comp = Composite(
-        processes={process._name: process},
-        topology={},
-        validate=False,
-        semantic_validation={"check_semantics": False},
-    )
+    comp = _solo_composite(process)
     res = Scheduler(rtol=rtol, atol=atol, max_steps=max_steps).run(
         comp,
         t_span=(0.0, t_end),
@@ -114,6 +128,111 @@ def _solo_run(process, t_end, rtol, atol, n_save, max_steps):
         save_dt=t_end / n_save,
     )
     return np.asarray(jnp.stack([res.get(k) for k in res.keys], axis=-1))
+
+
+def _sbmltoodejax_native_finite(process, t_end: float, n_steps: int):
+    """Integrate an SBML-imported process with sbmltoodejax's own stepper.
+
+    Rolls the generated ``ModelStep`` (which wraps the upstream odeint at
+    its generation-time tolerances) forward over ``[0, t_end]`` on the
+    model's native clock — the independent reference for the "is it the
+    model or is it us?" check. Returns ``(max_abs, finite)``, or ``None``
+    for a non-SBML process (no native reference exists) or if the native
+    run itself errors.
+    """
+    model = getattr(process, "_model", None)
+    if model is None or not hasattr(process, "_species_y0"):
+        return None
+    try:
+        y0 = jnp.asarray(process._species_y0)
+        c0 = process._c
+        dt = t_end / n_steps
+
+        def step(carry, _):
+            y, w, c, t = carry
+            y, w, c, t = model(y, w, c, t, dt)
+            return (y, w, c, t), y
+
+        _, ys = jax.lax.scan(
+            step, (y0, process._w0, c0, 0.0), None, length=n_steps
+        )
+        ys = np.asarray(ys)
+    except Exception:
+        return None
+    finite = bool(np.all(np.isfinite(ys)))
+    max_abs = float(np.nanmax(np.abs(ys))) if ys.size else 0.0
+    return max_abs, finite
+
+
+def _solo_composite(process):
+    return Composite(
+        processes={process._name: process},
+        topology={},
+        validate=False,
+        semantic_validation={"check_semantics": False},
+    )
+
+
+def _tunes(process, t_end: float, n_probe: int = 2):
+    """Forward-mode gradient finiteness — the 'tunes' half of the rule.
+
+    The constituents-first rule requires each model both *runs* and
+    *tunes*: a finite forward-mode gradient of a state summary w.r.t. one
+    of its parameters. This probes up to ``n_probe`` of the process's
+    ``calibratable_params`` with ``jax.jvp`` through ``Scheduler.run``
+    (the same ForwardMode path calibration uses). A model whose explicit
+    forward sensitivities overflow (stiff) is retried on the implicit
+    solver — that is how it would actually be calibrated.
+
+    Returns ``(tunes, needs_implicit)``: ``tunes`` True if some path gives
+    finite gradients, False if neither does, ``needs_implicit`` True when
+    only the implicit solver works. Returns ``(None, False)`` when the
+    process exposes no calibratable parameters.
+    """
+    from hallsim.calibration import _substitute_param
+
+    probes = process.calibratable_params()[:n_probe]
+    if not probes:
+        return None, False
+
+    def all_finite(sched):
+        for cp in probes:
+
+            def loss(val, field=cp.field):
+                proc = _substitute_param(process, field, val)
+                comp = _solo_composite(proc)
+                res = sched.run(
+                    comp,
+                    t_span=(0.0, t_end),
+                    macro_dt=t_end,
+                    y0=comp.initial_state_vec(),
+                    adjoint=dfx.ForwardMode(),
+                )
+                return jnp.sum(res.ys[-1])
+
+            try:
+                _, tangent = jax.jvp(loss, (cp.default,), (1.0,))
+            except Exception:
+                return False
+            if not bool(jnp.isfinite(tangent)):
+                return False
+        return True
+
+    if all_finite(Scheduler()):
+        return True, False
+
+    # warm_up runs eagerly outside the jvp trace so the stiffness verdict is
+    # cached before tracing (analysis can't read tracer Jacobians).
+    s_imp = Scheduler(auto_stiffness=True)
+    try:
+        s_imp.warm_up(
+            _solo_composite(process), t_span=(0.0, t_end), macro_dt=t_end
+        )
+    except Exception:
+        return False, False
+    if all_finite(s_imp):
+        return True, True
+    return False, False
 
 
 def screen_process(
@@ -126,6 +245,7 @@ def screen_process(
     growth_threshold: float = 1e3,
     n_save: int = 400,
     max_steps: int = DEFAULT_MAX_STEPS,
+    check_tunability: bool = True,
 ) -> ScreenReport:
     """Screen one process solo over ``[0, t_end]`` native time units.
 
@@ -140,6 +260,17 @@ def screen_process(
     1e-9 of zero), and ``tolerance_sensitive`` (loose vs tight tolerance
     differ by more than ``tol_rel_threshold``, peak-normalised). A solver
     that exceeds ``max_steps`` is reported as exploding/unintegrable.
+
+    When an SBML-imported process is flagged exploding/unintegrable, a
+    second integration with sbmltoodejax's own stepper decides whether the
+    model is at fault: a bounded, finite native run sets
+    ``framework_suspect`` (the failure is HallSim's, not the model's).
+
+    With ``check_tunability`` (default), also verifies the *tunes* half of
+    the constituents-first rule — a finite forward-mode gradient through
+    ``Scheduler.run`` — setting ``tunes`` (``False`` makes the report not
+    ``ok``; a model that tunes only on the implicit solver is noted in
+    ``detail``).
     """
     proc = _on_native_clock(process)
     name = getattr(proc, "_name", type(proc).__name__)
@@ -155,6 +286,14 @@ def screen_process(
             proc, t_end, rtol_loose, DEFAULT_ATOL, n_save, max_steps
         )
     except Exception as exc:  # max_steps / non-finite blow the solve up
+        native = _sbmltoodejax_native_finite(proc, t_end, n_save)
+        suspect = native is not None and native[1]
+        detail = f"solver failed: {type(exc).__name__}"
+        if suspect:
+            detail += (
+                f"; sbmltoodejax integrates it bounded (max|y|={native[0]:.3g})"
+                " — framework issue, not the model"
+            )
         return ScreenReport(
             name=name,
             exploding=True,
@@ -162,7 +301,8 @@ def screen_process(
             tolerance_sensitive=True,
             max_abs=float("inf"),
             tol_rel_diff=float("inf"),
-            detail=f"solver failed: {type(exc).__name__}",
+            detail=detail,
+            framework_suspect=suspect,
         )
 
     finite = bool(np.all(np.isfinite(y_tight)))
@@ -202,6 +342,26 @@ def screen_process(
             f"by {tol_rel_diff * 100:.0f}%"
         )
 
+    framework_suspect = False
+    if exploding:
+        native = _sbmltoodejax_native_finite(proc, t_end, n_save)
+        if native is not None and native[1]:
+            framework_suspect = True
+            detail += (
+                f"; sbmltoodejax integrates it bounded (max|y|={native[0]:.3g})"
+                " — framework issue, not the model"
+            )
+
+    tunes = None
+    if check_tunability and not exploding:
+        tunes, needs_implicit = _tunes(proc, t_end)
+        if tunes is False:
+            detail = (detail + "; " if detail else "") + "non-finite gradient"
+        elif needs_implicit:
+            detail = (detail + "; " if detail else "") + (
+                "tunes only under the implicit solver (auto_stiffness=True)"
+            )
+
     return ScreenReport(
         name=name,
         exploding=exploding,
@@ -210,6 +370,8 @@ def screen_process(
         max_abs=peak,
         tol_rel_diff=tol_rel_diff,
         detail=detail,
+        framework_suspect=framework_suspect,
+        tunes=tunes,
     )
 
 

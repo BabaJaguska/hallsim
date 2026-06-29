@@ -103,6 +103,10 @@ proc = process_from_sbml(hits[0]["id"], name="dna_nfkb") # fetch + auto-generate
 
 The hand-written Processes that ship — [`saturating_removal.py`](src/hallsim/models/saturating_removal.py) (Uri Alon damage model), [`kick_event.py`](src/hallsim/models/kick_event.py) (one-shot perturbation EVENT pattern), the [ERiQ](src/hallsim/models/eriq.py) decomposition, and [`neuralode.py`](src/hallsim/models/neuralode.py) — exist either as reference implementations of common patterns or to support the example composites above.
 
+#### Merge or couple? — when two models share a node
+
+Two models both have an "NF-κB" — same entity (merge) or distinct (couple)? It's an identity question, not a biology one: run `analyze_composability(a=.., b=..)` ([`validation.py`](src/hallsim/validation.py)). A shared ontology ID ⇒ same entity ⇒ merge (point both at one store path; `EVOLVED` sums them; `report.suggested_rewire` → `Composite(rewire=..)`). No ontology match ⇒ take the conservative choice — don't merge, add one documented coupling edge — and let a held-out [`gene_reporters`](src/hallsim/gene_reporters.py) split score it. Example: Konrath 2023 vs the Ihekwaba NF-κB module reports **no overlap** (Konrath ends at IKK, has no NF-κB species) ⇒ couple Konrath's IKK → `nfkb/IKK`, don't merge.
+
 ### Hallmark Handles
 
 Each hallmark of aging is represented as a 0-1 severity handle that modulates parameters across one or more processes. Hallmark severity is differentiable end-to-end: `jax.grad` through the whole pipeline works.

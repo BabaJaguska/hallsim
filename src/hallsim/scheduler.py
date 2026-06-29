@@ -209,29 +209,31 @@ class Scheduler:
     Parameters
     ----------
     solver:
-        Diffrax solver instance. Default ``None`` enables **automatic
-        per-group selection**: each continuous group's local Jacobian
-        spectrum is measured once (eagerly) via
-        :func:`hallsim.stiffness.analyze_groups`, and stiff groups get an
-        implicit A-stable solver (``implicit_solver``, default
-        ``Kvaerno5()``) with a magnitude-scaled vector ``atol`` while the
-        rest get an explicit one (``explicit_solver``, default
-        ``Tsit5()``) with the scalar controller. This is what keeps a
-        composite that mixes a fast dissipative subsystem (DallePezze
-        2014 mitochondria, λ≈-3e5 — explicit forward-sensitivity
-        overflows) with cheap signaling cascades solvable end-to-end and
-        differentiable, with no human picking solvers. Pass an explicit
-        ``solver`` to **disable** the automatic split and use that one
-        solver for every group (the scalar controller throughout) — e.g.
-        ``Scheduler(solver=dfx.Tsit5())`` for a known non-stiff system
-        where the per-group analysis is unnecessary overhead.
+        Diffrax solver instance applied to every group, with the scalar
+        controller. Default ``None`` uses ``explicit_solver`` (``Tsit5()``)
+        — the right choice for SBML biochemical systems in float64, where
+        the explicit solver is both correct and fastest (implicit's cheaper
+        step count is eaten by Newton cost). For a genuinely stiff group,
+        either pin a stiff ``solver`` (e.g. ``Scheduler(solver=dfx.Kvaerno5())``)
+        or set ``auto_stiffness=True`` to route per group.
+    auto_stiffness:
+        Opt into **per-group solver routing** (default ``False``). When
+        ``True``, each continuous group's local Jacobian spectrum is
+        measured once (eagerly) via :func:`hallsim.stiffness.analyze_groups`;
+        stiff groups get ``implicit_solver`` (A-stable) with a
+        magnitude-scaled vector ``atol`` while the rest keep
+        ``explicit_solver`` with the scalar controller. Off by default
+        because in float64 the explicit solver handles the example
+        composites and wins on wall-clock; turn it on for a composite that
+        mixes a stiff dissipative subsystem with cheap signaling cascades
+        and you'd rather not pick solvers by hand. Mutually exclusive with
+        a pinned ``solver``.
     explicit_solver, implicit_solver:
-        The two solvers the automatic split chooses between. Defaults
-        ``Tsit5()`` (explicit, ~4× faster than Kvaerno on mildly-stiff
-        oscillators like ``damage_p53_eriq``) and ``Kvaerno5()``
-        (implicit, A-stable — the diffrax analogue of CVODE's stiff BDF,
-        stable on stiff forward sensitivities). Ignored when ``solver``
-        is set.
+        The two solvers ``auto_stiffness`` routing chooses between. Defaults
+        ``Tsit5()`` (explicit) and ``Kvaerno5()`` (implicit, A-stable — the
+        diffrax analogue of CVODE's stiff BDF, stable on stiff forward
+        sensitivities). ``explicit_solver`` is also the default ``solver``;
+        ``implicit_solver`` is unused unless ``auto_stiffness=True``.
     max_explicit_substeps:
         Stiffness threshold forwarded to the analyzer: a group is stiff
         when its fastest decay rate × ``macro_dt`` (stability-limited
@@ -334,6 +336,7 @@ class Scheduler:
         dt0: float = DEFAULT_DT0,
         explicit_solver: dfx.AbstractSolver | None = None,
         implicit_solver: dfx.AbstractSolver | None = None,
+        auto_stiffness: bool = False,
         atol_scale: float = DEFAULT_ATOL_SCALE,
         max_explicit_substeps: float = DEFAULT_MAX_EXPLICIT_SUBSTEPS,
         groups: dict[str, list[str]] | None = None,
@@ -371,11 +374,18 @@ class Scheduler:
                 "(O(macro_dt^p) splitting error), or splitting='strang' "
                 "with coupling_mode='frozen' (O(macro_dt^2))."
             )
-        # Automatic per-group solver selection is on unless the caller
-        # pins a single `solver`. In auto mode the analyzer chooses
-        # between `explicit_solver` and `implicit_solver` per group; in
-        # manual mode `self.solver` is used for every group.
-        self.auto_solver = solver is None
+        # Solver selection. Default: the explicit solver (`explicit_solver`,
+        # Tsit5) for every group with the scalar controller. `auto_stiffness`
+        # opts into per-group routing — the analyzer measures each group's
+        # Jacobian spectrum and sends stiff groups to `implicit_solver` with
+        # a magnitude-scaled vector atol. Pinning `solver` uses that one
+        # solver for every group.
+        if auto_stiffness and solver is not None:
+            raise ValueError(
+                "auto_stiffness=True selects a solver per group; do not also "
+                "pin solver=. Pass one or the other."
+            )
+        self.auto_solver = auto_stiffness
         self.explicit_solver = explicit_solver or dfx.Tsit5()
         # Default stiff solver is Kvaerno5 with a **Newton** root finder.
         # diffrax's default `VeryChord` (stale-Jacobian chord, 10 iters)
@@ -874,9 +884,10 @@ class Scheduler:
     ) -> dict[str, GroupIntegrator]:
         """Pick a solver + step-size controller for each group.
 
-        Manual mode (an explicit ``solver`` was given): every group uses
-        it with the scalar controller. Auto mode: each group's local
-        Jacobian spectrum is measured once via
+        Manual mode (``auto_stiffness=False``, the default): every group
+        uses ``self.solver`` with the scalar controller. Auto mode
+        (``auto_stiffness=True``): each group's local Jacobian spectrum is
+        measured once via
         :func:`hallsim.stiffness.analyze_groups`; stiff groups get the
         implicit solver and a magnitude-scaled vector ``atol``, the rest
         the explicit solver and the scalar controller.
