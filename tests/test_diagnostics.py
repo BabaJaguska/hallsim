@@ -2,7 +2,14 @@
 
 import pytest
 
-from hallsim.diagnostics import ScreenReport, screen_process
+from hallsim.diagnostics import (
+    DEAD_SINK,
+    SUITABLE,
+    ScreenReport,
+    coupling_source_verdict,
+    recommend_coupling_source,
+    screen_process,
+)
 from hallsim.models.multi_hallmark import (
     GZ06_PSI_DEFAULT,
     GZ06_PSI_NAME,
@@ -51,6 +58,41 @@ def test_konrath_tunes_only_on_implicit_solver():
     report = screen_process(kon, t_end=600.0)
     assert report.tunes is True
     assert "implicit solver" in report.detail
+
+
+def test_konrath_pIKK_rejected_as_dead_sink():
+    """Konrath's terminal activated-IKK output pIKK is produced but consumed
+    by nothing and read by no rate law — the coupling guard must reject it
+    (wiring it would feed a frozen constant / diverge if unfrozen)."""
+    kon = process_from_sbml("MODEL2307130001", name="konrath")
+    v = coupling_source_verdict(kon, "pIKK")
+    assert v.verdict == DEAD_SINK
+    assert v.frozen and v.produced and not v.consumed
+    assert not v.ok
+
+
+def test_konrath_spIKKg_n_is_the_suitable_source():
+    """The live activated-IKK state spIKKg_n is produced and consumed —
+    bounded and actively turned over — so it is the usable coupling source."""
+    kon = process_from_sbml("MODEL2307130001", name="konrath")
+    v = coupling_source_verdict(kon, "spIKKg_n")
+    assert v.verdict == SUITABLE
+    assert v.produced and v.consumed and v.ok
+
+
+def test_konrath_recommendation_flags_dead_sink_and_clock_mismatch():
+    """The recommendation focused on the activated-IKK outputs must pick
+    spIKKg_n over pIKK, and warn that Konrath's second-scale native forcing
+    clock is unresolvable on the day-scale composite axis."""
+    kon = process_from_sbml("MODEL2307130001", name="konrath")
+    rec = recommend_coupling_source(
+        kon,
+        target_states=("pIKK", "spIKKg_n"),
+        canonical_time_seconds=86400.0,
+    )
+    assert rec.suitable == ("spIKKg_n",)
+    assert any("pIKK" in n and "unusable" in n for n in rec.notes)
+    assert any("finer than the composite clock" in n for n in rec.notes)
 
 
 def test_gz06_flagged_tolerance_sensitive():

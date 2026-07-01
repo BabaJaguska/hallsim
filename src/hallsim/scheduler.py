@@ -1068,7 +1068,7 @@ class Scheduler:
             integ.solver,
             t0=t0,
             t1=t1,
-            dt0=min(dt0_base, t1 - t0),
+            dt0=jnp.minimum(dt0_base, t1 - t0),
             y0=state_vec,
             saveat=dfx.SaveAt(t1=True),
             stepsize_controller=integ.controller,

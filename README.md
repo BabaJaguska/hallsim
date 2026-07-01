@@ -250,17 +250,6 @@ make this work on stiff biochemical systems:
   `float32` anywhere silently caps precision and makes an implicit solver reject
   most of its steps.
 
-**Validation in progress.** On GSE248823, fitting the mechanism parameters
-on one arm (DDIS vs control) improves that arm's concordance, but the **held-out**
-arm (rapamycin vs DDIS) does **not** improve — the current composite's models are
-*co-simulated under shared hallmark dials but not yet mechanistically coupled
-tightly enough* for a rapamycin (mTOR) perturbation to propagate to the readouts.
-The contribution here atm is making stiff, composed,
-multi-model systems **differentiably calibratable at all**, plus a held-out test
-that diagnoses where the *model* (not the method) falls short — which motivates
-adding curated cross-model coupling (e.g. a damage/p53 → NF-κB crosstalk model)
-or a learned coupling edge.
-
 ---
 
 ## Getting Started
@@ -414,8 +403,7 @@ via topology.
 Planned work spans the Scheduler (waveform relaxation, IMEX, Mori-Zwanzig
 coupling), models & validation (lipid-metabolism extension, trajectory-level
 validation, stochastic/Gillespie support, multi-cell communication), and
-SBML import (event translation). Full list in
-[docs/roadmap.md](docs/roadmap.md).
+SBML import improvement with event translation.
 
 ---
 

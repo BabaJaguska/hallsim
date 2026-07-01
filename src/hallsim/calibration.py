@@ -73,6 +73,7 @@ import jax
 import jax.flatten_util  # noqa: F401  # for ravel_pytree
 import jax.numpy as jnp
 import optax
+import optax.contrib
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -93,6 +94,7 @@ class CalibrationHistory:
     losses: list[float] = field(default_factory=list)
     param_history: list[ParamPytree] = field(default_factory=list)
     final_params: ParamPytree | None = None
+    best_loss: float = float("inf")
     wall_time_s: float = 0.0
 
     def __str__(self) -> str:
@@ -145,6 +147,11 @@ class Calibrator:
         mode: Literal["forward", "reverse"] = "forward",
         optimizer: optax.GradientTransformation | None = None,
         learning_rate: float = 0.05,
+        reduce_on_plateau: bool = False,
+        plateau_patience: int = 3,
+        plateau_factor: float = 0.5,
+        early_stop_patience: int = 0,
+        early_stop_tol: float = 1e-4,
         verbose: bool = True,
         log_every: int = 1,
     ) -> None:
@@ -156,30 +163,71 @@ class Calibrator:
         self.init_params = init_params
         self.clamps = clamps or {}
         self.mode = mode
-        self.optimizer = optimizer or optax.adam(learning_rate)
+        # Early stopping: 0 disables. Stop after `early_stop_patience`
+        # steps without a > tol loss improvement; return the best params
+        # seen, not the last (the loss is bumpy). Set patience above
+        # plateau_patience so the LR decays before giving up.
+        self.early_stop_patience = early_stop_patience
+        self.early_stop_tol = early_stop_tol
+        # Default optimizer: Adam, optionally with a reduce-LR-on-plateau
+        # tail that halves the step scale after `plateau_patience` steps
+        # without ≥rtol improvement — damps the overshoot a fixed LR shows
+        # on the flat direction-only loss. The tail reads the loss via
+        # update(..., value=loss); `_uses_plateau` gates that call.
+        base = optimizer or optax.adam(learning_rate)
+        self._uses_plateau = reduce_on_plateau and optimizer is None
+        if self._uses_plateau:
+            base = optax.chain(
+                base,
+                optax.contrib.reduce_on_plateau(
+                    factor=plateau_factor,
+                    patience=plateau_patience,
+                    cooldown=1,
+                    rtol=1e-3,
+                ),
+            )
+        self.optimizer = base
         self.verbose = verbose
         self.log_every = max(1, log_every)
+        # Built once, on first fit() step, then reused: jitting the whole
+        # value-and-grad compiles the composite rebuild + solve + adjoint
+        # into one cached executable instead of re-tracing every step.
+        self._vg = None
 
     # ── Autodiff: forward or reverse ───────────────────────────
 
-    def _value_and_grad(self, params: ParamPytree):
-        """Compute (loss, grad) using the configured autodiff mode.
+    def _value_and_grad_fn(self):
+        """Return the jitted ``params -> (loss, grad)`` transform.
 
-        Forward mode flattens the pytree via ``ravel_pytree``, JVPs along
-        each basis direction, then repacks to the original pytree shape.
+        Built once and cached: jitting compiles the whole loss (composite
+        rebuild + solve) and its autodiff into a single reusable
+        executable, so each fit step is an execution rather than a
+        re-trace. Reverse mode is a plain ``value_and_grad``; forward mode
+        flattens the pytree and JVPs along each basis direction (cost
+        scales with parameter count).
         """
+        if self._vg is not None:
+            return self._vg
+
         if self.mode == "reverse":
-            return jax.value_and_grad(self.loss_fn)(params)
+            vg = jax.value_and_grad(self.loss_fn)
+        else:
 
-        flat, unravel = jax.flatten_util.ravel_pytree(params)
+            def vg(params):
+                flat, unravel = jax.flatten_util.ravel_pytree(params)
 
-        def f_flat(flat_x):
-            return self.loss_fn(unravel(flat_x))
+                def f_flat(flat_x):
+                    return self.loss_fn(unravel(flat_x))
 
-        primal = f_flat(flat)
-        eye = jnp.eye(flat.shape[0], dtype=flat.dtype)
-        _, grad_flat = jax.vmap(lambda v: jax.jvp(f_flat, (flat,), (v,)))(eye)
-        return primal, unravel(grad_flat)
+                primal = f_flat(flat)
+                eye = jnp.eye(flat.shape[0], dtype=flat.dtype)
+                _, grad_flat = jax.vmap(
+                    lambda v: jax.jvp(f_flat, (flat,), (v,))
+                )(eye)
+                return primal, unravel(grad_flat)
+
+        self._vg = jax.jit(vg)
+        return self._vg
 
     # ── Clamping ───────────────────────────────────────────────
 
@@ -205,17 +253,33 @@ class Calibrator:
         """
         params = self.init_params
         opt_state = self.optimizer.init(params)
+        value_and_grad = self._value_and_grad_fn()
         history = CalibrationHistory()
+        best_loss = float("inf")
+        best_params = params
+        no_improve = 0
         t0 = time.time()
         for s in range(steps):
-            loss, grad = self._value_and_grad(params)
-            updates, opt_state = self.optimizer.update(grad, opt_state)
+            loss, grad = value_and_grad(params)
+            lf = float(loss)
+            # `loss` is of `params` before this step's update, so `params`
+            # is the point that achieved it — the best-params candidate.
+            if lf < best_loss - self.early_stop_tol:
+                best_loss, best_params, no_improve = lf, params, 0
+            else:
+                no_improve += 1
+            if self._uses_plateau:
+                updates, opt_state = self.optimizer.update(
+                    grad, opt_state, params, value=loss
+                )
+            else:
+                updates, opt_state = self.optimizer.update(grad, opt_state)
             params = optax.apply_updates(params, updates)
             params = self._clamp(params)
-            history.losses.append(float(loss))
+            history.losses.append(lf)
             history.param_history.append(params)
             if self.verbose and (s % self.log_every == 0 or s == steps - 1):
-                msg = f"  [{s+1:3d}/{steps}] loss = {float(loss):.4g}"
+                msg = f"  [{s+1:3d}/{steps}] loss = {lf:.4g}"
                 if isinstance(params, dict):
                     # Show the first 4 scalar keys for compactness.
                     pieces = [
@@ -226,7 +290,19 @@ class Calibrator:
                     if pieces:
                         msg += "  " + "  ".join(pieces)
                 print(msg)
-        history.final_params = params
+            if (
+                self.early_stop_patience
+                and no_improve >= self.early_stop_patience
+            ):
+                if self.verbose:
+                    print(
+                        f"  early stop at {s+1} "
+                        f"(best loss {best_loss:.4g}, "
+                        f"no improvement in {no_improve} steps)"
+                    )
+                break
+        history.final_params = best_params
+        history.best_loss = best_loss
         history.wall_time_s = time.time() - t0
         return history
 
@@ -234,16 +310,6 @@ class Calibrator:
 # ═══════════════════════════════════════════════════════════════════════════
 # High-level framework: Condition, ParameterRef, CalibrationProblem
 # ═══════════════════════════════════════════════════════════════════════════
-
-
-def _normalized(v: jnp.ndarray) -> jnp.ndarray:
-    """Zero-mean, unit-norm. Robust to scale mismatch between sim and data.
-
-    Regularization goes inside the sqrt so the gradient stays finite at
-    the all-zero input (``sqrt(x)`` has divergent derivative at x=0).
-    """
-    v = v - jnp.mean(v)
-    return v / jnp.sqrt(jnp.sum(v**2) + 1e-12)
 
 
 @dataclass(frozen=True)
@@ -396,9 +462,12 @@ class CalibrationProblem:
     Encapsulates the standard pattern for fitting mechanism parameters
     against gene-reporter Δ_data with one or more experimental arms.
     Each Δ_arm is a ``(condition, baseline)`` pair; for each arm in
-    ``fit_arms``, the loss is a normalized cosine distance between
-    sign-adjusted Δ_sim and Δ_data on the reporters. Held-out arms are
-    evaluated in :meth:`evaluate` but not included in the fit.
+    ``fit_arms``, the loss is the MSE between the model's sign-aligned
+    log2 fold-change ``sign·log2(cond/base)`` and the measured log2
+    fold-change on the reporters — commensurable units, so every
+    reporter contributes its O(1) fold-change regardless of the
+    observable's absolute scale. Held-out arms are evaluated in
+    :meth:`evaluate` but not included in the fit.
 
     Parameters
     ----------
@@ -560,7 +629,14 @@ class CalibrationProblem:
         self.t_end = t_end
         self.macro_dt = macro_dt
         self.n_save = n_save
-        self.scheduler_kwargs = scheduler_kwargs or {}
+        # Tuning defaults to the auto-stiffness picker: explicit-solver
+        # sensitivities NaN on stiff groups (p53–Mdm2, NF-κB) though the
+        # primal stays finite. Caller's scheduler_kwargs wins if given.
+        self.scheduler_kwargs = (
+            {"auto_stiffness": True}
+            if scheduler_kwargs is None
+            else scheduler_kwargs
+        )
 
         # Precompute store-path → trailing-axis index for fast lookup.
         self._store_idx = {k: i for i, k in enumerate(composite.store_keys())}
@@ -651,25 +727,42 @@ class CalibrationProblem:
                 )
             return obs_cache[cond_name]
 
-        signs = jnp.asarray([r.sign for r in self.reporters], dtype=float)
         per_arm_losses = []
         for arm in self.fit_arms:
             cond, base = self.arm_pairs[arm]
-            delta_sim = signs * (obs_for(cond) - obs_for(base))
-            # Extract Δ_data for the reporters' genes (drop NaN/missing).
+            lfc_sim = self._log2_fold_change(obs_for(cond), obs_for(base))
+            # Δ_data is already a log2 fold-change (microarray), so the two
+            # are commensurable: MSE keeps magnitude and weighs every
+            # reporter's O(1) log-ratio comparably regardless of the
+            # observable's absolute scale (a 1e-4 pool and a 1e1 pool both
+            # contribute their fold-change, not their raw amplitude).
             delta_data = jnp.asarray(
                 [
                     float(self.data[arm].get(r.gene_symbol, jnp.nan))
                     for r in self.reporters
                 ]
             )
-            # Same-shape comparison; missing genes get a NaN that the
-            # mask removes.
             mask = jnp.isfinite(delta_data)
-            sim_norm = _normalized(jnp.where(mask, delta_sim, 0.0))
-            data_norm = _normalized(jnp.where(mask, delta_data, 0.0))
-            per_arm_losses.append(jnp.mean((sim_norm - data_norm) ** 2))
+            err2 = jnp.where(mask, (lfc_sim - delta_data) ** 2, 0.0)
+            per_arm_losses.append(
+                jnp.sum(err2) / jnp.maximum(jnp.sum(mask), 1.0)
+            )
         return jnp.mean(jnp.stack(per_arm_losses))
+
+    def _log2_fold_change(
+        self, cond: jnp.ndarray, base: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Sign-aligned log2 fold-change per reporter, ``sign·log2(cond/base)``.
+
+        Observables are non-negative pools/means; a small floor keeps the
+        log finite. The result is on the same scale as the measured
+        log2 fold-change, so model and data compare directly.
+        """
+        eps = 1e-12
+        signs = jnp.asarray([r.sign for r in self.reporters], dtype=float)
+        log_cond = jnp.log2(jnp.clip(cond, eps, None))
+        log_base = jnp.log2(jnp.clip(base, eps, None))
+        return signs * (log_cond - log_base)
 
     def warm_up(self, param_values: dict[str, jnp.ndarray]) -> None:
         """Resolve the Scheduler's per-group solvers eagerly.
@@ -773,8 +866,14 @@ class CalibrationProblem:
             cond, base = self.arm_pairs[arm]
             c_obs = obs_for(cond)
             b_obs = obs_for(base)
+            # log2 fold-change, matching the loss and the measured Δ_data
+            # units — magnitude is directly comparable across reporters.
+            eps = 1e-12
             delta_sim_named = {
-                r.observable: c_obs[r.observable] - b_obs[r.observable]
+                r.observable: float(
+                    jnp.log2(max(c_obs[r.observable], eps))
+                    - jnp.log2(max(b_obs[r.observable], eps))
+                )
                 for r in self.reporters
             }
             results[arm] = compute_concordance(

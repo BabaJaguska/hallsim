@@ -237,6 +237,13 @@ def apply_hallmarks(
 # Hallmark definitions for ERiQ-based processes.
 # Process names match those in build_eriq_composite().
 
+# GZ06's psi (damage signal) at full DDIS. The Genomic Instability
+# mapping interpolates psi from the fitted basal level (control) up to
+# this full-dose value, so control cells retain a nonzero basal p53 from
+# spontaneous DSBs rather than collapsing to p53=0. See
+# docs/gz06-basal-p53.md.
+GZ06_PSI_FULL = 1.0
+
 HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
     "Stem Cell Exhaustion": HallmarkHandle(
         name="Stem Cell Exhaustion",
@@ -367,15 +374,20 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             # GZ06 (Geva-Zatorsky 2006 p53-Mdm2 oscillator): the same
             # severity drives its psi damage-signal independently, at
             # GZ06's own calibrated scale. No DP14↔GZ06 topology
-            # coupling — the hallmark is the shared knob.
+            # coupling — the hallmark is the shared knob. Interpolates
+            # from the fitted basal psi (control, base) to GZ06_PSI_FULL
+            # (DDIS): GZ06 has no basal p53 production (production =
+            # beta_x·psi), so psi=0 would force p53→0, biologically wrong.
+            # base is the basal spontaneous-DSB level (fittable). See
+            # docs/gz06-basal-p53.md.
             ParameterMapping(
                 process_name="gz06",
                 param_name="parameters.psi",
-                transform=lambda h, base: base * h,
+                transform=lambda h, base: base * (1.0 - h) + GZ06_PSI_FULL * h,
                 description=(
-                    "GZ06 damage-signal parameter: zero at severity=0 "
-                    "(no damage), full base at severity=1 (calibrated "
-                    "full-dose value)"
+                    "GZ06 damage signal: fitted basal psi at severity=0 "
+                    "(spontaneous-DSB baseline, nonzero p53), full-dose "
+                    "GZ06_PSI_FULL at severity=1 (DDIS)"
                 ),
             ),
         ],

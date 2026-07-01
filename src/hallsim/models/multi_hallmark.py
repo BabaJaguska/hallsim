@@ -30,18 +30,25 @@ The three constituent SBML models:
   insult — both models reflect the same experimental condition without
   needing dynamic coupling between them).
 - **Ihekwaba 2004** (BIOMD0000000230) supplies NF-κB / IκBα dynamics.
-  Its ``IkBa`` species is the NFKBIA reporter. NF-κB is driven by
-  DallePezze 2014's mTORC1 through the :class:`MtorNFkBActivator` edge
-  (mTOR → IKK; see below), so rapamycin (mTOR ↓) suppresses NF-κB
-  activity here rather than leaving the module inert.
+  Its ``IkBa`` species is the NFKBIA reporter. NF-κB is driven into the
+  module through two DP14 channels (see below), so both rapamycin
+  (via mTOR) and genotoxic stress (via DNA damage) reach the NFKBIA
+  readout rather than leaving the module inert.
 
-The one cross-publication mechanistic edge:
+The two cross-publication mechanistic edges, both additive into
+Ihekwaba's ``IKK`` pool:
 
 - **mTORC1 → IKK** (:class:`hallsim.models.mtor_nfkb.MtorNFkBActivator`)
-  reads DP14's ``mTORC1_pS2448`` and contributes a Hill-gated positive
-  derivative to Ihekwaba's ``IKK`` pool. Activating sign per Dan 2008 /
-  Laberge 2015. This is the composite's first inter-model port wiring;
-  DP14↔GZ06 remain coupled only through the shared hallmark severity.
+  reads DP14's ``mTORC1_pS2448`` and Hill-gates a positive derivative
+  onto ``IKK``. Activating sign per Dan 2008 / Laberge 2015 — the
+  nutrient-sensing / rapamycin channel.
+- **DNA damage → IKK**
+  (:class:`hallsim.models.damage_nfkb.DamageNFkBActivator`) reads DP14's
+  ``DNA_damage`` and Hill-gates a positive derivative onto ``IKK``.
+  Activating sign per the ATM → NEMO → IKK genotoxic pathway (Wu 2006 /
+  Miyamoto 2011) — the genomic-instability channel through which the
+  Genomic Instability hallmark reaches NF-κB. DP14↔GZ06 remain coupled
+  only through the shared hallmark severity.
 
 Geva-Zatorsky 2006 ships vendored under ``models/zatorsky2006/`` and
 loads from disk. DallePezze 2014 and Ihekwaba 2004 are not vendored in
@@ -108,6 +115,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hallsim.composite import Composite
+from hallsim.models.damage_nfkb import DamageNFkBActivator
 from hallsim.models.mtor_nfkb import MtorNFkBActivator
 from hallsim.models.running_integral import RunningIntegral
 from hallsim.sbml_import import process_from_sbml
@@ -152,12 +160,19 @@ DP14_IRRADIATION_RATE_DEFAULT = 9237.72311545872
 DP14_IRRADIATION_RATE_NAME = "DNA_damaged_by_irradiation"
 
 # GZ06's damage-signal parameter. Geva-Zatorsky 2006 calibrated their
-# p53-Mdm2 oscillator with ψ representing the damage stimulus; the
-# original paper uses ψ ≈ 1 as the "full irradiation" reference. Driven
-# by the Genomic Instability hallmark at GZ06's own scale, independent
-# of DP14's damage trajectory.
+# p53-Mdm2 oscillator with ψ representing the damage stimulus; ψ ≈ 1 is
+# the "full irradiation" reference (GZ06_PSI_FULL in hallmarks).
+#
+# In GZ06 p53 production is entirely ψ-driven (rate = beta_x·psi,
+# alpha_x=0), so ψ=0 forces p53→0 — biologically wrong: unstressed cells
+# keep a low basal p53 from ~50 spontaneous DSBs per cell cycle
+# (docs/gz06-basal-p53.md). So the composite seeds ψ at a nonzero BASAL
+# level and the Genomic Instability hallmark interpolates it up to
+# GZ06_PSI_FULL at DDIS. The basal level is a fitted mechanism parameter
+# (calibrated against the modest measured DDB2 / p53-target fold-change).
 GZ06_PSI_NAME = "psi"
-GZ06_PSI_DEFAULT = 1.0
+GZ06_PSI_DEFAULT = 1.0  # full-damage reference (standalone screening)
+GZ06_PSI_BASAL_DEFAULT = 0.3  # control basal ψ; fitted in the composite
 
 # Canonical clock for the composite: one t_span unit = one day. DP14
 # (the senescence spine) is natively in days, so it runs unchanged;
@@ -189,14 +204,14 @@ def build_multi_hallmark_composite(*, validate: bool = True):
     nfkb = process_from_sbml(str(NFKB_SBML_PATH), name="nfkb").reconciled_to(
         CANONICAL_TIME_SECONDS
     )
-    # GZ06's psi is driven by the Genomic Instability hallmark at GZ06's
-    # own calibrated scale (~1.0 at full DDIS), not by a topology edge from
-    # DP14. Hallmark severity simultaneously sets DP14's irradiation
-    # exposure and GZ06's psi — same knob, independent regimes.
+    # GZ06's psi is driven by the Genomic Instability hallmark, which
+    # interpolates from this basal value (control) up to GZ06_PSI_FULL at
+    # DDIS — not by a topology edge from DP14. Seeded at the basal level
+    # so control keeps a nonzero p53; the basal value is fittable.
     gz06 = process_from_sbml(
         str(GZ06_SBML_PATH),
         name="gz06",
-        parameters={GZ06_PSI_NAME: GZ06_PSI_DEFAULT},
+        parameters={GZ06_PSI_NAME: GZ06_PSI_BASAL_DEFAULT},
     ).reconciled_to(CANONICAL_TIME_SECONDS)
     processes: dict = {
         "dp14": process_from_sbml(
@@ -216,6 +231,14 @@ def build_multi_hallmark_composite(*, validate: bool = True):
         # derivative (intrinsic + mTOR drive) is solved in one group; the
         # slow mTOR input is read frozen across the fast macro-step.
         "mtor_nfkb": MtorNFkBActivator(timescale=nfkb.timescale),
+        # DNA damage → IKK crosstalk edge: couples DP14's genomic-
+        # instability state to the NF-κB module so the Genomic Instability
+        # hallmark (which drives DP14's DNA_damage) reaches the NFKBIA
+        # readout. Activating sign per the ATM → NEMO → IKK genotoxic
+        # pathway (Wu 2006 / Miyamoto 2011); required for the NF-κB-
+        # dependent SASP in DDIS senescence (Salminen 2012). Shares NFKB's
+        # timescale so both IKK drives solve in one group.
+        "damage_nfkb": DamageNFkBActivator(timescale=nfkb.timescale),
         # Phase-insensitive readouts for the two oscillating reporters.
         # Each RunningIntegral integrates its oscillator (∫x, ∫IkBat)
         # *in its source's group* (matched timescale) so the integral is
@@ -233,6 +256,10 @@ def build_multi_hallmark_composite(*, validate: bool = True):
     topology: dict = {
         "mtor_nfkb": {
             "mTORC1_pS2448": "dp14/mTORC1_pS2448",
+            "IKK": "nfkb/IKK",
+        },
+        "damage_nfkb": {
+            "DNA_damage": "dp14/DNA_damage",
             "IKK": "nfkb/IKK",
         },
         "gz06_x_integral": {

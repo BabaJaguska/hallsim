@@ -375,6 +375,219 @@ def screen_process(
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Coupling-source suitability — "is this model a good addition to a composite?"
+# ═══════════════════════════════════════════════════════════════════════════
+
+SUITABLE = "suitable"
+DEAD_SINK = "dead_sink"
+UNBOUNDED_ACCUMULATOR = "unbounded_accumulator"
+DEPLETING_RESERVOIR = "depleting_reservoir"
+STATIC = "static"
+
+
+@dataclass(frozen=True)
+class CouplingSource:
+    """Verdict for one state of a candidate model used as a coupling source.
+
+    A *coupling source* is a state another model reads (via an INPUT port)
+    and adds into its own derivative. Only a **bounded, actively-turned-over**
+    state is safe to drive another model with; the other verdicts each name a
+    concrete failure mode:
+
+    - ``suitable`` — produced and consumed; reaches a bounded quasi-steady
+      level under sustained input. Safe to couple from.
+    - ``dead_sink`` — produced, consumed by nothing, and read by no rate law
+      (an inert accumulator the importer freezes at its initial value).
+      Reads as a constant; unfreezing it makes it diverge. **Never couple.**
+    - ``unbounded_accumulator`` — produced, never consumed, but read by the
+      dynamics. Grows without bound under sustained input, so an additive
+      edge from it diverges. **Never couple.**
+    - ``depleting_reservoir`` — consumed, never produced; only declines
+      toward zero. Exports a monotone drain, not a signal. Marginal.
+    - ``static`` — neither produced nor consumed; carries no dynamics.
+    """
+
+    state: str
+    verdict: str
+    produced: bool
+    consumed: bool
+    frozen: bool
+    reason: str
+
+    @property
+    def ok(self) -> bool:
+        return self.verdict == SUITABLE
+
+
+@dataclass
+class CouplingRecommendation:
+    """Whether a candidate model exposes a usable coupling source.
+
+    ``recommended`` is True when at least one *focused* state (those named
+    in ``focus``, else all states) is ``suitable``. ``notes`` carry dynamic
+    caveats that structure alone cannot settle — e.g. a native forcing clock
+    far finer than the composite's, which makes a built-in input pulse
+    unresolvable so the constituent needs a sustained external driver to
+    activate under composition.
+    """
+
+    name: str
+    sources: tuple[CouplingSource, ...]
+    focus: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
+
+    def source(self, state: str) -> CouplingSource:
+        for s in self.sources:
+            if s.state == state:
+                return s
+        raise KeyError(f"{self.name!r} has no state {state!r}")
+
+    @property
+    def _focused(self) -> tuple[CouplingSource, ...]:
+        if not self.focus:
+            return self.sources
+        return tuple(s for s in self.sources if s.state in self.focus)
+
+    @property
+    def suitable(self) -> tuple[str, ...]:
+        return tuple(s.state for s in self._focused if s.ok)
+
+    @property
+    def recommended(self) -> bool:
+        return bool(self.suitable)
+
+    def __str__(self) -> str:
+        scope = f" (for {', '.join(self.focus)})" if self.focus else ""
+        verdict = "RECOMMENDED" if self.recommended else "NOT RECOMMENDED"
+        lines = [
+            f"{self.name}: {verdict} as a coupling source{scope}.",
+            f"  {'state':<16}{'verdict':<22}why",
+        ]
+        shown = self._focused if self.focus else self.sources
+        for s in sorted(shown, key=lambda x: (x.ok, x.state), reverse=True):
+            lines.append(f"  {s.state:<16}{s.verdict:<22}{s.reason}")
+        if self.suitable:
+            lines.append(f"  → couple from: {', '.join(self.suitable)}")
+        for note in self.notes:
+            lines.append(f"  ⚠ {note}")
+        return "\n".join(lines)
+
+
+def _reaction_roles(proc):
+    """``(produced, consumed)`` boolean arrays per species.
+
+    Read off the stoichiometric matrix sbmltoodejax bakes into the imported
+    model (species × reactions): a positive entry produces the species in
+    some reaction, a negative one consumes it. This is the same matrix the
+    rate law integrates, so producer/consumer structure is exact, not
+    re-parsed from the SBML.
+    """
+    host = getattr(proc._model, "modelstepfunc", proc._model)
+    sm = np.asarray(host.ratefunc.stoichiometricMatrix)
+    return np.any(sm > 0, axis=1), np.any(sm < 0, axis=1)
+
+
+def coupling_source_verdict(proc, state: str) -> CouplingSource:
+    """Classify one state of an imported model as a coupling source.
+
+    See :class:`CouplingSource` for the verdict meanings. Used both
+    standalone (guard a single proposed edge) and by
+    :func:`recommend_coupling_source` (survey every state).
+    """
+    if not hasattr(proc, "_species_names"):
+        raise TypeError(
+            "coupling-source analysis needs an imported SBML process "
+            "(stoichiometry-based); got a generic Process."
+        )
+    names = list(proc._species_names)
+    if state not in names:
+        raise KeyError(f"{proc._name!r} has no state {state!r}")
+    i = names.index(state)
+    produced, consumed = _reaction_roles(proc)
+    p, c = bool(produced[i]), bool(consumed[i])
+    frozen = i in proc._frozen_indices
+
+    if frozen:
+        verdict, reason = DEAD_SINK, (
+            "produced, consumed by nothing, read by no rate law — frozen at "
+            "its initial value; coupling from it feeds a constant"
+        )
+    elif p and not c:
+        verdict, reason = UNBOUNDED_ACCUMULATOR, (
+            "produced but never consumed — grows without bound under "
+            "sustained input; an additive edge from it diverges"
+        )
+    elif c and not p:
+        verdict, reason = DEPLETING_RESERVOIR, (
+            "consumed but never replenished — only declines toward zero; "
+            "exports a monotone drain, not a signal"
+        )
+    elif p and c:
+        verdict, reason = SUITABLE, (
+            "produced and consumed — bounded, actively turned over"
+        )
+    else:
+        verdict, reason = STATIC, "neither produced nor consumed — no dynamics"
+    return CouplingSource(
+        state=state,
+        verdict=verdict,
+        produced=p,
+        consumed=c,
+        frozen=frozen,
+        reason=reason,
+    )
+
+
+def recommend_coupling_source(
+    proc,
+    *,
+    target_states: tuple[str, ...] = (),
+    canonical_time_seconds: float | None = None,
+) -> CouplingRecommendation:
+    """Recommend whether an imported model is a good coupling addition.
+
+    Surveys every state's coupling-source suitability (structural, from the
+    stoichiometry) and, when ``canonical_time_seconds`` is given, adds a
+    clock-scale caveat: a model whose native forcing clock is far finer than
+    the composite's cannot resolve its own built-in input pulse on the shared
+    axis, so it needs a sustained external driver to activate at all.
+
+    Pass ``target_states`` to focus the verdict on the biologically-intended
+    output(s) — the states you actually mean to couple from — so
+    ``recommended`` answers *for that coupling intent*, not merely whether
+    some usable state exists somewhere in the model.
+    """
+    sources = tuple(
+        coupling_source_verdict(proc, s) for s in proc._species_names
+    )
+    notes: list[str] = []
+
+    bad = [s for s in sources if s.state in target_states and not s.ok]
+    if bad:
+        notes.append(
+            "requested source(s) unusable: "
+            + ", ".join(f"{s.state} ({s.verdict})" for s in bad)
+        )
+
+    native = getattr(proc, "native_time_seconds", None)
+    if canonical_time_seconds is not None and native:
+        ratio = canonical_time_seconds / native
+        if ratio > 100.0:
+            notes.append(
+                f"native forcing clock ({native:g}s) is {ratio:.0f}× finer "
+                f"than the composite clock ({canonical_time_seconds:g}s); a "
+                "built-in input pulse is unresolved on the shared axis — this "
+                "constituent needs a sustained external driver to activate"
+            )
+    return CouplingRecommendation(
+        name=proc._name,
+        sources=sources,
+        focus=tuple(target_states),
+        notes=tuple(notes),
+    )
+
+
 def screen_composite(
     composite: Composite,
     t_ends: dict[str, float],
