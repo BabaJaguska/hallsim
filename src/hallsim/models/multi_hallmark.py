@@ -240,12 +240,13 @@ def build_multi_hallmark_composite(*, validate: bool = True):
         # timescale so both IKK drives solve in one group.
         "damage_nfkb": DamageNFkBActivator(timescale=nfkb.timescale),
         # Phase-insensitive readouts for the two oscillating reporters.
-        # Each RunningIntegral integrates its oscillator (∫x, ∫IkBat)
-        # *in its source's group* (matched timescale) so the integral is
-        # taken at the oscillation's own resolution; the DDB2 / NFKBIA
-        # reporters read the trailing-window mean off these via
-        # `window_mean`. Replaces reading the phase-dependent endpoint.
-        "gz06_x_integral": RunningIntegral(timescale=gz06.timescale),
+        # RunningIntegrals over each oscillator, in its source's group so
+        # the integral sees the real oscillation. DDB2 reads ∫x² (power=2)
+        # → RMS: GZ06's mean p53 is damage-blind (buffered), the damage is
+        # in the pulsing, and RMS captures it. NFKBIA reads ∫IkBat → mean.
+        "gz06_x2_integral": RunningIntegral(
+            timescale=gz06.timescale, power=2.0
+        ),
         "nfkb_ikbat_integral": RunningIntegral(timescale=nfkb.timescale),
     }
     # The mtor_nfkb edge reads DP14's active mTORC1 and writes additively
@@ -262,9 +263,9 @@ def build_multi_hallmark_composite(*, validate: bool = True):
             "DNA_damage": "dp14/DNA_damage",
             "IKK": "nfkb/IKK",
         },
-        "gz06_x_integral": {
+        "gz06_x2_integral": {
             "source": "gz06/x",
-            "integral": "gz06/x_integral",
+            "integral": "gz06/x2_integral",
         },
         "nfkb_ikbat_integral": {
             "source": "nfkb/IkBat",

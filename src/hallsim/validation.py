@@ -360,9 +360,11 @@ class GraphAnalyzer:
                     path_writers.setdefault(sp, []).append(proc_name)
                 if port.role == PortRole.INPUT:
                     path_readers.setdefault(sp, []).append(proc_name)
-                # EVOLVED ports are both: the process reads the current value
-                # (via the port view) and writes a derivative.
-                if port.role == PortRole.EVOLVED:
+                # EVOLVED ports usually read the current value too (their
+                # derivative can depend on it) — count as reader. A pure
+                # source (reads_value=False) writes but does not read, so it
+                # forms no feedback edge.
+                if port.role == PortRole.EVOLVED and port.reads_value:
                     path_readers.setdefault(sp, []).append(proc_name)
 
         # Edges: writer → reader (skip self-loops)

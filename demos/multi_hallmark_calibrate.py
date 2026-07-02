@@ -1,96 +1,69 @@
-"""End-to-end gene-reporter validation on the multi-hallmark composite.
+"""Calibrate the multi-hallmark flagship composite against GSE248823.
 
-Wires DP14 + NFKB + GZ06 against GSE248823 (etoposide DDIS ± rapamycin)
-through the high-level :class:`hallsim.calibration.CalibrationProblem`
-API:
+THE end-to-end calibration demo. Three published SBML models (DallePezze
+2014 + Geva-Zatorsky 2006 + Ihekwaba 2004), stitched by literature-grounded
+coupling edges, fit against etoposide-DDIS ± rapamycin transcriptomics.
 
-- Three experimental arms: ctrl, DDIS, RAPA — each a hallmark severity
-  profile (Genomic Instability + Deregulated Nutrient Sensing).
-- Two mechanism parameters fit jointly: DP14's ``DNA_damaged_by_irradiation``
-  rate constant and GZ06's ``psi`` damage-signal amplitude. The Genomic
-  Instability hallmark scales each by severity at its own model's
-  calibrated regime — no DP14↔GZ06 topology coupling.
-- Held-out validation: calibrate on DDIS_vs_ctrl, evaluate concordance
-  on RAPA_vs_DDIS without using it in the loss.
-- Six gene reporters (CDKN1A, DDB2, HMOX1, NFKBIA, CYCS, EIF4EBP1)
-  via :data:`MULTI_HALLMARK_REPORTERS`. DDB2 routes through GZ06's
-  oscillating p53 and uses cycle-averaging for phase-insensitive
-  comparison to bulk RNA.
-
-Usage::
+Fits eight mechanism parameters (one per reporter axis, plus the two NF-κB
+IKK edge strengths and GZ06's basal-p53 ψ) on the DDIS-vs-control arm and
+evaluates concordance on the held-out rapamycin arm, using a magnitude-aware
+log2 fold-change loss. Prints out-of-the-box vs calibrated vs measured per
+reporter and writes the comparison plot.
 
     .venv_hallsim/bin/python demos/multi_hallmark_calibrate.py
+
+Needs the GSE248823 matrix under data/FibroblastsDNA_dmg_Rapamycin/; the
+SBML models download from BioModels on first import and cache locally.
 """
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
-# float64: the DP14 forward-mode sensitivities are large near the damage
-# regime and overflow float32 to NaN during the calibration JVP (the
-# primal solve is fine in float32; only the tangent overflows). Enable
-# before any JAX array is created.
 import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
-from hallsim.gene_reporters import (
+import jax.numpy as jnp  # noqa: E402
+import numpy as np  # noqa: E402
+
+from hallsim.calibration import (  # noqa: E402
+    CalibrationProblem,
+    Condition,
+    ParameterRef,
+)
+from hallsim.gene_reporters import (  # noqa: E402
     MULTI_HALLMARK_REPORTERS,
     GeneExpressionDataset,
 )
-from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+from hallsim.models.multi_hallmark import (  # noqa: E402
+    build_multi_hallmark_composite,
+)
 
-
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "FibroblastsDNA_dmg_Rapamycin"
 SERIES_MATRIX = DATA_DIR / "GSE248823_series_matrix.txt"
 PLATFORM = DATA_DIR / "GPL17586-45144.txt"
 
-# Sample positions in GSE248823's 20-sample series matrix.
-# Same indexing as demos/concordance_reporters.py — etoposide is the
-# DDIS arm, RAS is the OIS arm, RAPA is etoposide+rapamycin rescue.
+# GSE248823 columns: etoposide DDIS at D00 (baseline) and D14, plus
+# etoposide + rapamycin at D14 (D14 is the terminal sampling timepoint).
 SAMPLE_POSITION_GROUPS = {
     "ETOPOSIDE_D00": [0, 1],
     "ETOPOSIDE_D14": [4, 5],
     "ETOPOSIDE_RAPA_D14": [8, 9],
 }
 
-
-T_END = 25.0
-MACRO_DT = 5.0
-N_SAVE = 6
+ARMS = ["DDIS_vs_ctrl", "RAPA_vs_DDIS"]
 
 
-def print_concordance(results: dict) -> None:
-    print(f"\n  {'arm':<20}  {'sign agree':>11}  {'Spearman r':>12}  {'n':>3}")
-    print(f"  {'-'*20}  {'-'*11}  {'-'*12}  {'-'*3}")
-    for arm, r in results.items():
-        sa = r.sign_agreement * 100
-        rho = r.spearman_r
-        print(f"  {arm:<20}  {sa:>10.1f}%  {rho:>+12.3f}  {r.n_compared:>3}")
-
-
-def main() -> None:
-    print("=" * 78)
-    print("HallSim — multi-hallmark composite gene-reporter validation")
-    print("=" * 78)
-
-    # 1. Load gene expression
-    print("\n[1/4] Loading GSE248823 gene-expression matrix ...")
+def build_problem() -> CalibrationProblem:
     ds = GeneExpressionDataset.from_series_matrix(
         SERIES_MATRIX,
         PLATFORM,
         sample_groups={},
         sample_position_groups=SAMPLE_POSITION_GROUPS,
     )
-    print(f"      {ds.gene_expr.shape[0]} gene symbols × "
-          f"{ds.gene_expr.shape[1]} samples")
-
-    # 2. Build problem
-    print("\n[2/4] Wiring CalibrationProblem ...")
-    problem = CalibrationProblem(
+    return CalibrationProblem(
         composite=build_multi_hallmark_composite(),
         reporters=MULTI_HALLMARK_REPORTERS,
         conditions={
@@ -124,141 +97,245 @@ def main() -> None:
             "DDIS_vs_ctrl": ("DDIS", "ctrl"),
             "RAPA_vs_DDIS": ("RAPA", "DDIS"),
         },
-        # Mechanism candidates — biological rate constants that vary
-        # across cell states / genotypes / disease conditions, that
-        # gene-expression data legitimately informs.
-        #
-        #   etoposide_potency ← dp14.DNA_damaged_by_irradiation
-        #                       (damage per unit exposure — the dose knob.
-        #                        Severity sets the Irradiation *level*; this
-        #                        is what "full exposure" means in DP14 units,
-        #                        recalibrated from DallePezze's γ value for
-        #                        etoposide. No longer hallmark-targeted, so
-        #                        it is a plain fittable mechanism parameter.)
-        #   HMOX1   ← dp14.ROS_turnover           (ROS clearance)
-        #   CDKN1A  ← dp14.CDKN1A_transcr_...     (p21 transcription gain)
-        #   CYCS    ← dp14.mitophagy_inactiv_...  (mTOR→mitophagy)
-        #   DDB2    ← gz06.alpha_y                (Mdm2 turnover, p53 ampl.)
-        #
-        # EIF4EBP1's mTOR phos rate is correctly hallmark-controlled.
+        # One mechanism knob per reporter axis, plus the two NF-κB IKK edge
+        # strengths and GZ06's basal-p53 ψ. Each has a log-normal MAP prior
+        # (center = literature/derived value; sigma in log10 decades) so the
+        # under-constrained fit (8 params, 6 fit-arm reporters) stays
+        # physical. Edges are anchored to the Ihekwaba IKK pool scale (0.1);
+        # see docs/coupling-edge-priors.md and docs/gz06-basal-p53.md.
         params={
             "etoposide_potency": ParameterRef(
-                process_name="dp14",
-                field="parameters.DNA_damaged_by_irradiation",
+                "dp14",
+                "parameters.DNA_damaged_by_irradiation",
                 init=10.0,
                 clamp=(0.01, 10000.0),
-                description=(
-                    "DNA damage produced per unit Irradiation exposure. "
-                    "DallePezze's published 9237.72 is the γ-irradiation "
-                    "value (drives DNA_damage to ~28k); fit here to the "
-                    "etoposide DDIS regime. Severity sets the exposure "
-                    "level, not this potency."
-                ),
+                prior=10.0,
+                prior_sigma=1.0,
             ),
             "ROS_turnover": ParameterRef(
-                process_name="dp14",
-                field="parameters.ROS_turnover",
+                "dp14",
+                "parameters.ROS_turnover",
                 init=3.231,
                 clamp=(0.1, 50.0),
-                description=(
-                    "DP14's ROS clearance rate. Controls steady-state "
-                    "ROS pool size. Informs HMOX1 reporter via "
-                    "Nrf2/ARE-driven antioxidant response."
-                ),
+                prior=3.231,
+                prior_sigma=0.5,
             ),
             "CDKN1A_transcr": ParameterRef(
-                process_name="dp14",
-                field="parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
+                "dp14",
+                "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
                 init=0.085,
                 clamp=(0.001, 5.0),
-                description=(
-                    "p21 (CDKN1A) transcription rate via "
-                    "FoxO3a × DNA_damage. Direct amplitude knob for "
-                    "the CDKN1A reporter — gain on the damage-to-p21 "
-                    "cascade."
-                ),
+                prior=0.085,
+                prior_sigma=0.5,
             ),
             "mitophagy_inactiv": ParameterRef(
-                process_name="dp14",
-                field="parameters.mitophagy_inactiv_by_mTORC1_pS2448",
+                "dp14",
+                "parameters.mitophagy_inactiv_by_mTORC1_pS2448",
                 init=646.0,
                 clamp=(1.0, 10000.0),
-                description=(
-                    "mTORC1's negative effect on mitophagy. Drives "
-                    "the rapamycin axis (low mTOR → de-suppressed "
-                    "mitophagy → mito turnover). Informs CYCS via "
-                    "Mito_mass_new."
-                ),
+                prior=646.0,
+                prior_sigma=0.5,
             ),
             "alpha_y": ParameterRef(
-                process_name="gz06",
-                field="parameters.alpha_y",
+                "gz06",
+                "parameters.alpha_y",
                 init=0.8,
                 clamp=(0.01, 10.0),
-                description=(
-                    "GZ06's Mdm2 protein degradation rate. Controls "
-                    "p53 oscillation amplitude. Informs DDB2 via "
-                    "cycle-averaged p53 level."
-                ),
+                prior=0.8,
+                prior_sigma=0.5,
+            ),
+            "psi_basal": ParameterRef(
+                "gz06",
+                "parameters.psi",
+                init=0.3,
+                clamp=(0.02, 0.95),
+                prior=0.3,
+                prior_sigma=0.5,
+            ),
+            "damage_to_nfkb": ParameterRef(
+                "damage_nfkb",
+                "k_act",
+                init=0.1,
+                clamp=(1e-4, 1.0),
+                prior=0.1,
+                prior_sigma=0.5,
+            ),
+            "mtor_to_nfkb": ParameterRef(
+                "mtor_nfkb",
+                "k_act",
+                init=0.1,
+                clamp=(1e-4, 1.0),
+                prior=0.1,
+                prior_sigma=0.5,
             ),
         },
         fit_arms=["DDIS_vs_ctrl"],
         held_out_arms=["RAPA_vs_DDIS"],
-        t_end=T_END,
-        macro_dt=MACRO_DT,
-        n_save=N_SAVE,
-        # Solvers are chosen per group automatically: both DP14+GZ06
-        # (λ≈-3e5) and NF-κB (λ≈-1.7e4) are stiff, so the Scheduler routes
-        # them to an implicit (A-stable) solver with a magnitude-scaled
-        # vector atol — which is what keeps the forward sensitivity from
-        # overflowing to NaN. No solver pinned here.
-    )
-    print(
-        f"      {len(problem.reporters)} reporters × "
-        f"{len(problem.conditions)} conditions × "
-        f"{len(problem.params)} fittable params"
+        prior_weight=0.03,
+        t_end=14.0,
+        macro_dt=3.5,
+        n_save=5,
     )
 
-    # 3. Pre-fit baseline
-    print("\n[3/4] Pre-fit concordance (default parameters) ...")
-    init_params = {
-        k: __import__("jax").numpy.asarray(p.init)
-        for k, p in problem.params.items()
-    }
-    t0 = time.time()
-    pre_results = problem.evaluate(init_params)
-    print(f"      evaluate ran in {time.time()-t0:.1f}s")
-    print_concordance(pre_results)
 
-    # 4. Fit + post-fit concordance
-    print("\n[4/4] Fitting (20 Adam steps, reverse-mode autodiff) ...")
-    t0 = time.time()
+def _rows_by_gene(result):
+    return {r.reporter.gene_symbol: r for r in result.rows}
+
+
+def print_table(pre, post) -> None:
+    print("\n" + "=" * 74)
+    print("OUT-OF-THE-BOX vs CALIBRATED vs MEASURED  (log2 fold-change)")
+    print("=" * 74)
+    for arm in ARMS:
+        tag = "FIT" if arm == "DDIS_vs_ctrl" else "HELD-OUT"
+        pre_r, post_r = _rows_by_gene(pre[arm]), _rows_by_gene(post[arm])
+        print(f"\n[{tag}] {arm}")
+        print(
+            f"  {'gene':<9}{'measured':>10}{'model(oob)':>12}"
+            f"{'model(cal)':>12}   sign"
+        )
+        for g in pre_r:
+            s0 = "OK" if pre_r[g].sign_match else "X"
+            s1 = "OK" if post_r[g].sign_match else "X"
+            print(
+                f"  {g:<9}{pre_r[g].delta_data:>+10.3f}"
+                f"{pre_r[g].delta_sim:>+12.4f}"
+                f"{post_r[g].delta_sim:>+12.4f}   {s0:>2}→{s1:<2}"
+            )
+        print(
+            f"  panel: sign-agree {pre[arm].sign_agreement * 100:.0f}%→"
+            f"{post[arm].sign_agreement * 100:.0f}%   "
+            f"Spearman {pre[arm].spearman_r:+.3f}→"
+            f"{post[arm].spearman_r:+.3f}"
+        )
+
+
+def plot(pre, post, path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
+    for ax, arm in zip(axes, ARMS):
+        pre_r, post_r = _rows_by_gene(pre[arm]), _rows_by_gene(post[arm])
+        genes = list(pre_r)
+        x = np.arange(len(genes))
+        w = 0.26
+        ax.bar(
+            x - w,
+            [pre_r[g].delta_data for g in genes],
+            w,
+            label="measured",
+            color="#333",
+        )
+        ax.bar(
+            x,
+            [pre_r[g].delta_sim for g in genes],
+            w,
+            label="model (out-of-box)",
+            color="#bbb",
+        )
+        ax.bar(
+            x + w,
+            [post_r[g].delta_sim for g in genes],
+            w,
+            label="model (calibrated)",
+            color="#2a7",
+        )
+        ax.axhline(0, color="k", lw=0.5)
+        ax.set_xticks(x)
+        ax.set_xticklabels(genes, rotation=45, ha="right")
+        tag = "FIT" if arm == "DDIS_vs_ctrl" else "HELD-OUT"
+        ax.set_title(f"{tag}: {arm}")
+    axes[0].set_ylabel("log2 fold-change")
+    axes[0].legend(loc="best", fontsize=9)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=130)
+
+
+def plot_history(problem, history, path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    losses = np.asarray(history.losses)
+    epochs = np.arange(1, len(losses) + 1)
+    best = int(np.argmin(losses))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    ax1.plot(epochs, losses, color="#2a7")
+    ax1.scatter(
+        [best + 1],
+        [losses[best]],
+        color="k",
+        zorder=5,
+        label=f"best {losses[best]:.4g} @ epoch {best + 1}",
+    )
+    ax1.set_yscale("log")
+    ax1.set_xlabel("epoch")
+    ax1.set_ylabel("loss (log2FC MSE)")
+    ax1.set_title("training loss")
+    ax1.legend()
+
+    # Each param's position within its clamp range, in log space (the
+    # params span orders of magnitude), so trajectories are comparable.
+    for name, ref in problem.params.items():
+        lo, hi = ref.clamp
+        vals = np.asarray([float(ph[name]) for ph in history.param_history])
+        norm = (np.log(vals) - np.log(lo)) / (np.log(hi) - np.log(lo))
+        ax2.plot(epochs, norm, label=name)
+    ax2.set_ylim(-0.02, 1.02)
+    ax2.set_xlabel("epoch")
+    ax2.set_ylabel("param (log-position in clamp range)")
+    ax2.set_title("parameter trajectories")
+    ax2.legend(fontsize=7, loc="best")
+
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=130)
+
+
+def main() -> None:
+    problem = build_problem()
+    init = {k: jnp.asarray(p.init) for k, p in problem.params.items()}
+
+    print("[1/3] out-of-the-box concordance ...", flush=True)
+    pre = problem.evaluate(init)
+    for arm in ARMS:
+        print(pre[arm], flush=True)
+
+    print("[2/3] fitting ...", flush=True)
     history = problem.fit(
-        steps=20, mode="reverse", learning_rate=0.05, verbose=True
-    )
-    print(f"\n      Fit ran in {time.time()-t0:.1f}s")
-    print(f"      {history}")
-
-    print("\n      Post-fit concordance:")
-    post_results = problem.evaluate(history.final_params)
-    print_concordance(post_results)
-
-    print("\n      Fitted parameters:")
-    for k, v in history.final_params.items():
-        print(f"        {k:<25} = {float(v):.6g}")
-
-    print(
-        "\n      Held-out RAPA row is the validation number — calibrate on "
-        "DDIS_vs_ctrl, evaluate on RAPA_vs_DDIS."
+        steps=150,
+        mode="reverse",
+        learning_rate=0.03,
+        reduce_on_plateau=True,
+        plateau_patience=5,
+        early_stop_patience=15,
+        verbose=True,
     )
 
-    # 5. Artifact bundle (topology graph + per-arm trajectories +
-    # pre-vs-post comparison + concordance JSON).
+    print("[3/3] calibrated concordance ...", flush=True)
+    post = problem.evaluate(history.final_params)
+
+    print_table(pre, post)
+    print("\nfitted parameters (init → fit):")
+    for k in problem.params:
+        print(
+            f"  {k:<20}{float(init[k]):>12.5g} → "
+            f"{float(history.final_params[k]):>12.5g}"
+        )
+
     out_dir = ROOT / "outputs" / "multi_hallmark_calibrate"
-    print(f"\n[5/5] Writing artifacts to {out_dir.relative_to(ROOT)} ...")
-    info = problem.save_outputs(str(out_dir), history, n_save_plot=50)
-    for fname in info["files"]:
-        print(f"      {fname}")
+    plot(pre, post, out_dir / "oob_vs_cal_vs_measured.png")
+    plot_history(problem, history, out_dir / "training_history.png")
+    print(
+        f"\nbest loss {history.best_loss:.4g} over {len(history.losses)} "
+        f"epochs → plots in {out_dir.relative_to(ROOT)}/"
+    )
 
 
 if __name__ == "__main__":

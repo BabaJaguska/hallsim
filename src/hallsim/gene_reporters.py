@@ -31,6 +31,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
+import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 
@@ -69,6 +70,24 @@ def window_mean(n_intervals: int = 1):
 
     def summarize(ts, y):
         return (y[-1] - y[-1 - n_intervals]) / (ts[-1] - ts[-1 - n_intervals])
+
+    return summarize
+
+
+def window_rms(n_intervals: int = 1):
+    """Root-mean-square of an observable over the trailing window.
+
+    For a source routed through a ``RunningIntegral(power=2)`` (path holds
+    ∫source²), this returns ``√⟨source²⟩``. Unlike the plain mean it rises
+    with oscillation amplitude, so it reads a pulsatile species' damage-
+    encoded pulsing rather than its buffered mean; unlike bare amplitude it
+    keeps the mean as a floor, so a quiescent baseline gives a finite
+    fold-change instead of diverging. See docs/gz06-basal-p53.md.
+    """
+    mean_square = window_mean(n_intervals)
+
+    def summarize(ts, y):
+        return jnp.sqrt(jnp.clip(mean_square(ts, y), 0.0, None))
 
     return summarize
 
@@ -228,23 +247,22 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         reference="el-Deiry et al. 1993, Cell 75:817–825",
     ),
     GeneReporter(
-        observable="gz06/x_integral",
+        observable="gz06/x2_integral",
         gene_symbol="DDB2",
         sign=+1,
         description=(
             "Damage-specific DNA Binding Protein 2 — direct p53 "
-            "transcription target. Maps to GZ06's p53 protein (x) which "
-            "is the actual p53 dynamic in the composite; CDKN1A in DP14 "
-            "is FoxO-driven, not p53-driven, so DDB2 needs its own "
-            "mechanistic counterpart. GZ06's p53 oscillates after damage, "
-            "so we read the exact trailing-window mean of x: a "
-            "RunningIntegral writes ∫x to `gz06/x_integral` and "
-            "window_mean differences it — phase-insensitive, matching "
-            "bulk transcriptomics' population averaging over random cycle "
-            "phases, with a bounded calibration gradient."
+            "transcription target, mapped to GZ06's p53 (x). Read as the "
+            "trailing-window RMS √⟨x²⟩, not the mean: GZ06 encodes damage "
+            "in p53 *pulsing*, and its mean p53 is analytically buffered "
+            "against the damage signal (psi cancels in the steady state), "
+            "so the mean is damage-blind. RMS rises with pulse amplitude "
+            "yet keeps the mean as a floor (no divergence when quiescent). "
+            "A RunningIntegral(power=2) writes ∫x² to `gz06/x2_integral`. "
+            "See docs/gz06-basal-p53.md."
         ),
-        reference="Hwang et al. 1999, Nature 401:430–432",
-        summary=window_mean(),
+        reference="Geva-Zatorsky 2006; Lahav 2004; Purvis 2012",
+        summary=window_rms(),
     ),
     GeneReporter(
         observable="dp14/ROS",

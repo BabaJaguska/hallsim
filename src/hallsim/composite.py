@@ -28,6 +28,7 @@ Example
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import equinox as eqx
@@ -35,6 +36,8 @@ import jax.numpy as jnp
 
 from hallsim.process import PortRole, Process, ProcessKind
 from hallsim.store import build_initial_store, validate_topology
+
+log = logging.getLogger(__name__)
 
 
 def _flatten_subcomposites(
@@ -161,8 +164,6 @@ class Composite(eqx.Module):
                     + "\n".join(f"  - {e}" for e in errors)
                 )
         if semantic_validation:
-            import warnings
-
             from hallsim.validation import CompositeValidator
 
             if isinstance(semantic_validation, dict):
@@ -173,11 +174,7 @@ class Composite(eqx.Module):
             if report.errors:
                 raise ValueError(f"Semantic validation failed:\n{report}")
             if report.warnings:
-                warnings.warn(
-                    f"Semantic validation warnings:\n{report}",
-                    UserWarning,
-                    stacklevel=2,
-                )
+                log.warning("Semantic validation warnings:\n%s", report)
 
     # -----------------------------------------------------------------
     # State flattening: dict ↔ array

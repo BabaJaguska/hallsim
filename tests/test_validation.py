@@ -11,7 +11,7 @@ Covers all four subsystems:
 
 from __future__ import annotations
 
-import warnings
+import logging
 
 import jax.numpy as jnp
 import pytest
@@ -499,17 +499,15 @@ class TestCompositeIntegration:
         )
         assert composite is not None
 
-    def test_semantic_validation_warns_on_warnings(self):
-        """Warnings are emitted as Python warnings, not errors."""
+    def test_semantic_validation_warns_on_warnings(self, caplog):
+        """Warnings are emitted via logging, not raised as errors."""
         procs = {"a": ROSProducerMicromolar(), "b": ROSProducerNanomolar()}
         topo = {"a": {"ros": "pool/ros"}, "b": {"ros": "pool/ros"}}
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
+        with caplog.at_level(logging.WARNING, logger="hallsim.composite"):
             Composite(procs, topo, semantic_validation=True)
-            sem_warnings = [
-                x for x in w if "Semantic validation" in str(x.message)
-            ]
-            assert len(sem_warnings) >= 1
+        assert any(
+            "Semantic validation" in r.getMessage() for r in caplog.records
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

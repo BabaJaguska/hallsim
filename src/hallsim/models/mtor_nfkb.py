@@ -95,6 +95,7 @@ class MtorNFkBActivator(Process):
                 units="dimensionless",
                 description="Ihekwaba IKK pool, receives mTORC1 activation",
                 ontology={"go": "GO:0008384"},  # IkappaB kinase activity
+                reads_value=False,  # pure source: term depends on mTORC1, not IKK
             ),
             # INPUT: active mTORC1 from DallePezze 2014.
             "mTORC1_pS2448": Port(

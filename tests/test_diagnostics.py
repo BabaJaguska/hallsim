@@ -1,7 +1,5 @@
 """Tests for the pre-flight subsystem screening (hallsim.diagnostics)."""
 
-import pytest
-
 from hallsim.diagnostics import (
     DEAD_SINK,
     SUITABLE,
@@ -16,6 +14,13 @@ from hallsim.models.multi_hallmark import (
     GZ06_SBML_PATH,
 )
 from hallsim.sbml_import import process_from_sbml
+
+# A vendored (committed) model with both a dead-sink species (`s195`) and
+# produced-and-consumed species (`s305`) — exercises the coupling-source
+# diagnostic locally, no BioModels download.
+WNT_SBML_PATH = (
+    GZ06_SBML_PATH.parent.parent / "sivakumar2011" / "wnt_BIOMD0000000397.xml"
+)
 
 
 def test_screenreport_ok_logic():
@@ -50,48 +55,39 @@ def test_check_tunability_opt_out_skips_gradient():
     assert report.tunes is None
 
 
-@pytest.mark.slow
-def test_konrath_tunes_only_on_implicit_solver():
-    """Konrath 2023 runs on the explicit solver but its forward sensitivities
-    are stiff: the screen must find it tunable only via the implicit solver."""
-    kon = process_from_sbml("MODEL2307130001", name="konrath")
-    report = screen_process(kon, t_end=600.0)
-    assert report.tunes is True
-    assert "implicit solver" in report.detail
-
-
-def test_konrath_pIKK_rejected_as_dead_sink():
-    """Konrath's terminal activated-IKK output pIKK is produced but consumed
-    by nothing and read by no rate law — the coupling guard must reject it
-    (wiring it would feed a frozen constant / diverge if unfrozen)."""
-    kon = process_from_sbml("MODEL2307130001", name="konrath")
-    v = coupling_source_verdict(kon, "pIKK")
+def test_dead_sink_rejected_as_coupling_source():
+    """A produced-but-never-consumed, read-by-nothing species (the importer
+    freezes it) must be rejected: coupling from it feeds a frozen constant /
+    diverges if unfrozen."""
+    p = process_from_sbml(str(WNT_SBML_PATH), name="wnt")
+    v = coupling_source_verdict(p, "s195")
     assert v.verdict == DEAD_SINK
     assert v.frozen and v.produced and not v.consumed
     assert not v.ok
 
 
-def test_konrath_spIKKg_n_is_the_suitable_source():
-    """The live activated-IKK state spIKKg_n is produced and consumed —
-    bounded and actively turned over — so it is the usable coupling source."""
-    kon = process_from_sbml("MODEL2307130001", name="konrath")
-    v = coupling_source_verdict(kon, "spIKKg_n")
+def test_produced_and_consumed_is_the_suitable_source():
+    """A produced-and-consumed species is bounded and actively turned over,
+    so it is a usable coupling source."""
+    p = process_from_sbml(str(WNT_SBML_PATH), name="wnt")
+    v = coupling_source_verdict(p, "s305")
     assert v.verdict == SUITABLE
     assert v.produced and v.consumed and v.ok
 
 
-def test_konrath_recommendation_flags_dead_sink_and_clock_mismatch():
-    """The recommendation focused on the activated-IKK outputs must pick
-    spIKKg_n over pIKK, and warn that Konrath's second-scale native forcing
-    clock is unresolvable on the day-scale composite axis."""
-    kon = process_from_sbml("MODEL2307130001", name="konrath")
+def test_recommendation_flags_dead_sink_and_clock_mismatch():
+    """Focused on a dead-sink + a suitable state, the recommendation must
+    pick the suitable one, flag the dead sink as unusable, and warn when the
+    native clock is far finer than the composite's."""
+    p = process_from_sbml(str(WNT_SBML_PATH), name="wnt")
+    canon = p.native_time_seconds * 1000.0  # force a >100x clock ratio
     rec = recommend_coupling_source(
-        kon,
-        target_states=("pIKK", "spIKKg_n"),
-        canonical_time_seconds=86400.0,
+        p,
+        target_states=("s195", "s305"),
+        canonical_time_seconds=canon,
     )
-    assert rec.suitable == ("spIKKg_n",)
-    assert any("pIKK" in n and "unusable" in n for n in rec.notes)
+    assert rec.suitable == ("s305",)
+    assert any("s195" in n and "unusable" in n for n in rec.notes)
     assert any("finer than the composite clock" in n for n in rec.notes)
 
 

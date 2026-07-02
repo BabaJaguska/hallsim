@@ -2,6 +2,15 @@
 
 Actionable ideas extracted from three CrossGen sessions (April 2025).
 
+HallSim's Scheduler splitting schemes (Strang splitting, interpolated
+dense-output coupling, adaptive macro_dt) and multi-scale roadmap were
+informed by these sessions, generated with
+[CrossGen](https://github.com/mohamedAtoui/CrossGen) — a structure-mapping
+tool that surfaces solutions from unrelated fields. Several turned out to be
+established methods in those communities (gyrokinetic plasma simulation,
+partitioned fluid-structure interaction, Mori-Zwanzig projection, waveform
+relaxation, federated Kalman filtering) for the same coupling problems.
+
 **Session 1** (biology-default lenses): immunological germinal centers
 and mycorrhizal fungal networks. Mostly standard numerical methods in
 biological costume, but the mycorrhizal interpolant idea was real.

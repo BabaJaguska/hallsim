@@ -99,6 +99,7 @@ class DamageNFkBActivator(Process):
                 units="dimensionless",
                 description="genomic-instability drive summed into IKK",
                 ontology={"go": "GO:0008384"},  # IkappaB kinase activity
+                reads_value=False,  # pure source: term depends on damage, not IKK
             ),
             # INPUT: DNA-damage state from DallePezze 2014.
             "DNA_damage": Port(

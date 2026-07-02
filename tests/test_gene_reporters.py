@@ -294,25 +294,24 @@ class TestMultiHallmarkReporters:
         genes = [r.gene_symbol for r in MULTI_HALLMARK_REPORTERS]
         assert len(genes) == len(set(genes))
 
-    def test_ddb2_uses_window_mean(self):
-        # DDB2 reads the gz06/x_integral path (∫x) via window_mean, which
-        # recovers the flat trailing mean of x. Feed the exact integral of
-        # 5 + sin(t): A = 5t - cos(t) + 1; on a 4π save grid the cos
-        # boundary terms cancel → mean = 5.0, phase-insensitively.
+    def test_ddb2_uses_window_rms(self):
+        # DDB2 reads gz06/x2_integral (∫x²) via window_rms → √⟨x²⟩, so it
+        # sees p53 pulse amplitude, not the damage-blind mean. Feed the
+        # integral of a constant x²=25 (A=25t): window mean 25 → RMS 5.0.
         ddb2 = next(
             r for r in MULTI_HALLMARK_REPORTERS if r.gene_symbol == "DDB2"
         )
-        assert ddb2.observable == "gz06/x_integral"
+        assert ddb2.observable == "gz06/x2_integral"
         ts = jnp.linspace(0.0, 20 * jnp.pi, 6)
-        A = 5.0 * ts - jnp.cos(ts) + 1.0
-        assert abs(float(ddb2.summary(ts, A)) - 5.0) < 1e-4
+        A2 = 25.0 * ts
+        assert abs(float(ddb2.summary(ts, A2)) - 5.0) < 1e-4
 
     def test_derive_multi_hallmark_summaries(self):
         n_time = 20
         ts = jnp.linspace(0.0, 25.0, n_time)
         traj = {
             "dp14/CDKN1A": jnp.linspace(0, 10, n_time),
-            "gz06/x_integral": jnp.linspace(0, 1, n_time),
+            "gz06/x2_integral": jnp.linspace(0, 1, n_time),
             "dp14/ROS": jnp.linspace(0, 5, n_time),
             "nfkb/IkBat_integral": jnp.linspace(0, 2, n_time),
             "dp14/Mito_mass_new": jnp.linspace(0, 3, n_time),

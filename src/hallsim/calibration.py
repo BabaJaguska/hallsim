@@ -145,6 +145,7 @@ class Calibrator:
         init_params: ParamPytree,
         clamps: dict[str, tuple[float, float]] | None = None,
         mode: Literal["forward", "reverse"] = "forward",
+        method: Literal["adam", "lbfgs"] = "adam",
         optimizer: optax.GradientTransformation | None = None,
         learning_rate: float = 0.05,
         reduce_on_plateau: bool = False,
@@ -163,6 +164,7 @@ class Calibrator:
         self.init_params = init_params
         self.clamps = clamps or {}
         self.mode = mode
+        self.method = method
         # Early stopping: 0 disables. Stop after `early_stop_patience`
         # steps without a > tol loss improvement; return the best params
         # seen, not the last (the loss is bumpy). Set patience above
@@ -246,11 +248,13 @@ class Calibrator:
     # ── Fit loop ───────────────────────────────────────────────
 
     def fit(self, steps: int) -> CalibrationHistory:
-        """Run ``steps`` Adam (or supplied-optimizer) iterations.
+        """Run ``steps`` optimizer iterations (Adam or L-BFGS).
 
         Returns a :class:`CalibrationHistory` with per-step loss and
         parameter snapshots.
         """
+        if self.method == "lbfgs":
+            return self._fit_lbfgs(steps)
         params = self.init_params
         opt_state = self.optimizer.init(params)
         value_and_grad = self._value_and_grad_fn()
@@ -301,6 +305,65 @@ class Calibrator:
                         f"no improvement in {no_improve} steps)"
                     )
                 break
+        history.final_params = best_params
+        history.best_loss = best_loss
+        history.wall_time_s = time.time() - t0
+        return history
+
+    def _fit_lbfgs(self, steps: int) -> CalibrationHistory:
+        """L-BFGS with zoom line search — reverse-mode gradients, curvature
+        from recent gradient history, and a line search that guarantees each
+        step does not increase the loss. Bounds are handled by projecting
+        (clamping) after each step. Shares the early-stop / best-params logic.
+        """
+        loss_fn = self.loss_fn
+        opt = optax.lbfgs()
+        value_and_grad = optax.value_and_grad_from_state(loss_fn)
+        params = self.init_params
+        opt_state = opt.init(params)
+
+        @jax.jit
+        def value_grad(p, state):
+            return value_and_grad(p, state=state)
+
+        @jax.jit
+        def apply(p, state, value, grad):
+            updates, state = opt.update(
+                grad, state, p, value=value, grad=grad, value_fn=loss_fn
+            )
+            return self._clamp(optax.apply_updates(p, updates)), state
+
+        history = CalibrationHistory()
+        best_loss, best_params, no_improve = float("inf"), params, 0
+        t0 = time.time()
+        for s in range(steps):
+            value, grad = value_grad(params, opt_state)
+            lf = float(value)  # loss of current params (pre-update)
+            if lf < best_loss - self.early_stop_tol:
+                best_loss, best_params, no_improve = lf, params, 0
+            else:
+                no_improve += 1
+            history.losses.append(lf)
+            history.param_history.append(params)
+            if self.verbose and (s % self.log_every == 0 or s == steps - 1):
+                msg = f"  [{s+1:3d}/{steps}] loss = {lf:.4g}"
+                if isinstance(params, dict):
+                    pieces = [
+                        f"{k}={float(v):.3g}"
+                        for k, v in list(params.items())[:4]
+                        if jnp.ndim(v) == 0
+                    ]
+                    if pieces:
+                        msg += "  " + "  ".join(pieces)
+                print(msg)
+            if (
+                self.early_stop_patience
+                and no_improve >= self.early_stop_patience
+            ):
+                if self.verbose:
+                    print(f"  early stop at {s+1} (best loss {best_loss:.4g})")
+                break
+            params, opt_state = apply(params, opt_state, value, grad)
         history.final_params = best_params
         history.best_loss = best_loss
         history.wall_time_s = time.time() - t0
@@ -415,6 +478,15 @@ class ParameterRef:
         Initial value for the optimizer.
     clamp:
         Optional ``(lo, hi)`` box-clamp applied after each step.
+    prior:
+        Optional log-normal prior *center* for a MAP penalty (see
+        :class:`CalibrationProblem`). ``None`` → this parameter is not
+        regularized. Set it to the literature / derived value the fit
+        should stay near; with few data points this keeps an
+        under-constrained parameter from running to an unphysical rail.
+    prior_sigma:
+        Prior width in **log10** units (0.5 ≈ a factor of ~3, 1.0 ≈ one
+        order of magnitude). Only used when ``prior`` is set.
     description:
         Optional notes.
     """
@@ -423,6 +495,8 @@ class ParameterRef:
     field: str
     init: float
     clamp: tuple[float, float] | None = None
+    prior: float | None = None
+    prior_sigma: float = 0.5
     description: str = ""
 
 
@@ -518,6 +592,7 @@ class CalibrationProblem:
         t_end: float = 25.0,
         macro_dt: float = 5.0,
         n_save: int = 6,
+        prior_weight: float = 1.0,
         scheduler_kwargs: dict | None = None,
         hallmark_registry: dict | None = None,
     ) -> None:
@@ -624,6 +699,7 @@ class CalibrationProblem:
         self.data = data
         self.arm_pairs = arm_pairs
         self.params = params
+        self.prior_weight = prior_weight
         self.fit_arms = fit_arms
         self.held_out_arms = held_out_arms or []
         self.t_end = t_end
@@ -747,7 +823,29 @@ class CalibrationProblem:
             per_arm_losses.append(
                 jnp.sum(err2) / jnp.maximum(jnp.sum(mask), 1.0)
             )
-        return jnp.mean(jnp.stack(per_arm_losses))
+        data_loss = jnp.mean(jnp.stack(per_arm_losses))
+        return data_loss + self._prior_penalty(param_values)
+
+    def _prior_penalty(self, param_values: dict) -> jnp.ndarray:
+        """MAP log-normal prior penalty: prior_weight · Σ ((log10 p −
+        log10 prior) / prior_sigma)² over params with a ``prior`` set.
+
+        With few data points the data term alone is under-constrained and a
+        parameter can run to an unphysical rail; anchoring it to its
+        literature / derived value (in log space, since rate constants span
+        orders of magnitude) keeps the fit physical — a maximum-a-posteriori
+        estimate treating the prior as a belief.
+        """
+        terms = []
+        for name, pref in self.params.items():
+            if pref.prior is None:
+                continue
+            lp = jnp.log10(jnp.clip(param_values[name], 1e-30, None))
+            target = jnp.log10(jnp.asarray(float(pref.prior)))
+            terms.append(((lp - target) / pref.prior_sigma) ** 2)
+        if not terms:
+            return jnp.asarray(0.0)
+        return self.prior_weight * jnp.sum(jnp.stack(terms))
 
     def _log2_fold_change(
         self, cond: jnp.ndarray, base: jnp.ndarray

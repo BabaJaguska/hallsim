@@ -49,6 +49,7 @@ class RunningIntegral(Process):
     """
 
     timescale: float | None = None
+    power: float = 1.0  # integrate source**power; 2 → ⟨x²⟩ for RMS
 
     def ports_schema(self):
         return {
@@ -56,7 +57,8 @@ class RunningIntegral(Process):
                 role=PortRole.EVOLVED,
                 default=0.0,
                 units="dimensionless",
-                description="Cumulative time-integral ∫₀ᵗ source",
+                description="Cumulative time-integral ∫₀ᵗ source**power",
+                reads_value=False,  # pure integrator: RHS is source, not the accumulator
             ),
             "source": Port(
                 role=PortRole.INPUT,
@@ -69,8 +71,8 @@ class RunningIntegral(Process):
     def derivative(self, t, state):
         # RHS depends only on `source` (a read-only INPUT), never on the
         # accumulator `integral` itself — so this is integration, not an
-        # exponential.
-        return {"integral": state["source"]}
+        # exponential. power=2 gives ∫source² → ⟨x²⟩ → RMS via window_rms.
+        return {"integral": state["source"] ** self.power}
 
     def metadata(self):
         base = super().metadata()

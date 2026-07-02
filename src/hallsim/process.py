@@ -149,6 +149,14 @@ class Port:
         Human-readable description for metadata / LLM consumption.
     ontology:
         Optional ontology annotation, e.g. ``{"GO": "GO:0006915"}``.
+    reads_value:
+        For an EVOLVED port only: whether the additive contribution
+        depends on the path's *current* value. Default True (the general
+        case — the graph analyzer then treats the port as both writer and
+        reader). Set False for a **pure source** — a contribution that
+        depends only on the process's other inputs, not on the path it
+        writes (e.g. a Hill-gated cross-model edge, or a running integral)
+        — so the analyzer doesn't infer a spurious feedback cycle.
     """
 
     __slots__ = (
@@ -157,6 +165,7 @@ class Port:
         "units",
         "description",
         "ontology",
+        "reads_value",
     )
 
     def __init__(
@@ -166,12 +175,14 @@ class Port:
         units: str = "",
         description: str = "",
         ontology: dict[str, str] | None = None,
+        reads_value: bool = True,
     ) -> None:
         self.role = role
         self.default = default
         self.units = units
         self.description = description
         self.ontology = ontology or {}
+        self.reads_value = reads_value
 
     def __repr__(self) -> str:
         return (
