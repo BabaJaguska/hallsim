@@ -27,6 +27,7 @@ from hallsim.gene_reporters import (
     last_value,
     log2_fold_change,
     window_mean,
+    window_rms,
 )
 
 
@@ -253,9 +254,30 @@ class TestTrajectorySummaries:
         s = window_mean()
         assert float(s(ts, A)) == pytest.approx(5.0, abs=1e-4)
 
-    def test_window_mean_rejects_invalid_n(self):
+    def test_window_mean_rejects_invalid_frac(self):
+        # The window is now a fraction of elapsed time in (0, 1].
         with pytest.raises(ValueError):
-            window_mean(0)
+            window_mean(0.0)
+        with pytest.raises(ValueError):
+            window_mean(1.5)
+
+    def test_summaries_read_at_query_times(self):
+        # Trajectory-native contract: passing query_times returns one value
+        # per time (not just the endpoint), grid-independently.
+        ts = jnp.linspace(0.0, 14.0, 15)
+        # point observable y = 2t: value at t=7 is 14, at t=14 is 28.
+        y = 2.0 * ts
+        got = last_value(ts, y, jnp.asarray([7.0, 14.0]))
+        assert got.shape == (2,)
+        assert float(got[0]) == pytest.approx(14.0)
+        assert float(got[1]) == pytest.approx(28.0)
+        # integrated observable A2 = 25t (∫x² for constant x=5) → RMS 5.0 at
+        # every query time.
+        A2 = 25.0 * ts
+        rms = window_rms()(ts, A2, jnp.asarray([7.0, 14.0]))
+        assert rms.shape == (2,)
+        assert float(rms[0]) == pytest.approx(5.0, abs=1e-4)
+        assert float(rms[1]) == pytest.approx(5.0, abs=1e-4)
 
     def test_derive_observable_summaries_collapses_trajectory(self):
         # Build a trajectory by tiling the homeostatic state along

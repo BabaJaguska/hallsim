@@ -39,55 +39,83 @@ from hallsim.models.eriq import _compute_algebraic
 
 
 # ── Trajectory summaries ───────────────────────────────────────────
+#
+# The trajectory-native contract: a summary maps a saved trajectory to a
+# readout **at one or more query times**, so the calibration loss can ask
+# each reporter for its value at every measured timepoint. The endpoint is
+# just the degenerate single-time query — ``summary(ts, y)`` with
+# ``query_times=None`` returns the final-time scalar (and stays
+# shape-polymorphic for batched validation). Pass an array of query times
+# and the summary returns one value per time, grid-independently (the
+# running-integral windows are interpolated at the requested times, not
+# snapped to the save grid).
 
 
-def last_value(ts, y):
-    """Default trajectory summary: the endpoint value (time axis ignored)."""
-    return y[-1] if hasattr(y, "__getitem__") and hasattr(y, "shape") else y
+def last_value(ts, y, query_times=None):
+    """Instantaneous observable value at each query time (endpoint default).
+
+    ``query_times=None`` returns the final-time value (shape-polymorphic —
+    works on batched ``(n_time, ...)`` trajectories). Given query times it
+    linear-interpolates ``y`` onto them. The right readout for a
+    non-oscillating state, whose value *at* time ``t`` is the biological
+    quantity of interest (CDKN1A accumulation, a kinase level, a pool size).
+    """
+    if query_times is None:
+        return (
+            y[-1] if hasattr(y, "__getitem__") and hasattr(y, "shape") else y
+        )
+    return jnp.interp(jnp.atleast_1d(jnp.asarray(query_times)), ts, y)
 
 
-def window_mean(n_intervals: int = 1):
-    """Exact mean of an observable over the trailing save window(s).
+def window_mean(frac: float = 0.5):
+    """Exact mean of an observable over a trailing window, at each query time.
 
     For an observable routed through a
     :class:`hallsim.models.running_integral.RunningIntegral` — whose path
     holds the cumulative integral ``A = ∫₀ᵗ source`` — the mean of the
-    source over the last ``n_intervals`` save intervals is, by the
-    fundamental theorem of calculus::
+    source over the trailing window ``[t·(1-frac), t]`` is, by the
+    fundamental theorem of calculus, ``(A(t) - A(t·(1-frac))) / (t·frac)``.
 
-        ⟨source⟩ = (A[-1] - A[-1-n]) / (ts[-1] - ts[-1-n])
-
-    This is the phase-insensitive readout for oscillating species. It is a
-    *flat* window mean (no weighting bias, unlike an exponential moving
-    average), exact regardless of save resolution (the integral is taken
-    at the solver's own fine steps, not the coarse save grid), and its
-    calibration sensitivity stays bounded when the window is a fixed
-    fraction of the run. Dividing by elapsed time keeps it in the
-    observable's own units, commensurable with endpoint reporters.
+    The window is a **fraction of the elapsed time**, not a count of save
+    intervals, so the readout is grid-independent and defined at *any*
+    query time: the integral is interpolated at the window edges (it is
+    smooth — taken at the solver's fine steps). This is the phase-
+    insensitive readout for an oscillating species, dividing by elapsed
+    time to keep the observable's own units (commensurable with endpoint
+    reporters). ``query_times=None`` collapses to the exact mean over the
+    last save interval (batch-safe, no interpolation).
     """
-    if n_intervals < 1:
-        raise ValueError(f"n_intervals must be >= 1; got {n_intervals!r}")
+    if not 0 < frac <= 1:
+        raise ValueError(f"frac must be in (0, 1]; got {frac!r}")
 
-    def summarize(ts, y):
-        return (y[-1] - y[-1 - n_intervals]) / (ts[-1] - ts[-1 - n_intervals])
+    def summarize(ts, y, query_times=None):
+        if query_times is None:
+            return (y[-1] - y[-2]) / (ts[-1] - ts[-2])
+        qt = jnp.atleast_1d(jnp.asarray(query_times))
+        t_lo = qt * (1.0 - frac)
+        a_hi = jnp.interp(qt, ts, y)
+        a_lo = jnp.interp(t_lo, ts, y)
+        return (a_hi - a_lo) / jnp.clip(qt - t_lo, 1e-12, None)
 
     return summarize
 
 
-def window_rms(n_intervals: int = 1):
+def window_rms(frac: float = 0.5):
     """Root-mean-square of an observable over the trailing window.
 
     For a source routed through a ``RunningIntegral(power=2)`` (path holds
-    ∫source²), this returns ``√⟨source²⟩``. Unlike the plain mean it rises
-    with oscillation amplitude, so it reads a pulsatile species' damage-
-    encoded pulsing rather than its buffered mean; unlike bare amplitude it
-    keeps the mean as a floor, so a quiescent baseline gives a finite
-    fold-change instead of diverging. See docs/gz06-basal-p53.md.
+    ∫source²), this returns ``√⟨source²⟩`` at each query time. Unlike the
+    plain mean it rises with oscillation amplitude, so it reads a
+    pulsatile species' damage-encoded pulsing rather than its buffered
+    mean; unlike bare amplitude it keeps the mean as a floor, so a
+    quiescent baseline gives a finite fold-change instead of diverging.
+    Same query-time contract as :func:`window_mean`. See
+    docs/gz06-basal-p53.md.
     """
-    mean_square = window_mean(n_intervals)
+    mean_square = window_mean(frac)
 
-    def summarize(ts, y):
-        return jnp.sqrt(jnp.clip(mean_square(ts, y), 0.0, None))
+    def summarize(ts, y, query_times=None):
+        return jnp.sqrt(jnp.clip(mean_square(ts, y, query_times), 0.0, None))
 
     return summarize
 
@@ -95,11 +123,12 @@ def window_rms(n_intervals: int = 1):
 def cycle_average(fraction: float = 0.25):
     """Mean over the last ``fraction`` of the *saved* trajectory points.
 
-    Phase-insensitive only when the saves resolve the oscillation; with a
-    coarse save grid the points are aliased and this degrades to ~the
-    endpoint. Prefer :func:`window_mean` over a
+    Endpoint-only (grid-based): phase-insensitive when the saves resolve
+    the oscillation, but with a coarse grid the points alias and it
+    degrades to ~the endpoint, and it cannot be evaluated at an arbitrary
+    query time. Prefer :func:`window_mean` over a
     :class:`~hallsim.models.running_integral.RunningIntegral`, which is
-    exact at any save resolution. Kept for fine-save trajectories.
+    exact and query-time-aware. Kept for the legacy ERiQ reporter path.
 
     Parameters
     ----------
@@ -109,7 +138,13 @@ def cycle_average(fraction: float = 0.25):
     if not 0 < fraction <= 1:
         raise ValueError(f"fraction must be in (0, 1]; got {fraction!r}")
 
-    def summarize(ts, y):
+    def summarize(ts, y, query_times=None):
+        if query_times is not None:
+            raise NotImplementedError(
+                "cycle_average is grid-based and endpoint-only; use "
+                "window_mean (over a RunningIntegral) for trajectory "
+                "queries at arbitrary times."
+            )
         n = int(y.shape[0])
         k = max(1, int(round(n * fraction)))
         return y[-k:].mean(axis=0)
@@ -137,10 +172,13 @@ class GeneReporter:
     reference:
         Primary literature anchor.
     summary:
-        Callable collapsing a trajectory ``y`` (shape ``(n_time, ...)``)
-        to a single value. Defaults to :func:`last_value` (the endpoint).
-        Use :func:`cycle_average` for observables routed through an
-        oscillating state.
+        Callable ``(ts, y, query_times=None) -> value(s)`` reading a
+        trajectory ``y`` (shape ``(n_time, ...)``) at the query times —
+        one value per time, or the endpoint scalar when
+        ``query_times is None``. Defaults to :func:`last_value` (the
+        instantaneous value). Use :func:`window_mean` / :func:`window_rms`
+        over a :class:`~hallsim.models.running_integral.RunningIntegral`
+        for observables routed through an oscillating state.
     """
 
     observable: str

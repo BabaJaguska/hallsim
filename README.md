@@ -94,7 +94,7 @@ make test
 
 ## Roadmap
 
-Scheduler (waveform relaxation, IMEX, Mori-Zwanzig coupling), models & validation (lipid-metabolism extension, trajectory-level validation, stochastic/Gillespie support, multi-cell communication), and SBML import improvements (event translation).
+Scheduler (waveform relaxation, IMEX, Mori-Zwanzig coupling), models & validation (lipid-metabolism extension, stochastic/Gillespie support, multi-cell communication), and SBML import improvements (event translation). Calibration fits fold-change time courses (multi-timepoint), not just endpoints — see [docs/calibration.md](docs/calibration.md).
 
 ## License
 

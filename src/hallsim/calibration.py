@@ -556,10 +556,15 @@ class CalibrationProblem:
         ``{arm_name: Condition}``. Severities applied to the
         per-iteration substituted processes.
     data:
-        ``{arm_pair_name: pd.Series}``. Each Series is Δ_data indexed
-        by gene symbol; the per-arm-pair name (e.g.
-        ``"DDIS_vs_ctrl"``) is what ``fit_arms`` / ``held_out_arms``
-        select.
+        Trajectory-native Δ_data: ``{arm_pair_name: {timepoint: pd.Series}}``,
+        each Series indexed by gene symbol (a measured log2 fold-change at
+        that timepoint, in the model's time units). A plain
+        ``{arm_pair_name: pd.Series}`` is accepted as the degenerate
+        single-timepoint case and normalized to ``{t_end: series}`` — so an
+        endpoint fit needs no timepoint bookkeeping. The loss sums one MSE
+        term per (arm, timepoint); the model fits the fold-change
+        *trajectory*, not just the endpoint. The per-arm-pair name (e.g.
+        ``"DDIS_vs_ctrl"``) is what ``fit_arms`` / ``held_out_arms`` select.
     arm_pairs:
         ``{arm_pair_name: (condition_name, baseline_name)}``. Names
         must be keys in ``conditions``.
@@ -696,7 +701,17 @@ class CalibrationProblem:
         self.composite = composite
         self.reporters = reporters
         self.conditions = conditions
-        self.data = data
+        # Trajectory-native: each arm's Δ_data is a {timepoint: Δseries}
+        # map. A plain Series is the degenerate single-timepoint case —
+        # normalized to {t_end: series} so endpoint fits keep working.
+        self.data = {
+            arm: (
+                {float(t): s for t, s in d.items()}
+                if isinstance(d, dict)
+                else {float(t_end): d}
+            )
+            for arm, d in data.items()
+        }
         self.arm_pairs = arm_pairs
         self.params = params
         self.prior_weight = prior_weight
@@ -720,6 +735,30 @@ class CalibrationProblem:
         self._reporter_indices = tuple(
             self._store_idx[r.observable] for r in reporters
         )
+        # Precompute per-arm query-time and Δ_data matrices once (static).
+        # The timepoint axis is *vectorized*, not looped: each summary reads
+        # all query times in one interp, so the traced loss is O(n_reporters)
+        # per arm regardless of timepoint count — 2 or 200 timepoints trace
+        # to the same graph size (only the array length differs). A Python
+        # loop here would unroll under JIT into O(n_reporters × n_timepoints)
+        # nodes and blow up compile time.
+        self._arm_times: dict[str, list[float]] = {}
+        self._arm_query_times: dict[str, jnp.ndarray] = {}
+        self._arm_data_matrix: dict[str, jnp.ndarray] = {}
+        for arm, per_t in self.data.items():
+            times = sorted(per_t.keys())
+            self._arm_times[arm] = times
+            self._arm_query_times[arm] = jnp.asarray(times, dtype=float)
+            # (n_reporters, n_timepoints); NaN marks a gene absent at a time.
+            self._arm_data_matrix[arm] = jnp.asarray(
+                [
+                    [
+                        float(per_t[t].get(r.gene_symbol, jnp.nan))
+                        for t in times
+                    ]
+                    for r in reporters
+                ]
+            )
         # Reuse the Composite type for re-construction in the loss.
         self._Composite = Composite
         # One persistent Scheduler across the eager evaluate pass and the
@@ -762,8 +801,9 @@ class CalibrationProblem:
 
     def _simulate_condition(self, processes: dict, condition: Condition):
         """Apply hallmarks + run Scheduler for one condition. Returns the
-        per-reporter ``summary``-collapsed observable values (a jnp array
-        of length ``len(reporters)``)."""
+        full ``(ts, reporter_trajectories)`` — ``ts`` shape ``(n_save,)``
+        and ``reporter_trajectories`` shape ``(n_reporters, n_save)`` — so
+        the loss can read each reporter at arbitrary query times."""
         comp = self._condition_composite(processes, condition)
         y0 = comp.initial_state_vec()
         save_dt = max(1e-6, self.t_end / max(1, self.n_save - 1))
@@ -781,49 +821,70 @@ class CalibrationProblem:
             adjoint=adjoint,
         )
         # res.ys is (n_save, ..., n_vars). Trailing-axis convention.
-        out = []
-        for rep, idx in zip(self.reporters, self._reporter_indices):
-            traj = res.ys[..., idx]
-            out.append(rep.summary(res.ts, traj))
-        return jnp.stack([jnp.asarray(o) for o in out])
+        trajs = jnp.stack([res.ys[..., idx] for idx in self._reporter_indices])
+        return res.ts, trajs
+
+    def _reporter_summaries(self, ts, trajs, query_times) -> jnp.ndarray:
+        """Each reporter's summary at every query time → ``(n_rep, n_t)``.
+
+        Summaries take ``(ts, y, query_times)`` and return one value per
+        query time in a single vectorized interp — so this is O(n_reporters)
+        traced work, independent of how many timepoints are queried. Only
+        the reporter axis is a Python loop (small, fixed); the timepoint
+        axis rides inside each summary as an array.
+        """
+        qt = jnp.atleast_1d(jnp.asarray(query_times))
+        return jnp.stack(
+            [
+                jnp.atleast_1d(rep.summary(ts, trajs[i], qt))
+                for i, rep in enumerate(self.reporters)
+            ]
+        )
 
     # ── Loss / fit / evaluate ─────────────────────────────────────
 
     def loss(self, param_values: dict[str, jnp.ndarray]) -> jnp.ndarray:
         substituted = self._substitute(self.composite.processes, param_values)
-        # Cache per-condition observables so each appears in the loss
-        # only once even if it's both a condition and a baseline in
-        # different arm_pairs.
-        obs_cache: dict[str, jnp.ndarray] = {}
+        # Each condition is solved once (whole trajectory) and cached, then
+        # read at each arm's measured timepoints — so a condition that is
+        # both a condition and a baseline in different arm_pairs still runs
+        # once, and every timepoint reuses the same solve.
+        run_cache: dict[str, tuple] = {}
 
-        def obs_for(cond_name: str) -> jnp.ndarray:
-            if cond_name not in obs_cache:
-                obs_cache[cond_name] = self._simulate_condition(
+        def run_for(cond_name: str):
+            if cond_name not in run_cache:
+                run_cache[cond_name] = self._simulate_condition(
                     substituted, self.conditions[cond_name]
                 )
-            return obs_cache[cond_name]
+            return run_cache[cond_name]
 
-        per_arm_losses = []
+        # One arm loss = mean squared error over the whole (reporter ×
+        # timepoint) block: the model fits the *trajectory* of the log2
+        # fold-change, not just the endpoint. The timepoint axis is
+        # vectorized (precomputed static arrays + one interp per reporter),
+        # so this scales to many timepoints without unrolling. A
+        # single-timepoint arm is the degenerate n_t=1 case.
+        arm_losses = []
         for arm in self.fit_arms:
             cond, base = self.arm_pairs[arm]
-            lfc_sim = self._log2_fold_change(obs_for(cond), obs_for(base))
+            ts_c, trajs_c = run_for(cond)
+            ts_b, trajs_b = run_for(base)
+            qt = self._arm_query_times[arm]  # (n_t,)
+            summ_c = self._reporter_summaries(
+                ts_c, trajs_c, qt
+            )  # (n_rep, n_t)
+            summ_b = self._reporter_summaries(ts_b, trajs_b, qt)
+            lfc_sim = self._log2_fold_change(summ_c, summ_b)  # (n_rep, n_t)
             # Δ_data is already a log2 fold-change (microarray), so the two
             # are commensurable: MSE keeps magnitude and weighs every
             # reporter's O(1) log-ratio comparably regardless of the
             # observable's absolute scale (a 1e-4 pool and a 1e1 pool both
             # contribute their fold-change, not their raw amplitude).
-            delta_data = jnp.asarray(
-                [
-                    float(self.data[arm].get(r.gene_symbol, jnp.nan))
-                    for r in self.reporters
-                ]
-            )
+            delta_data = self._arm_data_matrix[arm]  # (n_rep, n_t)
             mask = jnp.isfinite(delta_data)
             err2 = jnp.where(mask, (lfc_sim - delta_data) ** 2, 0.0)
-            per_arm_losses.append(
-                jnp.sum(err2) / jnp.maximum(jnp.sum(mask), 1.0)
-            )
-        data_loss = jnp.mean(jnp.stack(per_arm_losses))
+            arm_losses.append(jnp.sum(err2) / jnp.maximum(jnp.sum(mask), 1.0))
+        data_loss = jnp.mean(jnp.stack(arm_losses))
         return data_loss + self._prior_penalty(param_values)
 
     def _prior_penalty(self, param_values: dict) -> jnp.ndarray:
@@ -853,11 +914,14 @@ class CalibrationProblem:
         """Sign-aligned log2 fold-change per reporter, ``sign·log2(cond/base)``.
 
         Observables are non-negative pools/means; a small floor keeps the
-        log finite. The result is on the same scale as the measured
-        log2 fold-change, so model and data compare directly.
+        log finite. The result is on the same scale as the measured log2
+        fold-change, so model and data compare directly. ``cond``/``base``
+        are ``(n_rep,)`` or ``(n_rep, n_t)``; the per-reporter sign
+        broadcasts over any trailing timepoint axis.
         """
         eps = 1e-12
         signs = jnp.asarray([r.sign for r in self.reporters], dtype=float)
+        signs = signs.reshape(signs.shape + (1,) * (jnp.ndim(cond) - 1))
         log_cond = jnp.log2(jnp.clip(cond, eps, None))
         log_base = jnp.log2(jnp.clip(base, eps, None))
         return signs * (log_cond - log_base)
@@ -920,25 +984,26 @@ class CalibrationProblem:
     def evaluate(
         self,
         param_values: dict[str, jnp.ndarray],
-    ):
-        """Run all arms (fit + held-out), return per-arm
-        :class:`ConcordanceResult` via :func:`compute_concordance`.
+    ) -> dict[str, dict[float, Any]]:
+        """Run all arms (fit + held-out), return per-arm, per-timepoint
+        :class:`ConcordanceResult` via :func:`compute_concordance` —
+        ``{arm: {timepoint: result}}``.
 
         Bypasses the JAX/jvp path used inside ``loss`` — runs each
         condition once with the standard Scheduler default adjoint so
-        wall-time is faster (no forward-mode unfold).
+        wall-time is faster (no forward-mode unfold). Each condition is
+        solved once and read at every measured timepoint.
         """
         from hallsim.gene_reporters import compute_concordance
-        import pandas as pd
 
         substituted = self._substitute(self.composite.processes, param_values)
 
-        # Per-condition simulation cache.
-        obs_cache: dict[str, dict[str, float]] = {}
+        # Per-condition simulation cache: cond_name -> (ts, reporter_trajs).
+        run_cache: dict[str, tuple] = {}
 
-        def obs_for(cond_name: str) -> dict[str, float]:
-            if cond_name in obs_cache:
-                return obs_cache[cond_name]
+        def run_for(cond_name: str):
+            if cond_name in run_cache:
+                return run_cache[cond_name]
             comp = self._condition_composite(
                 substituted, self.conditions[cond_name]
             )
@@ -951,37 +1016,41 @@ class CalibrationProblem:
                 y0=y0,
                 save_dt=save_dt,
             )
-            out: dict[str, float] = {}
-            for rep, idx in zip(self.reporters, self._reporter_indices):
-                traj = res.ys[..., idx]
-                out[rep.observable] = float(rep.summary(res.ts, traj))
-            obs_cache[cond_name] = out
-            return out
+            trajs = jnp.stack(
+                [res.ys[..., idx] for idx in self._reporter_indices]
+            )
+            run_cache[cond_name] = (res.ts, trajs)
+            return run_cache[cond_name]
 
-        results = {}
+        eps = 1e-12
+        results: dict[str, dict[float, Any]] = {}
         all_arms = list(self.fit_arms) + list(self.held_out_arms)
         for arm in all_arms:
             cond, base = self.arm_pairs[arm]
-            c_obs = obs_for(cond)
-            b_obs = obs_for(base)
-            # log2 fold-change, matching the loss and the measured Δ_data
-            # units — magnitude is directly comparable across reporters.
-            eps = 1e-12
-            delta_sim_named = {
-                r.observable: float(
-                    jnp.log2(max(c_obs[r.observable], eps))
-                    - jnp.log2(max(b_obs[r.observable], eps))
+            ts_c, trajs_c = run_for(cond)
+            ts_b, trajs_b = run_for(base)
+            times = self._arm_times[arm]
+            qt = self._arm_query_times[arm]
+            # Vectorized read: (n_rep, n_t) in one interp per condition, then
+            # slice per timepoint to build each concordance table.
+            summ_c = self._reporter_summaries(ts_c, trajs_c, qt)
+            summ_b = self._reporter_summaries(ts_b, trajs_b, qt)
+            lfc = jnp.log2(jnp.maximum(summ_c, eps)) - jnp.log2(
+                jnp.maximum(summ_b, eps)
+            )  # (n_rep, n_t), unsigned; compute_concordance applies the sign
+            per_t: dict[float, Any] = {}
+            for j, t in enumerate(times):
+                delta_sim_named = {
+                    r.observable: float(lfc[i, j])
+                    for i, r in enumerate(self.reporters)
+                }
+                per_t[float(t)] = compute_concordance(
+                    delta_observables=delta_sim_named,
+                    delta_gene_expression=self.data[arm][t],
+                    condition_name=f"{arm}@t{float(t):g}",
+                    reporters=self.reporters,
                 )
-                for r in self.reporters
-            }
-            results[arm] = compute_concordance(
-                delta_observables=delta_sim_named,
-                delta_gene_expression=self.data.get(
-                    arm, pd.Series(dtype=float)
-                ),
-                condition_name=arm,
-                reporters=self.reporters,
-            )
+            results[arm] = per_t
         return results
 
     # ── Output bundle: trajectories + topology + concordance JSON ──
@@ -1106,22 +1175,25 @@ class CalibrationProblem:
         # 5. Summary JSON
         def _conc_to_dict(results_dict):
             out = {}
-            for arm, r in results_dict.items():
-                out[arm] = {
-                    "sign_agreement": float(r.sign_agreement),
-                    "spearman_r": float(r.spearman_r),
-                    "n_compared": r.n_compared,
-                    "rows": [
-                        {
-                            "gene": row.reporter.gene_symbol,
-                            "observable": row.reporter.observable,
-                            "delta_sim_signed": float(row.delta_sim),
-                            "delta_data": float(row.delta_data),
-                            "sign_match": bool(row.sign_match),
-                        }
-                        for row in r.rows
-                    ],
-                }
+            for arm, per_t in results_dict.items():
+                out[arm] = {}
+                for t, r in per_t.items():
+                    out[arm][f"{t:g}"] = {
+                        "timepoint": float(t),
+                        "sign_agreement": float(r.sign_agreement),
+                        "spearman_r": float(r.spearman_r),
+                        "n_compared": r.n_compared,
+                        "rows": [
+                            {
+                                "gene": row.reporter.gene_symbol,
+                                "observable": row.reporter.observable,
+                                "delta_sim_signed": float(row.delta_sim),
+                                "delta_data": float(row.delta_data),
+                                "sign_match": bool(row.sign_match),
+                            }
+                            for row in r.rows
+                        ],
+                    }
             return out
 
         summary = {

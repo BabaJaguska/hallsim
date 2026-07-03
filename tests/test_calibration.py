@@ -498,11 +498,75 @@ class TestCalibrationProblemEndToEnd:
         for v in history.losses:
             assert jnp.isfinite(v)
 
-    def test_evaluate_returns_per_arm_concordance(self):
+    def test_evaluate_returns_per_arm_per_timepoint_concordance(self):
         problem = self._setup()
         params = {"rate": jnp.asarray(0.2)}
         results = problem.evaluate(params)
         assert "high_vs_ctrl" in results
-        r = results["high_vs_ctrl"]
-        # n_compared = 2 reporters, both have data
-        assert r.n_compared == 2
+        # A plain Series is the degenerate single-timepoint case, normalized
+        # to {t_end: series}; evaluate returns {arm: {timepoint: result}}.
+        per_t = results["high_vs_ctrl"]
+        assert set(per_t) == {5.0}
+        r = per_t[5.0]
+        assert r.n_compared == 2  # 2 reporters, both have data
+
+    def test_trajectory_data_fits_multiple_timepoints(self):
+        """A {timepoint: Δseries} arm makes the loss a trajectory fit: the
+        loss stays a finite scalar and evaluate reports every timepoint."""
+        import pandas as pd
+
+        from hallsim.calibration import (
+            CalibrationProblem,
+            Condition,
+            ParameterRef,
+        )
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter
+        from hallsim.process import Port, PortRole, Process
+
+        class Decay(Process):
+            rate: float = 0.1
+
+            def ports_schema(self):
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=1.0, units="uM"),
+                }
+
+            def derivative(self, t, state):
+                return {"x": -self.rate * state["x"]}
+
+        comp = Composite(
+            processes={"decay": Decay()},
+            topology={"decay": {"x": "pool/x"}},
+            validate=False,
+            semantic_validation=False,
+        )
+        reporters = [GeneReporter(observable="pool/x", gene_symbol="GENE_X")]
+        problem = CalibrationProblem(
+            composite=comp,
+            reporters=reporters,
+            conditions={
+                "ctrl": Condition("ctrl", {}),
+                "high": Condition("high", {}),
+            },
+            data={
+                "high_vs_ctrl": {
+                    2.0: pd.Series({"GENE_X": -0.2}),
+                    5.0: pd.Series({"GENE_X": -0.5}),
+                },
+            },
+            arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
+            params={
+                "rate": ParameterRef(
+                    process_name="decay", field="rate", init=0.2
+                ),
+            },
+            fit_arms=["high_vs_ctrl"],
+            t_end=5.0,
+            macro_dt=1.0,
+            n_save=6,
+        )
+        v = problem.loss({"rate": jnp.asarray(0.2)})
+        assert jnp.isfinite(v) and v.shape == ()
+        results = problem.evaluate({"rate": jnp.asarray(0.2)})
+        assert set(results["high_vs_ctrl"]) == {2.0, 5.0}

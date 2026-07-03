@@ -16,12 +16,12 @@ multi-hallmark composite's reporters:
 
 | Gene | Store path | Summary | Note |
 |---|---|---|---|
-| `CDKN1A` (p21) | `dp14/CDKN1A` | endpoint | senescence/arrest marker; DP14 transcribes it via FoxO3a × damage (no explicit p53) |
+| `CDKN1A` (p21) | `dp14/CDKN1A` | value at time | senescence/arrest marker; DP14 transcribes it via FoxO3a × damage (no explicit p53) |
 | `DDB2` | `gz06/x2_integral` | **RMS** `√⟨x²⟩` | p53 target; GZ06's mean p53 is analytically damage-blind, so DDB2 reads pulse amplitude — see [gz06-basal-p53.md](gz06-basal-p53.md) |
-| `HMOX1` | `dp14/ROS` | endpoint | Nrf2/ARE oxidative-stress reporter |
+| `HMOX1` | `dp14/ROS` | value at time | Nrf2/ARE oxidative-stress reporter |
 | `NFKBIA` (IκBα) | `nfkb/IkBat` | window-mean | IκBα *transcript* (an NF-κB target that rises with activity), not the protein |
-| `CYCS` (cyt c) | `dp14/Mito_mass_new` | endpoint | mitochondrial biogenesis |
-| `EIF4EBP1` (4E-BP1) | `dp14/mTORC1_pS2448` | endpoint | kinase-level mTOR proxy |
+| `CYCS` (cyt c) | `dp14/Mito_mass_new` | value at time | mitochondrial biogenesis |
+| `EIF4EBP1` (4E-BP1) | `dp14/mTORC1_pS2448` | value at time | kinase-level mTOR proxy |
 
 Oscillating species are read phase-insensitively via a
 [`RunningIntegral`](../src/hallsim/models/running_integral.py) co-solved at
@@ -65,7 +65,15 @@ problem = CalibrationProblem(
     },
     arm_pairs={"DDIS_vs_ctrl": ("DDIS", "ctrl"),
                "RAPA_vs_DDIS": ("RAPA", "DDIS")},
-    data={"DDIS_vs_ctrl": ds.delta(...), "RAPA_vs_DDIS": ds.delta(...)},
+    # Trajectory-native: each arm is a {day: Δlog2FC} time course (model time
+    # units). A plain `ds.delta(...)` Series is the degenerate single-point
+    # case, auto-normalized to {t_end: series}.
+    data={
+        "DDIS_vs_ctrl": {7.0: ds.delta("ETOP_D07", "ETOP_D00"),
+                         14.0: ds.delta("ETOP_D14", "ETOP_D00")},
+        "RAPA_vs_DDIS": {7.0: ds.delta("RAPA_D07", "ETOP_D07"),
+                         14.0: ds.delta("RAPA_D14", "ETOP_D14")},
+    },
     params={
         "CDKN1A_transcr": ParameterRef(
             "dp14", "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
@@ -98,6 +106,19 @@ already a log ratio, the two are commensurable and every reporter contributes
 its O(1) fold-change regardless of the observable's absolute scale (a 1e-4
 pool and a 1e1 pool weigh equally — a plain mean or unit-norm loss lets the
 big reporters dominate and makes small ones invisible).
+
+**Trajectory, not endpoint.** The loss fits the fold-change *time course*: it
+sums one MSE term per `(arm, timepoint)`, reading each reporter at every
+measured timepoint. Each condition is solved once over the full `t_span`;
+the reporter summaries are query-time-aware (`summary(ts, y, query_times)`)
+and read the trajectory at the requested times — grid-independently (the
+running-integral windows behind `window_mean` / `window_rms` are
+interpolated at the query times, not snapped to the save grid). The
+timepoint axis is **vectorized**, not looped, so the traced graph is
+`O(reporters)` regardless of how many timepoints there are — 2 or 200 cost
+the same to compile, and the number of ODE solves never changes (one per
+condition). An arm with a single timepoint is the degenerate endpoint case.
+`evaluate` correspondingly returns `{arm: {timepoint: ConcordanceResult}}`.
 
 ### Priors (MAP regularization)
 

@@ -45,11 +45,14 @@ DATA_DIR = ROOT / "data" / "FibroblastsDNA_dmg_Rapamycin"
 SERIES_MATRIX = DATA_DIR / "GSE248823_series_matrix.txt"
 PLATFORM = DATA_DIR / "GPL17586-45144.txt"
 
-# GSE248823 columns: etoposide DDIS at D00 (baseline) and D14, plus
-# etoposide + rapamycin at D14 (D14 is the terminal sampling timepoint).
+# GSE248823 columns: etoposide DDIS sampled at D00 (baseline), D07, D14,
+# and etoposide + rapamycin at D07, D14 (2 replicates each). We fit the
+# whole D07 + D14 time course, not just the endpoint.
 SAMPLE_POSITION_GROUPS = {
     "ETOPOSIDE_D00": [0, 1],
+    "ETOPOSIDE_D07": [2, 3],
     "ETOPOSIDE_D14": [4, 5],
+    "ETOPOSIDE_RAPA_D07": [6, 7],
     "ETOPOSIDE_RAPA_D14": [8, 9],
 }
 
@@ -89,9 +92,19 @@ def build_problem() -> CalibrationProblem:
                 },
             ),
         },
+        # Trajectory-native: each arm is a {day: Δlog2FC} time course. Model
+        # time is in days (t_end=14), so the measured D07 / D14 samples map
+        # to query times 7.0 and 14.0. DDIS vs the D00 baseline; rapamycin
+        # vs the time-matched etoposide arm.
         data={
-            "DDIS_vs_ctrl": ds.delta("ETOPOSIDE_D14", "ETOPOSIDE_D00"),
-            "RAPA_vs_DDIS": ds.delta("ETOPOSIDE_RAPA_D14", "ETOPOSIDE_D14"),
+            "DDIS_vs_ctrl": {
+                7.0: ds.delta("ETOPOSIDE_D07", "ETOPOSIDE_D00"),
+                14.0: ds.delta("ETOPOSIDE_D14", "ETOPOSIDE_D00"),
+            },
+            "RAPA_vs_DDIS": {
+                7.0: ds.delta("ETOPOSIDE_RAPA_D07", "ETOPOSIDE_D07"),
+                14.0: ds.delta("ETOPOSIDE_RAPA_D14", "ETOPOSIDE_D14"),
+            },
         },
         arm_pairs={
             "DDIS_vs_ctrl": ("DDIS", "ctrl"),
@@ -174,7 +187,10 @@ def build_problem() -> CalibrationProblem:
         prior_weight=0.03,
         t_end=14.0,
         macro_dt=3.5,
-        n_save=5,
+        # Save daily so the D07 and D14 query times land on the grid and the
+        # trajectory is smooth for plotting; save density is free (dense
+        # output, no extra ODE solves).
+        n_save=15,
     )
 
 
@@ -187,27 +203,34 @@ def print_table(pre, post) -> None:
     print("OUT-OF-THE-BOX vs CALIBRATED vs MEASURED  (log2 fold-change)")
     print("=" * 74)
     for arm in ARMS:
-        tag = "FIT" if arm == "DDIS_vs_ctrl" else "HELD-OUT"
-        pre_r, post_r = _rows_by_gene(pre[arm]), _rows_by_gene(post[arm])
+        tag = "FIT " if arm == "DDIS_vs_ctrl" else "HELD-OUT"
         print(f"\n[{tag}] {arm}")
-        print(
-            f"  {'gene':<9}{'measured':>10}{'model(oob)':>12}"
-            f"{'model(cal)':>12}   sign"
-        )
-        for g in pre_r:
-            s0 = "OK" if pre_r[g].sign_match else "X"
-            s1 = "OK" if post_r[g].sign_match else "X"
+        for t in sorted(pre[arm]):
+            pre_r = _rows_by_gene(pre[arm][t])
+            post_r = _rows_by_gene(post[arm][t])
             print(
-                f"  {g:<9}{pre_r[g].delta_data:>+10.3f}"
-                f"{pre_r[g].delta_sim:>+12.4f}"
-                f"{post_r[g].delta_sim:>+12.4f}   {s0:>2}→{s1:<2}"
+                f"  day {t:g}   {'gene':<9}{'measured':>10}"
+                f"{'model(oob)':>12}{'model(cal)':>12}   {'|err|oob→cal':>14}"
             )
-        print(
-            f"  panel: sign-agree {pre[arm].sign_agreement * 100:.0f}%→"
-            f"{post[arm].sign_agreement * 100:.0f}%   "
-            f"Spearman {pre[arm].spearman_r:+.3f}→"
-            f"{post[arm].spearman_r:+.3f}"
-        )
+            e0_sum = e1_sum = 0.0
+            for g in pre_r:
+                e0 = abs(pre_r[g].delta_sim - pre_r[g].delta_data)
+                e1 = abs(post_r[g].delta_sim - post_r[g].delta_data)
+                e0_sum, e1_sum = e0_sum + e0, e1_sum + e1
+                print(
+                    f"  {'':<9}{g:<9}{pre_r[g].delta_data:>+10.3f}"
+                    f"{pre_r[g].delta_sim:>+12.4f}"
+                    f"{post_r[g].delta_sim:>+12.4f}   {e0:>6.3f}→{e1:<6.3f}"
+                )
+            n = len(pre_r)
+            print(
+                f"  {'':<9}{'mean|err|':<9}{'':>10}{'':>12}{'':>12}   "
+                f"{e0_sum / n:>6.3f}→{e1_sum / n:<6.3f}   "
+                f"sign {pre[arm][t].sign_agreement * 100:.0f}→"
+                f"{post[arm][t].sign_agreement * 100:.0f}%  "
+                f"ρ {pre[arm][t].spearman_r:+.2f}→"
+                f"{post[arm][t].spearman_r:+.2f}"
+            )
 
 
 def plot(pre, post, path: Path) -> None:
@@ -216,40 +239,50 @@ def plot(pre, post, path: Path) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
-    for ax, arm in zip(axes, ARMS):
-        pre_r, post_r = _rows_by_gene(pre[arm]), _rows_by_gene(post[arm])
-        genes = list(pre_r)
-        x = np.arange(len(genes))
-        w = 0.26
-        ax.bar(
-            x - w,
-            [pre_r[g].delta_data for g in genes],
-            w,
-            label="measured",
-            color="#333",
-        )
-        ax.bar(
-            x,
-            [pre_r[g].delta_sim for g in genes],
-            w,
-            label="model (out-of-box)",
-            color="#bbb",
-        )
-        ax.bar(
-            x + w,
-            [post_r[g].delta_sim for g in genes],
-            w,
-            label="model (calibrated)",
-            color="#2a7",
-        )
-        ax.axhline(0, color="k", lw=0.5)
-        ax.set_xticks(x)
-        ax.set_xticklabels(genes, rotation=45, ha="right")
-        tag = "FIT" if arm == "DDIS_vs_ctrl" else "HELD-OUT"
-        ax.set_title(f"{tag}: {arm}")
-    axes[0].set_ylabel("log2 fold-change")
-    axes[0].legend(loc="best", fontsize=9)
+    times = sorted(pre[ARMS[0]])
+    fig, axes = plt.subplots(
+        len(ARMS),
+        len(times),
+        figsize=(6 * len(times), 4.5 * len(ARMS)),
+        sharey=True,
+        squeeze=False,
+    )
+    for ai, arm in enumerate(ARMS):
+        for ti, t in enumerate(times):
+            ax = axes[ai][ti]
+            pre_r = _rows_by_gene(pre[arm][t])
+            post_r = _rows_by_gene(post[arm][t])
+            genes = list(pre_r)
+            x = np.arange(len(genes))
+            w = 0.26
+            ax.bar(
+                x - w,
+                [pre_r[g].delta_data for g in genes],
+                w,
+                label="measured",
+                color="#333",
+            )
+            ax.bar(
+                x,
+                [pre_r[g].delta_sim for g in genes],
+                w,
+                label="model (out-of-box)",
+                color="#bbb",
+            )
+            ax.bar(
+                x + w,
+                [post_r[g].delta_sim for g in genes],
+                w,
+                label="model (calibrated)",
+                color="#2a7",
+            )
+            ax.axhline(0, color="k", lw=0.5)
+            ax.set_xticks(x)
+            ax.set_xticklabels(genes, rotation=45, ha="right")
+            tag = "FIT" if arm == "DDIS_vs_ctrl" else "HELD-OUT"
+            ax.set_title(f"{tag}: {arm} · day {t:g}")
+    axes[0][0].set_ylabel("log2 fold-change")
+    axes[0][0].legend(loc="best", fontsize=9)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=130)
@@ -305,7 +338,8 @@ def main() -> None:
     print("[1/3] out-of-the-box concordance ...", flush=True)
     pre = problem.evaluate(init)
     for arm in ARMS:
-        print(pre[arm], flush=True)
+        for t in sorted(pre[arm]):
+            print(pre[arm][t], flush=True)
 
     print("[2/3] fitting ...", flush=True)
     history = problem.fit(
