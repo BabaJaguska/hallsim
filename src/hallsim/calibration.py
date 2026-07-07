@@ -293,16 +293,18 @@ class Calibrator:
                     ]
                     if pieces:
                         msg += "  " + "  ".join(pieces)
-                print(msg)
+                log.info(msg)
             if (
                 self.early_stop_patience
                 and no_improve >= self.early_stop_patience
             ):
                 if self.verbose:
-                    print(
-                        f"  early stop at {s+1} "
-                        f"(best loss {best_loss:.4g}, "
-                        f"no improvement in {no_improve} steps)"
+                    log.info(
+                        "  early stop at %d (best loss %.4g, "
+                        "no improvement in %d steps)",
+                        s + 1,
+                        best_loss,
+                        no_improve,
                     )
                 break
         history.final_params = best_params
@@ -355,13 +357,17 @@ class Calibrator:
                     ]
                     if pieces:
                         msg += "  " + "  ".join(pieces)
-                print(msg)
+                log.info(msg)
             if (
                 self.early_stop_patience
                 and no_improve >= self.early_stop_patience
             ):
                 if self.verbose:
-                    print(f"  early stop at {s+1} (best loss {best_loss:.4g})")
+                    log.info(
+                        "  early stop at %d (best loss %.4g)",
+                        s + 1,
+                        best_loss,
+                    )
                 break
             params, opt_state = apply(params, opt_state, value, grad)
         history.final_params = best_params

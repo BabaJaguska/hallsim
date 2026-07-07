@@ -18,6 +18,7 @@ SBML models download from BioModels on first import and cache locally.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import jax
@@ -332,6 +333,12 @@ def plot_history(problem, history, path: Path) -> None:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logging.getLogger("hallsim").setLevel(logging.INFO)
     problem = build_problem()
     init = {k: jnp.asarray(p.init) for k, p in problem.params.items()}
 

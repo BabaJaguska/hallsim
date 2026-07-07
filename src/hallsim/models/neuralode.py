@@ -26,6 +26,7 @@ Usage
 
 from __future__ import annotations
 
+import logging
 from typing import Sequence
 
 import equinox as eqx
@@ -33,6 +34,8 @@ import jax
 import jax.numpy as jnp
 
 from hallsim.process import Port, PortRole, Process
+
+log = logging.getLogger(__name__)
 
 
 class NeuralODEProcess(Process):
@@ -192,7 +195,7 @@ def train_neuralode(
         yi = ys[idx]
         loss, proc, opt_state = make_step(ts, yi, proc, opt_state)
         if step % 100 == 0:
-            print(f"Step {step}, loss: {float(loss):.6f}")
+            log.info("Step %d, loss: %.6f", step, float(loss))
 
     return proc
 

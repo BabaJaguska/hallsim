@@ -180,3 +180,4 @@ shared `t` and the result is meaningless — screen for it.
 - before composing an sbml model, test it with sbmltoodejax and with our framework. then proceed to compose.
 - code should be self-explanatory; minimize comments. Comments must be lean!
 - VECTORIZE what vectorized can be.
+- Logging, not printing.
