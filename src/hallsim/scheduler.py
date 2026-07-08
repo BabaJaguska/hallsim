@@ -582,7 +582,7 @@ class Scheduler:
                 max_steps=self.max_steps,
                 throw=False,
             )
-            ys = self._guard_result(sol.ys, sol, gname, integ)
+            ys = self._guard_result(sol.ys, sol.result, gname, integ)
             stats = {
                 gname: {
                     "num_macro_steps": 1,
@@ -601,6 +601,35 @@ class Scheduler:
                 keys=keys,
                 events=[],
                 stats=stats,
+            )
+
+        # ─── Scan path: continuous-only, frozen, fixed macro_dt ────────
+        # Multiple groups (or a single group under Strang) with no
+        # discrete/event processes and no adaptive macro_dt: the macro
+        # loop has a statically-known step count, so express it as one
+        # ``lax.scan`` — the whole multi-group run compiles to a single
+        # executable (bounded compile, reverse-mode memory flat in
+        # macro-step count). ``adaptive_dt`` (data-dependent step count),
+        # interpolated coupling, and debug logging keep the eager loop.
+        scan_eligible = (
+            not discrete_procs
+            and not event_procs
+            and not self.adaptive_dt
+            and self.coupling_mode == "frozen"
+            and not self.debug
+        )
+        if scan_eligible:
+            return self._run_scan_continuous(
+                composite,
+                groups,
+                integrators,
+                state,
+                keys,
+                t0,
+                t1,
+                macro_dt,
+                save_dt,
+                adjoint,
             )
 
         # Pre-build group flat RHS functions (each returns (fn, keys);
@@ -859,6 +888,113 @@ class Scheduler:
             ts=ts, ys=ys, keys=keys, events=events, stats=stats
         )
 
+    def _run_scan_continuous(
+        self,
+        composite: Composite,
+        groups: dict[str, list[str]],
+        integrators: dict[str, GroupIntegrator],
+        state: jnp.ndarray,
+        keys: list[str],
+        t0: float,
+        t1: float,
+        macro_dt: float,
+        save_dt: float | None,
+        adjoint: dfx.AbstractAdjoint,
+    ) -> SchedulerResult:
+        """Continuous-only multi-group run as a single ``lax.scan``.
+
+        One fixed-length scan over ``macro_dt`` communication windows;
+        each window solves every group in turn (Lie) or forward-then-
+        reversed (Strang) via :meth:`_group_step`, threading each group's
+        settled step size as the next window's warm-start. The whole
+        multi-group trajectory compiles to one executable, so compile time
+        and reverse-mode memory no longer scale with the macro-step count.
+        Requires frozen coupling and a fixed ``macro_dt`` (guaranteed by
+        the caller's ``scan_eligible`` gate).
+        """
+        group_rhs = [
+            (g, composite.build_rhs(procs)[0]) for g, procs in groups.items()
+        ]
+        n_groups = len(group_rhs)
+        strang = self.splitting == "strang" and n_groups > 1
+
+        n_macro = int(round((t1 - t0) / macro_dt))
+        t_starts = t0 + macro_dt * jnp.arange(n_macro)
+
+        dt0_init = jnp.full((n_groups,), float(self.dt0))
+        steps_init = jnp.zeros((n_groups,), jnp.int64)
+        rej_init = jnp.zeros((n_groups,), jnp.int64)
+        res_init = tuple(dfx.RESULTS.successful for _ in range(n_groups))
+
+        def one_solve(gi, st, t_a, t_b, dt0h, steps, rej, res):
+            g, rhs = group_rhs[gi]
+            st, ld, r, ns, nr = self._group_step(
+                rhs, st, t_a, t_b, integrators[g], adjoint, g, dt0h[gi]
+            )
+            return (
+                st,
+                ld,
+                steps.at[gi].add(ns),
+                rej.at[gi].add(nr),
+                res[:gi] + (r,) + res[gi + 1 :],
+            )
+
+        def body(carry, t_start):
+            st, dt0h, steps, rej, res = carry
+            t_next = jnp.minimum(t_start + macro_dt, t1)
+            dt0_next = [None] * n_groups
+            if strang:
+                t_mid = t_start + (t_next - t_start) / 2.0
+                for gi in range(n_groups):
+                    st, _, steps, rej, res = one_solve(
+                        gi, st, t_start, t_mid, dt0h, steps, rej, res
+                    )
+                for gi in range(n_groups - 1, -1, -1):
+                    st, ld, steps, rej, res = one_solve(
+                        gi, st, t_mid, t_next, dt0h, steps, rej, res
+                    )
+                    dt0_next[gi] = ld
+            else:
+                for gi in range(n_groups):
+                    st, ld, steps, rej, res = one_solve(
+                        gi, st, t_start, t_next, dt0h, steps, rej, res
+                    )
+                    dt0_next[gi] = ld
+            carry = (st, jnp.stack(dt0_next), steps, rej, res)
+            return carry, st
+
+        init = (state, dt0_init, steps_init, rej_init, res_init)
+        (final_state, _, steps_tot, rej_tot, res_final), ys_stack = (
+            jax.lax.scan(body, init, t_starts)
+        )
+
+        # Fixed-grid trajectory: y0 prepended, then each window's end
+        # state. Subsample to save_dt (an integer multiple of macro_dt).
+        step_ends = jnp.minimum(t_starts + macro_dt, t1)
+        all_ts = jnp.concatenate([jnp.asarray([t0]), step_ends])
+        all_ys = jnp.concatenate([state[None], ys_stack], axis=0)
+        stride = 1 if not save_dt else max(1, int(round(save_dt / macro_dt)))
+        keep = list(range(0, n_macro + 1, stride))
+        if keep[-1] != n_macro:
+            keep.append(n_macro)
+        keep = jnp.asarray(keep)
+        ts, ys = all_ts[keep], all_ys[keep]
+
+        stats = {
+            g: {
+                "num_macro_steps": n_macro * (2 if strang else 1),
+                "num_solver_steps": steps_tot[gi],
+                "num_rejected_steps": rej_tot[gi],
+                "result": res_final[gi],
+                "solver": type(integrators[g].solver).__name__,
+                "stiff": integrators[g].stiff,
+            }
+            for gi, (g, _) in enumerate(group_rhs)
+        }
+        return SchedulerResult(
+            ts=ts, ys=ys, keys=keys, events=[], stats=stats
+        )
+
     @staticmethod
     def _integrator_signature(groups, state, macro_dt):
         """Structural key for the integrator cache.
@@ -1022,6 +1158,58 @@ class Scheduler:
             composite, groups, state, t_span[0], macro_dt
         )
 
+    def _group_step(
+        self,
+        rhs_fn,
+        state_vec: jnp.ndarray,
+        t0,
+        t1,
+        integ: GroupIntegrator,
+        adjoint: dfx.AbstractAdjoint,
+        group_name: str = "",
+        dt0_hint=None,
+    ):
+        """Trace-safe single-group ``diffeqsolve`` over ``[t0, t1]``.
+
+        No Python-side guards or logging — ``t0``/``t1`` may be tracers,
+        so this is the core used inside ``lax.scan`` by the continuous
+        scan path as well as by the eager :meth:`_solve_group`. Returns
+        ``(final_vec, last_dt, result, num_steps, num_rejected)``.
+        """
+        # Prior macro-step's average dt as a warm-start hint, clamped to
+        # the remaining interval.
+        dt0_base = dt0_hint if dt0_hint is not None else self.dt0
+        # throw=False so a failed solve returns its RESULTS code instead
+        # of crashing opaquely; _guard_result re-raises a labelled error
+        # when self.throw, else the code is surfaced in stats.
+        sol = dfx.diffeqsolve(
+            dfx.ODETerm(rhs_fn),
+            integ.solver,
+            t0=t0,
+            t1=t1,
+            dt0=jnp.minimum(dt0_base, t1 - t0),
+            y0=state_vec,
+            saveat=dfx.SaveAt(t1=True),
+            stepsize_controller=integ.controller,
+            adjoint=adjoint,
+            max_steps=self.max_steps,
+            throw=False,
+        )
+        final_vec = self._guard_result(
+            sol.ys[-1], sol.result, group_name, integ
+        )
+        # "What step size did the controller settle at?" — average over
+        # the macro interval, a robust proxy that doesn't depend on
+        # Diffrax's internal controller_state API.
+        last_dt = (t1 - t0) / jnp.maximum(sol.stats["num_steps"], 1)
+        return (
+            final_vec,
+            last_dt,
+            sol.result,
+            sol.stats["num_steps"],
+            sol.stats["num_rejected_steps"],
+        )
+
     def _solve_group(
         self,
         rhs_fn,
@@ -1034,18 +1222,14 @@ class Scheduler:
         group_name: str = "",
         dt0_hint: float | None = None,
     ) -> tuple[jnp.ndarray, float]:
-        """Solve one continuous group from t0 to t1 on the flat state.
+        """Eager single-group solve — :meth:`_group_step` plus the
+        empty-interval guard and optional debug logging.
 
-        Uses the group's resolved ``integ`` (solver + step-size
-        controller — implicit + scaled vector atol for a stiff group,
-        explicit + scalar controller otherwise).
-
-        Returns ``(final_state_vec, last_dt_estimate, diag)``. The
-        ``last_dt_estimate`` is ``(t1-t0)/num_steps`` and is meant to be
-        passed back as the next macro-step's ``dt0_hint`` for this
-        group, so the adaptive controller doesn't restart from
-        ``self.dt0`` every macro step. ``diag`` is a
-        ``(result, num_steps, num_rejected)`` triple recorded into stats.
+        Returns ``(final_state_vec, last_dt_estimate, diag)`` where
+        ``diag`` is a ``(result, num_steps, num_rejected)`` triple
+        recorded into stats. ``last_dt_estimate`` feeds the next
+        macro-step's ``dt0_hint`` so the controller doesn't restart from
+        ``self.dt0`` every macro step.
         """
         if t1 <= t0:
             return (
@@ -1056,41 +1240,12 @@ class Scheduler:
 
         state_before = jnp.asarray(state_vec) if self.debug else None
 
-        # Use the prior macro-step's average dt as a starting hint when
-        # available; clamp to the remaining interval.
-        dt0_base = dt0_hint if dt0_hint is not None else self.dt0
-        term = dfx.ODETerm(rhs_fn)
-        # throw=False so a failed solve returns its RESULTS code instead
-        # of crashing opaquely; _guard_result re-raises a labelled error
-        # when self.throw, else the code is surfaced in stats.
-        sol = dfx.diffeqsolve(
-            term,
-            integ.solver,
-            t0=t0,
-            t1=t1,
-            dt0=jnp.minimum(dt0_base, t1 - t0),
-            y0=state_vec,
-            saveat=dfx.SaveAt(t1=True),
-            stepsize_controller=integ.controller,
-            adjoint=adjoint,
-            max_steps=self.max_steps,
-            throw=False,
+        final_vec, last_dt, result, n_steps_s, n_rej_s = self._group_step(
+            rhs_fn, state_vec, t0, t1, integ, adjoint, group_name, dt0_hint
         )
-
-        final_vec = self._guard_result(sol.ys[-1], sol, group_name, integ)
-        # Estimate "what step size did the controller settle at?" by
-        # averaging over the macro interval. This is a robust proxy that
-        # doesn't depend on Diffrax's internal controller_state API.
-        last_dt = (t1 - t0) / jnp.maximum(sol.stats["num_steps"], 1)
-        diag = (
-            sol.result,
-            sol.stats["num_steps"],
-            sol.stats["num_rejected_steps"],
-        )
+        diag = (result, n_steps_s, n_rej_s)
 
         if self.debug:
-            n_steps = int(sol.stats["num_steps"])
-            n_rejected = int(sol.stats["num_rejected_steps"])
             deltas = jnp.abs(final_vec - state_before)
             max_idx = int(jnp.argmax(deltas))
             max_delta = float(deltas[max_idx])
@@ -1098,15 +1253,15 @@ class Scheduler:
             any_nan = bool(jnp.isnan(final_vec).any())
             log.info(
                 f"  [{group_name}] [{t0:.1f} → {t1:.1f}]: "
-                f"{n_steps} steps ({n_rejected} rej) | "
-                f"result={sol.result} | "
+                f"{int(n_steps_s)} steps ({int(n_rej_s)} rej) | "
+                f"result={result} | "
                 f"max Δ: {max_delta_key}={max_delta:.4g}"
                 + (" *** NaN ***" if any_nan else "")
             )
 
         return final_vec, last_dt, diag
 
-    def _guard_result(self, value, sol, group_name: str, integ):
+    def _guard_result(self, value, result, group_name: str, integ):
         """Re-raise a labelled error on a failed solve when ``self.throw``.
 
         ``eqx.error_if`` bakes the check into ``value`` so it fires both
@@ -1124,7 +1279,7 @@ class Scheduler:
             f"diagnose (max_steps vs implicit/Newton divergence)."
         )
         return eqx.error_if(
-            value, sol.result != dfx.RESULTS.successful, reason
+            value, result != dfx.RESULTS.successful, reason
         )
 
     def _solve_group_interpolated(
@@ -1186,7 +1341,9 @@ class Scheduler:
             throw=False,
         )
 
-        final_vec = self._guard_result(sol.ys[-1], sol, "interpolated", integ)
+        final_vec = self._guard_result(
+            sol.ys[-1], sol.result, "interpolated", integ
+        )
         return final_vec, sol.interpolation
 
     @staticmethod
