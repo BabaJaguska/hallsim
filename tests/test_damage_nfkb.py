@@ -24,20 +24,26 @@ class TestDamageNFkBActivator:
         assert set(dy.keys()) == {"IKK"}
 
     def test_activating_sign_and_saturates(self):
-        # More damage -> larger positive IKK contribution; K straddles the
-        # measured control (~10) vs DDIS (~2.8e4) DNA_damage range.
+        # K_dmg=19 is the geometric midpoint of the etoposide-regime
+        # DNA_damage range (~9.6 control -> ~37 DDIS at the fitted potency
+        # ~10). Control sits below the Hill half-saturation, DDIS above it,
+        # and the term saturates toward k_act at high damage.
         proc = DamageNFkBActivator()
         ctrl = float(
-            proc.derivative(0.0, {"DNA_damage": jnp.array(10.0)})["IKK"]
+            proc.derivative(0.0, {"DNA_damage": jnp.array(9.6)})["IKK"]
         )
         ddis = float(
-            proc.derivative(0.0, {"DNA_damage": jnp.array(28000.0)})["IKK"]
+            proc.derivative(0.0, {"DNA_damage": jnp.array(37.0)})["IKK"]
         )
-        assert 0.0 <= ctrl < ddis
-        # Control sits below the Hill inflection: near-zero contribution.
-        assert ctrl < 0.05 * proc.k_act
-        # DDIS is essentially saturated at k_act.
-        assert ddis == pytest.approx(proc.k_act, rel=1e-3)
+        sat = float(
+            proc.derivative(0.0, {"DNA_damage": jnp.array(1e4)})["IKK"]
+        )
+        # Activating: more damage -> larger contribution.
+        assert 0.0 <= ctrl < ddis < sat
+        # K straddles the range: control below half-saturation, DDIS above.
+        assert ctrl < 0.5 * proc.k_act < ddis
+        # Saturates toward k_act at high damage.
+        assert sat == pytest.approx(proc.k_act, rel=1e-3)
 
     def test_differentiable_through_input_and_rate(self):
         def ikk_from_dmg(d):

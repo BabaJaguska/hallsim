@@ -143,15 +143,79 @@ last.
 
 The composite is calibrated by gradient descent **through the ODE solve** —
 the same reverse-mode autodiff that trains neural networks, applied to
-mechanism parameters spread across independently-published SBML models. Two
-ingredients make this work on stiff systems:
+mechanism parameters spread across independently-published SBML models.
+
+### Forward — the loss is one pure function of the parameters
+
+`CalibrationProblem.loss(θ)` composes, all in JAX:
+
+1. **Substitute** the fit parameters `θ` into the composite's process pytree
+   via `eqx.tree_at` (`_substitute`), so each lands *inside* its model as a
+   traced array — the step that makes it reachable by autodiff.
+2. For each `Condition`, apply the hallmark severities, build the flat RHS
+   `f(t, y; θ)` (`Composite.build_rhs`), and solve `dy/dt = f` over the full
+   `t_span` with the Scheduler (one `diffeqsolve` per timescale group, under
+   operator splitting / a single `lax.scan`).
+3. Read the reporter store paths off the trajectory and apply each reporter's
+   query-time-aware **summary** (`window_mean` / `window_rms`, interpolating
+   the running-integrals at the measured days).
+4. Form the model fold-change `sign·(log2 summ_cond − log2 summ_base)` and sum
+   `(model − data)²` over `(reporter × timepoint)`, plus the MAP prior penalty.
+
+Every step — including the solve — has a VJP, so `loss: θ ↦ ℝ` is
+differentiable. The data is a handful of fold-change points per arm, not a
+dense trajectory: the loss reads the model *at those query days* (via the
+interpolating summaries) and compares fold-changes, not raw trajectories.
+
+### Backward — reverse-mode through the solve
+
+`jax.grad(loss)` propagates the chain rule back through the arithmetic, the
+`log2`, and the interpolating summaries — all trivial — down to the one hard
+factor, `∂y(t)/∂θ` through the solver. The solve is a sequence of solver steps
+`yₙ₊₁ = step(yₙ; θ)`, each a JAX function; because `f` depends on `θ` at
+*every* step, the parameter gradient **accumulates over the whole trajectory**.
+
+Storing every intermediate state for that backward pass is `O(n_steps)`
+memory — untenable for a stiff multi-day solve of thousands of steps. HallSim
+uses Diffrax's **`RecursiveCheckpointAdjoint`** (the `mode="reverse"` /
+`adjoint=None` path): recursive (Griewank–Walther) checkpointing keeps only
+`O(log n_steps)` checkpoints and re-runs forward segments during the backward
+pass to rebuild the rest — trading ~`log n` extra forward evaluations for
+`log n` memory, and yielding the *exact* gradient of the numerical solution
+actually taken. The continuous adjoint (an augmented ODE solved backward,
+`O(1)` memory) is **not** used: on stiff p53 / NF-κB oscillators the
+reconstructed backward solution drifts and corrupts the gradient.
+
+The `lax.scan` outer solve keeps this bounded at scale — the whole multi-group
+run compiles to one executable, so reverse-mode checkpoint memory no longer
+grows with the macro-step count.
+
+### The loop
+
+`Calibrator` builds `vg = jax.jit(jax.value_and_grad(loss))` **once** and
+reuses it every step; un-jitted it would re-trace the composite + solve +
+adjoint each iteration (the difference between minutes and hours). Each step is
+one `value_and_grad` (≈ one solve's cost) fed to the optimizer.
+
+### What it takes on stiff systems
 
 - **A stiff solver with a proper Newton root finder.** Stiff subsystems make
-  an explicit solver's *sensitivity* (the gradient) blow up even when the
-  forward trajectory is fine. The Scheduler auto-detects stiffness per
+  an explicit solver's *sensitivity* (the gradient) blow up to NaN even when
+  the forward trajectory is finite. The Scheduler auto-detects stiffness per
   timescale group and routes stiff groups to an A-stable implicit solver
-  (`Kvaerno5`); non-stiff groups stay on a cheap explicit solver.
-  `CalibrationProblem` enables this routing by default.
+  (`Kvaerno5` + Newton); Diffrax differentiates through the Newton root-find
+  too (an implicit-function-theorem VJP). `CalibrationProblem` enables this
+  routing by default (`auto_stiffness=True`).
 - **End-to-end float64.** Adaptive error control at `rtol=1e-6` needs the
   state *and* the RHS in double precision; a single hardcoded `float32`
   silently caps precision and makes the implicit solver reject most steps.
+
+### What the gradient reaches
+
+`∂loss/∂θ` is nonzero for SBML rate constants *inside* the imported models (via
+the `c`-vector substitution in `SBMLProcess.derivative`), the coupling-edge
+strengths, and the driven-parameter basal `psi_basal`. Because hallmark
+severity is itself a differentiable transform on parameters, `jax.grad(loss)`
+w.r.t. a **severity** works too — the whole path from a gene-reporter readout,
+back through the operator-split checkpointed solve, to any upstream knob is one
+differentiable graph.

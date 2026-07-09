@@ -202,15 +202,15 @@ class TestUnitChecker:
         assert len(unit_results) == 0
 
     def test_compatible_different_scale(self):
-        """uM vs nM → WARNING (compatible, different scale)."""
+        """uM vs nM → INFO (compatible; auto-reconciled to canonical unit)."""
         procs = {"a": ROSProducerMicromolar(), "b": ROSProducerNanomolar()}
         topo = {"a": {"ros": "pool/ros"}, "b": {"ros": "pool/ros"}}
         results = UnitChecker().check(procs, topo)
-        warnings = [r for r in results if r.level == Severity.WARNING]
-        assert len(warnings) == 1
+        infos = [r for r in results if r.level == Severity.INFO]
+        assert len(infos) == 1
         assert (
-            "scale mismatch" in warnings[0].message.lower()
-            or "factor" in warnings[0].message.lower()
+            "reconciled" in infos[0].message.lower()
+            or "factor" in infos[0].message.lower()
         )
 
     def test_incompatible_dimensions(self):

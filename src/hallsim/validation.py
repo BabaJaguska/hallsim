@@ -227,12 +227,13 @@ class UnitChecker:
                             factor = "?"
                         results.append(
                             ValidationResult(
-                                Severity.WARNING,
+                                Severity.INFO,
                                 "units",
-                                f"Unit scale mismatch at {store_path!r}: "
+                                f"Units auto-reconciled at {store_path!r}: "
                                 f"{e1.proc_name}.{e1.port_name}={u1.units} vs "
                                 f"{e2.proc_name}.{e2.port_name}={u2.units} "
-                                f"(factor: {factor})",
+                                f"(compatible; contributions rescaled to the "
+                                f"path's canonical unit, factor {factor}).",
                             )
                         )
 

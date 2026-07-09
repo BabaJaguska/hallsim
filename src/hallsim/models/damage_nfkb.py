@@ -67,12 +67,15 @@ class DamageNFkBActivator(Process):
         time unit, matching the scale of the mTORC1-driven edge so
         neither channel dominates the IKK pool a priori.
     K_dmg:
-        Hill half-saturation threshold on ``DNA_damage``. Set to 500,
-        the geometric midpoint of DP14's settled DNA_damage operating
-        range across the arms (~10 unstressed to ~2.8e4 at full DDIS), so
-        control sits well below the inflection (contribution ≈ 0) and
-        DDIS well above it (contribution ≈ saturated) — a clean
-        genomic-instability differential.
+        Hill half-saturation threshold on ``DNA_damage``. Set to 19, the
+        geometric midpoint of DP14's DNA_damage operating range *in the
+        calibrated etoposide regime* (~9.6 unstressed → ~37 at full DDIS,
+        at the fitted etoposide potency ~10) — NOT the γ-irradiation
+        default (~2.8e4), which would leave this edge starved (damage ≪ K)
+        and the genomic-instability → NF-κB channel effectively off. So
+        control sits below the inflection (contribution ≈ 0) and DDIS above
+        it — a clean genomic-instability differential in the regime the
+        composite is actually fit in.
     n:
         Hill cooperativity. Default 2.0 — graded engagement across the
         operating range rather than a hard switch.
@@ -87,7 +90,7 @@ class DamageNFkBActivator(Process):
             "reporter across the DDIS/control arms."
         ),
     )
-    K_dmg: float = 500.0  # measurement-grounded (DP14 DNA_damage range)
+    K_dmg: float = 19.0  # etoposide-regime DNA_damage midpoint (~9.6→37)
     n: float = 2.0  # Hill cooperativity — fixed
 
     def ports_schema(self):

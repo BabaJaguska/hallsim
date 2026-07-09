@@ -49,7 +49,12 @@ class RunningIntegral(Process):
     """
 
     timescale: float | None = None
-    power: float = 1.0  # integrate source**power; 2 → ⟨x²⟩ for RMS
+    # Integrate source**power. Default 2 → ∫x² → √⟨x²⟩ via window_rms: the
+    # amplitude-aware readout is the safe default, because a buffered-mean
+    # oscillator (e.g. p53, mean analytically damage-blind) is invisible to a
+    # plain mean. power=1 → ∫x → window_mean, for a species whose DC level
+    # itself moves with the drive (e.g. a directly-read transcript).
+    power: float = 2.0
 
     def ports_schema(self):
         return {

@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -854,6 +855,126 @@ class TestSchedulerInitValidation:
 
     def test_lie_plus_interpolated_ok(self):
         Scheduler(splitting="lie", coupling_mode="interpolated")
+
+
+class TestInterpolatedCouplingAccuracy:
+    """Interpolated coupling feeds a fixed-size sample of the previous
+    group's trajectory to the next group, so a downstream integrator sees
+    the upstream variable *evolving* across the macro step instead of frozen.
+    On a genuine cross-group coupling this is far more accurate than frozen
+    and compiles through the scan fast path."""
+
+    def _coupled(self):
+        class Decay(Process):
+            def ports_schema(self):
+                return {"A": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"A": -state["A"]}
+
+        class Integrate(Process):
+            def ports_schema(self):
+                return {
+                    "A": Port(role=PortRole.INPUT, default=1.0),
+                    "B": Port(role=PortRole.EVOLVED, default=0.0),
+                }
+
+            def derivative(self, t, state):
+                return {"B": state["A"]}
+
+        comp = Composite(
+            processes={"decay": Decay(), "integ": Integrate()},
+            topology={
+                "decay": {"A": "p/A"},
+                "integ": {"A": "p/A", "B": "p/B"},
+            },
+        )
+        return comp, {"fast": ["decay"], "slow": ["integ"]}
+
+    def test_interpolated_beats_frozen_on_cross_group_coupling(self):
+        # dA/dt=-A, A0=1 -> A=exp(-t); dB/dt=A, B0=0 -> B(T)=1-exp(-T).
+        comp, groups = self._coupled()
+        T = 4.0
+        exact = 1.0 - float(jnp.exp(-jnp.asarray(T)))
+        bi = comp.store_keys().index("p/B")
+
+        def run_B(mode, mdt):
+            s = Scheduler(coupling_mode=mode, groups=groups)
+            return float(s.run(comp, (0.0, T), macro_dt=mdt).ys[-1, bi])
+
+        frozen_err = abs(run_B("frozen", 1.0) - exact)
+        interp_err = abs(run_B("interpolated", 1.0) - exact)
+        # Frozen (left-rectangle) is badly off at this step; interpolated
+        # (trapezoid over the sample) matches the analytic value.
+        assert frozen_err > 0.3
+        assert interp_err < 1e-2
+        assert interp_err < frozen_err / 100
+
+    def test_auto_routes_interpolated_on_forward_edge(self):
+        # A forward cross-group edge (fast group writes A, slow group reads
+        # it) is exactly the case interpolated helps, so auto must pick it.
+        comp, groups = self._coupled()
+        s = Scheduler(coupling_mode="auto", groups=groups)
+        assert s._effective_coupling(comp, groups, comp.store_keys()) == (
+            "interpolated"
+        )
+        bi = comp.store_keys().index("p/B")
+        auto_B = float(s.run(comp, (0.0, 4.0), macro_dt=1.0).ys[-1, bi])
+        exact = 1.0 - float(jnp.exp(-jnp.asarray(4.0)))
+        assert abs(auto_B - exact) < 1e-2
+
+    def test_auto_routes_frozen_without_forward_edge(self):
+        # No cross-group coupling -> interpolated would only add cost, so
+        # auto stays frozen.
+        comp, groups = self._coupled()
+        # Swap the solve order so the reader group runs first: the A->B edge
+        # is now backward, which interpolated cannot help.
+        rev = {"slow": groups["slow"], "fast": groups["fast"]}
+        s = Scheduler(coupling_mode="auto", groups=rev)
+        assert s._effective_coupling(comp, rev, comp.store_keys()) == "frozen"
+
+    def test_auto_coupling_traces_under_jit_vmap(self):
+        # Auto-detection must use only static structure: population runs wrap
+        # run() in jax.jit(jax.vmap(...)) with a traced composite, so any
+        # concrete int()/set op on a jnp array would raise ConcretizationError.
+        _, groups = self._coupled()
+
+        class DecayR(Process):
+            rate: float = 1.0
+
+            def ports_schema(self):
+                return {"A": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"A": -self.rate * state["A"]}
+
+        class Integrate(Process):
+            def ports_schema(self):
+                return {
+                    "A": Port(role=PortRole.INPUT, default=1.0),
+                    "B": Port(role=PortRole.EVOLVED, default=0.0),
+                }
+
+            def derivative(self, t, state):
+                return {"B": state["A"]}
+
+        def run(rate):
+            comp = Composite(
+                processes={"decay": DecayR(rate=rate), "integ": Integrate()},
+                topology={
+                    "decay": {"A": "p/A"},
+                    "integ": {"A": "p/A", "B": "p/B"},
+                },
+            )
+            return (
+                Scheduler(groups=groups)
+                .run(comp, (0.0, 4.0), macro_dt=1.0)
+                .ys[-1]
+            )
+
+        out = jax.jit(jax.vmap(run))(jnp.array([1.0, 1.3, 0.8]))
+        assert out.shape == (3, 2)
+        assert bool(jnp.isfinite(out).all())
 
 
 class TestSchedulerDiscrete:

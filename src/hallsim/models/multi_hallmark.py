@@ -21,23 +21,28 @@ The three constituent SBML models:
   dynamics, ROS, DNA_damage, CDKN1A (p21), and SA_beta_gal as direct
   state variables.
 - **Geva-Zatorsky 2006** (BIOMD0000000157) supplies a p53–Mdm2
-  oscillator. Its ``psi`` damage-input parameter is **driven by the
-  Genomic Instability hallmark directly** at GZ06's own calibrated
-  scale (~1.0 at full DDIS). There is no DP14↔GZ06 topology coupling:
-  the hallmark severity sets both DP14's irradiation rate AND GZ06's
-  psi simultaneously, each at its own model's regime. Biologically
-  appropriate for sustained damage (etoposide DDIS is a constant
-  insult — both models reflect the same experimental condition without
-  needing dynamic coupling between them).
+  oscillator. Its ``psi`` damage-input parameter is **driven live by
+  DP14's ``DNA_damage`` state** through the DP14 → GZ06 edge below,
+  Hill-interpolated from the fitted basal ψ (control) to ``GZ06_PSI_FULL``
+  (DDIS). So the p53 oscillator's damage input is *caused* by DP14's
+  accumulated damage rather than set independently by the hallmark: the
+  Genomic Instability severity drives DP14's irradiation rate, DP14
+  integrates DNA_damage, and the edge carries it to GZ06.
 - **Ihekwaba 2004** (BIOMD0000000230) supplies NF-κB / IκBα dynamics.
   Its ``IkBa`` species is the NFKBIA reporter. NF-κB is driven into the
   module through two DP14 channels (see below), so both rapamycin
   (via mTOR) and genotoxic stress (via DNA damage) reach the NFKBIA
   readout rather than leaving the module inert.
 
-The two cross-publication mechanistic edges, both additive into
-Ihekwaba's ``IKK`` pool:
+The three cross-publication mechanistic edges:
 
+- **DNA damage → p53** (DP14 ``DNA_damage`` → GZ06 ``psi``, via
+  :meth:`SBMLProcess.with_param_driver`) Hill-interpolates GZ06's ψ
+  damage-input between its fitted basal value and ``GZ06_PSI_FULL`` on
+  DP14's accumulated DNA_damage. Activating per the canonical ATM/ATR →
+  p53 DNA-damage-response axis. ψ's range is anchored by GZ06's own
+  calibration, so this edge is structural (no free strength), unlike the
+  two phenomenological IKK edges below.
 - **mTORC1 → IKK** (:class:`hallsim.models.mtor_nfkb.MtorNFkBActivator`)
   reads DP14's ``mTORC1_pS2448`` and Hill-gates a positive derivative
   onto ``IKK``. Activating sign per Dan 2008 / Laberge 2015 — the
@@ -47,8 +52,7 @@ Ihekwaba's ``IKK`` pool:
   ``DNA_damage`` and Hill-gates a positive derivative onto ``IKK``.
   Activating sign per the ATM → NEMO → IKK genotoxic pathway (Wu 2006 /
   Miyamoto 2011) — the genomic-instability channel through which the
-  Genomic Instability hallmark reaches NF-κB. DP14↔GZ06 remain coupled
-  only through the shared hallmark severity.
+  Genomic Instability hallmark reaches NF-κB.
 
 Geva-Zatorsky 2006 ships vendored under ``models/zatorsky2006/`` and
 loads from disk. DallePezze 2014 and Ihekwaba 2004 are not vendored in
@@ -161,18 +165,28 @@ DP14_IRRADIATION_RATE_NAME = "DNA_damaged_by_irradiation"
 
 # GZ06's damage-signal parameter. Geva-Zatorsky 2006 calibrated their
 # p53-Mdm2 oscillator with ψ representing the damage stimulus; ψ ≈ 1 is
-# the "full irradiation" reference (GZ06_PSI_FULL in hallmarks).
+# the "full irradiation" reference.
 #
 # In GZ06 p53 production is entirely ψ-driven (rate = beta_x·psi,
 # alpha_x=0), so ψ=0 forces p53→0 — biologically wrong: unstressed cells
 # keep a low basal p53 from ~50 spontaneous DSBs per cell cycle
-# (docs/gz06-basal-p53.md). So the composite seeds ψ at a nonzero BASAL
-# level and the Genomic Instability hallmark interpolates it up to
-# GZ06_PSI_FULL at DDIS. The basal level is a fitted mechanism parameter
-# (calibrated against the modest measured DDB2 / p53-target fold-change).
+# (docs/gz06-basal-p53.md). So ψ is driven live from DP14's DNA_damage
+# state (with_param_driver below), Hill-interpolated from a nonzero basal
+# floor (control) to GZ06_PSI_FULL (DDIS). The basal floor is the fitted
+# mechanism parameter, exposed as the ordinary `parameters.psi` entry
+# (the driver reads it as the Hill's lower bound).
 GZ06_PSI_NAME = "psi"
 GZ06_PSI_DEFAULT = 1.0  # full-damage reference (standalone screening)
 GZ06_PSI_BASAL_DEFAULT = 0.3  # control basal ψ; fitted in the composite
+GZ06_PSI_FULL = 1.0  # saturated ψ at full DDIS (the driver's `hi`)
+# Hill gate mapping DP14 DNA_damage → GZ06 psi. K is the geometric midpoint
+# of DP14's DNA_damage operating range *in the calibrated etoposide regime*
+# (~9.6 control → ~37 DDIS at the fitted etoposide potency ~10), NOT the
+# γ-irradiation default (~2.8e4). Control sits near basal ψ; DDIS drives it
+# up toward GZ06_PSI_FULL. n=2 matches the damage→IKK edge's cooperativity.
+# See docs/gz06-basal-p53.md.
+GZ06_PSI_DRIVE_K = 19.0
+GZ06_PSI_DRIVE_N = 2.0
 
 # Canonical clock for the composite: one t_span unit = one day. DP14
 # (the senescence spine) is natively in days, so it runs unchanged;
@@ -208,11 +222,24 @@ def build_multi_hallmark_composite(*, validate: bool = True):
     # interpolates from this basal value (control) up to GZ06_PSI_FULL at
     # DDIS — not by a topology edge from DP14. Seeded at the basal level
     # so control keeps a nonzero p53; the basal value is fittable.
-    gz06 = process_from_sbml(
-        str(GZ06_SBML_PATH),
-        name="gz06",
-        parameters={GZ06_PSI_NAME: GZ06_PSI_BASAL_DEFAULT},
-    ).reconciled_to(CANONICAL_TIME_SECONDS)
+    # psi is driven live by DP14's DNA_damage state (edge below), Hill-
+    # interpolated from the fitted basal ψ (control) to GZ06_PSI_FULL
+    # (DDIS). The `parameters.psi` basal stays the fittable control floor.
+    gz06 = (
+        process_from_sbml(
+            str(GZ06_SBML_PATH),
+            name="gz06",
+            parameters={GZ06_PSI_NAME: GZ06_PSI_BASAL_DEFAULT},
+        )
+        .reconciled_to(CANONICAL_TIME_SECONDS)
+        .with_param_driver(
+            GZ06_PSI_NAME,
+            "psi_source",
+            hi=GZ06_PSI_FULL,
+            K=GZ06_PSI_DRIVE_K,
+            n=GZ06_PSI_DRIVE_N,
+        )
+    )
     processes: dict = {
         "dp14": process_from_sbml(
             str(DP14_SBML_PATH),
@@ -241,13 +268,14 @@ def build_multi_hallmark_composite(*, validate: bool = True):
         "damage_nfkb": DamageNFkBActivator(timescale=nfkb.timescale),
         # Phase-insensitive readouts for the two oscillating reporters.
         # RunningIntegrals over each oscillator, in its source's group so
-        # the integral sees the real oscillation. DDB2 reads ∫x² (power=2)
-        # → RMS: GZ06's mean p53 is damage-blind (buffered), the damage is
-        # in the pulsing, and RMS captures it. NFKBIA reads ∫IkBat → mean.
-        "gz06_x2_integral": RunningIntegral(
-            timescale=gz06.timescale, power=2.0
+        # the integral sees the real oscillation. DDB2 reads ∫x² (the default
+        # power=2) → RMS: GZ06's mean p53 is damage-blind (buffered), the
+        # damage is in the pulsing, and RMS captures it. NFKBIA overrides to
+        # power=1 (∫IkBat → mean): its transcript's DC level moves with drive.
+        "gz06_x2_integral": RunningIntegral(timescale=gz06.timescale),
+        "nfkb_ikbat_integral": RunningIntegral(
+            timescale=nfkb.timescale, power=1.0
         ),
-        "nfkb_ikbat_integral": RunningIntegral(timescale=nfkb.timescale),
     }
     # The mtor_nfkb edge reads DP14's active mTORC1 and writes additively
     # to the NF-κB module's IKK pool. The RunningIntegral observers read an
@@ -255,6 +283,12 @@ def build_multi_hallmark_composite(*, validate: bool = True):
     # processes carry no topology entries, so each auto-prefixes to its own
     # ``<name>/`` namespace; only these wires cross namespaces.
     topology: dict = {
+        # DP14 DNA_damage → GZ06 psi: the genomic-instability → p53 edge.
+        # GZ06's psi damage-input is now caused by DP14's accumulated
+        # DNA_damage state (Hill-gated in with_param_driver), so the two
+        # published models are mechanistically wired rather than both set
+        # independently by the hallmark severity.
+        "gz06": {"psi_source": "dp14/DNA_damage"},
         "mtor_nfkb": {
             "mTORC1_pS2448": "dp14/mTORC1_pS2448",
             "IKK": "nfkb/IKK",

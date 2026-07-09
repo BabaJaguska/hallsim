@@ -36,6 +36,7 @@ import jax.numpy as jnp
 
 from hallsim.process import PortRole, Process, ProcessKind
 from hallsim.store import build_initial_store, validate_topology
+from hallsim.units import canonical_units, conversion_factor
 
 log = logging.getLogger(__name__)
 
@@ -284,19 +285,36 @@ class Composite(eqx.Module):
         keys = self.store_keys()
         key_to_idx = {k: i for i, k in enumerate(keys)}
 
+        # Canonical unit per store path (whole composite, so it's consistent
+        # across operator-splitting groups and with the seeded initial state).
+        canon = canonical_units(self.processes, self.topology)
+
         # Precompute static index maps per process.  The per-process port
         # dict (``view`` below) survives because ``Process.derivative``'s
         # public contract is ``derivative(t, {port_name: value}) -> dict``.
+        # Each read carries a factor canonical→port-unit; each write a factor
+        # port-unit→canonical — 1.0 unless the port's unit differs from the
+        # path's canonical, in which case contributions are reconciled so
+        # writers with compatible-but-different units sum correctly.
         pre = []
         for proc_name in proc_names:
             proc = self.processes[proc_name]
             proc_topo = self.topology[proc_name]
-            read_pairs = tuple(
-                (port, key_to_idx[sp]) for port, sp in proc_topo.items()
-            )
             schema = proc.ports_schema()
+            read_pairs = tuple(
+                (
+                    port,
+                    key_to_idx[sp],
+                    conversion_factor(canon.get(sp, ""), schema[port].units),
+                )
+                for port, sp in proc_topo.items()
+            )
             write_pairs = tuple(
-                (port, key_to_idx[proc_topo[port]])
+                (
+                    port,
+                    key_to_idx[proc_topo[port]],
+                    conversion_factor(p.units, canon.get(proc_topo[port], "")),
+                )
                 for port, p in schema.items()
                 if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
             )
@@ -309,11 +327,13 @@ class Composite(eqx.Module):
             # accum follows y_vec's shape so the scatter stays aligned.
             accum = jnp.zeros_like(y_vec)
             for proc, read_pairs, write_pairs in pre:
-                view = {port: y_vec[..., idx] for port, idx in read_pairs}
+                view = {
+                    port: y_vec[..., idx] * rf for port, idx, rf in read_pairs
+                }
                 raw = proc.derivative(t, view)
                 out = [
-                    (idx, raw[port])
-                    for port, idx in write_pairs
+                    (idx, raw[port] * wf)
+                    for port, idx, wf in write_pairs
                     if port in raw
                 ]
                 if out:

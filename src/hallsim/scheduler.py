@@ -195,6 +195,24 @@ def _apply_delta(
     return state_vec.at[idxs].add(vals)
 
 
+def _interp_uniform(
+    t: jnp.ndarray, t0: jnp.ndarray, t1: jnp.ndarray, ys: jnp.ndarray
+) -> jnp.ndarray:
+    """Linear interpolation along axis 0 of a uniform sample at scalar ``t``.
+
+    ``ys`` has shape ``(K, ...)`` sampled at ``K`` equally spaced times over
+    ``[t0, t1]``. Fixed ``K`` (static) keeps the coupling representation a
+    constant shape, so the interpolated multi-rate loop compiles under
+    ``lax.scan`` — unlike a solver-native dense interpolant, whose size is
+    the adaptive step count and varies per macro step.
+    """
+    k = ys.shape[0]
+    pos = jnp.clip((t - t0) / (t1 - t0) * (k - 1), 0.0, k - 1.0)
+    i0 = jnp.minimum(jnp.floor(pos).astype(jnp.int32), k - 2)
+    frac = pos - i0
+    return ys[i0] * (1.0 - frac) + ys[i0 + 1] * frac
+
+
 class Scheduler:
     """Multi-rate orchestrator for composites with mixed process kinds.
 
@@ -266,18 +284,22 @@ class Scheduler:
     coupling_mode:
         How inter-group state is communicated during Lie splitting.
 
-        - ``"frozen"`` (default): each group sees the previous group's
-          final state — standard Lie splitting.
-        - ``"interpolated"``: each group receives a dense interpolant
-          from the previous group's Diffrax solution.  The group's RHS
-          queries the interpolant at the current time ``t``, so it
-          "feels" the previous group's trajectory within the macro step.
-          Reduces splitting error from O(macro_dt) to O(macro_dt^p)
-          where p depends on the interpolant order.
+        - ``"auto"`` (default): pick per run — ``"interpolated"`` when the
+          composite has a forward cross-group edge (an earlier group's
+          variables read by a later group), else ``"frozen"``. Interpolated
+          only improves accuracy on such an edge, so this pays for it only
+          when it helps.
+        - ``"frozen"``: each group sees the previous group's final state —
+          standard Lie splitting.
+        - ``"interpolated"``: each group reads a fixed-size sample
+          (``coupling_interp_points`` points) of the previous group's
+          trajectory, linearly interpolated at the current time ``t``, so
+          it "feels" the previous group's trajectory within the macro step
+          instead of a frozen snapshot. Fixed sample size keeps the loop
+          compilable under ``lax.scan``.
 
           Inspired by dense-output multirate methods (cf. SUNDIALS,
-          continuous-output Runge-Kutta).  See
-          ``docs/crossgen-suggestions.md``, suggestion #1.
+          continuous-output Runge-Kutta).
 
           Requires ``splitting="lie"``. With ``splitting="strang"``, the
           reverse pass needs interpolants over a half-step that have
@@ -340,7 +362,8 @@ class Scheduler:
         atol_scale: float = DEFAULT_ATOL_SCALE,
         max_explicit_substeps: float = DEFAULT_MAX_EXPLICIT_SUBSTEPS,
         groups: dict[str, list[str]] | None = None,
-        coupling_mode: str = "frozen",
+        coupling_mode: str = "auto",
+        coupling_interp_points: int = 16,
         splitting: str = "lie",
         adaptive_dt: bool = False,
         adaptive_dt_rho_max: float = 0.5,
@@ -354,10 +377,10 @@ class Scheduler:
         debug: bool = False,
         progress: bool = False,
     ) -> None:
-        if coupling_mode not in ("frozen", "interpolated"):
+        if coupling_mode not in ("auto", "frozen", "interpolated"):
             raise ValueError(
-                f"coupling_mode must be 'frozen' or 'interpolated', "
-                f"got {coupling_mode!r}"
+                f"coupling_mode must be 'auto', 'frozen', or "
+                f"'interpolated', got {coupling_mode!r}"
             )
         if splitting not in ("lie", "strang"):
             raise ValueError(
@@ -417,6 +440,7 @@ class Scheduler:
         self.dt0 = dt0
         self.manual_groups = groups
         self.coupling_mode = coupling_mode
+        self.coupling_interp_points = coupling_interp_points
         self.splitting = splitting
         self.adaptive_dt = adaptive_dt
         self.adaptive_dt_rho_max = adaptive_dt_rho_max
@@ -533,6 +557,11 @@ class Scheduler:
             if continuous:
                 groups = {"default": list(continuous.keys())}
 
+        # Resolve coupling once groups are known. "auto" (the default)
+        # picks interpolated only when a forward cross-group edge exists;
+        # otherwise frozen. Explicit modes pass through.
+        coupling = self._effective_coupling(composite, groups, keys)
+
         # Resolve the per-group solver + step-size controller. In auto
         # mode this measures each group's Jacobian spectrum once (eagerly)
         # and routes stiff groups to the implicit solver + scaled vector
@@ -555,7 +584,7 @@ class Scheduler:
             and not event_procs
             and not self.adaptive_dt
             and self.splitting == "lie"
-            and self.coupling_mode == "frozen"
+            and coupling == "frozen"
         )
         if fast_path_eligible:
             (gname,) = groups.keys()
@@ -609,13 +638,15 @@ class Scheduler:
         # loop has a statically-known step count, so express it as one
         # ``lax.scan`` — the whole multi-group run compiles to a single
         # executable (bounded compile, reverse-mode memory flat in
-        # macro-step count). ``adaptive_dt`` (data-dependent step count),
-        # interpolated coupling, and debug logging keep the eager loop.
+        # macro-step count). ``adaptive_dt`` (data-dependent step count)
+        # and debug logging keep the eager loop; both frozen and
+        # interpolated coupling scan (interpolated threads a fixed-size
+        # ``coupling_interp_points`` sample between groups).
         scan_eligible = (
             not discrete_procs
             and not event_procs
             and not self.adaptive_dt
-            and self.coupling_mode == "frozen"
+            and coupling in ("frozen", "interpolated")
             and not self.debug
         )
         if scan_eligible:
@@ -630,6 +661,7 @@ class Scheduler:
                 macro_dt,
                 save_dt,
                 adjoint,
+                coupling,
             )
 
         # Pre-build group flat RHS functions (each returns (fn, keys);
@@ -774,8 +806,8 @@ class Scheduler:
                 prev_interpolant = None
                 prev_idxs: jnp.ndarray | None = None
                 for gname, rhs_fn in group_rhs.items():
-                    if self.coupling_mode == "interpolated":
-                        state, prev_interpolant = (
+                    if coupling == "interpolated":
+                        state, prev_interpolant, last_dt, diag = (
                             self._solve_group_interpolated(
                                 rhs_fn,
                                 state,
@@ -785,8 +817,11 @@ class Scheduler:
                                 prev_idxs,
                                 integ=integrators[gname],
                                 adjoint=adjoint,
+                                dt0_hint=group_dt0_hint.get(gname),
                             )
                         )
+                        group_dt0_hint[gname] = last_dt
+                        _record(gname, diag)
                         prev_idxs = group_write_idxs[gname]
                     else:
                         state, last_dt, diag = self._solve_group(
@@ -888,6 +923,57 @@ class Scheduler:
             ts=ts, ys=ys, keys=keys, events=events, stats=stats
         )
 
+    def _effective_coupling(
+        self,
+        composite: Composite,
+        groups: dict[str, list[str]],
+        keys: list[str],
+    ) -> str:
+        """Resolve ``coupling_mode="auto"`` to ``"frozen"`` or
+        ``"interpolated"`` for this run.
+
+        Interpolated coupling only improves accuracy on a **forward**
+        cross-group edge — a group written earlier in the solve order whose
+        variables a later group reads (the later group then sees that
+        trajectory evolving via the sample instead of frozen). If no such
+        edge exists, interpolated does identical work to frozen at higher
+        cost, so ``auto`` picks frozen. Strang and single-group runs always
+        resolve to frozen. Explicit ``"frozen"``/``"interpolated"`` pass
+        through unchanged.
+        """
+        if self.coupling_mode != "auto":
+            return self.coupling_mode
+        if self.splitting == "strang" or len(groups) < 2:
+            return "frozen"
+        # Static structure only — no jnp — so this stays concrete when run()
+        # is traced under jax.jit/vmap (population studies). A group writes a
+        # path via its EVOLVED ports; it reads every path any of its ports
+        # is wired to.
+        key_to_idx = {k: i for i, k in enumerate(keys)}
+        items = list(groups.items())
+        writes: list[set[int]] = []
+        reads: list[set[int]] = []
+        for _, procs in items:
+            w: set[int] = set()
+            r: set[int] = set()
+            for pname in procs:
+                topo_p = composite.topology[pname]
+                schema = composite.processes[pname].ports_schema()
+                for port, path in topo_p.items():
+                    if path not in key_to_idx:
+                        continue
+                    r.add(key_to_idx[path])
+                    p = schema.get(port)
+                    if p is not None and p.role == PortRole.EVOLVED:
+                        w.add(key_to_idx[path])
+            writes.append(w)
+            reads.append(r)
+        for a in range(len(items)):
+            for b in range(a + 1, len(items)):
+                if writes[a] & reads[b]:
+                    return "interpolated"
+        return "frozen"
+
     def _run_scan_continuous(
         self,
         composite: Composite,
@@ -900,6 +986,7 @@ class Scheduler:
         macro_dt: float,
         save_dt: float | None,
         adjoint: dfx.AbstractAdjoint,
+        coupling: str = "frozen",
     ) -> SchedulerResult:
         """Continuous-only multi-group run as a single ``lax.scan``.
 
@@ -909,8 +996,8 @@ class Scheduler:
         settled step size as the next window's warm-start. The whole
         multi-group trajectory compiles to one executable, so compile time
         and reverse-mode memory no longer scale with the macro-step count.
-        Requires frozen coupling and a fixed ``macro_dt`` (guaranteed by
-        the caller's ``scan_eligible`` gate).
+        Handles both frozen and interpolated coupling at a fixed
+        ``macro_dt`` (guaranteed by the caller's ``scan_eligible`` gate).
         """
         group_rhs = [
             (g, composite.build_rhs(procs)[0]) for g, procs in groups.items()
@@ -939,11 +1026,75 @@ class Scheduler:
                 res[:gi] + (r,) + res[gi + 1 :],
             )
 
+        # Interpolated coupling: each group is solved saving at a fixed grid
+        # of ``coupling_interp_points`` times, and the next group reads the
+        # previous group's evolving variables by linear interpolation over
+        # that sample. Fixed sample size keeps the whole loop scan-compilable.
+        interp = coupling == "interpolated" and n_groups > 1
+        grid_frac = (
+            jnp.linspace(0.0, 1.0, self.coupling_interp_points)
+            if interp
+            else None
+        )
+        write_idxs = (
+            [composite.evolved_indices(p, keys) for p in groups.values()]
+            if interp
+            else None
+        )
+
+        def one_solve_sampled(gi, st, t_a, t_b, dt0h, steps, rej, res, prev):
+            g, rhs = group_rhs[gi]
+            if prev is not None:
+                p_t0, p_t1, p_ys = prev
+                widx = write_idxs[gi - 1]
+                base = rhs
+
+                def coupled(t, y, args=None):
+                    pv = _interp_uniform(t, p_t0, p_t1, p_ys)
+                    return base(t, y.at[widx].set(pv[widx]), args)
+
+                rhs_use = coupled
+            else:
+                rhs_use = rhs
+            grid = t_a + grid_frac * (t_b - t_a)
+            sol = dfx.diffeqsolve(
+                dfx.ODETerm(rhs_use),
+                integrators[g].solver,
+                t0=t_a,
+                t1=t_b,
+                dt0=jnp.minimum(dt0h[gi], t_b - t_a),
+                y0=st,
+                saveat=dfx.SaveAt(ts=grid),
+                stepsize_controller=integrators[g].controller,
+                adjoint=adjoint,
+                max_steps=self.max_steps,
+                throw=False,
+            )
+            final = self._guard_result(
+                sol.ys[-1], sol.result, g, integrators[g]
+            )
+            ld = (t_b - t_a) / jnp.maximum(sol.stats["num_steps"], 1)
+            return (
+                final,
+                ld,
+                (t_a, t_b, sol.ys),
+                steps.at[gi].add(sol.stats["num_steps"]),
+                rej.at[gi].add(sol.stats["num_rejected_steps"]),
+                res[:gi] + (sol.result,) + res[gi + 1 :],
+            )
+
         def body(carry, t_start):
             st, dt0h, steps, rej, res = carry
             t_next = jnp.minimum(t_start + macro_dt, t1)
             dt0_next = [None] * n_groups
-            if strang:
+            if interp:
+                prev = None
+                for gi in range(n_groups):
+                    st, ld, prev, steps, rej, res = one_solve_sampled(
+                        gi, st, t_start, t_next, dt0h, steps, rej, res, prev
+                    )
+                    dt0_next[gi] = ld
+            elif strang:
                 t_mid = t_start + (t_next - t_start) / 2.0
                 for gi in range(n_groups):
                     st, _, steps, rej, res = one_solve(
@@ -991,9 +1142,7 @@ class Scheduler:
             }
             for gi, (g, _) in enumerate(group_rhs)
         }
-        return SchedulerResult(
-            ts=ts, ys=ys, keys=keys, events=[], stats=stats
-        )
+        return SchedulerResult(ts=ts, ys=ys, keys=keys, events=[], stats=stats)
 
     @staticmethod
     def _integrator_signature(groups, state, macro_dt):
@@ -1278,9 +1427,7 @@ class Scheduler:
             f"code in result.stats[{group_name!r}]['result'] and "
             f"diagnose (max_steps vs implicit/Newton divergence)."
         )
-        return eqx.error_if(
-            value, result != dfx.RESULTS.successful, reason
-        )
+        return eqx.error_if(value, result != dfx.RESULTS.successful, reason)
 
     def _solve_group_interpolated(
         self,
@@ -1293,32 +1440,47 @@ class Scheduler:
         *,
         integ: GroupIntegrator,
         adjoint: dfx.AbstractAdjoint,
-    ) -> tuple[jnp.ndarray, Any]:
-        """Solve one group with dense output, splicing the previous group's
-        evolving variables in via interpolation.
+        dt0_hint: float | None = None,
+    ) -> tuple[jnp.ndarray, Any, float, tuple]:
+        """Solve one group, sampling its trajectory at a fixed grid so the
+        next group can splice in the previous group's evolving variables.
 
-        When ``prev_interpolant`` is provided, this group's RHS sees the
-        previous group's evolved variables at the current solver time
-        ``t`` (queried from the interpolant), while keeping its own
-        evolving ``y`` for everything else.  This is dense-output Lie
-        splitting: the next group "feels" the previous group's continuous
-        trajectory inside the macro step, not just a frozen snapshot.
+        When ``prev_interpolant`` (a ``(t0, t1, ys)`` fixed-size sample) is
+        provided, this group's RHS sees the previous group's evolved
+        variables at the current solver time ``t`` — linearly interpolated
+        over that sample — while keeping its own evolving ``y`` for
+        everything else. This is fixed-sample Lie splitting: the next group
+        "feels" the previous group's continuous trajectory inside the macro
+        step, not just a frozen snapshot. The sample size is static
+        (``coupling_interp_points``), so the same routine runs in the eager
+        loop and, for the common case, inside the compiled ``lax.scan``.
 
         Returns
         -------
-        (final_state_vec, interpolant)
-            The updated flat state and this group's dense interpolant
-            (for passing to the next group).
+        (final_state_vec, sample, last_dt, diag)
+            The updated flat state, this group's ``(t0, t1, ys)`` sample
+            (for passing to the next group), the average step size over the
+            interval (warm-start hint for the next macro step), and the
+            ``(result, num_steps, num_rejected)`` diagnostics triple.
         """
+        k = self.coupling_interp_points
+        grid = t0 + jnp.linspace(0.0, 1.0, k) * (t1 - t0)
         if t1 <= t0:
-            return state_vec, prev_interpolant
+            ys_deg = jnp.broadcast_to(state_vec, (k,) + state_vec.shape)
+            return (
+                state_vec,
+                (t0, t1, ys_deg),
+                (dt0_hint if dt0_hint is not None else self.dt0),
+                (dfx.RESULTS.successful, 0, 0),
+            )
 
         if prev_interpolant is not None and prev_idxs is not None:
+            p_t0, p_t1, p_ys = prev_interpolant
             base_rhs = rhs_fn
             idxs = prev_idxs
 
             def coupled_rhs(t, y, args=None):
-                interp_vec = prev_interpolant.evaluate(t)
+                interp_vec = _interp_uniform(t, p_t0, p_t1, p_ys)
                 merged = y.at[idxs].set(interp_vec[idxs])
                 return base_rhs(t, merged, args)
 
@@ -1327,14 +1489,15 @@ class Scheduler:
             rhs_to_solve = rhs_fn
 
         term = dfx.ODETerm(rhs_to_solve)
+        dt0_base = dt0_hint if dt0_hint is not None else self.dt0
         sol = dfx.diffeqsolve(
             term,
             integ.solver,
             t0=t0,
             t1=t1,
-            dt0=min(self.dt0, t1 - t0),
+            dt0=jnp.minimum(dt0_base, t1 - t0),
             y0=state_vec,
-            saveat=dfx.SaveAt(t1=True, dense=True),
+            saveat=dfx.SaveAt(ts=grid),
             stepsize_controller=integ.controller,
             adjoint=adjoint,
             max_steps=self.max_steps,
@@ -1344,7 +1507,13 @@ class Scheduler:
         final_vec = self._guard_result(
             sol.ys[-1], sol.result, "interpolated", integ
         )
-        return final_vec, sol.interpolation
+        last_dt = (t1 - t0) / jnp.maximum(sol.stats["num_steps"], 1)
+        diag = (
+            sol.result,
+            sol.stats["num_steps"],
+            sol.stats["num_rejected_steps"],
+        )
+        return final_vec, (t0, t1, sol.ys), last_dt, diag
 
     @staticmethod
     def _is_due(t: float, t_next: float, dt_step: float) -> bool:

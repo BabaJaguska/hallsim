@@ -55,9 +55,14 @@ SAMPLE_POSITION_GROUPS = {
     "ETOPOSIDE_D14": [4, 5],
     "ETOPOSIDE_RAPA_D07": [6, 7],
     "ETOPOSIDE_RAPA_D14": [8, 9],
+    # Oncogene-induced senescence (HRAS) arm — a mechanistically distinct
+    # senescence trigger the model is NOT calibrated on. Sampled D00/D04/D07.
+    "RAS_D00": [10, 11],
+    "RAS_D04": [12, 13],
+    "RAS_D07": [14, 15],
 }
 
-ARMS = ["DDIS_vs_ctrl", "RAPA_vs_DDIS"]
+ARMS = ["DDIS_vs_ctrl", "RAPA_vs_DDIS", "RAS_vs_ctrl"]
 
 
 def build_problem() -> CalibrationProblem:
@@ -92,6 +97,19 @@ def build_problem() -> CalibrationProblem:
                     "Deregulated Nutrient Sensing": 0.3,
                 },
             ),
+            # Oncogene-induced senescence: mapped to the same full-senescence
+            # severities as DDIS (oncogenic RAS drives replication-stress DNA
+            # damage AND mTOR hyperactivation). The composite has no
+            # oncogene-specific mechanism, so this is deliberately an
+            # out-of-the-box generalization test — does the senescence
+            # program calibrated on etoposide transfer to a different trigger?
+            "RAS_OIS": Condition(
+                "RAS_OIS",
+                {
+                    "Genomic Instability": 1.0,
+                    "Deregulated Nutrient Sensing": 1.0,
+                },
+            ),
         },
         # Trajectory-native: each arm is a {day: Δlog2FC} time course. Model
         # time is in days (t_end=14), so the measured D07 / D14 samples map
@@ -106,10 +124,16 @@ def build_problem() -> CalibrationProblem:
                 7.0: ds.delta("ETOPOSIDE_RAPA_D07", "ETOPOSIDE_D07"),
                 14.0: ds.delta("ETOPOSIDE_RAPA_D14", "ETOPOSIDE_D14"),
             },
+            # RAS vs its own pre-oncogene D00 baseline, at D04 and D07.
+            "RAS_vs_ctrl": {
+                4.0: ds.delta("RAS_D04", "RAS_D00"),
+                7.0: ds.delta("RAS_D07", "RAS_D00"),
+            },
         },
         arm_pairs={
             "DDIS_vs_ctrl": ("DDIS", "ctrl"),
             "RAPA_vs_DDIS": ("RAPA", "DDIS"),
+            "RAS_vs_ctrl": ("RAS_OIS", "ctrl"),
         },
         # One mechanism knob per reporter axis, plus the two NF-κB IKK edge
         # strengths and GZ06's basal-p53 ψ. Each has a log-normal MAP prior
@@ -184,7 +208,7 @@ def build_problem() -> CalibrationProblem:
             ),
         },
         fit_arms=["DDIS_vs_ctrl"],
-        held_out_arms=["RAPA_vs_DDIS"],
+        held_out_arms=["RAPA_vs_DDIS", "RAS_vs_ctrl"],
         prior_weight=0.03,
         t_end=14.0,
         macro_dt=3.5,
@@ -240,17 +264,24 @@ def plot(pre, post, path: Path) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    times = sorted(pre[ARMS[0]])
+    # Arms may have different timepoints (etoposide D07/D14, RAS D04/D07),
+    # so size the grid to the widest arm and use each arm's own times.
+    ncol = max(len(pre[a]) for a in ARMS)
     fig, axes = plt.subplots(
         len(ARMS),
-        len(times),
-        figsize=(6 * len(times), 4.5 * len(ARMS)),
+        ncol,
+        figsize=(6 * ncol, 4.5 * len(ARMS)),
         sharey=True,
         squeeze=False,
     )
     for ai, arm in enumerate(ARMS):
-        for ti, t in enumerate(times):
+        atimes = sorted(pre[arm])
+        for ti in range(ncol):
             ax = axes[ai][ti]
+            if ti >= len(atimes):
+                ax.axis("off")
+                continue
+            t = atimes[ti]
             pre_r = _rows_by_gene(pre[arm][t])
             post_r = _rows_by_gene(post[arm][t])
             genes = list(pre_r)

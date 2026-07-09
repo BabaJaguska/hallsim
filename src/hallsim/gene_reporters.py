@@ -189,6 +189,40 @@ class GeneReporter:
     summary: Callable[[Any], Any] = field(default=last_value)
 
 
+def oscillating_reporter(
+    observable: str,
+    gene_symbol: str,
+    *,
+    sign: int = 1,
+    readout: str = "rms",
+    frac: float = 0.5,
+    description: str = "",
+    reference: str = "",
+) -> GeneReporter:
+    """Phase-insensitive reporter for an OSCILLATING model species.
+
+    ``readout="rms"`` (default) reads the pulse amplitude √⟨x²⟩; ``"mean"``
+    reads the DC level. RMS is the default because a *buffered* mean — one
+    the drive cannot move (e.g. p53, whose mean is analytically damage-blind
+    under the Mdm2 feedback) — leaves a mean readout signal-blind, while RMS
+    still sees the amplitude. Use ``"mean"`` only when the species' DC level
+    is known to move with the drive (then mean ≈ rms anyway). ``observable``
+    must be the matching :class:`~hallsim.models.running_integral.RunningIntegral`
+    path — ∫x² (its default ``power=2``) for rms, ∫x (``power=1``) for mean.
+    """
+    if readout not in ("rms", "mean"):
+        raise ValueError(f"readout must be 'rms' or 'mean', got {readout!r}")
+    summary = window_rms(frac) if readout == "rms" else window_mean(frac)
+    return GeneReporter(
+        observable=observable,
+        gene_symbol=gene_symbol,
+        sign=sign,
+        description=description,
+        reference=reference,
+        summary=summary,
+    )
+
+
 CANONICAL_REPORTERS: list[GeneReporter] = [
     GeneReporter(
         observable="p53_activity",
@@ -284,23 +318,22 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         ),
         reference="el-Deiry et al. 1993, Cell 75:817–825",
     ),
-    GeneReporter(
+    oscillating_reporter(
         observable="gz06/x2_integral",
         gene_symbol="DDB2",
         sign=+1,
+        readout="rms",  # default: p53's mean is buffered, damage is in pulsing
         description=(
             "Damage-specific DNA Binding Protein 2 — direct p53 "
             "transcription target, mapped to GZ06's p53 (x). Read as the "
             "trailing-window RMS √⟨x²⟩, not the mean: GZ06 encodes damage "
             "in p53 *pulsing*, and its mean p53 is analytically buffered "
             "against the damage signal (psi cancels in the steady state), "
-            "so the mean is damage-blind. RMS rises with pulse amplitude "
-            "yet keeps the mean as a floor (no divergence when quiescent). "
-            "A RunningIntegral(power=2) writes ∫x² to `gz06/x2_integral`. "
+            "so the mean is damage-blind. A RunningIntegral (power=2, the "
+            "default) writes ∫x² to `gz06/x2_integral`. "
             "See docs/gz06-basal-p53.md."
         ),
         reference="Geva-Zatorsky 2006; Lahav 2004; Purvis 2012",
-        summary=window_rms(),
     ),
     GeneReporter(
         observable="dp14/ROS",
@@ -313,25 +346,28 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         ),
         reference="Alam & Cook 2007, Antioxid Redox Signal 9:2499–2511",
     ),
-    GeneReporter(
+    oscillating_reporter(
         observable="nfkb/IkBat_integral",
         gene_symbol="NFKBIA",
+        # Mean is a justified override of the rms default: unlike p53, the
+        # IκBα-transcript DC level *moves* with integrated NF-κB activity, so
+        # its mean carries the signal — and mean ≈ rms empirically (6/6
+        # timepoints, scratchpad/nfkbia_mean_vs_rms.py). Bulk microarray
+        # measures average transcript abundance, which the mean matches.
         sign=+1,
+        readout="mean",
         description=(
             "IκBα transcript — direct NF-κB target via the autoregulatory "
             "negative feedback loop. Maps to Ihekwaba 2004's IκBα mRNA "
             "species (IkBat), which rises with NF-κB transcriptional "
             "activity. Transcriptomic NFKBIA measures the transcript, not "
             "the cytoplasmic protein (IkBa), whose abundance moves "
-            "inversely to activity through IKK-driven degradation. NF-κB "
-            "oscillates, so we read the exact trailing-window mean of "
-            "IkBat: a RunningIntegral writes ∫IkBat to "
-            "`nfkb/IkBat_integral` and window_mean differences it — "
-            "phase-insensitive, with a bounded calibration gradient (same "
-            "treatment as the DDB2/p53 oscillator reporter)."
+            "inversely to activity through IKK-driven degradation. A "
+            "RunningIntegral(power=1) writes ∫IkBat to `nfkb/IkBat_integral` "
+            "and window_mean differences it — phase-insensitive with a "
+            "bounded calibration gradient."
         ),
         reference="Sun et al. 1993, Science 259:1912–1915",
-        summary=window_mean(),
     ),
     GeneReporter(
         observable="dp14/Mito_mass_new",

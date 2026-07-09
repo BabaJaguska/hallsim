@@ -20,10 +20,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 
 from hallsim.process import Port, PortRole, Process
+from hallsim.utils import h_act
 
 log = logging.getLogger(__name__)
 
@@ -226,6 +228,38 @@ def _precheck_sbml_supported(xml_path: str) -> list[str]:
     return issues
 
 
+class HillParamDriver(eqx.Module):
+    """Drives one SBML constant from another model's state, live.
+
+    An imported model's parameter is normally a fixed constant. This turns
+    a named parameter into a coupling target: at every derivative
+    evaluation the parameter is Hill-interpolated between its own basal
+    value (the ``parameters[param_name]`` entry — still a fittable point on
+    the parameter surface) and ``hi``, gated on a signal read from an INPUT
+    port::
+
+        c[param_name] = basal + (hi - basal) · h_act(signal; K, n)
+
+    so a slow upstream state (e.g. DP14 ``DNA_damage``) can drive an
+    imported oscillator's damage input (e.g. GZ06 ``psi``) mechanistically,
+    rather than both being set independently by an external knob. The
+    basal stays on ``parameters`` so it calibrates through the ordinary
+    ``parameters.<name>`` path; ``hi``/``K``/``n`` are structural.
+    """
+
+    param_name: str = eqx.field(static=True)
+    input_port: str = eqx.field(static=True)
+    c_index: int = eqx.field(static=True)
+    hi: float = eqx.field(static=True)
+    K: float = eqx.field(static=True)
+    n: float = eqx.field(static=True)
+
+    def value(self, basal, signal):
+        return basal + (self.hi - basal) * h_act(
+            jnp.asarray(signal), jnp.asarray(self.K), jnp.asarray(self.n)
+        )
+
+
 class SBMLProcess(Process):
     """Process auto-generated from an SBML model via sbmltoodejax.
 
@@ -285,9 +319,56 @@ class SBMLProcess(Process):
     # numerical scaling. Their derivative is frozen to 0 (treated as a
     # boundary species), which is exact since no rate law reads them.
     _frozen_indices: tuple[int, ...] = ()
+    # Live parameter couplings: each drives one SBML constant from an INPUT
+    # port every derivative step (see :class:`HillParamDriver`). Empty for
+    # a plain imported model; populated via :meth:`with_param_driver`. Static
+    # (pure metadata) so it round-trips untouched through the ``eqx.tree_at``
+    # substitutions the hallmark / Calibrator paths apply to `parameters`.
+    _param_drivers: tuple = eqx.field(static=True, default=())
+
+    def with_param_driver(
+        self,
+        param_name: str,
+        input_port: str,
+        *,
+        hi: float,
+        K: float,
+        n: float = 2.0,
+    ) -> "SBMLProcess":
+        """Return a copy whose ``param_name`` is driven by ``input_port``.
+
+        Adds an INPUT port ``input_port`` (wire it to the driving store
+        path via topology) and Hill-interpolates ``param_name`` between its
+        basal ``parameters[param_name]`` value and ``hi`` on the port's
+        signal. See :class:`HillParamDriver`.
+        """
+        if param_name not in self._param_names:
+            raise KeyError(
+                f"{param_name!r} is not an SBML constant on {self._name!r}; "
+                f"available: {sorted(self._param_names)}"
+            )
+        c_index = self._param_indexes[self._param_names.index(param_name)]
+        driver = HillParamDriver(
+            param_name=param_name,
+            input_port=input_port,
+            c_index=int(c_index),
+            hi=float(hi),
+            K=float(K),
+            n=float(n),
+        )
+        # HillParamDriver is pure static metadata (no array leaves), so
+        # tree_at can't grow the tuple; copy + set the field directly,
+        # mirroring the object.__setattr__ construction in process_from_sbml.
+        import copy
+
+        new = copy.copy(self)
+        object.__setattr__(
+            new, "_param_drivers", self._param_drivers + (driver,)
+        )
+        return new
 
     def ports_schema(self):
-        return {
+        schema = {
             name: Port(
                 role=PortRole.EVOLVED,
                 default=float(y0),
@@ -301,6 +382,16 @@ class SBMLProcess(Process):
                 self._species_ontology or ({},) * len(self._species_names),
             )
         }
+        # INPUT ports feeding live parameter drivers, wired to the driving
+        # store path via topology.
+        for d in self._param_drivers:
+            schema[d.input_port] = Port(
+                role=PortRole.INPUT,
+                default=0.0,
+                units="dimensionless",
+                description=f"drives SBML constant {d.param_name!r}",
+            )
+        return schema
 
     def derivative(self, t, state):
         # Stack species along the trailing axis. For scalar state values
@@ -329,6 +420,30 @@ class SBMLProcess(Process):
             c = self._c.at[indexes].set(values)
         else:
             c = self._c
+
+        # Live parameter drivers: override each driven constant with a value
+        # read from an INPUT port this step (see HillParamDriver). A batched
+        # driving signal makes c per-batch, so the ratefunc vmaps over c too.
+        c_batched = False
+        if self._param_drivers:
+            driven = jnp.stack(
+                [
+                    d.value(self.parameters[d.param_name], state[d.input_port])
+                    for d in self._param_drivers
+                ],
+                axis=-1,
+            )
+            d_idx = jnp.asarray([d.c_index for d in self._param_drivers])
+            if driven.ndim > 1:  # batched signal → per-batch c
+                batch = driven.shape[0]
+                c = (
+                    jnp.broadcast_to(c, (batch,) + c.shape)
+                    .at[:, d_idx]
+                    .set(driven)
+                )
+                c_batched = True
+            else:
+                c = c.at[d_idx].set(driven)
 
         # Map canonical time to this model's native time, evaluate the
         # native rate law there, and scale dy back to canonical time:
@@ -365,7 +480,8 @@ class SBMLProcess(Process):
 
         if is_batched:
             w_in = 0 if w_batched else None
-            dydt = jax.vmap(ratefunc, in_axes=(0, None, w_in, None))(
+            c_in = 0 if c_batched else None
+            dydt = jax.vmap(ratefunc, in_axes=(0, None, w_in, c_in))(
                 y, t_native, w, c
             )
         else:

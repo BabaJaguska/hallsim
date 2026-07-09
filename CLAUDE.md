@@ -181,3 +181,5 @@ shared `t` and the result is meaningless — screen for it.
 - code should be self-explanatory; minimize comments. Comments must be lean!
 - VECTORIZE what vectorized can be.
 - Logging, not printing.
+- Claude memory IS NOT the way to make agents behave a certain way in the future. THE FRAMEWORK ITSELF is. Whatever can be built less ambiguously IN THE FRAMEWORK should be done so. Claude.md is just for you. It is not for everyone, it is not a manual. 
+- 

@@ -237,13 +237,6 @@ def apply_hallmarks(
 # Hallmark definitions for ERiQ-based processes.
 # Process names match those in build_eriq_composite().
 
-# GZ06's psi (damage signal) at full DDIS. The Genomic Instability
-# mapping interpolates psi from the fitted basal level (control) up to
-# this full-dose value, so control cells retain a nonzero basal p53 from
-# spontaneous DSBs rather than collapsing to p53=0. See
-# docs/gz06-basal-p53.md.
-GZ06_PSI_FULL = 1.0
-
 HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
     "Stem Cell Exhaustion": HallmarkHandle(
         name="Stem Cell Exhaustion",
@@ -331,10 +324,12 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
         name="Genomic Instability",
         description=(
             "Exogenous DNA damage exposure. Drives ERiQ's damage_repair "
-            "(eta), DP14's Irradiation exposure input, and GZ06's psi — "
-            "severity is the normalized exposure level (0=none, 1=full). "
-            "The per-exposure damage potency is a mechanism parameter fit "
-            "separately, not part of this dial."
+            "(eta) and DP14's Irradiation exposure input — severity is the "
+            "normalized exposure level (0=none, 1=full). GZ06's psi is no "
+            "longer set here: it is driven by DP14's DNA_damage state "
+            "through a topology edge (see multi_hallmark). The per-exposure "
+            "damage potency is a mechanism parameter fit separately, not "
+            "part of this dial."
         ),
         category="Primary",
         references=[
@@ -371,25 +366,12 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
                     "(sustained DDIS exposure)"
                 ),
             ),
-            # GZ06 (Geva-Zatorsky 2006 p53-Mdm2 oscillator): the same
-            # severity drives its psi damage-signal independently, at
-            # GZ06's own calibrated scale. No DP14↔GZ06 topology
-            # coupling — the hallmark is the shared knob. Interpolates
-            # from the fitted basal psi (control, base) to GZ06_PSI_FULL
-            # (DDIS): GZ06 has no basal p53 production (production =
-            # beta_x·psi), so psi=0 would force p53→0, biologically wrong.
-            # base is the basal spontaneous-DSB level (fittable). See
-            # docs/gz06-basal-p53.md.
-            ParameterMapping(
-                process_name="gz06",
-                param_name="parameters.psi",
-                transform=lambda h, base: base * (1.0 - h) + GZ06_PSI_FULL * h,
-                description=(
-                    "GZ06 damage signal: fitted basal psi at severity=0 "
-                    "(spontaneous-DSB baseline, nonzero p53), full-dose "
-                    "GZ06_PSI_FULL at severity=1 (DDIS)"
-                ),
-            ),
+            # GZ06's psi is NOT mapped here. It is driven by DP14's
+            # DNA_damage state via a topology edge (SBMLProcess param
+            # driver, see multi_hallmark), so the p53 oscillator's damage
+            # input is caused mechanistically by DP14 rather than set
+            # independently by this severity. The GI severity still reaches
+            # GZ06 — through DP14's Irradiation → DNA_damage → psi.
         ],
     ),
 }
