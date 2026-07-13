@@ -1,5 +1,7 @@
 """Tests for the pre-flight subsystem screening (hallsim.diagnostics)."""
 
+import pytest
+
 from hallsim.diagnostics import (
     DEAD_SINK,
     SUITABLE,
@@ -7,11 +9,14 @@ from hallsim.diagnostics import (
     coupling_source_verdict,
     recommend_coupling_source,
     screen_process,
+    screen_sensitivity,
 )
+from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
 from hallsim.models.multi_hallmark import (
     GZ06_PSI_DEFAULT,
     GZ06_PSI_NAME,
     GZ06_SBML_PATH,
+    build_multi_hallmark_composite,
 )
 from hallsim.sbml_import import process_from_sbml
 
@@ -103,3 +108,21 @@ def test_gz06_flagged_tolerance_sensitive():
     assert report.tolerance_sensitive, report
     assert report.tol_rel_diff > 1.0  # loose vs tight wildly disagree
     assert not report.ok
+
+
+@pytest.mark.slow
+def test_screen_sensitivity_flags_saturated_reporter():
+    """In the default dp14 regime the etoposide dose saturates ψ→1, so DDB2
+    (√⟨p53²⟩) is dead to genomic-instability severity while CDKN1A is not. The
+    in-regime guardrail must flag DDB2 FLAT and CDKN1A live, with finite
+    gradients through the three stiff SBML models (reverse-mode)."""
+    comp = build_multi_hallmark_composite(validate=False)
+    reports = screen_sensitivity(
+        comp, MULTI_HALLMARK_REPORTERS, ["Genomic Instability"],
+        baseline={"Genomic Instability": 1.0,
+                  "Deregulated Nutrient Sensing": 0.5},
+        t_end=14.0, macro_dt=3.5)
+    by = {r.reporter: r for r in reports}
+    assert all(r.finite for r in reports), reports
+    assert not by["DDB2"].live, by["DDB2"]     # saturated → flat → caught
+    assert by["CDKN1A"].live, by["CDKN1A"]     # damage→p21 stays live

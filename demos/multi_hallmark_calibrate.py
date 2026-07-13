@@ -379,6 +379,9 @@ def main() -> None:
         for t in sorted(pre[arm]):
             print(pre[arm][t], flush=True)
 
+    out_dir = ROOT / "outputs" / "multi_hallmark_calibrate"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     print("[2/3] fitting ...", flush=True)
     history = problem.fit(
         steps=150,
@@ -388,6 +391,7 @@ def main() -> None:
         plateau_patience=5,
         early_stop_patience=15,
         verbose=True,
+        checkpoint_path=out_dir / "checkpoint.npz",
     )
 
     print("[3/3] calibrated concordance ...", flush=True)
@@ -401,12 +405,12 @@ def main() -> None:
             f"{float(history.final_params[k]):>12.5g}"
         )
 
-    out_dir = ROOT / "outputs" / "multi_hallmark_calibrate"
     plot(pre, post, out_dir / "oob_vs_cal_vs_measured.png")
     plot_history(problem, history, out_dir / "training_history.png")
+    problem.save_outputs(str(out_dir), history)
     print(
         f"\nbest loss {history.best_loss:.4g} over {len(history.losses)} "
-        f"epochs → plots in {out_dir.relative_to(ROOT)}/"
+        f"epochs → outputs in {out_dir.relative_to(ROOT)}/"
     )
 
 

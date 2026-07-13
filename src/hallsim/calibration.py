@@ -92,9 +92,11 @@ class CalibrationHistory:
     """Per-step record of a Calibrator.fit() run."""
 
     losses: list[float] = field(default_factory=list)
+    val_losses: list[float] = field(default_factory=list)
     param_history: list[ParamPytree] = field(default_factory=list)
     final_params: ParamPytree | None = None
     best_loss: float = float("inf")
+    stopped_epoch: int | None = None
     wall_time_s: float = 0.0
 
     def __str__(self) -> str:
@@ -105,6 +107,22 @@ class CalibrationHistory:
             f"loss {self.losses[0]:.4g} → {self.losses[-1]:.4g}, "
             f"{self.wall_time_s:.1f}s"
         )
+
+
+def load_checkpoint(path) -> tuple[dict, dict]:
+    """Load a Calibrator checkpoint written via ``checkpoint_path``.
+
+    Returns ``(params, meta)`` — the fitted param dict and ``{"value",
+    "epoch"}`` of the best point at write time.
+    """
+    import numpy as np
+
+    d = np.load(path)
+    pre = "param."
+    params = {
+        k[len(pre):]: jnp.asarray(d[k]) for k in d.files if k.startswith(pre)
+    }
+    return params, {"value": float(d["_value"]), "epoch": int(d["_epoch"])}
 
 
 class Calibrator:
@@ -144,6 +162,8 @@ class Calibrator:
         loss_fn: Callable[[ParamPytree], jnp.ndarray],
         init_params: ParamPytree,
         clamps: dict[str, tuple[float, float]] | None = None,
+        val_loss_fn: Callable[[ParamPytree], jnp.ndarray] | None = None,
+        checkpoint_path: str | Path | None = None,
         mode: Literal["forward", "reverse"] = "forward",
         method: Literal["adam", "lbfgs"] = "adam",
         optimizer: optax.GradientTransformation | None = None,
@@ -163,6 +183,12 @@ class Calibrator:
         self.loss_fn = loss_fn
         self.init_params = init_params
         self.clamps = clamps or {}
+        # When set, best-params / early-stop watch this held-out loss instead
+        # of the training loss.
+        self.val_loss_fn = val_loss_fn
+        # When set, the best params so far are written here (atomically) on
+        # every improvement, so a killed run keeps its best.
+        self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
         self.mode = mode
         self.method = method
         # Early stopping: 0 disables. Stop after `early_stop_patience`
@@ -245,6 +271,30 @@ class Calibrator:
                 out[k] = v
         return out
 
+    def _save_checkpoint(self, params, value, epoch) -> None:
+        if self.checkpoint_path is None or not isinstance(params, dict):
+            return
+        import os
+        import tempfile
+
+        import numpy as np
+
+        self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        arrays = {f"param.{k}": np.asarray(v) for k, v in params.items()}
+        arrays["_value"] = np.asarray(value)
+        arrays["_epoch"] = np.asarray(epoch)
+        fd, tmp = tempfile.mkstemp(
+            dir=str(self.checkpoint_path.parent), suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                np.savez(fh, **arrays)
+            os.replace(tmp, self.checkpoint_path)  # atomic
+        except BaseException:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise
+
     # ── Fit loop ───────────────────────────────────────────────
 
     def fit(self, steps: int) -> CalibrationHistory:
@@ -258,6 +308,7 @@ class Calibrator:
         params = self.init_params
         opt_state = self.optimizer.init(params)
         value_and_grad = self._value_and_grad_fn()
+        val_fn = jax.jit(self.val_loss_fn) if self.val_loss_fn else None
         history = CalibrationHistory()
         best_loss = float("inf")
         best_params = params
@@ -267,9 +318,15 @@ class Calibrator:
             loss, grad = value_and_grad(params)
             lf = float(loss)
             # `loss` is of `params` before this step's update, so `params`
-            # is the point that achieved it — the best-params candidate.
-            if lf < best_loss - self.early_stop_tol:
-                best_loss, best_params, no_improve = lf, params, 0
+            # is the point that achieved it — the best-params candidate. With
+            # a validation loss, that held-out score, not the training loss,
+            # is the selection criterion.
+            monitored = float(val_fn(params)) if val_fn else lf
+            if val_fn:
+                history.val_losses.append(monitored)
+            if monitored < best_loss - self.early_stop_tol:
+                best_loss, best_params, no_improve = monitored, params, 0
+                self._save_checkpoint(best_params, best_loss, s)
             else:
                 no_improve += 1
             if self._uses_plateau:
@@ -284,6 +341,8 @@ class Calibrator:
             history.param_history.append(params)
             if self.verbose and (s % self.log_every == 0 or s == steps - 1):
                 msg = f"  [{s+1:3d}/{steps}] loss = {lf:.4g}"
+                if val_fn:
+                    msg += f"  val = {monitored:.4g}"
                 if isinstance(params, dict):
                     # Show the first 4 scalar keys for compactness.
                     pieces = [
@@ -298,11 +357,14 @@ class Calibrator:
                 self.early_stop_patience
                 and no_improve >= self.early_stop_patience
             ):
+                history.stopped_epoch = s + 1
                 if self.verbose:
+                    metric = "val" if val_fn else "loss"
                     log.info(
-                        "  early stop at %d (best loss %.4g, "
+                        "  early stop at %d (best %s %.4g, "
                         "no improvement in %d steps)",
                         s + 1,
+                        metric,
                         best_loss,
                         no_improve,
                     )
@@ -343,6 +405,7 @@ class Calibrator:
             lf = float(value)  # loss of current params (pre-update)
             if lf < best_loss - self.early_stop_tol:
                 best_loss, best_params, no_improve = lf, params, 0
+                self._save_checkpoint(best_params, best_loss, s)
             else:
                 no_improve += 1
             history.losses.append(lf)
@@ -849,7 +912,16 @@ class CalibrationProblem:
 
     # ── Loss / fit / evaluate ─────────────────────────────────────
 
-    def loss(self, param_values: dict[str, jnp.ndarray]) -> jnp.ndarray:
+    def data_loss(
+        self, param_values: dict[str, jnp.ndarray], arms: list[str]
+    ) -> jnp.ndarray:
+        """Mean per-arm MSE of the sign-aligned log2 fold-change over ``arms``.
+
+        The pure data-fit term — no prior penalty. Factored out of
+        :meth:`loss` so a held-out (validation) arm can be scored at
+        arbitrary params, e.g. to trace a train-vs-validation curve for
+        early stopping. ``arms`` must be keys of ``arm_pairs``.
+        """
         substituted = self._substitute(self.composite.processes, param_values)
         # Each condition is solved once (whole trajectory) and cached, then
         # read at each arm's measured timepoints — so a condition that is
@@ -871,7 +943,7 @@ class CalibrationProblem:
         # so this scales to many timepoints without unrolling. A
         # single-timepoint arm is the degenerate n_t=1 case.
         arm_losses = []
-        for arm in self.fit_arms:
+        for arm in arms:
             cond, base = self.arm_pairs[arm]
             ts_c, trajs_c = run_for(cond)
             ts_b, trajs_b = run_for(base)
@@ -890,8 +962,12 @@ class CalibrationProblem:
             mask = jnp.isfinite(delta_data)
             err2 = jnp.where(mask, (lfc_sim - delta_data) ** 2, 0.0)
             arm_losses.append(jnp.sum(err2) / jnp.maximum(jnp.sum(mask), 1.0))
-        data_loss = jnp.mean(jnp.stack(arm_losses))
-        return data_loss + self._prior_penalty(param_values)
+        return jnp.mean(jnp.stack(arm_losses))
+
+    def loss(self, param_values: dict[str, jnp.ndarray]) -> jnp.ndarray:
+        return self.data_loss(
+            param_values, self.fit_arms
+        ) + self._prior_penalty(param_values)
 
     def _prior_penalty(self, param_values: dict) -> jnp.ndarray:
         """MAP log-normal prior penalty: prior_weight · Σ ((log10 p −
@@ -957,6 +1033,7 @@ class CalibrationProblem:
         *,
         steps: int = 40,
         mode: str = "forward",
+        validation_arms: list[str] | None = None,
         **calibrator_kwargs,
     ) -> CalibrationHistory:
         """Fit the mechanism parameters.
@@ -978,10 +1055,19 @@ class CalibrationProblem:
         # under autodiff — the per-group solver verdict can't be computed
         # from tracers.
         self.warm_up(init)
+        for arm in validation_arms or []:
+            if arm not in self.arm_pairs:
+                raise KeyError(f"validation_arms entry {arm!r} not in arm_pairs")
+        val_loss_fn = (
+            (lambda p: self.data_loss(p, validation_arms))
+            if validation_arms
+            else None
+        )
         cal = Calibrator(
             loss_fn=self.loss,
             init_params=init,
             clamps=clamps or None,
+            val_loss_fn=val_loss_fn,
             mode=mode,
             **calibrator_kwargs,
         )

@@ -34,12 +34,8 @@ def build_initial_store(
             store_path = topo.get(port_name, port_name)
             if store_path not in store:
                 # No explicit dtype: honor the global JAX default (float64
-                # when jax_enable_x64 is set, float32 otherwise). A
-                # hardcoded float32 here forced the *entire integration
-                # state* to float32 even under x64, so an adaptive solver
-                # at rtol=1e-6 (below the float32 floor) thrashed on stiff
-                # systems — the state-side half of the precision bug whose
-                # RHS-side half was sbmltoodejax's float32 codegen.
+                # under jax_enable_x64), so integration state matches the
+                # rtol=1e-6 solver tolerance rather than the float32 floor.
                 store[store_path] = jnp.asarray(port.default)
     return store
 
@@ -134,19 +130,11 @@ def validate_topology(
                 f"Set dt_step to the interval between update calls (in seconds)."
             )
 
-    # NOTE on LATCHED ↔ EVOLVED/EXCLUSIVE coexistence: previously the
-    # validator rejected store paths that had both a LATCHED writer
-    # (DISCRETE/EVENT) and an EVOLVED/EXCLUSIVE writer (CONTINUOUS). That
-    # rule conflated two distinct things — derivative ownership
-    # (EVOLVED/EXCLUSIVE) and one-shot state mutation by an event
-    # (LATCHED writes from EVENT/DISCRETE processes scatter-add a delta
-    # at sync points, they do not contribute to the derivative).
-    #
-    # The two are semantically orthogonal, and they need to coexist for
-    # the canonical use case of an event "kicking" a continuous state
-    # variable (e.g. a one-time perturbation of mTOR activity at t=10).
-    # See ``hallsim.models.kick_event.KickEvent`` for the reference
-    # pattern. The CONTINUOUS process retains derivative ownership; the
-    # EVENT process applies a one-shot scatter-add when its condition
-    # fires. The earlier rejection is removed.
+    # A LATCHED writer (DISCRETE/EVENT) and an EVOLVED/EXCLUSIVE writer
+    # (CONTINUOUS) may share a store path: the two are orthogonal. The
+    # CONTINUOUS process owns the derivative; the EVENT/DISCRETE process
+    # scatter-adds a one-shot delta at sync points without contributing to
+    # the derivative. This is the canonical event-"kick" pattern — a one-time
+    # perturbation of a continuous state (see
+    # ``hallsim.models.kick_event.KickEvent``).
     return errors

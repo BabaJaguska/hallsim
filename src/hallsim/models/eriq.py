@@ -547,13 +547,11 @@ class ERiQOxidativeStress(Process):
         # dCz = -ROS - Cz
         # dAz = gz * Uz - clearance(ros_act)   where gz = 0.01
         #
-        # Saturating clearance term added to bound ros_act under chronic
-        # damage / strong perturbations. Hill form (n=2, K=1) keeps the
-        # term ≈ 0 at baseline ros_act ≈ 0.08 (decay ~6e-5) and engages
-        # only when ros_act ≳ K. This preserves the homeostatic
-        # equilibrium of the integrator-style feedback while preventing
-        # the unbounded ROS growth that V10's algebraic-activity refactor
-        # was designed to address.
+        # Saturating clearance term bounds ros_act under chronic damage /
+        # strong perturbations. Hill form (n=2, K=1) keeps the term ≈ 0 at
+        # baseline ros_act ≈ 0.08 (decay ~6e-5) and engages only when
+        # ros_act ≳ K, preserving the homeostatic equilibrium of the
+        # integrator-style feedback while bounding unbounded ROS growth.
         ros_int = state["ROS_integrator_c"]
         ros_act = state["ROS_activity"]
         p = state.get("_params", {})
@@ -663,71 +661,6 @@ class ERiQSignaling(Process):
             "mTOR_activity": dMTOR_activity,
             "p53_integrator_c": dp53_integrator_c,
             "p53_activity": dp53_activity,
-        }
-
-
-# ── Process 3 variant: signaling with external p53 ─────────────────────
-
-
-class ERiQSignalingNoP53(Process):
-    """ERiQ signaling without intrinsic p53 dynamics.
-
-    Variant of :class:`ERiQSignaling` that omits the EXCLUSIVE p53
-    ports so an external Process (e.g. :class:`hallsim.models.p53_bridge.P53Bridge`
-    driven by an SBML-imported p53-Mdm2 oscillator) can own the
-    ``p53_activity`` store path without a topology conflict.
-
-    State variables retained:
-    - mTOR_integrator_c (Cy)
-    - mTOR_activity (Ay)
-
-    p53_activity is read as INPUT (from whichever Process owns it in the
-    composite). p53_integrator_c is dropped — it has no role without the
-    intrinsic p53 dynamics it integrated for.
-    """
-
-    def ports_schema(self):
-        return {
-            # EXCLUSIVE — sole owner of the mTOR integrator
-            "mTOR_integrator_c": Port(
-                role=PortRole.EXCLUSIVE,
-                default=-0.0000,
-                units="dimensionless",
-                description="mTOR regulatory feedback integrator (Cy)",
-            ),
-            # EVOLVED — same additive contract as ERiQSignaling so
-            # SASPmTORActivator can also contribute.
-            "mTOR_activity": Port(
-                role=PortRole.EVOLVED,
-                default=-0.1936,
-                units="dimensionless",
-                description="mTOR activity level (Ay); additive port",
-                ontology={"go": "GO:0031929"},  # TOR signaling
-            ),
-            # INPUT — same as ERiQSignaling, plus p53_activity
-            # (which was EXCLUSIVE in the original; here the bridge owns it)
-            "p53_activity": Port(role=PortRole.INPUT, default=0.8734),
-            "mito_function": Port(role=PortRole.INPUT, default=3.6239),
-            "glycolysis": Port(role=PortRole.INPUT, default=2.4010),
-            "ROS_activity": Port(role=PortRole.INPUT, default=0.0794),
-            "ROS_integrator_c": Port(role=PortRole.INPUT, default=-0.7944),
-            "mito_damage": Port(role=PortRole.INPUT, default=0.0724),
-        }
-
-    def derivative(self, t, state):
-        obs = _compute_algebraic(state)
-        mtor_int = state["mTOR_integrator_c"]
-
-        # mTOR feedback unchanged from ERiQSignaling
-        ry = 0.0
-        gy = 0.1
-        Uy = ry + mtor_int
-        dMTOR_integrator_c = -obs["MTORa"] - mtor_int
-        dMTOR_activity = gy * Uy
-
-        return {
-            "mTOR_integrator_c": dMTOR_integrator_c,
-            "mTOR_activity": dMTOR_activity,
         }
 
 

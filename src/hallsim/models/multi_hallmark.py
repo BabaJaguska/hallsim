@@ -266,16 +266,16 @@ def build_multi_hallmark_composite(*, validate: bool = True):
         # dependent SASP in DDIS senescence (Salminen 2012). Shares NFKB's
         # timescale so both IKK drives solve in one group.
         "damage_nfkb": DamageNFkBActivator(timescale=nfkb.timescale),
-        # Phase-insensitive readouts for the two oscillating reporters.
-        # RunningIntegrals over each oscillator, in its source's group so
-        # the integral sees the real oscillation. DDB2 reads ∫x² (the default
-        # power=2) → RMS: GZ06's mean p53 is damage-blind (buffered), the
-        # damage is in the pulsing, and RMS captures it. NFKBIA overrides to
-        # power=1 (∫IkBat → mean): its transcript's DC level moves with drive.
+        # Phase-insensitive RMS readouts for both oscillating reporters. A
+        # RunningIntegral over each oscillator (in its source's group, so the
+        # integral sees the real oscillation) accumulates ∫x² — the default
+        # power=2 — and window_rms differences it → √⟨x²⟩. DDB2 needs RMS
+        # because GZ06's mean p53 is damage-blind (buffered): the damage lives
+        # in the pulse amplitude. NFKBIA's transcript mean is itself drive-
+        # responsive, so mean ≈ rms there (6/6 timepoints); RMS is used for
+        # both, uniformly — no per-reporter override.
         "gz06_x2_integral": RunningIntegral(timescale=gz06.timescale),
-        "nfkb_ikbat_integral": RunningIntegral(
-            timescale=nfkb.timescale, power=1.0
-        ),
+        "nfkb_ikbat_integral": RunningIntegral(timescale=nfkb.timescale),
     }
     # The mtor_nfkb edge reads DP14's active mTORC1 and writes additively
     # to the NF-κB module's IKK pool. The RunningIntegral observers read an

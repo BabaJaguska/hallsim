@@ -15,7 +15,6 @@ Usage::
 
     validator = CompositeValidator()
     report = validator.validate(processes, topology)
-    print(report)
     assert report.is_valid
 
 Or integrated into Composite::
@@ -770,7 +769,6 @@ def analyze_composability(**composites) -> ComposabilityReport:
     merging::
 
         report = analyze_composability(eriq=eriq_comp, dp14=dp14_comp)
-        print(report)
         merged = Composite(
             processes={"eriq": eriq_comp, "dp14": dp14_comp},
             rewire=report.suggested_rewire,

@@ -14,7 +14,6 @@ from hallsim.models.eriq import (
     ERiQEnergyMetabolism,
     ERiQOxidativeStress,
     ERiQSignaling,
-    ERiQSignalingNoP53,
     build_eriq_composite,
 )
 from hallsim.models.kick_event import KickEvent

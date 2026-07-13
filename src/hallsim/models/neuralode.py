@@ -21,7 +21,7 @@ Usage
 ...     processes={"neural": proc},
 ...     topology={"neural": {"x": "pool/x", "y": "pool/y"}},
 ... )
->>> # Train via hallsim.models.neuralode.train_neuralode(...)
+>>> # Fit via fit_neuralode_derivative(...) or fit_neuralode_shooting(...)
 """
 
 from __future__ import annotations
@@ -29,11 +29,14 @@ from __future__ import annotations
 import logging
 from typing import Sequence
 
+import copy
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
 from hallsim.process import Port, PortRole, Process
+from hallsim.utils import h_act
 
 log = logging.getLogger(__name__)
 
@@ -41,44 +44,86 @@ log = logging.getLogger(__name__)
 class NeuralODEProcess(Process):
     """Process with MLP-parameterized dynamics.
 
+    The MLP maps ``[state_fields, control_inputs] -> d(state)/dt``. Control
+    inputs (``input_fields``) let the learned vector field be conditioned on
+    external signals, so one network can represent a whole parameter-indexed
+    family of dynamics — the mechanism that lets a NeuralODE reproduce a
+    bifurcation: train across both sides of the critical value and the
+    learned family flips regime as the conditioning input crosses it.
+
+    Each control input is sourced one of three ways at derivative time:
+
+    - **wired** (default) — read straight from an INPUT port of the same
+      name;
+    - **Hill-driven** (:meth:`with_input_driver`) — read a wired port and
+      Hill-interpolate it between a fittable basal (a ``parameters`` entry)
+      and ``hi``, the neural analogue of
+      :meth:`hallsim.sbml_import.SBMLProcess.with_param_driver`, so an
+      upstream state can drive the block the way it drives the mechanistic
+      model it replaces;
+    - **parameter-sourced** (:meth:`with_control_param`) — filled from a
+      fittable scalar in ``parameters``, so a bifurcation knob stays a live,
+      differentiable parameter of the hybrid rather than being frozen into
+      the weights.
+
     Parameters
     ----------
     fields:
-        Names of the state variables this process evolves.
-        Each becomes an EVOLVED port.
-    width:
-        Hidden layer width.
-    depth:
-        Number of hidden layers.
-    out_scale:
-        Output scaling factor (learned or fixed).
+        State variables this process evolves; each an EVOLVED port.
+    input_fields:
+        Control inputs to the MLP, in the order training data supplies them.
+    field_defaults:
+        Initial values for the EVOLVED ports (aligned with ``fields``); use
+        to start the block at the state its mechanistic counterpart starts
+        at. Defaults to zeros.
+    width, depth:
+        MLP architecture.
     key:
-        JAX PRNG key for weight initialization.
+        PRNG key for weight init.
     """
 
     fields: tuple[str, ...] = ("x", "y")
     input_fields: tuple[str, ...] = ()
+    field_defaults: tuple[float, ...] = eqx.field(static=True, default=())
     mlp: eqx.nn.MLP = eqx.field(default=None)
     out_scale: jax.Array = eqx.field(default_factory=lambda: jnp.array(1.0))
-    # Fixed I/O normalisation buffers (set from training data). Marked as a
-    # non-trainable node via ``eqx.field(static=False)`` but partitioned out
-    # of the optimiser by callers, so they persist unchanged through fits.
+    # Fittable scalar controls (e.g. a bifurcation parameter, a Hill basal).
+    # Dynamic (traced) so Calibrator/`jax.grad` reach them via
+    # ``parameters.<name>``, mirroring SBMLProcess.
+    parameters: dict[str, jax.Array] = eqx.field(default_factory=dict)
+    # Fixed I/O normalisation buffers (set from training data). Partitioned
+    # out of the optimiser by callers, so they persist unchanged through fits.
     in_mean: jax.Array = eqx.field(default=None)
     in_std: jax.Array = eqx.field(default=None)
     out_mean: jax.Array = eqx.field(default=None)
     out_std: jax.Array = eqx.field(default=None)
+    # Hill couplings: each (control_field, port, basal_param, hi, K, n) reads
+    # ``port`` and interpolates ``parameters[basal_param]``→``hi``. Static
+    # metadata so it round-trips through the ``eqx.tree_at`` substitutions the
+    # hallmark / Calibrator paths apply to ``parameters``.
+    _hill_drivers: tuple = eqx.field(static=True, default=())
 
     def __init__(
         self,
         fields: Sequence[str] = ("x", "y"),
         input_fields: Sequence[str] = (),
+        field_defaults: Sequence[float] | None = None,
         width: int = 64,
         depth: int = 2,
         key: jax.Array | None = None,
         final_activation=jax.nn.tanh,
+        timescale: float | None = None,
     ):
+        self.timescale = timescale
         self.fields = tuple(fields)
         self.input_fields = tuple(input_fields)
+        self.field_defaults = (
+            tuple(float(v) for v in field_defaults)
+            if field_defaults is not None
+            else tuple(0.0 for _ in self.fields)
+        )
+        self.parameters = {}
+        self._hill_drivers = ()
         if key is None:
             key = jax.random.PRNGKey(0)
         n_out = len(self.fields)
@@ -98,25 +143,97 @@ class NeuralODEProcess(Process):
         self.out_mean = jnp.zeros(n_out)
         self.out_std = jnp.ones(n_out)
 
+    def with_input_driver(
+        self, field: str, *, port: str, basal_param: str, hi: float,
+        K: float, n: float = 2.0, basal: float | None = None,
+    ) -> "NeuralODEProcess":
+        """Source control input ``field`` from a Hill transform of ``port``.
+
+        Adds an INPUT port ``port`` and, at derivative time, fills the MLP's
+        ``field`` column with ``parameters[basal_param] + (hi - basal) *
+        h_act(port; K, n)``. The basal lives on ``parameters`` so it stays
+        fittable; ``hi``/``K``/``n`` are structural. ``basal`` seeds the
+        parameter entry if not already present.
+        """
+        if field not in self.input_fields:
+            raise KeyError(
+                f"{field!r} is not a control input; have {self.input_fields}"
+            )
+        new = copy.copy(self)
+        params = dict(self.parameters)
+        if basal is not None or basal_param not in params:
+            params[basal_param] = jnp.asarray(
+                float(basal if basal is not None else 0.0)
+            )
+        object.__setattr__(new, "parameters", params)
+        object.__setattr__(
+            new, "_hill_drivers",
+            self._hill_drivers
+            + ((field, port, basal_param, float(hi), float(K), float(n)),),
+        )
+        return new
+
+    def with_control_param(
+        self, field: str, value: float
+    ) -> "NeuralODEProcess":
+        """Source control input ``field`` from a fittable scalar parameter.
+
+        The value stays on ``parameters`` (differentiable, calibratable), so
+        a bifurcation knob remains a live parameter of the hybrid instead of
+        being baked into the weights.
+        """
+        if field not in self.input_fields:
+            raise KeyError(
+                f"{field!r} is not a control input; have {self.input_fields}"
+            )
+        new = copy.copy(self)
+        params = dict(self.parameters)
+        params[field] = jnp.asarray(float(value))
+        object.__setattr__(new, "parameters", params)
+        return new
+
     def ports_schema(self):
         schema = {
             name: Port(
-                role=PortRole.EVOLVED, default=0.0, units="dimensionless"
+                role=PortRole.EVOLVED, default=dflt, units="dimensionless"
             )
-            for name in self.fields
+            for name, dflt in zip(self.fields, self.field_defaults)
         }
-        for name in self.input_fields:
-            schema[name] = Port(
+        hill_fields = {d[0] for d in self._hill_drivers}
+        for _, port, *_ in self._hill_drivers:
+            schema[port] = Port(
+                role=PortRole.INPUT, default=0.0, units="dimensionless"
+            )
+        param_fields = set(self.parameters)
+        for cf in self.input_fields:
+            if cf in hill_fields or cf in param_fields:
+                continue
+            schema[cf] = Port(
                 role=PortRole.INPUT, default=0.0, units="dimensionless"
             )
         return schema
+
+    def _control_column(self, cf, state, base_shape):
+        for field, port, basal_param, hi, K, n in self._hill_drivers:
+            if field == cf:
+                basal = self.parameters[basal_param]
+                return basal + (hi - basal) * h_act(
+                    state[port], jnp.asarray(K), jnp.asarray(n)
+                )
+        if cf in self.parameters:
+            return jnp.broadcast_to(
+                jnp.asarray(self.parameters[cf]), base_shape
+            )
+        return state[cf]
 
     def derivative(self, t, state):
         # Trailing-axis stack so the process is shape-polymorphic: scalar
         # state -> (n_in,), batched -> (..., n_in). The MLP is applied per
         # row via vmap over the flattened leading axes.
+        base_shape = jnp.shape(state[self.fields[0]])
         cols = [state[f] for f in self.fields] + [
-            state[f] for f in self.input_fields
+            self._control_column(cf, state, base_shape)
+            for cf in self.input_fields
         ]
         inp = jnp.stack(cols, axis=-1)
         inp_n = (inp - self.in_mean) / self.in_std
@@ -126,157 +243,6 @@ class NeuralODEProcess(Process):
         )
         dy = self.out_scale * (out * self.out_std + self.out_mean)
         return {f: dy[..., i] for i, f in enumerate(self.fields)}
-
-
-# ── Training infrastructure ─────────────────────────────────────────────
-
-
-def train_neuralode(
-    ts: jnp.ndarray,
-    ys: jnp.ndarray,
-    fields: Sequence[str] = ("x", "y"),
-    width: int = 64,
-    depth: int = 2,
-    lr: float = 1e-3,
-    steps: int = 1000,
-    batch_size: int = 64,
-    seed: int = 123,
-) -> NeuralODEProcess:
-    """Train a NeuralODEProcess on time-series data.
-
-    Uses the multiple-shooting approach: for each sample, predict from
-    y0 over the time grid and minimize MSE against the target trajectory.
-
-    Parameters
-    ----------
-    ts:
-        Time points, shape ``(T,)``.
-    ys:
-        Target trajectories, shape ``(N, T, D)`` where N=samples,
-        T=time points, D=state dimension.
-    fields:
-        State variable names (must match dimension D).
-    width, depth:
-        MLP architecture.
-    lr:
-        Learning rate (Adam).
-    steps:
-        Training steps.
-    batch_size:
-        Mini-batch size.
-    seed:
-        Random seed.
-
-    Returns
-    -------
-    Trained NeuralODEProcess.
-    """
-    import diffrax as dfx
-    import optax
-
-    key = jax.random.PRNGKey(seed)
-    model_key, loader_key = jax.random.split(key)
-
-    proc = NeuralODEProcess(
-        fields=fields, width=width, depth=depth, key=model_key
-    )
-
-    # Wrap for array-based solving
-    def solve_trajectory(proc, ts, y0):
-        def rhs(t, y, args):
-            return proc.out_scale * proc.mlp(y)
-
-        sol = dfx.diffeqsolve(
-            dfx.ODETerm(rhs),
-            dfx.Tsit5(),
-            t0=ts[0],
-            t1=ts[-1],
-            dt0=ts[1] - ts[0],
-            y0=y0,
-            saveat=dfx.SaveAt(ts=ts),
-            stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-6),
-        )
-        return sol.ys
-
-    @eqx.filter_value_and_grad
-    def loss_fn(proc, ti, yi):
-        y_pred = jax.vmap(lambda y0: solve_trajectory(proc, ti, y0))(yi[:, 0])
-        return jnp.mean((y_pred - yi) ** 2)
-
-    optimizer = optax.adam(lr)
-    opt_state = optimizer.init(eqx.filter(proc, eqx.is_inexact_array))
-
-    @eqx.filter_jit
-    def make_step(ti, yi, proc, opt_state):
-        loss, grads = loss_fn(proc, ti, yi)
-        updates, opt_state = optimizer.update(grads, opt_state)
-        proc = eqx.apply_updates(proc, updates)
-        return loss, proc, opt_state
-
-    dataset_size = ys.shape[0]
-
-    for step in range(steps):
-        # Simple random batch
-        loader_key, batch_key = jax.random.split(loader_key)
-        idx = jax.random.choice(
-            batch_key,
-            dataset_size,
-            shape=(min(batch_size, dataset_size),),
-            replace=False,
-        )
-        yi = ys[idx]
-        loss, proc, opt_state = make_step(ts, yi, proc, opt_state)
-        if step % 100 == 0:
-            log.info("Step %d, loss: %.6f", step, float(loss))
-
-    return proc
-
-
-def generate_training_data(
-    model_fn,
-    ts: jnp.ndarray,
-    n_vars: int,
-    dataset_size: int,
-    key: jax.Array,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Generate synthetic training data from a known RHS function.
-
-    Parameters
-    ----------
-    model_fn:
-        RHS function ``(t, y, args) -> dy/dt``.
-    ts:
-        Time grid.
-    n_vars:
-        Number of state variables.
-    dataset_size:
-        Number of trajectories to simulate.
-    key:
-        PRNG key.
-
-    Returns
-    -------
-    ``(ts, ys)`` where ys has shape ``(dataset_size, len(ts), n_vars)``.
-    """
-    import diffrax as dfx
-
-    def simulate_single(key):
-        y0 = jax.random.uniform(key, (n_vars,), minval=0.1, maxval=1.0)
-        sol = dfx.diffeqsolve(
-            dfx.ODETerm(model_fn),
-            dfx.Tsit5(),
-            t0=ts[0],
-            t1=ts[-1],
-            dt0=0.1,
-            y0=y0,
-            saveat=dfx.SaveAt(ts=ts),
-            stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-6),
-        )
-        return sol.ys
-
-    keys = jax.random.split(key, dataset_size)
-    ys = jax.vmap(simulate_single)(keys)
-    return ts, ys
 
 
 # ── Input-conditioned templates ─────────────────────────────────────────
@@ -467,6 +433,10 @@ def fit_neuralode_shooting(
     *,
     fields: Sequence[str],
     input_fields: Sequence[str] = (),
+    segments: int = 1,
+    curriculum: int = 1,
+    physics_weight: float = 0.0,
+    continuity_weight: float = 0.0,
     width: int = 96,
     depth: int = 3,
     lr: float = 1e-3,
@@ -477,11 +447,35 @@ def fit_neuralode_shooting(
     rtol: float = 1e-4,
     atol: float = 1e-7,
 ) -> NeuralODEProcess:
-    """Fit by **trajectory shooting**: integrate the learned field per
-    trajectory (each with its constant input) and match the trajectory,
-    backpropagating through the solve. The classic Neural-ODE objective;
-    for stiff dynamics warm-start via ``init=`` from a derivative fit so the
-    field is already close before any integration.
+    """Fit by **trajectory shooting**: integrate the learned field and match
+    the trajectory, backpropagating through the solve.
+
+    Plain single shooting over many periods of an oscillator collapses the
+    learned trajectory to a fixed point: a small period error drifts the
+    prediction out of phase, and full-horizon MSE is then lower for a flat
+    line at the mean than for a phase-shifted oscillation, so the optimizer
+    damps the amplitude away. The three knobs below are independent,
+    combinable stabilizers against that:
+
+    - ``segments`` — **multiple shooting**: cut each trajectory into
+      ``segments`` contiguous windows and integrate each from its own
+      observed start state. Shorter windows accrue less phase drift, so the
+      flat optimum stops winning. Slope-free — safe for noisy real data.
+    - ``curriculum`` — grow the matched horizon: over ``curriculum`` stages
+      match a progressively longer prefix of each window (short→full), so
+      the field is anchored on the easy near-term dynamics before the hard
+      long-horizon phase. Slope-free.
+    - ``physics_weight`` — **collocation regularizer**
+      ``λ·‖f_θ(z) − ż‖²`` on the data's finite-difference slopes (the same
+      residual :func:`fit_neuralode_derivative` minimizes). Supplies the
+      absolute vector-field magnitude constraint pure shooting lacks — the
+      strongest stabilizer, but slope quality degrades with noise/sparsity.
+    - ``continuity_weight`` — tie each window's integrated endpoint to the
+      next window's observed start, for global consistency across boundaries.
+
+    ``segments=1, curriculum=1, physics_weight=0`` is classic single
+    shooting. Warm-start via ``init=`` from a derivative fit for stiff
+    dynamics. See MPINeuralODE (arXiv:2605.13305) for the combined recipe.
     """
     import diffrax as dfx
     import optax
@@ -498,47 +492,84 @@ def fit_neuralode_shooting(
     )
     us_arr = jnp.zeros((ys.shape[0], 0)) if us is None else jnp.asarray(us)
     fld, inp = tuple(fields), tuple(input_fields)
+    xn = (jnp.concatenate([states, inputs], -1) - im) / isd
+    yn = (slopes - om) / osd
 
-    def solve(proc, y0, u):
+    n_t = ys.shape[1]
+    seg_len = max(2, n_t // segments)
+    starts = jnp.arange(segments) * seg_len
+
+    def integrate(proc, y0, u, seg_ts):
         def rhs(t, y, args=None):
             port = {f: y[i] for i, f in enumerate(fld)}
             port.update({f: u[j] for j, f in enumerate(inp)})
             d = proc.derivative(t, port)
             return jnp.stack([d[f] for f in fld])
 
-        sol = dfx.diffeqsolve(
-            dfx.ODETerm(rhs),
-            dfx.Tsit5(),
-            ts[0],
-            ts[-1],
-            ts[1] - ts[0],
-            y0,
-            saveat=dfx.SaveAt(ts=ts),
+        return dfx.diffeqsolve(
+            dfx.ODETerm(rhs), dfx.Tsit5(), seg_ts[0], seg_ts[-1],
+            (seg_ts[-1] - seg_ts[0]) / max(seg_ts.shape[0] - 1, 1),
+            y0, saveat=dfx.SaveAt(ts=seg_ts),
             stepsize_controller=dfx.PIDController(rtol=rtol, atol=atol),
             max_steps=100_000,
-        )
-        return sol.ys
+        ).ys
 
-    @eqx.filter_value_and_grad
-    def loss_fn(proc, yb, ub):
-        pred = jax.vmap(lambda y, u: solve(proc, y[0], u))(yb, ub)
-        return jnp.mean((pred - yb) ** 2)
+    def make_loss(match_len):
+        def per_window(proc, yb, ub, s):
+            seg_ts = jax.lax.dynamic_slice_in_dim(ts, s, match_len)
+            y0 = jax.vmap(lambda y: y[s])(yb)
+            pred = jax.vmap(lambda a, u: integrate(proc, a, u, seg_ts))(y0, ub)
+            tgt = jax.vmap(
+                lambda y: jax.lax.dynamic_slice_in_dim(y, s, match_len))(yb)
+            return jnp.mean((pred - tgt) ** 2)
+
+        @eqx.filter_value_and_grad
+        def loss_fn(proc, yb, ub, xb, tb):
+            traj = jnp.mean(jax.vmap(
+                lambda s: per_window(proc, yb, ub, s))(starts))
+            total = traj
+            if physics_weight:
+                total = total + physics_weight * jnp.mean(
+                    (jax.vmap(proc.mlp)(xb) - tb) ** 2)
+            if continuity_weight and segments > 1:
+                def gap(s):
+                    seg_ts = jax.lax.dynamic_slice_in_dim(ts, s, seg_len)
+                    y0 = jax.vmap(lambda y: y[s])(yb)
+                    end = jax.vmap(
+                        lambda a, u: integrate(proc, a, u, seg_ts)[-1])(y0, ub)
+                    nxt = jax.vmap(lambda y: y[s + seg_len])(yb)
+                    return jnp.mean((end - nxt) ** 2)
+                total = total + continuity_weight * jnp.mean(
+                    jax.vmap(gap)(starts[:-1]))
+            return total
+
+        return loss_fn
 
     opt = optax.adam(lr)
     opt_state = opt.init(eqx.filter(proc, eqx.is_inexact_array))
-
-    @eqx.filter_jit
-    def stepf(proc, opt_state, yb, ub):
-        lv, g = loss_fn(proc, yb, ub)
-        upd, opt_state = opt.update(g, opt_state)
-        return eqx.apply_updates(proc, upd), opt_state, lv
-
     key = jax.random.PRNGKey(seed + 1)
-    n = ys.shape[0]
-    for s in range(steps):
-        key, kb = jax.random.split(key)
-        idx = jax.random.choice(kb, n, (min(batch_size, n),), replace=False)
-        proc, opt_state, lv = stepf(proc, opt_state, ys[idx], us_arr[idx])
-        if s % max(1, steps // 8) == 0:
-            log.info("shooting-fit step %d, loss %.6f", s, float(lv))
+    n, m = ys.shape[0], xn.shape[0]
+    stage_steps = max(1, steps // curriculum)
+
+    for stage in range(curriculum):
+        match_len = int(jnp.ceil(seg_len * (stage + 1) / curriculum))
+        match_len = int(min(seg_len, max(2, match_len)))
+        loss_fn = make_loss(match_len)
+
+        @eqx.filter_jit
+        def stepf(proc, opt_state, yb, ub, xb, tb, loss_fn=loss_fn):
+            lv, g = loss_fn(proc, yb, ub, xb, tb)
+            upd, opt_state = opt.update(g, opt_state)
+            return eqx.apply_updates(proc, upd), opt_state, lv
+
+        for s in range(stage_steps):
+            key, k1, k2 = jax.random.split(key, 3)
+            bi = jax.random.choice(k1, n, (min(batch_size, n),), replace=False)
+            pi = jax.random.choice(k2, m, (min(512, m),), replace=False)
+            proc, opt_state, lv = stepf(
+                proc, opt_state, ys[bi], us_arr[bi], xn[pi], yn[pi])
+            if s % max(1, stage_steps // 4) == 0:
+                log.info("shooting stage %d/%d (match_len=%d) step %d, "
+                         "loss %.6f", stage + 1, curriculum, match_len, s,
+                         float(lv))
     return proc

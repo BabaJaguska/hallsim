@@ -258,7 +258,7 @@ def demo_neuralode():
     print("=" * 60)
 
     from hallsim.models.neuralode import (
-        NeuralODEProcess, generate_training_data, train_neuralode,
+        simulate_conditioned, fit_neuralode_shooting,
     )
     from hallsim.composite import Composite
     from hallsim.scheduler import Scheduler
@@ -268,19 +268,21 @@ def demo_neuralode():
     def oscillator(t, y, args=None):
         return jnp.stack([y[1], -y[0] - 0.1 * y[1]])
 
-    ts_train = jnp.linspace(0, 10, 50)
+    ts_data = jnp.linspace(0, 10, 50)
     key = jax.random.PRNGKey(42)
 
     print("   Generating training data (damped oscillator)...")
-    ts_data, ys_data = generate_training_data(
-        oscillator, ts_train, n_vars=2, dataset_size=64, key=key,
+    ys_data, _ = simulate_conditioned(
+        lambda u: oscillator, ts_data, jnp.zeros((1, 1)), n_ics=64,
+        y0_range=(0.1, 1.0), key=key,
     )
     print(f"   Data shape: {ys_data.shape}")
 
-    print("   Training NeuralODE (1000 steps)...")
-    proc = train_neuralode(
+    print("   Training NeuralODE (multiple shooting, 1000 steps)...")
+    proc = fit_neuralode_shooting(
         ts_data, ys_data,
-        fields=["x", "y"],
+        fields=("x", "y"),
+        segments=4,
         width=64, depth=3,
         steps=1000, batch_size=32, seed=42,
     )

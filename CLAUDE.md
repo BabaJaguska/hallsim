@@ -182,4 +182,5 @@ shared `t` and the result is meaningless — screen for it.
 - VECTORIZE what vectorized can be.
 - Logging, not printing.
 - Claude memory IS NOT the way to make agents behave a certain way in the future. THE FRAMEWORK ITSELF is. Whatever can be built less ambiguously IN THE FRAMEWORK should be done so. Claude.md is just for you. It is not for everyone, it is not a manual. 
-- 
+- Minimal comments!!!! Do not explain everything like the user is in elementary school, only the true unobvious things; The code itself should be readable and variable naming should be explanatory enough.
+- Honesty alone is not a virtue. Prefacing a bad result with "an honest finding" does not rescue it.

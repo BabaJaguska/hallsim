@@ -349,13 +349,13 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
     oscillating_reporter(
         observable="nfkb/IkBat_integral",
         gene_symbol="NFKBIA",
-        # Mean is a justified override of the rms default: unlike p53, the
-        # IκBα-transcript DC level *moves* with integrated NF-κB activity, so
-        # its mean carries the signal — and mean ≈ rms empirically (6/6
-        # timepoints, scratchpad/nfkbia_mean_vs_rms.py). Bulk microarray
-        # measures average transcript abundance, which the mean matches.
+        # RMS default, like DDB2. Unlike p53, the IκBα-transcript DC level also
+        # moves with integrated NF-κB activity, so mean and rms coincide here
+        # (6/6 timepoints, scratchpad/nfkbia_mean_vs_rms.py); rms is used for
+        # uniformity with DDB2 and to keep the "RMS window readouts" account of
+        # the oscillating reporters literally true.
         sign=+1,
-        readout="mean",
+        readout="rms",
         description=(
             "IκBα transcript — direct NF-κB target via the autoregulatory "
             "negative feedback loop. Maps to Ihekwaba 2004's IκBα mRNA "
@@ -363,9 +363,9 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
             "activity. Transcriptomic NFKBIA measures the transcript, not "
             "the cytoplasmic protein (IkBa), whose abundance moves "
             "inversely to activity through IKK-driven degradation. A "
-            "RunningIntegral(power=1) writes ∫IkBat to `nfkb/IkBat_integral` "
-            "and window_mean differences it — phase-insensitive with a "
-            "bounded calibration gradient."
+            "RunningIntegral(power=2) writes ∫IkBat² to `nfkb/IkBat_integral` "
+            "and window_rms differences it — phase-insensitive amplitude with "
+            "a bounded calibration gradient."
         ),
         reference="Sun et al. 1993, Science 259:1912–1915",
     ),

@@ -20,7 +20,6 @@ Usage
 >>> comp = build_eriq_composite()
 >>> analyzer = ModelAnalyzer(comp)
 >>> report = analyzer.run_all()
->>> print(report)
 
 For LLM-assisted review::
 

@@ -607,3 +607,120 @@ def screen_composite(
         for name, t_end in t_ends.items()
         if name in procs
     ]
+
+
+@dataclass
+class SensitivityReport:
+    """Whether a reporter responds to a control in a given operating regime.
+
+    A composite can be perfectly composed and still be useless for
+    calibrating or validating a reporter *in a particular regime*: if the
+    control's effect saturates or dies before it reaches the reporter, the
+    reporter is flat there and any fit against it is uninformative (and hides
+    bugs). ``live`` is the guardrail — a nonzero in-regime sensitivity means
+    there is actually a gradient to trust. ``finite`` catches a broken
+    derivative path (the composite is not differentiable here at all).
+    """
+
+    reporter: str
+    control: str
+    value: float
+    sensitivity: float
+    rel_sensitivity: float
+    live: bool
+    finite: bool
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.finite and self.live
+
+    def __str__(self) -> str:
+        if not self.finite:
+            verdict = "NON-FINITE-GRAD"
+        elif not self.live:
+            verdict = "FLAT (dead in this regime)"
+        else:
+            verdict = "live"
+        return (
+            f"{self.reporter:>10} ← {self.control:<24}: {verdict:<26} "
+            f"d/dctrl={self.sensitivity:+.3g}  value={self.value:.3g}  "
+            f"rel={self.rel_sensitivity:.3g}"
+            + (f"  [{self.detail}]" if self.detail else "")
+        )
+
+
+def screen_sensitivity(
+    composite: Composite,
+    reporters,
+    hallmarks,
+    *,
+    baseline: dict[str, float] | None = None,
+    t_end: float = 14.0,
+    macro_dt: float | None = None,
+    query_time: float | None = None,
+    rel_threshold: float = 1e-3,
+    auto_stiffness: bool = True,
+) -> list["SensitivityReport"]:
+    """Flag reporters that are insensitive to a hallmark *in this regime*.
+
+    For each ``hallmark`` it differentiates every reporter's summary with
+    respect to that hallmark's severity at ``baseline`` (the operating point —
+    sensitivity is regime-dependent, which is the whole point), using the same
+    differentiable ``apply_hallmarks`` → ``Scheduler.run`` path the calibrator
+    does. A reporter whose relative sensitivity falls below ``rel_threshold``
+    is ``FLAT`` — calibrating or validating it in this regime is
+    uninformative. A non-finite gradient means the composite is not
+    differentiable here. One pre-flight check that would catch a coupling
+    driven into saturation or a reporter read outside its dynamic range.
+
+    Reverse-mode (the multi-group scan path is a ``custom_vjp``, so forward
+    mode is unavailable); the Scheduler is warmed on the concrete baseline
+    first so ``auto_stiffness`` resolves its solvers outside the trace.
+    """
+    from hallsim.hallmarks import apply_hallmarks
+
+    hallmarks = list(hallmarks)
+    base = dict(baseline or {h: 1.0 for h in hallmarks})
+    qt = jnp.atleast_1d(jnp.asarray(query_time if query_time is not None
+                                    else t_end, dtype=float))
+    mdt = macro_dt if macro_dt is not None else t_end / 4.0
+    sched = Scheduler(auto_stiffness=auto_stiffness)
+    base_vec = jnp.asarray([float(base[h]) for h in hallmarks])
+
+    def _build(hm):
+        return Composite(apply_hallmarks(composite.processes, hm),
+                         composite.topology, validate=False,
+                         semantic_validation=False)
+
+    def reporter_values(sev_vec):
+        hm = dict(base)
+        for i, h in enumerate(hallmarks):
+            hm[h] = sev_vec[i]
+        comp = _build(hm)
+        res = sched.run(comp, t_span=(0.0, t_end), macro_dt=mdt,
+                        y0=comp.initial_state_vec())
+        return jnp.stack([
+            jnp.atleast_1d(r.summary(res.ts, res.get(r.observable), qt))[0]
+            for r in reporters
+        ])
+
+    base_comp = _build(base)
+    sched.warm_up(base_comp, t_span=(0.0, t_end), macro_dt=mdt,
+                  y0=base_comp.initial_state_vec())
+    values = reporter_values(base_vec)
+    jac = jax.jacrev(reporter_values)(base_vec)  # (n_reporter, n_hallmark)
+
+    reports = []
+    for i, r in enumerate(reporters):
+        val = float(values[i])
+        for j, h in enumerate(hallmarks):
+            sens = float(jac[i, j])
+            finite = bool(jnp.isfinite(sens))
+            rel = abs(sens) / (abs(val) + 1e-12)
+            reports.append(SensitivityReport(
+                reporter=getattr(r, "gene_symbol", r.observable),
+                control=h, value=val, sensitivity=sens,
+                rel_sensitivity=rel,
+                live=finite and rel >= rel_threshold, finite=finite))
+    return reports
