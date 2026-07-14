@@ -27,7 +27,7 @@ Usage
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+from typing import Any, Sequence
 
 import copy
 
@@ -77,7 +77,9 @@ class NeuralODEProcess(Process):
         to start the block at the state its mechanistic counterpart starts
         at. Defaults to zeros.
     width, depth:
-        MLP architecture.
+        Hidden-layer sizes. ``width`` is either a uniform int (a stack of
+        ``depth`` hidden layers of that width) or an explicit per-layer
+        sequence like ``(256, 128, 128)``, in which case ``depth`` is unused.
     key:
         PRNG key for weight init.
     """
@@ -85,7 +87,7 @@ class NeuralODEProcess(Process):
     fields: tuple[str, ...] = ("x", "y")
     input_fields: tuple[str, ...] = ()
     field_defaults: tuple[float, ...] = eqx.field(static=True, default=())
-    mlp: eqx.nn.MLP = eqx.field(default=None)
+    mlp: eqx.Module = eqx.field(default=None)
     out_scale: jax.Array = eqx.field(default_factory=lambda: jnp.array(1.0))
     # Fittable scalar controls (e.g. a bifurcation parameter, a Hill basal).
     # Dynamic (traced) so Calibrator/`jax.grad` reach them via
@@ -108,7 +110,7 @@ class NeuralODEProcess(Process):
         fields: Sequence[str] = ("x", "y"),
         input_fields: Sequence[str] = (),
         field_defaults: Sequence[float] | None = None,
-        width: int = 64,
+        width: int | Sequence[int] = 64,
         depth: int = 2,
         key: jax.Array | None = None,
         final_activation=jax.nn.tanh,
@@ -128,15 +130,7 @@ class NeuralODEProcess(Process):
             key = jax.random.PRNGKey(0)
         n_out = len(self.fields)
         n_in = len(self.fields) + len(self.input_fields)
-        self.mlp = eqx.nn.MLP(
-            in_size=n_in,
-            out_size=n_out,
-            width_size=width,
-            depth=depth,
-            activation=jax.nn.softplus,
-            final_activation=final_activation,
-            key=key,
-        )
+        self.mlp = _build_mlp(n_in, n_out, width, depth, final_activation, key)
         self.out_scale = jnp.array(1.0)
         self.in_mean = jnp.zeros(n_in)
         self.in_std = jnp.ones(n_in)
@@ -260,6 +254,124 @@ def _identity(z):
     return z
 
 
+def _build_mlp(n_in, n_out, width, depth, final_activation, key):
+    """Feed-forward net as an ``eqx.nn.Sequential`` of ``Linear`` layers with
+    softplus hidden activations. ``width`` is a uniform int (a stack of
+    ``depth`` hidden layers of that width) or an explicit per-hidden-layer
+    sequence like ``(256, 128, 128)`` (then ``depth`` is unused)."""
+    hidden = ([int(width)] * depth if isinstance(width, int)
+              else [int(w) for w in width])
+    sizes = [n_in, *hidden, n_out]
+    keys = jax.random.split(key, len(sizes) - 1)
+    layers = []
+    for i, k in enumerate(keys):
+        layers.append(eqx.nn.Linear(sizes[i], sizes[i + 1], key=k))
+        act = jax.nn.softplus if i < len(keys) - 1 else final_activation
+        layers.append(eqx.nn.Lambda(act))
+    return eqx.nn.Sequential(layers)
+
+
+_SDTW_INF = 1e10
+
+
+def _soft_dtw(D: jnp.ndarray, gamma: float) -> jnp.ndarray:
+    """Soft-DTW alignment cost of one pairwise cost matrix ``D`` (n×m).
+
+    Cuturi & Blondel 2017: the hard-DTW min over alignment paths relaxed to
+    a differentiable ``softmin_γ(a,b,c) = -γ·log Σ exp(-·/γ)``. Row-scan over
+    the DP so it stays fixed-shape (JIT/vmap-able); ``γ→0`` recovers hard DTW.
+    """
+    m = D.shape[1]
+
+    def softmin(vals):
+        vmin = jnp.min(vals)
+        return vmin - gamma * jnp.log(
+            jnp.sum(jnp.exp(-(vals - vmin) / gamma)))
+
+    def row_step(prev_row, D_row):
+        r_up, r_diag = prev_row[1:], prev_row[:-1]
+
+        def col_step(r_left, inp):
+            d, up, diag = inp
+            r_ij = d + softmin(jnp.stack([up, r_left, diag]))
+            return r_ij, r_ij
+
+        _, row = jax.lax.scan(col_step, _SDTW_INF, (D_row, r_up, r_diag))
+        return jnp.concatenate([jnp.array([_SDTW_INF]), row]), None
+
+    first_row = jnp.concatenate([jnp.array([0.0]), jnp.full(m, _SDTW_INF)])
+    last_row, _ = jax.lax.scan(row_step, first_row, D)
+    return last_row[-1]
+
+
+def _pairwise_sq(a: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
+    """Squared-Euclidean cost matrix between sequences ``a``, ``b`` (L×D)."""
+    return jnp.sum((a[:, None, :] - b[None, :, :]) ** 2, axis=-1)
+
+
+def _soft_dtw_divergence(pred, targ, gamma):
+    """Mean soft-DTW **divergence** over a batch of windows.
+
+    ``sdtw(x,y) − ½sdtw(x,x) − ½sdtw(y,y)`` (Blondel et al. 2021): unlike raw
+    soft-DTW it is ≥0 and zero iff ``x==y``, removing the self-similarity bias
+    a flat prediction could otherwise exploit. Normalised by window length so
+    ``dtw_weight`` sits on the same per-step scale as the MSE term.
+    """
+    L = pred.shape[1]
+
+    def one(x, y):
+        return (_soft_dtw(_pairwise_sq(x, y), gamma)
+                - 0.5 * _soft_dtw(_pairwise_sq(x, x), gamma)
+                - 0.5 * _soft_dtw(_pairwise_sq(y, y), gamma))
+
+    return jnp.mean(jax.vmap(one)(pred, targ)) / L
+
+
+class _RHSProcess(Process):
+    """Wraps a bare ``rhs(t, y)`` as a Process, so trajectories generate
+    through the Scheduler (auto-stiffness — implicit where stiff, explicit
+    where not) rather than a hand-rolled fixed solver."""
+
+    fields: tuple[str, ...] = ()
+    rhs: Any = eqx.field(static=True, default=None)
+
+    def ports_schema(self):
+        return {
+            f: Port(role=PortRole.EVOLVED, default=0.0, units="dimensionless")
+            for f in self.fields
+        }
+
+    def derivative(self, t, state):
+        y = jnp.stack([state[f] for f in self.fields])
+        d = self.rhs(t, y)
+        return {f: d[i] for i, f in enumerate(self.fields)}
+
+
+class _ShootWrap(Process):
+    """Wraps a NeuralODEProcess for trajectory shooting through the Scheduler.
+
+    The block's control inputs are exposed as EVOLVED states with zero
+    derivative (frozen at their per-trajectory value in ``y0``), so one
+    Scheduler run integrates the learned field with its inputs held constant
+    — no hand-rolled solver, and gradients reach the block's weights because
+    ``block`` is a dynamic child of the composite.
+    """
+
+    block: Any = None
+    fld: tuple[str, ...] = eqx.field(static=True, default=())
+    inp: tuple[str, ...] = eqx.field(static=True, default=())
+
+    def ports_schema(self):
+        return {
+            f: Port(role=PortRole.EVOLVED, default=0.0, units="dimensionless")
+            for f in self.fld + self.inp
+        }
+
+    def derivative(self, t, state):
+        d = self.block.derivative(t, state)
+        return {**d, **{f: jnp.zeros_like(state[f]) for f in self.inp}}
+
+
 def simulate_conditioned(
     rhs_for_input,
     ts: jnp.ndarray,
@@ -270,12 +382,18 @@ def simulate_conditioned(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Trajectories from a known input-conditioned RHS, for recovery fits.
 
+    Each input's dynamics run through :class:`hallsim.scheduler.Scheduler`
+    with ``auto_stiffness`` — so stiff regimes (e.g. near a bifurcation) are
+    integrated implicitly instead of blowing past the step budget on an
+    explicit solver. Initial conditions are batched per input (one vectorised
+    Scheduler run each).
+
     Parameters
     ----------
     rhs_for_input:
         ``u -> rhs(t, y, args) -> dy/dt`` — the mechanistic RHS at input ``u``.
     ts:
-        Time grid, shape ``(T,)``.
+        Uniform time grid, shape ``(T,)``.
     inputs:
         Input values to condition on, shape ``(M, U)``.
     n_ics:
@@ -286,34 +404,38 @@ def simulate_conditioned(
     ``(ys, us)`` with ``ys`` shape ``(M*n_ics, T, D)`` and ``us`` shape
     ``(M*n_ics, U)`` — the per-trajectory constant input, aligned with ``ys``.
     """
-    import diffrax as dfx
+    from hallsim.composite import Composite
+    from hallsim.scheduler import Scheduler
 
     if key is None:
         key = jax.random.PRNGKey(0)
+    ts = jnp.asarray(ts)
     inputs = jnp.asarray(inputs)
     dim = _probe_dim(rhs_for_input(inputs[0]), ts)
+    fields = tuple(f"v{i}" for i in range(dim))
+    sched = Scheduler(auto_stiffness=True)
+    t0, t1 = float(ts[0]), float(ts[-1])
+    save_dt = (t1 - t0) / (len(ts) - 1)
     ys, us = [], []
     for u in inputs:
-        rhs = rhs_for_input(u)
-        for _ in range(n_ics):
-            key, k = jax.random.split(key)
-            y0 = jax.random.uniform(
-                k, (dim,), minval=y0_range[0], maxval=y0_range[1]
-            )
-            sol = dfx.diffeqsolve(
-                dfx.ODETerm(rhs),
-                dfx.Tsit5(),
-                ts[0],
-                ts[-1],
-                ts[1] - ts[0],
-                y0,
-                saveat=dfx.SaveAt(ts=ts),
-                stepsize_controller=dfx.PIDController(rtol=1e-7, atol=1e-9),
-                max_steps=200_000,
-            )
-            ys.append(sol.ys)
-            us.append(u)
-    return jnp.stack(ys), jnp.stack(us)
+        comp = Composite(
+            {"m": _RHSProcess(fields=fields, rhs=rhs_for_input(u))},
+            topology={}, validate=False,
+            semantic_validation={"check_semantics": False})
+        idx = jnp.asarray(
+            [comp.store_keys().index(f"m/{f}") for f in fields])
+        key, k = jax.random.split(key)
+        y0v = jax.random.uniform(k, (n_ics, dim), minval=y0_range[0],
+                                 maxval=y0_range[1])
+        y0 = jnp.broadcast_to(comp.initial_state_vec(),
+                              (n_ics, len(comp.store_keys()))).at[:, idx].set(
+                                  y0v)
+        res = sched.run(comp, t_span=(t0, t1), y0=y0, macro_dt=t1 - t0,
+                        save_dt=save_dt)
+        traj = jnp.stack([res.get(f"m/{f}") for f in fields], axis=-1)
+        ys.append(jnp.moveaxis(traj, 0, 1))          # (n_ics, T, dim)
+        us.append(jnp.broadcast_to(u, (n_ics,) + u.shape))
+    return jnp.concatenate(ys, 0), jnp.concatenate(us, 0)
 
 
 def _probe_dim(rhs, ts) -> int:
@@ -437,6 +559,8 @@ def fit_neuralode_shooting(
     curriculum: int = 1,
     physics_weight: float = 0.0,
     continuity_weight: float = 0.0,
+    dtw_weight: float = 0.0,
+    dtw_gamma: float = 0.1,
     width: int = 96,
     depth: int = 3,
     lr: float = 1e-3,
@@ -444,8 +568,8 @@ def fit_neuralode_shooting(
     batch_size: int = 32,
     init: NeuralODEProcess | None = None,
     seed: int = 0,
-    rtol: float = 1e-4,
-    atol: float = 1e-7,
+    rtol: float | None = None,
+    atol: float | None = None,
 ) -> NeuralODEProcess:
     """Fit by **trajectory shooting**: integrate the learned field and match
     the trajectory, backpropagating through the solve.
@@ -472,13 +596,29 @@ def fit_neuralode_shooting(
       strongest stabilizer, but slope quality degrades with noise/sparsity.
     - ``continuity_weight`` — tie each window's integrated endpoint to the
       next window's observed start, for global consistency across boundaries.
+    - ``dtw_weight`` — **soft-DTW divergence** on each window, a
+      time-warp-invariant trajectory distance (``dtw_gamma`` sets the
+      softmin temperature). Where MSE punishes a phase-shifted-but-correct
+      oscillation harder than a flat line — the collapse driver — soft-DTW
+      scores the two sequences under their best differentiable alignment, so
+      a prediction with the right shape but slightly wrong period is no
+      longer penalised into flatness. The divergence form is ≥0 and zero
+      only at equality, so it cannot be gamed by damping.
 
     ``segments=1, curriculum=1, physics_weight=0`` is classic single
     shooting. Warm-start via ``init=`` from a derivative fit for stiff
     dynamics. See MPINeuralODE (arXiv:2605.13305) for the combined recipe.
+
+    Integration runs through the Scheduler; ``rtol``/``atol`` are forwarded to
+    it (default = the Scheduler's production tolerances). Loosening them trades
+    accuracy for speed — but note that a loose tolerance corrupts oscillator
+    integration (numerical anti-damping), so keep it tight for periodic
+    dynamics.
     """
-    import diffrax as dfx
     import optax
+
+    from hallsim.composite import Composite
+    from hallsim.scheduler import Scheduler
 
     ts = jnp.asarray(ts)
     ys = jnp.asarray(ys)
@@ -497,50 +637,67 @@ def fit_neuralode_shooting(
 
     n_t = ys.shape[1]
     seg_len = max(2, n_t // segments)
-    starts = jnp.arange(segments) * seg_len
+    starts = [i * seg_len for i in range(segments)]  # static window starts
+    dt = float(ts[1] - ts[0])
 
-    def integrate(proc, y0, u, seg_ts):
-        def rhs(t, y, args=None):
-            port = {f: y[i] for i, f in enumerate(fld)}
-            port.update({f: u[j] for j, f in enumerate(inp)})
-            d = proc.derivative(t, port)
-            return jnp.stack([d[f] for f in fld])
+    # Integrate the block through the Scheduler (its inputs frozen as constant
+    # states), so shooting reuses the same runner as deployment — no
+    # hand-rolled solver, and auto-stiffness is available if the field is stiff.
+    comp0 = Composite(
+        {"m": _ShootWrap(block=proc, fld=fld, inp=inp)}, topology={},
+        validate=False, semantic_validation={"check_semantics": False})
+    _keys = comp0.store_keys()
+    _sidx = jnp.asarray([_keys.index(f"m/{f}") for f in fld])
+    _iidx = jnp.asarray([_keys.index(f"m/{f}") for f in inp]) if inp else None
+    _base = comp0.initial_state_vec()
+    _sched_kw = {}
+    if rtol is not None:
+        _sched_kw["rtol"] = rtol
+    if atol is not None:
+        _sched_kw["atol"] = atol
+    _sched = Scheduler(**_sched_kw)
 
-        return dfx.diffeqsolve(
-            dfx.ODETerm(rhs), dfx.Tsit5(), seg_ts[0], seg_ts[-1],
-            (seg_ts[-1] - seg_ts[0]) / max(seg_ts.shape[0] - 1, 1),
-            y0, saveat=dfx.SaveAt(ts=seg_ts),
-            stepsize_controller=dfx.PIDController(rtol=rtol, atol=atol),
-            max_steps=100_000,
-        ).ys
+    # Window start times are concrete; the end is derived from ``dt`` and the
+    # point count so the Scheduler's uniform save grid lands exactly on the
+    # last sample (no floating-point overshoot past t1).
+    def integrate(bk, y0, u, t0, n_pts):
+        c = eqx.tree_at(lambda cc: cc.processes["m"].block, comp0, bk)
+        y0f = _base.at[_sidx].set(y0)
+        if _iidx is not None:
+            y0f = y0f.at[_iidx].set(u)
+        t1 = t0 + dt * (n_pts - 1)
+        res = _sched.run(c, t_span=(t0, t1), y0=y0f, macro_dt=t1 - t0,
+                         save_dt=dt)
+        return jnp.stack([res.get(f"m/{f}") for f in fld], axis=-1)
 
     def make_loss(match_len):
-        def per_window(proc, yb, ub, s):
-            seg_ts = jax.lax.dynamic_slice_in_dim(ts, s, match_len)
-            y0 = jax.vmap(lambda y: y[s])(yb)
-            pred = jax.vmap(lambda a, u: integrate(proc, a, u, seg_ts))(y0, ub)
-            tgt = jax.vmap(
-                lambda y: jax.lax.dynamic_slice_in_dim(y, s, match_len))(yb)
-            return jnp.mean((pred - tgt) ** 2)
+        t0s = [float(ts[s]) for s in starts]
 
         @eqx.filter_value_and_grad
-        def loss_fn(proc, yb, ub, xb, tb):
-            traj = jnp.mean(jax.vmap(
-                lambda s: per_window(proc, yb, ub, s))(starts))
-            total = traj
+        def loss_fn(bk, yb, ub, xb, tb):
+            wins, dtws = [], []
+            for s, t0 in zip(starts, t0s):
+                pred = jax.vmap(
+                    lambda a, u: integrate(bk, a, u, t0, match_len))(
+                        yb[:, s], ub)
+                targ = yb[:, s:s + match_len]
+                wins.append(jnp.mean((pred - targ) ** 2))
+                if dtw_weight:
+                    dtws.append(_soft_dtw_divergence(pred, targ, dtw_gamma))
+            total = jnp.mean(jnp.stack(wins))
+            if dtw_weight:
+                total = total + dtw_weight * jnp.mean(jnp.stack(dtws))
             if physics_weight:
                 total = total + physics_weight * jnp.mean(
-                    (jax.vmap(proc.mlp)(xb) - tb) ** 2)
+                    (jax.vmap(bk.mlp)(xb) - tb) ** 2)
             if continuity_weight and segments > 1:
-                def gap(s):
-                    seg_ts = jax.lax.dynamic_slice_in_dim(ts, s, seg_len)
-                    y0 = jax.vmap(lambda y: y[s])(yb)
+                gaps = []
+                for s, t0 in zip(starts[:-1], t0s[:-1]):
                     end = jax.vmap(
-                        lambda a, u: integrate(proc, a, u, seg_ts)[-1])(y0, ub)
-                    nxt = jax.vmap(lambda y: y[s + seg_len])(yb)
-                    return jnp.mean((end - nxt) ** 2)
-                total = total + continuity_weight * jnp.mean(
-                    jax.vmap(gap)(starts[:-1]))
+                        lambda a, u: integrate(bk, a, u, t0, seg_len)[-1])(
+                            yb[:, s], ub)
+                    gaps.append(jnp.mean((end - yb[:, s + seg_len]) ** 2))
+                total = total + continuity_weight * jnp.mean(jnp.stack(gaps))
             return total
 
         return loss_fn
@@ -552,15 +709,15 @@ def fit_neuralode_shooting(
     stage_steps = max(1, steps // curriculum)
 
     for stage in range(curriculum):
-        match_len = int(jnp.ceil(seg_len * (stage + 1) / curriculum))
-        match_len = int(min(seg_len, max(2, match_len)))
+        match_len = int(min(seg_len, max(
+            2, int(jnp.ceil(seg_len * (stage + 1) / curriculum)))))
         loss_fn = make_loss(match_len)
 
         @eqx.filter_jit
-        def stepf(proc, opt_state, yb, ub, xb, tb, loss_fn=loss_fn):
-            lv, g = loss_fn(proc, yb, ub, xb, tb)
+        def stepf(bk, opt_state, yb, ub, xb, tb, loss_fn=loss_fn):
+            lv, g = loss_fn(bk, yb, ub, xb, tb)
             upd, opt_state = opt.update(g, opt_state)
-            return eqx.apply_updates(proc, upd), opt_state, lv
+            return eqx.apply_updates(bk, upd), opt_state, lv
 
         for s in range(stage_steps):
             key, k1, k2 = jax.random.split(key, 3)

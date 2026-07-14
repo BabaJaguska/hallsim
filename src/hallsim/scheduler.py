@@ -1004,65 +1004,46 @@ class Scheduler:
         ]
         n_groups = len(group_rhs)
         strang = self.splitting == "strang" and n_groups > 1
+        interp = coupling == "interpolated" and n_groups > 1
+        write_idxs = [
+            composite.evolved_indices(p, keys) for p in groups.values()
+        ]
 
         n_macro = int(round((t1 - t0) / macro_dt))
         t_starts = t0 + macro_dt * jnp.arange(n_macro)
+
+        # Save each group at ``n_save`` equally-spaced times over the macro
+        # window (endpoints included, so the sample doubles as interpolated
+        # coupling's fixed-size representation). Output resolution is set by
+        # save_dt, INDEPENDENT of the coupling cadence macro_dt: dropping the
+        # left endpoint per window (it repeats the previous window's end)
+        # gives ``n_out`` fresh points, so fast intra-group dynamics are
+        # resolved without shrinking macro_dt. Strang keeps endpoints only.
+        if strang or not save_dt or save_dt >= macro_dt:
+            base_out = 1
+        else:
+            base_out = max(1, int(round(macro_dt / save_dt)))
+        n_save = base_out + 1
+        if interp:
+            n_save = max(n_save, self.coupling_interp_points)
+        n_out = 1 if strang else n_save - 1
+        save_frac = jnp.linspace(0.0, 1.0, n_save)
 
         dt0_init = jnp.full((n_groups,), float(self.dt0))
         steps_init = jnp.zeros((n_groups,), jnp.int64)
         rej_init = jnp.zeros((n_groups,), jnp.int64)
         res_init = tuple(dfx.RESULTS.successful for _ in range(n_groups))
 
-        def one_solve(gi, st, t_a, t_b, dt0h, steps, rej, res):
+        def solve_dense(gi, st, t_a, t_b, dt0hi, coupled_rhs):
             g, rhs = group_rhs[gi]
-            st, ld, r, ns, nr = self._group_step(
-                rhs, st, t_a, t_b, integrators[g], adjoint, g, dt0h[gi]
-            )
-            return (
-                st,
-                ld,
-                steps.at[gi].add(ns),
-                rej.at[gi].add(nr),
-                res[:gi] + (r,) + res[gi + 1 :],
-            )
-
-        # Interpolated coupling: each group is solved saving at a fixed grid
-        # of ``coupling_interp_points`` times, and the next group reads the
-        # previous group's evolving variables by linear interpolation over
-        # that sample. Fixed sample size keeps the whole loop scan-compilable.
-        interp = coupling == "interpolated" and n_groups > 1
-        grid_frac = (
-            jnp.linspace(0.0, 1.0, self.coupling_interp_points)
-            if interp
-            else None
-        )
-        write_idxs = (
-            [composite.evolved_indices(p, keys) for p in groups.values()]
-            if interp
-            else None
-        )
-
-        def one_solve_sampled(gi, st, t_a, t_b, dt0h, steps, rej, res, prev):
-            g, rhs = group_rhs[gi]
-            if prev is not None:
-                p_t0, p_t1, p_ys = prev
-                widx = write_idxs[gi - 1]
-                base = rhs
-
-                def coupled(t, y, args=None):
-                    pv = _interp_uniform(t, p_t0, p_t1, p_ys)
-                    return base(t, y.at[widx].set(pv[widx]), args)
-
-                rhs_use = coupled
-            else:
-                rhs_use = rhs
-            grid = t_a + grid_frac * (t_b - t_a)
+            rhs_use = coupled_rhs if coupled_rhs is not None else rhs
+            grid = t_a + save_frac * (t_b - t_a)
             sol = dfx.diffeqsolve(
                 dfx.ODETerm(rhs_use),
                 integrators[g].solver,
                 t0=t_a,
                 t1=t_b,
-                dt0=jnp.minimum(dt0h[gi], t_b - t_a),
+                dt0=jnp.minimum(dt0hi, t_b - t_a),
                 y0=st,
                 saveat=dfx.SaveAt(ts=grid),
                 stepsize_controller=integrators[g].controller,
@@ -1074,62 +1055,84 @@ class Scheduler:
                 sol.ys[-1], sol.result, g, integrators[g]
             )
             ld = (t_b - t_a) / jnp.maximum(sol.stats["num_steps"], 1)
-            return (
-                final,
-                ld,
-                (t_a, t_b, sol.ys),
-                steps.at[gi].add(sol.stats["num_steps"]),
-                rej.at[gi].add(sol.stats["num_rejected_steps"]),
-                res[:gi] + (sol.result,) + res[gi + 1 :],
-            )
+            return (final, sol.ys, ld, sol.stats["num_steps"],
+                    sol.stats["num_rejected_steps"], sol.result)
 
         def body(carry, t_start):
             st, dt0h, steps, rej, res = carry
             t_next = jnp.minimum(t_start + macro_dt, t1)
             dt0_next = [None] * n_groups
-            if interp:
-                prev = None
-                for gi in range(n_groups):
-                    st, ld, prev, steps, rej, res = one_solve_sampled(
-                        gi, st, t_start, t_next, dt0h, steps, rej, res, prev
-                    )
-                    dt0_next[gi] = ld
-            elif strang:
+
+            if strang:
                 t_mid = t_start + (t_next - t_start) / 2.0
                 for gi in range(n_groups):
-                    st, _, steps, rej, res = one_solve(
-                        gi, st, t_start, t_mid, dt0h, steps, rej, res
-                    )
+                    g, rhs = group_rhs[gi]
+                    st, _, r, ns, nr = self._group_step(
+                        rhs, st, t_start, t_mid, integrators[g], adjoint,
+                        g, dt0h[gi])
+                    steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
+                    res = res[:gi] + (r,) + res[gi + 1:]
                 for gi in range(n_groups - 1, -1, -1):
-                    st, ld, steps, rej, res = one_solve(
-                        gi, st, t_mid, t_next, dt0h, steps, rej, res
-                    )
+                    g, rhs = group_rhs[gi]
+                    st, ld, r, ns, nr = self._group_step(
+                        rhs, st, t_mid, t_next, integrators[g], adjoint,
+                        g, dt0h[gi])
+                    steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
+                    res = res[:gi] + (r,) + res[gi + 1:]
                     dt0_next[gi] = ld
+                traj = st[None]
             else:
+                traj = jnp.broadcast_to(st, (n_out,) + st.shape)
+                prev = None
                 for gi in range(n_groups):
-                    st, ld, steps, rej, res = one_solve(
-                        gi, st, t_start, t_next, dt0h, steps, rej, res
-                    )
+                    coupled = None
+                    if interp and prev is not None:
+                        p_t0, p_t1, p_ys = prev
+                        base = group_rhs[gi][1]
+                        widx = write_idxs[gi - 1]
+
+                        def coupled(t, y, args=None, _b=base, _w=widx,
+                                    _t0=p_t0, _t1=p_t1, _y=p_ys):
+                            pv = _interp_uniform(t, _t0, _t1, _y)
+                            return _b(t, y.at[_w].set(pv[_w]), args)
+
+                    st, gy, ld, ns, nr, r = solve_dense(
+                        gi, st, t_start, t_next, dt0h[gi], coupled)
+                    w = write_idxs[gi]
+                    traj = traj.at[:, w].set(gy[1:][:, w])
+                    steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
+                    res = res[:gi] + (r,) + res[gi + 1:]
                     dt0_next[gi] = ld
+                    prev = (t_start, t_next, gy)
+
             carry = (st, jnp.stack(dt0_next), steps, rej, res)
-            return carry, st
+            return carry, traj
 
         init = (state, dt0_init, steps_init, rej_init, res_init)
         (final_state, _, steps_tot, rej_tot, res_final), ys_stack = (
             jax.lax.scan(body, init, t_starts)
         )
 
-        # Fixed-grid trajectory: y0 prepended, then each window's end
-        # state. Subsample to save_dt (an integer multiple of macro_dt).
-        step_ends = jnp.minimum(t_starts + macro_dt, t1)
-        all_ts = jnp.concatenate([jnp.asarray([t0]), step_ends])
-        all_ys = jnp.concatenate([state[None], ys_stack], axis=0)
-        stride = 1 if not save_dt else max(1, int(round(save_dt / macro_dt)))
-        keep = list(range(0, n_macro + 1, stride))
-        if keep[-1] != n_macro:
-            keep.append(n_macro)
-        keep = jnp.asarray(keep)
-        ts, ys = all_ts[keep], all_ys[keep]
+        # Assemble the dense trajectory: y0, then each window's n_out fresh
+        # samples. ys_stack is (n_macro, n_out, n_vars); flatten the window
+        # axis into time. save_dt coarser than macro_dt (n_out==1) subsamples.
+        step_len = jnp.minimum(t_starts + macro_dt, t1) - t_starts
+        out_frac = jnp.asarray([1.0]) if strang else save_frac[1:]
+        sub_ts = t_starts[:, None] + out_frac[None, :] * step_len[:, None]
+        all_ts = jnp.concatenate([jnp.asarray([t0]), sub_ts.reshape(-1)])
+        all_ys = jnp.concatenate(
+            [state[None], ys_stack.reshape((n_macro * n_out,) + state.shape)],
+            axis=0,
+        )
+        if n_out == 1 and save_dt and save_dt > macro_dt:
+            stride = max(1, int(round(save_dt / macro_dt)))
+            keep = list(range(0, n_macro + 1, stride))
+            if keep[-1] != n_macro:
+                keep.append(n_macro)
+            keep = jnp.asarray(keep)
+            ts, ys = all_ts[keep], all_ys[keep]
+        else:
+            ts, ys = all_ts, all_ys
 
         stats = {
             g: {
