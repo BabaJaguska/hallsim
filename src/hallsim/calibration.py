@@ -120,7 +120,7 @@ def load_checkpoint(path) -> tuple[dict, dict]:
     d = np.load(path)
     pre = "param."
     params = {
-        k[len(pre):]: jnp.asarray(d[k]) for k in d.files if k.startswith(pre)
+        k[len(pre) :]: jnp.asarray(d[k]) for k in d.files if k.startswith(pre)
     }
     return params, {"value": float(d["_value"]), "epoch": int(d["_epoch"])}
 
@@ -188,7 +188,9 @@ class Calibrator:
         self.val_loss_fn = val_loss_fn
         # When set, the best params so far are written here (atomically) on
         # every improvement, so a killed run keeps its best.
-        self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
+        self.checkpoint_path = (
+            Path(checkpoint_path) if checkpoint_path else None
+        )
         self.mode = mode
         self.method = method
         # Early stopping: 0 disables. Stop after `early_stop_patience`
@@ -1057,7 +1059,9 @@ class CalibrationProblem:
         self.warm_up(init)
         for arm in validation_arms or []:
             if arm not in self.arm_pairs:
-                raise KeyError(f"validation_arms entry {arm!r} not in arm_pairs")
+                raise KeyError(
+                    f"validation_arms entry {arm!r} not in arm_pairs"
+                )
         val_loss_fn = (
             (lambda p: self.data_loss(p, validation_arms))
             if validation_arms

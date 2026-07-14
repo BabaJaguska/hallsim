@@ -682,32 +682,48 @@ def screen_sensitivity(
 
     hallmarks = list(hallmarks)
     base = dict(baseline or {h: 1.0 for h in hallmarks})
-    qt = jnp.atleast_1d(jnp.asarray(query_time if query_time is not None
-                                    else t_end, dtype=float))
+    qt = jnp.atleast_1d(
+        jnp.asarray(
+            query_time if query_time is not None else t_end, dtype=float
+        )
+    )
     mdt = macro_dt if macro_dt is not None else t_end / 4.0
     sched = Scheduler(auto_stiffness=auto_stiffness)
     base_vec = jnp.asarray([float(base[h]) for h in hallmarks])
 
     def _build(hm):
-        return Composite(apply_hallmarks(composite.processes, hm),
-                         composite.topology, validate=False,
-                         semantic_validation=False)
+        return Composite(
+            apply_hallmarks(composite.processes, hm),
+            composite.topology,
+            validate=False,
+            semantic_validation=False,
+        )
 
     def reporter_values(sev_vec):
         hm = dict(base)
         for i, h in enumerate(hallmarks):
             hm[h] = sev_vec[i]
         comp = _build(hm)
-        res = sched.run(comp, t_span=(0.0, t_end), macro_dt=mdt,
-                        y0=comp.initial_state_vec())
-        return jnp.stack([
-            jnp.atleast_1d(r.summary(res.ts, res.get(r.observable), qt))[0]
-            for r in reporters
-        ])
+        res = sched.run(
+            comp,
+            t_span=(0.0, t_end),
+            macro_dt=mdt,
+            y0=comp.initial_state_vec(),
+        )
+        return jnp.stack(
+            [
+                jnp.atleast_1d(r.summary(res.ts, res.get(r.observable), qt))[0]
+                for r in reporters
+            ]
+        )
 
     base_comp = _build(base)
-    sched.warm_up(base_comp, t_span=(0.0, t_end), macro_dt=mdt,
-                  y0=base_comp.initial_state_vec())
+    sched.warm_up(
+        base_comp,
+        t_span=(0.0, t_end),
+        macro_dt=mdt,
+        y0=base_comp.initial_state_vec(),
+    )
     values = reporter_values(base_vec)
     jac = jax.jacrev(reporter_values)(base_vec)  # (n_reporter, n_hallmark)
 
@@ -718,9 +734,15 @@ def screen_sensitivity(
             sens = float(jac[i, j])
             finite = bool(jnp.isfinite(sens))
             rel = abs(sens) / (abs(val) + 1e-12)
-            reports.append(SensitivityReport(
-                reporter=getattr(r, "gene_symbol", r.observable),
-                control=h, value=val, sensitivity=sens,
-                rel_sensitivity=rel,
-                live=finite and rel >= rel_threshold, finite=finite))
+            reports.append(
+                SensitivityReport(
+                    reporter=getattr(r, "gene_symbol", r.observable),
+                    control=h,
+                    value=val,
+                    sensitivity=sens,
+                    rel_sensitivity=rel,
+                    live=finite and rel >= rel_threshold,
+                    finite=finite,
+                )
+            )
     return reports

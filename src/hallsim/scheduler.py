@@ -1055,8 +1055,14 @@ class Scheduler:
                 sol.ys[-1], sol.result, g, integrators[g]
             )
             ld = (t_b - t_a) / jnp.maximum(sol.stats["num_steps"], 1)
-            return (final, sol.ys, ld, sol.stats["num_steps"],
-                    sol.stats["num_rejected_steps"], sol.result)
+            return (
+                final,
+                sol.ys,
+                ld,
+                sol.stats["num_steps"],
+                sol.stats["num_rejected_steps"],
+                sol.result,
+            )
 
         def body(carry, t_start):
             st, dt0h, steps, rej, res = carry
@@ -1068,17 +1074,31 @@ class Scheduler:
                 for gi in range(n_groups):
                     g, rhs = group_rhs[gi]
                     st, _, r, ns, nr = self._group_step(
-                        rhs, st, t_start, t_mid, integrators[g], adjoint,
-                        g, dt0h[gi])
+                        rhs,
+                        st,
+                        t_start,
+                        t_mid,
+                        integrators[g],
+                        adjoint,
+                        g,
+                        dt0h[gi],
+                    )
                     steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
-                    res = res[:gi] + (r,) + res[gi + 1:]
+                    res = res[:gi] + (r,) + res[gi + 1 :]
                 for gi in range(n_groups - 1, -1, -1):
                     g, rhs = group_rhs[gi]
                     st, ld, r, ns, nr = self._group_step(
-                        rhs, st, t_mid, t_next, integrators[g], adjoint,
-                        g, dt0h[gi])
+                        rhs,
+                        st,
+                        t_mid,
+                        t_next,
+                        integrators[g],
+                        adjoint,
+                        g,
+                        dt0h[gi],
+                    )
                     steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
-                    res = res[:gi] + (r,) + res[gi + 1:]
+                    res = res[:gi] + (r,) + res[gi + 1 :]
                     dt0_next[gi] = ld
                 traj = st[None]
             else:
@@ -1091,17 +1111,28 @@ class Scheduler:
                         base = group_rhs[gi][1]
                         widx = write_idxs[gi - 1]
 
-                        def coupled(t, y, args=None, _b=base, _w=widx,
-                                    _t0=p_t0, _t1=p_t1, _y=p_ys):
+                        def _coupled(
+                            t,
+                            y,
+                            args=None,
+                            _b=base,
+                            _w=widx,
+                            _t0=p_t0,
+                            _t1=p_t1,
+                            _y=p_ys,
+                        ):
                             pv = _interp_uniform(t, _t0, _t1, _y)
                             return _b(t, y.at[_w].set(pv[_w]), args)
 
+                        coupled = _coupled
+
                     st, gy, ld, ns, nr, r = solve_dense(
-                        gi, st, t_start, t_next, dt0h[gi], coupled)
+                        gi, st, t_start, t_next, dt0h[gi], coupled
+                    )
                     w = write_idxs[gi]
                     traj = traj.at[:, w].set(gy[1:][:, w])
                     steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
-                    res = res[:gi] + (r,) + res[gi + 1:]
+                    res = res[:gi] + (r,) + res[gi + 1 :]
                     dt0_next[gi] = ld
                     prev = (t_start, t_next, gy)
 

@@ -88,6 +88,15 @@ class NeuralODEProcess(Process):
     input_fields: tuple[str, ...] = ()
     field_defaults: tuple[float, ...] = eqx.field(static=True, default=())
     mlp: eqx.Module = eqx.field(default=None)
+    # The (normalised) vector field is ``out_scale ⊙ tanh(in_scale · MLP(ŷ))``
+    # — LeCun's scaled tanh with both constants learnable. ``in_scale`` (β, a
+    # global scalar inside tanh) is redundant on paper — it folds into the last
+    # weights — but acts as a preconditioner that rescales the activation's
+    # linear region in one step, smoothing stiff-ODE landscapes (Jagtap 2020
+    # adaptive activations). ``out_scale`` (α, per-dim, after tanh) is NOT
+    # redundant: tanh saturates at ±1, so without it the field cannot reach the
+    # large slopes of a relaxation oscillator's spikes. Both trained by the fits.
+    in_scale: jax.Array = eqx.field(default_factory=lambda: jnp.array(1.0))
     out_scale: jax.Array = eqx.field(default_factory=lambda: jnp.array(1.0))
     # Fittable scalar controls (e.g. a bifurcation parameter, a Hill basal).
     # Dynamic (traced) so Calibrator/`jax.grad` reach them via
@@ -113,7 +122,6 @@ class NeuralODEProcess(Process):
         width: int | Sequence[int] = 64,
         depth: int = 2,
         key: jax.Array | None = None,
-        final_activation=jax.nn.tanh,
         timescale: float | None = None,
     ):
         self.timescale = timescale
@@ -130,16 +138,24 @@ class NeuralODEProcess(Process):
             key = jax.random.PRNGKey(0)
         n_out = len(self.fields)
         n_in = len(self.fields) + len(self.input_fields)
-        self.mlp = _build_mlp(n_in, n_out, width, depth, final_activation, key)
-        self.out_scale = jnp.array(1.0)
+        self.mlp = _build_mlp(n_in, n_out, width, depth, key)
+        self.in_scale = jnp.array(1.0)
+        self.out_scale = jnp.ones(n_out)
         self.in_mean = jnp.zeros(n_in)
         self.in_std = jnp.ones(n_in)
         self.out_mean = jnp.zeros(n_out)
         self.out_std = jnp.ones(n_out)
 
     def with_input_driver(
-        self, field: str, *, port: str, basal_param: str, hi: float,
-        K: float, n: float = 2.0, basal: float | None = None,
+        self,
+        field: str,
+        *,
+        port: str,
+        basal_param: str,
+        hi: float,
+        K: float,
+        n: float = 2.0,
+        basal: float | None = None,
     ) -> "NeuralODEProcess":
         """Source control input ``field`` from a Hill transform of ``port``.
 
@@ -161,7 +177,8 @@ class NeuralODEProcess(Process):
             )
         object.__setattr__(new, "parameters", params)
         object.__setattr__(
-            new, "_hill_drivers",
+            new,
+            "_hill_drivers",
             self._hill_drivers
             + ((field, port, basal_param, float(hi), float(K), float(n)),),
         )
@@ -232,10 +249,11 @@ class NeuralODEProcess(Process):
         inp = jnp.stack(cols, axis=-1)
         inp_n = (inp - self.in_mean) / self.in_std
         flat = inp_n.reshape(-1, inp_n.shape[-1])
-        out = jax.vmap(self.mlp)(flat).reshape(
+        z = jax.vmap(self.mlp)(flat).reshape(
             inp_n.shape[:-1] + (len(self.fields),)
         )
-        dy = self.out_scale * (out * self.out_std + self.out_mean)
+        field = self.out_scale * jnp.tanh(self.in_scale * z)  # normalised
+        dy = field * self.out_std + self.out_mean
         return {f: dy[..., i] for i, f in enumerate(self.fields)}
 
 
@@ -250,24 +268,58 @@ class NeuralODEProcess(Process):
 # other, e.g. derivative-fit then a short shooting fine-tune.
 
 
-def _identity(z):
-    return z
+def _field_normalized(mlp, in_scale, out_scale, xb):
+    """Normalised vector-field prediction ``out_scale ⊙ tanh(in_scale·MLP(xb))``
+    for a batch of normalised inputs — the quantity the collocation/derivative
+    losses compare against normalised slopes."""
+    return out_scale * jnp.tanh(in_scale * jax.vmap(mlp)(xb))
 
 
-def _build_mlp(n_in, n_out, width, depth, final_activation, key):
+# Fields that must NOT be gradient-trained: the normalisation stats are fixed
+# from the data, not learned. Named once here so both fits stay correct.
+_FROZEN_FIELDS = ("in_mean", "in_std", "out_mean", "out_std")
+
+
+def _trainable_partition(proc):
+    """Split a NeuralODEProcess into ``(trainable, frozen)`` for fitting.
+
+    Frozen = the fixed normalisation buffers (:data:`_FROZEN_FIELDS`).
+    Trainable = every other float-array leaf — MLP weights, ``in_scale``,
+    ``out_scale``, the fittable ``parameters`` dict, and any field added later.
+    Inverting the logic this way (freeze the known set, train the rest) means
+    new learnable parameters are picked up with no change here — the reusable
+    analogue of PyTorch's ``Parameter`` vs ``buffer`` split, made explicit.
+    """
+    frozen = jax.tree_util.tree_map(lambda _: False, proc)
+    frozen = eqx.tree_at(
+        lambda p: tuple(getattr(p, f) for f in _FROZEN_FIELDS),
+        frozen,
+        tuple(True for _ in _FROZEN_FIELDS),
+    )
+    spec = jax.tree_util.tree_map(
+        lambda leaf, fr: eqx.is_inexact_array(leaf) and not fr, proc, frozen
+    )
+    return eqx.partition(proc, spec)
+
+
+def _build_mlp(n_in, n_out, width, depth, key):
     """Feed-forward net as an ``eqx.nn.Sequential`` of ``Linear`` layers with
-    softplus hidden activations. ``width`` is a uniform int (a stack of
-    ``depth`` hidden layers of that width) or an explicit per-hidden-layer
-    sequence like ``(256, 128, 128)`` (then ``depth`` is unused)."""
-    hidden = ([int(width)] * depth if isinstance(width, int)
-              else [int(w) for w in width])
+    softplus hidden activations and a **raw linear output** (the output tanh +
+    learnable scales live in :meth:`NeuralODEProcess.derivative`). ``width`` is
+    a uniform int (a stack of ``depth`` hidden layers of that width) or an
+    explicit per-hidden-layer sequence like ``(256, 128, 128)``."""
+    hidden = (
+        [int(width)] * depth
+        if isinstance(width, int)
+        else [int(w) for w in width]
+    )
     sizes = [n_in, *hidden, n_out]
     keys = jax.random.split(key, len(sizes) - 1)
     layers = []
     for i, k in enumerate(keys):
         layers.append(eqx.nn.Linear(sizes[i], sizes[i + 1], key=k))
-        act = jax.nn.softplus if i < len(keys) - 1 else final_activation
-        layers.append(eqx.nn.Lambda(act))
+        if i < len(keys) - 1:
+            layers.append(eqx.nn.Lambda(jax.nn.softplus))
     return eqx.nn.Sequential(layers)
 
 
@@ -285,8 +337,7 @@ def _soft_dtw(D: jnp.ndarray, gamma: float) -> jnp.ndarray:
 
     def softmin(vals):
         vmin = jnp.min(vals)
-        return vmin - gamma * jnp.log(
-            jnp.sum(jnp.exp(-(vals - vmin) / gamma)))
+        return vmin - gamma * jnp.log(jnp.sum(jnp.exp(-(vals - vmin) / gamma)))
 
     def row_step(prev_row, D_row):
         r_up, r_diag = prev_row[1:], prev_row[:-1]
@@ -320,9 +371,11 @@ def _soft_dtw_divergence(pred, targ, gamma):
     L = pred.shape[1]
 
     def one(x, y):
-        return (_soft_dtw(_pairwise_sq(x, y), gamma)
-                - 0.5 * _soft_dtw(_pairwise_sq(x, x), gamma)
-                - 0.5 * _soft_dtw(_pairwise_sq(y, y), gamma))
+        return (
+            _soft_dtw(_pairwise_sq(x, y), gamma)
+            - 0.5 * _soft_dtw(_pairwise_sq(x, x), gamma)
+            - 0.5 * _soft_dtw(_pairwise_sq(y, y), gamma)
+        )
 
     return jnp.mean(jax.vmap(one)(pred, targ)) / L
 
@@ -420,20 +473,27 @@ def simulate_conditioned(
     for u in inputs:
         comp = Composite(
             {"m": _RHSProcess(fields=fields, rhs=rhs_for_input(u))},
-            topology={}, validate=False,
-            semantic_validation={"check_semantics": False})
-        idx = jnp.asarray(
-            [comp.store_keys().index(f"m/{f}") for f in fields])
+            topology={},
+            validate=False,
+            semantic_validation={"check_semantics": False},
+        )
+        idx = jnp.asarray([comp.store_keys().index(f"m/{f}") for f in fields])
         key, k = jax.random.split(key)
-        y0v = jax.random.uniform(k, (n_ics, dim), minval=y0_range[0],
-                                 maxval=y0_range[1])
-        y0 = jnp.broadcast_to(comp.initial_state_vec(),
-                              (n_ics, len(comp.store_keys()))).at[:, idx].set(
-                                  y0v)
-        res = sched.run(comp, t_span=(t0, t1), y0=y0, macro_dt=t1 - t0,
-                        save_dt=save_dt)
+        y0v = jax.random.uniform(
+            k, (n_ics, dim), minval=y0_range[0], maxval=y0_range[1]
+        )
+        y0 = (
+            jnp.broadcast_to(
+                comp.initial_state_vec(), (n_ics, len(comp.store_keys()))
+            )
+            .at[:, idx]
+            .set(y0v)
+        )
+        res = sched.run(
+            comp, t_span=(t0, t1), y0=y0, macro_dt=t1 - t0, save_dt=save_dt
+        )
         traj = jnp.stack([res.get(f"m/{f}") for f in fields], axis=-1)
-        ys.append(jnp.moveaxis(traj, 0, 1))          # (n_ics, T, dim)
+        ys.append(jnp.moveaxis(traj, 0, 1))  # (n_ics, T, dim)
         us.append(jnp.broadcast_to(u, (n_ics,) + u.shape))
     return jnp.concatenate(ys, 0), jnp.concatenate(us, 0)
 
@@ -486,7 +546,6 @@ def _new_process(fields, input_fields, width, depth, seed, init):
         width=width,
         depth=depth,
         key=jax.random.PRNGKey(seed),
-        final_activation=_identity,
     )
 
 
@@ -523,29 +582,43 @@ def fit_neuralode_derivative(
     )
     xn = (jnp.concatenate([states, inputs], -1) - im) / isd
     yn = (slopes - om) / osd
+    # Seed the output scale to cover the normalised slope range (a fresh block;
+    # a warm-started one keeps its learned scale) so tanh doesn't start clipped.
+    if init is None:
+        proc = eqx.tree_at(
+            lambda p: p.out_scale,
+            proc,
+            jnp.maximum(1.0, jnp.max(jnp.abs(yn), axis=0) * 1.2),
+        )
 
-    mlp = proc.mlp
+    # Optimise the field (MLP + scales + any fittable parameters); the
+    # normalisation buffers stay frozen. See :func:`_trainable_partition`.
     opt = optax.adam(lr)
-    opt_state = opt.init(eqx.filter(mlp, eqx.is_inexact_array))
+    train, frozen = _trainable_partition(proc)
+    opt_state = opt.init(train)
 
     @eqx.filter_jit
-    def stepf(mlp, opt_state, xb, yb):
-        def loss(m):
-            return jnp.mean((jax.vmap(m)(xb) - yb) ** 2)
+    def stepf(train, opt_state, xb, yb):
+        def loss(tr):
+            p = eqx.combine(tr, frozen)
+            return jnp.mean(
+                (_field_normalized(p.mlp, p.in_scale, p.out_scale, xb) - yb)
+                ** 2
+            )
 
-        lv, g = eqx.filter_value_and_grad(loss)(mlp)
+        lv, g = eqx.filter_value_and_grad(loss)(train)
         upd, opt_state = opt.update(g, opt_state)
-        return eqx.apply_updates(mlp, upd), opt_state, lv
+        return eqx.apply_updates(train, upd), opt_state, lv
 
     key = jax.random.PRNGKey(seed + 1)
     n = xn.shape[0]
     for s in range(steps):
         key, kb = jax.random.split(key)
         idx = jax.random.choice(kb, n, (min(batch_size, n),), replace=False)
-        mlp, opt_state, lv = stepf(mlp, opt_state, xn[idx], yn[idx])
+        train, opt_state, lv = stepf(train, opt_state, xn[idx], yn[idx])
         if s % max(1, steps // 8) == 0:
             log.info("derivative-fit step %d, loss %.6f", s, float(lv))
-    return eqx.tree_at(lambda p: p.mlp, proc, mlp)
+    return eqx.combine(train, frozen)
 
 
 def fit_neuralode_shooting(
@@ -557,6 +630,7 @@ def fit_neuralode_shooting(
     input_fields: Sequence[str] = (),
     segments: int = 1,
     curriculum: int = 1,
+    length_strategy: tuple = (1.0,),
     physics_weight: float = 0.0,
     continuity_weight: float = 0.0,
     dtw_weight: float = 0.0,
@@ -585,10 +659,17 @@ def fit_neuralode_shooting(
       ``segments`` contiguous windows and integrate each from its own
       observed start state. Shorter windows accrue less phase drift, so the
       flat optimum stops winning. Slope-free — safe for noisy real data.
-    - ``curriculum`` — grow the matched horizon: over ``curriculum`` stages
-      match a progressively longer prefix of each window (short→full), so
-      the field is anchored on the easy near-term dynamics before the hard
-      long-horizon phase. Slope-free.
+    - ``curriculum`` — grow the matched horizon *within each window*: over
+      ``curriculum`` stages match a progressively longer prefix of each window
+      (short→full), so the field is anchored on the easy near-term dynamics
+      before the hard long-horizon phase. Slope-free.
+    - ``length_strategy`` — grow the *global* horizon (Kidger's Diffrax trick):
+      a tuple of fractions like ``(0.1, 1.0)`` trains on the first 10% of each
+      trajectory first, then the full length, splitting ``steps`` across the
+      stages. Fitting the short-horizon dynamics first is the standard way to
+      avoid the flat-line local minimum. Distinct from ``curriculum``: this
+      shortens the whole trajectory (fewer, shorter windows), not the matched
+      prefix of a fixed window.
     - ``physics_weight`` — **collocation regularizer**
       ``λ·‖f_θ(z) − ż‖²`` on the data's finite-difference slopes (the same
       residual :func:`fit_neuralode_derivative` minimizes). Supplies the
@@ -636,16 +717,17 @@ def fit_neuralode_shooting(
     yn = (slopes - om) / osd
 
     n_t = ys.shape[1]
-    seg_len = max(2, n_t // segments)
-    starts = [i * seg_len for i in range(segments)]  # static window starts
     dt = float(ts[1] - ts[0])
 
     # Integrate the block through the Scheduler (its inputs frozen as constant
     # states), so shooting reuses the same runner as deployment — no
     # hand-rolled solver, and auto-stiffness is available if the field is stiff.
     comp0 = Composite(
-        {"m": _ShootWrap(block=proc, fld=fld, inp=inp)}, topology={},
-        validate=False, semantic_validation={"check_semantics": False})
+        {"m": _ShootWrap(block=proc, fld=fld, inp=inp)},
+        topology={},
+        validate=False,
+        semantic_validation={"check_semantics": False},
+    )
     _keys = comp0.store_keys()
     _sidx = jnp.asarray([_keys.index(f"m/{f}") for f in fld])
     _iidx = jnp.asarray([_keys.index(f"m/{f}") for f in inp]) if inp else None
@@ -666,21 +748,23 @@ def fit_neuralode_shooting(
         if _iidx is not None:
             y0f = y0f.at[_iidx].set(u)
         t1 = t0 + dt * (n_pts - 1)
-        res = _sched.run(c, t_span=(t0, t1), y0=y0f, macro_dt=t1 - t0,
-                         save_dt=dt)
+        res = _sched.run(
+            c, t_span=(t0, t1), y0=y0f, macro_dt=t1 - t0, save_dt=dt
+        )
         return jnp.stack([res.get(f"m/{f}") for f in fld], axis=-1)
 
-    def make_loss(match_len):
+    def make_loss(match_len, starts, seg_len):
         t0s = [float(ts[s]) for s in starts]
 
         @eqx.filter_value_and_grad
-        def loss_fn(bk, yb, ub, xb, tb):
+        def loss_fn(train, yb, ub, xb, tb):
+            bk = eqx.combine(train, frozen)
             wins, dtws = [], []
             for s, t0 in zip(starts, t0s):
                 pred = jax.vmap(
-                    lambda a, u: integrate(bk, a, u, t0, match_len))(
-                        yb[:, s], ub)
-                targ = yb[:, s:s + match_len]
+                    lambda a, u: integrate(bk, a, u, t0, match_len)
+                )(yb[:, s], ub)
+                targ = yb[:, s : s + match_len]
                 wins.append(jnp.mean((pred - targ) ** 2))
                 if dtw_weight:
                     dtws.append(_soft_dtw_divergence(pred, targ, dtw_gamma))
@@ -689,13 +773,20 @@ def fit_neuralode_shooting(
                 total = total + dtw_weight * jnp.mean(jnp.stack(dtws))
             if physics_weight:
                 total = total + physics_weight * jnp.mean(
-                    (jax.vmap(bk.mlp)(xb) - tb) ** 2)
+                    (
+                        _field_normalized(
+                            bk.mlp, bk.in_scale, bk.out_scale, xb
+                        )
+                        - tb
+                    )
+                    ** 2
+                )
             if continuity_weight and segments > 1:
                 gaps = []
                 for s, t0 in zip(starts[:-1], t0s[:-1]):
                     end = jax.vmap(
-                        lambda a, u: integrate(bk, a, u, t0, seg_len)[-1])(
-                            yb[:, s], ub)
+                        lambda a, u: integrate(bk, a, u, t0, seg_len)[-1]
+                    )(yb[:, s], ub)
                     gaps.append(jnp.mean((end - yb[:, s + seg_len]) ** 2))
                 total = total + continuity_weight * jnp.mean(jnp.stack(gaps))
             return total
@@ -703,30 +794,52 @@ def fit_neuralode_shooting(
         return loss_fn
 
     opt = optax.adam(lr)
-    opt_state = opt.init(eqx.filter(proc, eqx.is_inexact_array))
+    train, frozen = _trainable_partition(proc)
+    opt_state = opt.init(train)
     key = jax.random.PRNGKey(seed + 1)
     n, m = ys.shape[0], xn.shape[0]
-    stage_steps = max(1, steps // curriculum)
+    length_steps = max(1, steps // len(length_strategy))
+    stage_steps = max(1, length_steps // curriculum)
 
-    for stage in range(curriculum):
-        match_len = int(min(seg_len, max(
-            2, int(jnp.ceil(seg_len * (stage + 1) / curriculum)))))
-        loss_fn = make_loss(match_len)
+    for frac in length_strategy:
+        # Restrict to the first `frac` of the horizon, re-segment within it.
+        n_active = min(n_t, max(segments * 2, int(round(frac * n_t))))
+        seg_l = max(2, n_active // segments)
+        seg_starts = [i * seg_l for i in range(segments)]
 
-        @eqx.filter_jit
-        def stepf(bk, opt_state, yb, ub, xb, tb, loss_fn=loss_fn):
-            lv, g = loss_fn(bk, yb, ub, xb, tb)
-            upd, opt_state = opt.update(g, opt_state)
-            return eqx.apply_updates(bk, upd), opt_state, lv
+        for stage in range(curriculum):
+            match_len = int(
+                min(
+                    seg_l,
+                    max(2, int(jnp.ceil(seg_l * (stage + 1) / curriculum))),
+                )
+            )
+            loss_fn = make_loss(match_len, seg_starts, seg_l)
 
-        for s in range(stage_steps):
-            key, k1, k2 = jax.random.split(key, 3)
-            bi = jax.random.choice(k1, n, (min(batch_size, n),), replace=False)
-            pi = jax.random.choice(k2, m, (min(512, m),), replace=False)
-            proc, opt_state, lv = stepf(
-                proc, opt_state, ys[bi], us_arr[bi], xn[pi], yn[pi])
-            if s % max(1, stage_steps // 4) == 0:
-                log.info("shooting stage %d/%d (match_len=%d) step %d, "
-                         "loss %.6f", stage + 1, curriculum, match_len, s,
-                         float(lv))
-    return proc
+            @eqx.filter_jit
+            def stepf(train, opt_state, yb, ub, xb, tb, loss_fn=loss_fn):
+                lv, g = loss_fn(train, yb, ub, xb, tb)
+                upd, opt_state = opt.update(g, opt_state)
+                return eqx.apply_updates(train, upd), opt_state, lv
+
+            for s in range(stage_steps):
+                key, k1, k2 = jax.random.split(key, 3)
+                bi = jax.random.choice(
+                    k1, n, (min(batch_size, n),), replace=False
+                )
+                pi = jax.random.choice(k2, m, (min(512, m),), replace=False)
+                train, opt_state, lv = stepf(
+                    train, opt_state, ys[bi], us_arr[bi], xn[pi], yn[pi]
+                )
+                if s % max(1, stage_steps // 4) == 0:
+                    log.info(
+                        "shooting length=%.2f stage %d/%d (match_len=%d) "
+                        "step %d, loss %.6f",
+                        frac,
+                        stage + 1,
+                        curriculum,
+                        match_len,
+                        s,
+                        float(lv),
+                    )
+    return eqx.combine(train, frozen)

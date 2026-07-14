@@ -7,6 +7,8 @@ data/
 /models/
 docs/diary.md
 /outputs/
+/one_off_scripts/
+/scratchpad/
 
 # C extensions
 *.so

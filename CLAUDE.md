@@ -185,3 +185,4 @@ shared `t` and the result is meaningless — screen for it.
 - Minimal comments!!!! Do not explain everything like the user is in elementary school, only the true unobvious things; The code itself should be readable and variable naming should be explanatory enough.
 - Honesty alone is not a virtue. Prefacing a bad result with "an honest finding" does not rescue it. In fact, I hate the word "honest", chill with it. "Truthful" is the same, don't hunt for synonyms, drop the idea that HONEST is a value in itself. It is not. When you say honest, I know things are bad. Stop saying it. If it's bad, it's bad. You are using honest as a euphimism and it is going on my nerves.
 - Test neural networks and other models on held out data, not just training data, don't be a noob.
+- "Honest" is a banned word now.

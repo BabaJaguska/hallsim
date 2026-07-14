@@ -118,11 +118,17 @@ def test_screen_sensitivity_flags_saturated_reporter():
     gradients through the three stiff SBML models (reverse-mode)."""
     comp = build_multi_hallmark_composite(validate=False)
     reports = screen_sensitivity(
-        comp, MULTI_HALLMARK_REPORTERS, ["Genomic Instability"],
-        baseline={"Genomic Instability": 1.0,
-                  "Deregulated Nutrient Sensing": 0.5},
-        t_end=14.0, macro_dt=3.5)
+        comp,
+        MULTI_HALLMARK_REPORTERS,
+        ["Genomic Instability"],
+        baseline={
+            "Genomic Instability": 1.0,
+            "Deregulated Nutrient Sensing": 0.5,
+        },
+        t_end=14.0,
+        macro_dt=3.5,
+    )
     by = {r.reporter: r for r in reports}
     assert all(r.finite for r in reports), reports
-    assert not by["DDB2"].live, by["DDB2"]     # saturated → flat → caught
-    assert by["CDKN1A"].live, by["CDKN1A"]     # damage→p21 stays live
+    assert not by["DDB2"].live, by["DDB2"]  # saturated → flat → caught
+    assert by["CDKN1A"].live, by["CDKN1A"]  # damage→p21 stays live
