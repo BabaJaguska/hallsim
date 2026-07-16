@@ -189,3 +189,4 @@ shared `t` and the result is meaningless — screen for it.
 - Dude, you need to cd into the project before running the scripts.
 - Python loops are looked down upon with disdain. Please vectorize if possible, even if it's just 3 rows, we are trying to make this as general and as scalable as possible.
 - If we are debugging, we are debugging together. I want to see the output graphs, tables, figures that you are basing your decisions on. Not your scratchpad. 
+- Historical decisions generally belong in your diary. Not in comment novels.

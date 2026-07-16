@@ -145,6 +145,37 @@ def leaky_rms():
     return summarize
 
 
+def _zerophase_ema(seq, a, odd=True):
+    """Reflection-padded forward-backward EMA: zero phase, unity DC gain, and
+    no boundary lift.
+
+    ``a = exp(-dt/tau)`` is the per-step retention. The sequence is reflected by
+    its own length at both ends before filtering so the boundary averages
+    against real data. ``odd`` (point-reflect through each endpoint) continues
+    the local trend — correct for a trending *level*. ``odd=False`` (mirror)
+    keeps a non-negative *amplitude* envelope from being extrapolated below
+    zero. Forward and backward passes cancel each other's phase.
+    """
+    n = seq.shape[0]
+    if odd:
+        left = 2.0 * seq[0] - seq[1:][::-1]
+        right = 2.0 * seq[-1] - seq[:-1][::-1]
+    else:
+        left = seq[1:][::-1]
+        right = seq[:-1][::-1]
+    padded = jnp.concatenate([left, seq, right])
+
+    def ema(s, init):
+        def step(c, v):
+            return a * c + (1.0 - a) * v, a * c + (1.0 - a) * v
+
+        return jax.lax.scan(step, init, s)[1]
+
+    fwd = ema(padded, padded[0])
+    bwd = ema(fwd[::-1], fwd[-1])[::-1]
+    return bwd[n - 1 : 2 * n - 1]
+
+
 def zerophase_rms(tau: float):
     """Zero-phase (forward-backward EMA) RMS amplitude envelope — smooth, and
     with *no phase lag*, so a query at day 7 reads the amplitude *at* day 7
@@ -152,10 +183,12 @@ def zerophase_rms(tau: float):
 
     Reads a ``RunningIntegral(power=2)`` path (∫x²), recovers the per-interval
     ⟨x²⟩ by differencing, then low-passes it with an exponential moving average
-    run **forward and backward** — the two passes' phase shifts cancel exactly.
-    Each pass is warm-started at its boundary sample (an infinite edge-pad),
-    which removes the endpoint start-up transient a cold-started pass leaves at
-    the last timepoint. ``√`` gives the amplitude.
+    run forward and backward (the two passes' phase shifts cancel), each warm-
+    started at its boundary sample. ``√`` gives the amplitude. The constant
+    warm-start (rather than reflection) is deliberate: ⟨x²⟩ can carry a lone
+    near-zero interval where a save step straddles a p53 trough, and reflecting
+    it into the endpoint collapses the RMS to zero; the warm-start rides over
+    that aliasing blip.
 
     This is an *acausal* readout — legitimate here because the integral is an
     output only (never read back into any derivative), so the summary is a
@@ -178,11 +211,36 @@ def zerophase_rms(tau: float):
             return jax.lax.scan(step, init, seq)[1]
 
         fwd = ema(ms, ms[0])
-        sm = ema(fwd[::-1], fwd[-1])[::-1]  # zero-phase, edge-padded
+        sm = ema(fwd[::-1], fwd[-1])[::-1]
         rms = jnp.sqrt(jnp.clip(sm, 0.0, None))
         if query_times is None:
             return rms[-1]
         return jnp.interp(jnp.atleast_1d(jnp.asarray(query_times)), tmid, rms)
+
+    return summarize
+
+
+def zerophase_mean(tau: float):
+    """Zero-phase (forward-backward EMA) low-pass of a raw level observable.
+
+    The mean counterpart to :func:`zerophase_rms`. Use it where the reporter's
+    signal is the observable's **DC level** and a fast upstream oscillation
+    rides on top as ripple to remove — e.g. CDKN1A, whose p21 pool is a slowly
+    accumulating arrest marker but carries GZ06's p53 pulsing injected by the
+    p53→CDKN1A edge. (Contrast DDB2/p53, which take RMS *because* the mean p53
+    is damage-blind — psi cancels in the steady state — so the pulse amplitude,
+    not the level, carries the signal.) Reflection-padded forward-backward EMA
+    (:func:`_zerophase_ema`): zero phase, unity DC, no boundary lift. Operates
+    on the raw trajectory directly — no RunningIntegral. Assumes uniform save
+    spacing.
+    """
+
+    def summarize(ts, y, query_times=None):
+        a = jnp.exp(-(ts[1] - ts[0]) / tau)
+        sm = _zerophase_ema(y, a)
+        if query_times is None:
+            return sm[-1]
+        return jnp.interp(jnp.atleast_1d(jnp.asarray(query_times)), ts, sm)
 
     return summarize
 
@@ -398,6 +456,7 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         observable="dp14/CDKN1A",
         gene_symbol="CDKN1A",
         sign=+1,
+        summary=zerophase_mean(tau=2.0),
         description=(
             "p21/CIP1/WAF1 — senescence and cell-cycle arrest marker. "
             "DallePezze 2014 models CDKN1A as transcribed by FoxO3a in "
@@ -426,15 +485,11 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         reference="Geva-Zatorsky 2006; Lahav 2004; Purvis 2012",
     ),
     GeneReporter(
-        observable="dp14/ROS",
-        gene_symbol="HMOX1",
+        observable="dp14/FoxO3a",
+        gene_symbol="FOXO3",
         sign=+1,
-        description=(
-            "Heme oxygenase 1 — Nrf2/ARE-driven oxidative-stress "
-            "reporter. Mapped to DP14's ROS state as the closest "
-            "available proxy until a curated Nrf2 module is added."
-        ),
-        reference="Alam & Cook 2007, Antioxid Redox Signal 9:2499–2511",
+        description="FOXO3 transcription factor — DP14's active FoxO3a.",
+        reference="Brunet et al. 1999, Cell 96:857–868",
     ),
     oscillating_reporter(
         observable="nfkb/IkBat_integral",

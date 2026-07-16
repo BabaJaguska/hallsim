@@ -28,7 +28,35 @@ from hallsim.gene_reporters import (
     log2_fold_change,
     window_mean,
     window_rms,
+    zerophase_mean,
 )
+
+
+class TestZerophaseMean:
+
+    def test_constant_preserved(self):
+        ts = jnp.linspace(0.0, 20.0, 400)
+        y = jnp.full_like(ts, 3.0)
+        sm = zerophase_mean(2.0)(ts, y, query_times=ts)
+        assert jnp.allclose(sm, 3.0, atol=1e-4)
+
+    def test_ripple_removed_without_lag(self):
+        ts = jnp.linspace(0.0, 20.0, 800)
+        dc = 2.0 + 0.05 * ts  # gentle DC trend
+        y = dc + 0.5 * jnp.sin(2 * jnp.pi * ts / 0.4)  # fast ripple
+        qt = jnp.array([5.0, 10.0, 15.0])
+        sm = zerophase_mean(2.0)(ts, y, query_times=qt)
+        want = 2.0 + 0.05 * qt
+        assert jnp.allclose(sm, want, atol=0.05)  # ripple gone, DC tracked, no lag
+
+    def test_reflection_beats_constant_pad_at_boundary(self):
+        # Reflection padding keeps the first smoothed point near y[0] for a
+        # signal rising slowly relative to tau, where a constant warm-start
+        # would lift it toward the interior (the CDKN1A startup-spike fix).
+        ts = jnp.linspace(0.0, 14.0, 280)
+        y = 1.0 - jnp.exp(-ts / 10.0)  # slow rise relative to tau=2
+        sm = zerophase_mean(2.0)(ts, y, query_times=ts)
+        assert abs(float(sm[0]) - float(y[0])) < 0.05
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -334,7 +362,7 @@ class TestMultiHallmarkReporters:
         traj = {
             "dp14/CDKN1A": jnp.linspace(0, 10, n_time),
             "gz06/x2_integral": jnp.linspace(0, 1, n_time),
-            "dp14/ROS": jnp.linspace(0, 5, n_time),
+            "dp14/FoxO3a": jnp.linspace(0, 5, n_time),
             "nfkb/IkBat_integral": jnp.linspace(0, 2, n_time),
             "dp14/Mito_mass_new": jnp.linspace(0, 3, n_time),
             "dp14/mTORC1_pS2448": jnp.linspace(0, 4, n_time),
@@ -343,8 +371,9 @@ class TestMultiHallmarkReporters:
         for r in MULTI_HALLMARK_REPORTERS:
             assert r.observable in out
             assert jnp.isfinite(out[r.observable])
-        # CDKN1A uses last_value → 10.0
-        assert float(out["dp14/CDKN1A"]) == pytest.approx(10.0)
+        # CDKN1A low-passes the level (zerophase_mean), so a monotone ramp's
+        # smoothed endpoint sits below the raw endpoint (10.0).
+        assert float(out["dp14/CDKN1A"]) < 10.0
 
 
 class TestGeneExpressionDataset:

@@ -464,17 +464,14 @@ def cmd_calibrate(args) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("[2/3] fitting ...", flush=True)
-    # LR kept low enough that Adam's early bias-corrected steps can't overshoot
-    # a dominant-gradient parameter (CDKN1A_transcr) to its clamp floor and
-    # thrash — the fit descends to a joint minimum where best ≈ final rather
-    # than latching a single-epoch transient.
+
     history = problem.fit(
         steps=150,
         mode="reverse",
         learning_rate=0.005,
         reduce_on_plateau=True,
         plateau_patience=8,
-        early_stop_patience=30,
+        early_stop_patience=20,
         verbose=True,
         checkpoint_path=out_dir / "checkpoint.npz",
     )

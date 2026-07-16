@@ -367,7 +367,7 @@ def fig_temporal(args):
         cond, base = problem.arm_pairs[arm]
         data_times = sorted(problem.data[arm])
         genes = [r.gene_symbol for r in problem.reporters]
-        qt = jnp.arange(0.1, t_end + 1e-6, 0.1)
+        qt = jnp.arange(0.5, t_end + 1e-6, 0.1)
         lfc_oob = np.asarray(lfc_curve(problem, init, cond, base, qt))
         lfc_fit = np.asarray(lfc_curve(problem, fit, cond, base, qt))
         qt = np.concatenate([[0.0], np.asarray(qt)])

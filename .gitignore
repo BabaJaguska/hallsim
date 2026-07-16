@@ -224,3 +224,6 @@ cython_debug/
 
 # Allow specific image
 !docs/assets/hallsim_architecture.png
+
+# Local scratch / untracked notes
+/misc/
