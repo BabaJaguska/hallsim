@@ -43,7 +43,8 @@ NS = list(cfg["n_sweep"])
 SIGMA = float(cfg.get("perturb_sigma", 0.1))
 SEED = int(cfg.get("seed", 0))
 NPROC = int(cfg.get("nproc", 8))
-PLOT_PATH = cfg.get("plot", "demos/plots/bench_population.png")
+from outdir import outdir
+PLOT_PATH = cfg.get("plot", str(outdir("bench_population") / "bench_population.png"))
 
 
 def log(*a):

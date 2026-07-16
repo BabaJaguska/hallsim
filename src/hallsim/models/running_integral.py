@@ -1,26 +1,32 @@
-"""RunningIntegral — cumulative time-integral of an observable.
+"""RunningIntegral — time-integral of an observable, flat or low-pass.
 
 A phase-insensitive readout for oscillating species. Reading an oscillator
 at its endpoint is both wrong (phase-dependent) and numerically hostile:
 the endpoint's forward/adjoint sensitivity grows with integration time
 (accumulating phase drift), blowing calibration gradients up toward NaN.
-The cure is to read the *mean over the last window* instead.
+The cure is to read a *time-average* instead.
 
-``RunningIntegral`` integrates the source alongside the dynamics::
+Two modes, by ``tau``:
 
-    dA/dt = source          # note: RHS is the source, NOT A — pure
-                            # integration, no self-feedback, no exponential
+**Flat (``tau=None``, default)** — pure accumulation::
 
-so ``A(t) = ∫₀ᵗ source``. The mean of the source over any trailing window
-``[T−W, T]`` is then exactly (fundamental theorem of calculus)::
+    dA/dt = source          # RHS is the source, NOT A — no self-feedback
 
-    ⟨source⟩_[T−W, T] = (A(T) − A(T−W)) / W
+so ``A(t) = ∫₀ᵗ source`` and the trailing-window mean over ``[T−W, T]`` is
+exactly ``(A(T) − A(T−W)) / W`` (fundamental theorem of calculus). Read it
+with :func:`hallsim.gene_reporters.window_mean` / ``window_rms``.
 
-Read it with :func:`hallsim.gene_reporters.window_mean`, which differences
-the accumulator at two save points and divides by the elapsed time. This is
-a *flat* window mean — exact, with no weighting bias (unlike an exponential
-moving average) — and its sensitivity stays bounded when the window is a
-fixed fraction of the run.
+**Leaky (``tau`` set)** — first-order low-pass (exponential moving average)::
+
+    dA/dt = source − A/τ
+
+so ``A(t) = ∫₀ᵗ source·e^{-(t-s)/τ} ds`` and ``A/τ`` is the τ-weighted mean
+of the source (the low-pass envelope). Read it with
+:func:`hallsim.gene_reporters.leaky_rms`. This models a *stable-product*
+reporter that integrates a pulsing drive — the pulses are filtered out and
+the readout is smooth, with no window edges or phase to alias, unlike the
+flat window. ``τ`` is the integration time constant, in the trajectory's
+time unit.
 
 The accumulator must be integrated at the source's own resolution, so set
 ``timescale`` to the source oscillator's timescale: the Scheduler then
@@ -49,12 +55,16 @@ class RunningIntegral(Process):
     """
 
     timescale: float | None = None
-    # Integrate source**power. Default 2 → ∫x² → √⟨x²⟩ via window_rms: the
-    # amplitude-aware readout is the safe default, because a buffered-mean
-    # oscillator (e.g. p53, mean analytically damage-blind) is invisible to a
-    # plain mean. power=1 → ∫x → window_mean, for a species whose DC level
-    # itself moves with the drive (e.g. a directly-read transcript).
+    # Integrate source**power. Default 2 → ∫x² → √⟨x²⟩: the amplitude-aware
+    # readout is the safe default, because a buffered-mean oscillator (e.g.
+    # p53, mean analytically damage-blind) is invisible to a plain mean.
+    # power=1 → ∫x, for a species whose DC level itself moves with the drive.
     power: float = 2.0
+    # None → flat accumulation (∫source**power). Set → leaky low-pass with
+    # this time constant: dA/dt = source**power − A/τ, an exponential moving
+    # average read via leaky_rms. For a stable-product reporter that filters
+    # a pulsing drive into a smooth envelope.
+    tau: float | None = None
 
     def ports_schema(self):
         return {
@@ -62,8 +72,8 @@ class RunningIntegral(Process):
                 role=PortRole.EVOLVED,
                 default=0.0,
                 units="dimensionless",
-                description="Cumulative time-integral ∫₀ᵗ source**power",
-                reads_value=False,  # pure integrator: RHS is source, not the accumulator
+                description="Time-integral of source**power (flat or leaky)",
+                reads_value=self.tau is not None,  # leaky term reads A
             ),
             "source": Port(
                 role=PortRole.INPUT,
@@ -74,10 +84,10 @@ class RunningIntegral(Process):
         }
 
     def derivative(self, t, state):
-        # RHS depends only on `source` (a read-only INPUT), never on the
-        # accumulator `integral` itself — so this is integration, not an
-        # exponential. power=2 gives ∫source² → ⟨x²⟩ → RMS via window_rms.
-        return {"integral": state["source"] ** self.power}
+        val = state["source"] ** self.power
+        if self.tau is not None:
+            val = val - state["integral"] / self.tau
+        return {"integral": val}
 
     def metadata(self):
         base = super().metadata()

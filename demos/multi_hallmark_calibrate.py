@@ -79,7 +79,7 @@ SAMPLE_POSITION_GROUPS = {
 ARMS = ["DDIS_vs_ctrl", "RAPA_vs_DDIS", "RAS_vs_ctrl"]
 
 
-def build_problem() -> CalibrationProblem:
+def build_problem(composite=None) -> CalibrationProblem:
     ds = GeneExpressionDataset.from_series_matrix(
         SERIES_MATRIX,
         PLATFORM,
@@ -87,7 +87,9 @@ def build_problem() -> CalibrationProblem:
         sample_position_groups=SAMPLE_POSITION_GROUPS,
     )
     return CalibrationProblem(
-        composite=build_multi_hallmark_composite(),
+        composite=composite
+        if composite is not None
+        else build_multi_hallmark_composite(),
         reporters=MULTI_HALLMARK_REPORTERS,
         conditions={
             "ctrl": Condition(
@@ -220,16 +222,17 @@ def build_problem() -> CalibrationProblem:
                 prior=0.1,
                 prior_sigma=0.5,
             ),
+            # p53 → CDKN1A edge (P53CDKN1AActivator.k_act) is fixed, not fitted.
         },
         fit_arms=["DDIS_vs_ctrl"],
         held_out_arms=["RAPA_vs_DDIS", "RAS_vs_ctrl"],
         prior_weight=0.03,
         t_end=14.0,
         macro_dt=3.5,
-        # Save daily so the D07 and D14 query times land on the grid and the
-        # trajectory is smooth for plotting; save density is free (dense
-        # output, no extra ODE solves).
-        n_save=15,
+        # Save every 0.5 day so the D07/D14 query times and their 2-day window
+        # edges (5, 7, 12, 14) land exactly on the grid; save density is free
+        # (dense output, no extra ODE solves).
+        n_save=29,
     )
 
 
@@ -251,20 +254,18 @@ def print_table(pre, post) -> None:
                 f"  day {t:g}   {'gene':<9}{'measured':>10}"
                 f"{'model(oob)':>12}{'model(cal)':>12}   {'|err|oob→cal':>14}"
             )
-            e0_sum = e1_sum = 0.0
             for g in pre_r:
                 e0 = abs(pre_r[g].delta_sim - pre_r[g].delta_data)
                 e1 = abs(post_r[g].delta_sim - post_r[g].delta_data)
-                e0_sum, e1_sum = e0_sum + e0, e1_sum + e1
                 print(
                     f"  {'':<9}{g:<9}{pre_r[g].delta_data:>+10.3f}"
                     f"{pre_r[g].delta_sim:>+12.4f}"
                     f"{post_r[g].delta_sim:>+12.4f}   {e0:>6.3f}→{e1:<6.3f}"
                 )
-            n = len(pre_r)
             print(
                 f"  {'':<9}{'mean|err|':<9}{'':>10}{'':>12}{'':>12}   "
-                f"{e0_sum / n:>6.3f}→{e1_sum / n:<6.3f}   "
+                f"{pre[arm][t].mean_abs_error:>6.3f}→"
+                f"{post[arm][t].mean_abs_error:<6.3f}   "
                 f"sign {pre[arm][t].sign_agreement * 100:.0f}→"
                 f"{post[arm][t].sign_agreement * 100:.0f}%  "
                 f"ρ {pre[arm][t].spearman_r:+.2f}→"
@@ -377,6 +378,72 @@ def plot_history(problem, history, path: Path) -> None:
     fig.savefig(path, dpi=130)
 
 
+def write_concordance_table(pre, post, out_dir: Path) -> None:
+    """Per-arm ρ and mean|error|, out-of-box → calibrated, as a CSV and a
+    colored PNG table (green where calibration improves on out-of-box, orange
+    where it worsens). Fit and held-out arms are labelled."""
+    import csv
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fit_arms = {"DDIS_vs_ctrl"}
+    rows = []
+    for arm in ARMS:
+        tag = "fit" if arm in fit_arms else "held-out"
+        short = arm.split("_")[0]
+        for t in sorted(pre[arm]):
+            rows.append((
+                f"{short} ({tag})", f"{t:g}",
+                pre[arm][t].spearman_r, post[arm][t].spearman_r,
+                pre[arm][t].mean_abs_error, post[arm][t].mean_abs_error,
+            ))
+
+    with open(out_dir / "concordance_table.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["arm", "day", "rho_oob", "rho_cal",
+                    "mean_abs_err_oob", "mean_abs_err_cal"])
+        for arm, day, ro, rc, eo, ec in rows:
+            w.writerow([arm, day, f"{ro:.3f}", f"{rc:.3f}",
+                        f"{eo:.3f}", f"{ec:.3f}"])
+
+    IMP, REG, DIM, INK = "#1a7f4b", "#c0552b", "#6b7280", "#1f2937"
+    header = ["Arm", "Day", "ρ (oob)", "ρ (cal)",
+              "mean|err| (oob)", "mean|err| (cal)"]
+    text, colors = [header], [[INK] * 6]
+    for arm, day, ro, rc, eo, ec in rows:
+        text.append([arm, day, f"{ro:+.2f}", f"{rc:+.2f}",
+                     f"{eo:.2f}", f"{ec:.2f}"])
+        colors.append([INK, INK, DIM, IMP if rc >= ro else REG,
+                       DIM, IMP if ec <= eo else REG])
+
+    fig, ax = plt.subplots(figsize=(8.6, 0.55 + 0.42 * len(text)))
+    ax.axis("off")
+    tbl = ax.table(cellText=text, cellLoc="center", loc="center",
+                   colWidths=[0.26, 0.10, 0.14, 0.14, 0.18, 0.18])
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(10.5)
+    tbl.scale(1, 1.55)
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_edgecolor("#dcdcdc")
+        if r == 0:
+            cell.set_facecolor("#f2f3f5")
+            cell.set_text_props(fontweight="bold", color=INK)
+        else:
+            cell.get_text().set_color(colors[r][c])
+            if c == 0:
+                cell.get_text().set_fontweight("bold")
+    ax.set_title("Calibrated vs out-of-the-box concordance",
+                 fontsize=12.5, fontweight="bold", color=INK, loc="left",
+                 pad=14)
+    for ext in ("png", "pdf"):
+        fig.savefig(out_dir / f"concordance_table.{ext}", dpi=200,
+                    bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"wrote concordance_table.png/.csv -> {out_dir}", flush=True)
+
+
 def cmd_calibrate(args) -> None:
     logging.basicConfig(
         level=logging.WARNING,
@@ -397,13 +464,17 @@ def cmd_calibrate(args) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("[2/3] fitting ...", flush=True)
+    # LR kept low enough that Adam's early bias-corrected steps can't overshoot
+    # a dominant-gradient parameter (CDKN1A_transcr) to its clamp floor and
+    # thrash — the fit descends to a joint minimum where best ≈ final rather
+    # than latching a single-epoch transient.
     history = problem.fit(
         steps=150,
         mode="reverse",
-        learning_rate=0.03,
+        learning_rate=0.005,
         reduce_on_plateau=True,
-        plateau_patience=5,
-        early_stop_patience=15,
+        plateau_patience=8,
+        early_stop_patience=30,
         verbose=True,
         checkpoint_path=out_dir / "checkpoint.npz",
     )
@@ -419,9 +490,19 @@ def cmd_calibrate(args) -> None:
             f"{float(history.final_params[k]):>12.5g}"
         )
 
-    plot(pre, post, out_dir / "oob_vs_cal_vs_measured.png")
+    write_concordance_table(pre, post, out_dir)
     plot_history(problem, history, out_dir / "training_history.png")
     problem.save_outputs(str(out_dir), history)
+
+    # Re-plot the calibrated figures on the fit just written, so the
+    # time-domain trajectories and concordance dumbbells never lag behind the
+    # checkpoint.
+    from multi_hallmark_figures import fig_temporal, fig_concordance
+    print("temporal reporter trajectories ...", flush=True)
+    fig_temporal(args)
+    print("reporter concordance dumbbells ...", flush=True)
+    fig_concordance(args)
+
     print(
         f"\nbest loss {history.best_loss:.4g} over {len(history.losses)} "
         f"epochs → outputs in {out_dir.relative_to(ROOT)}/"

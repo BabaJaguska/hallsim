@@ -250,9 +250,8 @@ def main():
     ax.set_yscale("log")
 
     plt.tight_layout()
-    out_path = "outputs/multiscale_coupling_comparison.png"
-    import os
-    os.makedirs("outputs", exist_ok=True)
+    from outdir import outdir
+    out_path = str(outdir("multiscale_coupling") / "comparison.png")
     plt.savefig(out_path, dpi=150)
     print(f"\nPlot saved to {out_path}")
     print()

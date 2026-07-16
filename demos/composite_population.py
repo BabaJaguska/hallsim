@@ -65,8 +65,9 @@ def main():
     ap.add_argument("--macro-dt", type=float, default=5.0)
     ap.add_argument("--save-dt", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default=os.path.join(
-        _REPO, "outputs/composite_population.png"))
+    from outdir import outdir
+    ap.add_argument("--out", default=str(
+        outdir("composite_population") / "composite_population.png"))
     a = ap.parse_args()
 
     base = build_multi_hallmark_composite()

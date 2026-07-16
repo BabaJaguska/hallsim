@@ -254,12 +254,12 @@ class TestTrajectorySummaries:
         s = window_mean()
         assert float(s(ts, A)) == pytest.approx(5.0, abs=1e-4)
 
-    def test_window_mean_rejects_invalid_frac(self):
-        # The window is now a fraction of elapsed time in (0, 1].
+    def test_window_mean_rejects_nonpositive_window(self):
+        # The window is a fixed duration in the trajectory's time unit.
         with pytest.raises(ValueError):
             window_mean(0.0)
         with pytest.raises(ValueError):
-            window_mean(1.5)
+            window_mean(-1.0)
 
     def test_summaries_read_at_query_times(self):
         # Trajectory-native contract: passing query_times returns one value

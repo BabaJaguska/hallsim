@@ -62,9 +62,8 @@ def main():
                  fontsize=12, x=0.02, ha="left", fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.97))
 
-    out = Path(__file__).resolve().parent.parent / "outputs" / \
-        "multi_hallmark_calibrate"
-    out.mkdir(parents=True, exist_ok=True)
+    from outdir import outdir
+    out = outdir("gz06_oscillator")
     for ext in ("png", "pdf"):
         fig.savefig(out / f"gz06_oscillator.{ext}", dpi=160,
                     bbox_inches="tight", facecolor="white")

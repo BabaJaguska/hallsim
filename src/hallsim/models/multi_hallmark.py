@@ -121,6 +121,7 @@ from pathlib import Path
 from hallsim.composite import Composite
 from hallsim.models.damage_nfkb import DamageNFkBActivator
 from hallsim.models.mtor_nfkb import MtorNFkBActivator
+from hallsim.models.p53_cdkn1a import P53CDKN1AActivator
 from hallsim.models.running_integral import RunningIntegral
 from hallsim.sbml_import import process_from_sbml
 
@@ -276,6 +277,11 @@ def build_multi_hallmark_composite(*, validate: bool = True):
         # both, uniformly — no per-reporter override.
         "gz06_x2_integral": RunningIntegral(timescale=gz06.timescale),
         "nfkb_ikbat_integral": RunningIntegral(timescale=nfkb.timescale),
+        # p53 → CDKN1A (p21) transcription edge: the canonical p53 target,
+        # absent until now (DP14 transcribed CDKN1A only from FoxO3a/damage).
+        # Shares GZ06's group so it reads p53 live (resolving the oscillation);
+        # its Hill-gated flux is integrated by DP14's own CDKN1A turnover.
+        "p53_cdkn1a": P53CDKN1AActivator(timescale=gz06.timescale),
     }
     # The mtor_nfkb edge reads DP14's active mTORC1 and writes additively
     # to the NF-κB module's IKK pool. The RunningIntegral observers read an
@@ -305,6 +311,8 @@ def build_multi_hallmark_composite(*, validate: bool = True):
             "source": "nfkb/IkBat",
             "integral": "nfkb/IkBat_integral",
         },
+        # p53 → CDKN1A: read GZ06 p53, add transcription flux to DP14's p21.
+        "p53_cdkn1a": {"p53": "gz06/x", "CDKN1A": "dp14/CDKN1A"},
     }
     return Composite(
         processes=processes,

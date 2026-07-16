@@ -171,6 +171,7 @@ ax.set_xlabel("number of parameters P"); ax.set_ylabel("gradient wall time (s)")
 ax.set_title(f"dL/dθ over a {N_POP}-cell population: autodiff vs finite diff")
 ax.legend(); ax.grid(True, alpha=0.3)
 plt.tight_layout()
-out = "demos/plots/bench_gradient.png"
+from outdir import outdir
+out = str(outdir("bench_gradient") / "bench_gradient.png")
 plt.savefig(out, dpi=120)
 log(f"\nsaved {out}\nDONE")

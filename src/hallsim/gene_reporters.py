@@ -31,6 +31,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
@@ -67,32 +68,32 @@ def last_value(ts, y, query_times=None):
     return jnp.interp(jnp.atleast_1d(jnp.asarray(query_times)), ts, y)
 
 
-def window_mean(frac: float = 0.5):
-    """Exact mean of an observable over a trailing window, at each query time.
+def window_mean(window: float = 0.5):
+    """Exact mean of an observable over a trailing fixed-duration window.
 
     For an observable routed through a
     :class:`hallsim.models.running_integral.RunningIntegral` — whose path
     holds the cumulative integral ``A = ∫₀ᵗ source`` — the mean of the
-    source over the trailing window ``[t·(1-frac), t]`` is, by the
-    fundamental theorem of calculus, ``(A(t) - A(t·(1-frac))) / (t·frac)``.
+    source over ``[t - window, t]`` is, by the fundamental theorem of
+    calculus, ``(A(t) - A(t - window)) / window``. Early (``t < window``)
+    the window clamps to ``[0, t]``.
 
-    The window is a **fraction of the elapsed time**, not a count of save
-    intervals, so the readout is grid-independent and defined at *any*
-    query time: the integral is interpolated at the window edges (it is
-    smooth — taken at the solver's fine steps). This is the phase-
-    insensitive readout for an oscillating species, dividing by elapsed
-    time to keep the observable's own units (commensurable with endpoint
-    reporters). ``query_times=None`` collapses to the exact mean over the
-    last save interval (batch-safe, no interpolation).
+    ``window`` is a **fixed duration in the trajectory's time unit** (days
+    on the composite axis, so ``0.5`` is 12 h), sized to average over a few
+    of the species' oscillation periods — a transcript readout reflects its
+    recent transcription, not a fraction of the whole experiment. The
+    readout is grid-independent: the integral is interpolated at the window
+    edges (smooth, taken at the solver's fine steps). ``query_times=None``
+    collapses to the exact mean over the last save interval (batch-safe).
     """
-    if not 0 < frac <= 1:
-        raise ValueError(f"frac must be in (0, 1]; got {frac!r}")
+    if window <= 0:
+        raise ValueError(f"window must be > 0; got {window!r}")
 
     def summarize(ts, y, query_times=None):
         if query_times is None:
             return (y[-1] - y[-2]) / (ts[-1] - ts[-2])
         qt = jnp.atleast_1d(jnp.asarray(query_times))
-        t_lo = qt * (1.0 - frac)
+        t_lo = jnp.clip(qt - window, 0.0, None)
         a_hi = jnp.interp(qt, ts, y)
         a_lo = jnp.interp(t_lo, ts, y)
         return (a_hi - a_lo) / jnp.clip(qt - t_lo, 1e-12, None)
@@ -100,7 +101,7 @@ def window_mean(frac: float = 0.5):
     return summarize
 
 
-def window_rms(frac: float = 0.5):
+def window_rms(window: float = 0.5):
     """Root-mean-square of an observable over the trailing window.
 
     For a source routed through a ``RunningIntegral(power=2)`` (path holds
@@ -109,13 +110,79 @@ def window_rms(frac: float = 0.5):
     pulsatile species' damage-encoded pulsing rather than its buffered
     mean; unlike bare amplitude it keeps the mean as a floor, so a
     quiescent baseline gives a finite fold-change instead of diverging.
-    Same query-time contract as :func:`window_mean`. See
-    docs/gz06-basal-p53.md.
+    Same fixed-duration ``window`` and query-time contract as
+    :func:`window_mean`. See docs/gz06-basal-p53.md.
     """
-    mean_square = window_mean(frac)
+    mean_square = window_mean(window)
 
     def summarize(ts, y, query_times=None):
         return jnp.sqrt(jnp.clip(mean_square(ts, y, query_times), 0.0, None))
+
+    return summarize
+
+
+def leaky_rms():
+    """RMS envelope from a *leaky* ``RunningIntegral`` (its ``tau`` set).
+
+    The leaky integral path holds ``A = ∫₀ᵗ sourceᵖ·e^{-(t-s)/τ} ds`` — the
+    exponentially-weighted (τ-memory) accumulation of ``sourceᵖ``, a smooth
+    low-pass envelope with no window edge or oscillation phase to alias
+    (unlike the boxcar :func:`window_rms`). With ``power=2``,
+    ``A = τ·⟨source²⟩``, so ``√A ∝ RMS``; the constant ``√τ`` cancels in the
+    log2 fold-change, so τ is not needed here. The matching integral must be
+    leaky — over a flat (``tau=None``) integral this reads a growing
+    cumulative sum, not an amplitude.
+    """
+
+    def summarize(ts, y, query_times=None):
+        a = (
+            y[-1]
+            if query_times is None
+            else jnp.interp(jnp.atleast_1d(jnp.asarray(query_times)), ts, y)
+        )
+        return jnp.sqrt(jnp.clip(a, 0.0, None))
+
+    return summarize
+
+
+def zerophase_rms(tau: float):
+    """Zero-phase (forward-backward EMA) RMS amplitude envelope — smooth, and
+    with *no phase lag*, so a query at day 7 reads the amplitude *at* day 7
+    rather than a trailing average biased low by half a window.
+
+    Reads a ``RunningIntegral(power=2)`` path (∫x²), recovers the per-interval
+    ⟨x²⟩ by differencing, then low-passes it with an exponential moving average
+    run **forward and backward** — the two passes' phase shifts cancel exactly.
+    Each pass is warm-started at its boundary sample (an infinite edge-pad),
+    which removes the endpoint start-up transient a cold-started pass leaves at
+    the last timepoint. ``√`` gives the amplitude.
+
+    This is an *acausal* readout — legitimate here because the integral is an
+    output only (never read back into any derivative), so the summary is a
+    post-hoc transform of the fully-solved trajectory; there is no way for the
+    future to leak into the ODE. ``tau`` is the smoothing memory (trajectory
+    time unit), sized to a few oscillation periods. Assumes uniform save
+    spacing (the Scheduler's ``save_dt`` grid).
+    """
+
+    def summarize(ts, y, query_times=None):
+        tmid = 0.5 * (ts[:-1] + ts[1:])
+        ms = jnp.diff(y) / jnp.diff(ts)  # ⟨x²⟩ over each save interval
+        a = jnp.exp(-(tmid[1] - tmid[0]) / tau)
+
+        def ema(seq, init):
+            def step(c, v):
+                nc = a * c + (1.0 - a) * v
+                return nc, nc
+
+            return jax.lax.scan(step, init, seq)[1]
+
+        fwd = ema(ms, ms[0])
+        sm = ema(fwd[::-1], fwd[-1])[::-1]  # zero-phase, edge-padded
+        rms = jnp.sqrt(jnp.clip(sm, 0.0, None))
+        if query_times is None:
+            return rms[-1]
+        return jnp.interp(jnp.atleast_1d(jnp.asarray(query_times)), tmid, rms)
 
     return summarize
 
@@ -195,24 +262,46 @@ def oscillating_reporter(
     *,
     sign: int = 1,
     readout: str = "rms",
-    frac: float = 0.5,
+    window: float = 0.5,
+    tau: float | None = None,
     description: str = "",
     reference: str = "",
 ) -> GeneReporter:
     """Phase-insensitive reporter for an OSCILLATING model species.
 
-    ``readout="rms"`` (default) reads the pulse amplitude √⟨x²⟩; ``"mean"``
-    reads the DC level. RMS is the default because a *buffered* mean — one
+    ``readout="rms"`` (default) reads the pulse amplitude √⟨x²⟩ over a trailing
+    boxcar ``window``; ``"leaky"`` reads the same amplitude from an exponential
+    (τ-memory) envelope instead — smooth, no window edge to alias the
+    oscillation, requires the source's ``RunningIntegral`` to be leaky
+    (``tau`` set); ``"mean"`` reads the DC level. RMS is the default because a
+    *buffered* mean — one
     the drive cannot move (e.g. p53, whose mean is analytically damage-blind
     under the Mdm2 feedback) — leaves a mean readout signal-blind, while RMS
     still sees the amplitude. Use ``"mean"`` only when the species' DC level
-    is known to move with the drive (then mean ≈ rms anyway). ``observable``
-    must be the matching :class:`~hallsim.models.running_integral.RunningIntegral`
-    path — ∫x² (its default ``power=2``) for rms, ∫x (``power=1``) for mean.
+    is known to move with the drive (then mean ≈ rms anyway).
+    ``"zerophase"`` reads √⟨x²⟩ through a forward-backward EMA (``tau`` memory):
+    smooth *and* lag-free, so a timepoint query reads the amplitude *at* that
+    time — the readout of choice when the onset timing matters. ``window`` is
+    the trailing averaging duration (time unit of the trajectory), sized to
+    a few oscillation periods. ``observable`` must be the matching
+    :class:`~hallsim.models.running_integral.RunningIntegral` path — ∫x² (its
+    default ``power=2``) for rms/zerophase, ∫x (``power=1``) for mean.
     """
-    if readout not in ("rms", "mean"):
-        raise ValueError(f"readout must be 'rms' or 'mean', got {readout!r}")
-    summary = window_rms(frac) if readout == "rms" else window_mean(frac)
+    if readout not in ("rms", "mean", "leaky", "zerophase"):
+        raise ValueError(
+            "readout must be 'rms', 'mean', 'leaky', or 'zerophase', "
+            f"got {readout!r}"
+        )
+    if readout == "zerophase":
+        if tau is None:
+            raise ValueError("zerophase readout requires tau")
+        summary = zerophase_rms(tau)
+    elif readout == "leaky":
+        summary = leaky_rms()  # source's RunningIntegral must have tau set
+    elif readout == "rms":
+        summary = window_rms(window)
+    else:
+        summary = window_mean(window)
     return GeneReporter(
         observable=observable,
         gene_symbol=gene_symbol,
@@ -322,11 +411,12 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         observable="gz06/x2_integral",
         gene_symbol="DDB2",
         sign=+1,
-        readout="rms",  # default: p53's mean is buffered, damage is in pulsing
+        readout="zerophase",  # smooth, lag-free amplitude; onset timing matters
+        tau=2.0,  # forward-backward EMA memory (~7 p53 periods)
         description=(
             "Damage-specific DNA Binding Protein 2 — direct p53 "
             "transcription target, mapped to GZ06's p53 (x). Read as the "
-            "trailing-window RMS √⟨x²⟩, not the mean: GZ06 encodes damage "
+            "zero-phase RMS √⟨x²⟩ envelope, not the mean: GZ06 encodes damage "
             "in p53 *pulsing*, and its mean p53 is analytically buffered "
             "against the damage signal (psi cancels in the steady state), "
             "so the mean is damage-blind. A RunningIntegral (power=2, the "
@@ -349,13 +439,14 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
     oscillating_reporter(
         observable="nfkb/IkBat_integral",
         gene_symbol="NFKBIA",
-        # RMS default, like DDB2. Unlike p53, the IκBα-transcript DC level also
-        # moves with integrated NF-κB activity, so mean and rms coincide here
-        # (6/6 timepoints, scratchpad/nfkbia_mean_vs_rms.py); rms is used for
-        # uniformity with DDB2 and to keep the "RMS window readouts" account of
-        # the oscillating reporters literally true.
+        # Zero-phase RMS like DDB2. Unlike p53, the IκBα-transcript DC level
+        # also moves with integrated NF-κB activity, so mean and rms coincide
+        # here (6/6 timepoints, scratchpad/nfkbia_mean_vs_rms.py); the
+        # zero-phase envelope is used for uniformity with DDB2 — smooth and
+        # lag-free.
         sign=+1,
-        readout="rms",
+        readout="zerophase",
+        tau=2.0,  # forward-backward EMA memory
         description=(
             "IκBα transcript — direct NF-κB target via the autoregulatory "
             "negative feedback loop. Maps to Ihekwaba 2004's IκBα mRNA "
@@ -570,8 +661,10 @@ def log2_fold_change(
 ) -> pd.Series:
     """Per-gene log2 fold change between two sample groups.
 
-    Microarray series-matrix values are already log2-scaled, so this is a
-    mean-difference computation.
+    Assumes ``gene_expr`` is on a log scale (microarray RMA, log-CPM and
+    log-TPM all are), so the log2 fold change is the difference of group
+    means. Linear-scale inputs (raw counts, TPM) must be log-transformed by
+    the loader first.
     """
     return gene_expr[group_cols].mean(axis=1) - gene_expr[baseline_cols].mean(
         axis=1
@@ -622,12 +715,65 @@ class GeneExpressionDataset:
             }
         return cls(gene_expr=gene_expr, sample_groups=sample_groups)
 
+    @classmethod
+    def from_dataframe(
+        cls, gene_expr: pd.DataFrame, sample_groups: dict[str, list]
+    ) -> "GeneExpressionDataset":
+        """Any log-scale ``gene × sample`` matrix (gene-symbol indexed).
+
+        The platform-agnostic constructor: microarray log-RMA, log-CPM /
+        log-TPM from any RNA-seq pipeline, or pseudobulk logs from single
+        cell — anything already on a log scale, where a fold change is a
+        difference of group means. ``.delta`` / ``.variance`` then work
+        unchanged.
+        """
+        return cls(gene_expr=gene_expr, sample_groups=sample_groups)
+
+    @classmethod
+    def from_counts_matrix(
+        cls,
+        counts: pd.DataFrame,
+        sample_groups: dict[str, list],
+        *,
+        prior_count: float = 1.0,
+    ) -> "GeneExpressionDataset":
+        """RNA-seq raw counts (``gene × sample``) → log2-CPM.
+
+        Library-size (CPM) normalized, then log2 with a prior count so zeros
+        are finite and low counts are damped (edgeR-style log-CPM). A simple
+        default — for a rigorous analysis run DESeq2/edgeR upstream (TMM /
+        median-of-ratios + moderated dispersion) and pass their log-CPM via
+        :meth:`from_dataframe`, with per-gene SEs as calibration weights.
+        """
+        lib = counts.sum(axis=0)
+        cpm = counts.div(lib, axis=1) * 1e6
+        return cls(
+            gene_expr=np.log2(cpm + prior_count), sample_groups=sample_groups
+        )
+
     def delta(self, condition: str, baseline: str) -> pd.Series:
         """Δ_data = log2 fold change between two named groups."""
         return log2_fold_change(
             self.gene_expr,
             self.sample_groups[condition],
             self.sample_groups[baseline],
+        )
+
+    def variance(self, condition: str, baseline: str) -> pd.Series:
+        """Per-gene sampling variance of the log2 fold change.
+
+        ``Var(mean_cond − mean_base) = s²_cond/n_cond + s²_base/n_base`` from
+        replicate spread. Feed ``1/variance`` as ``weights`` to
+        :class:`~hallsim.calibration.CalibrationProblem` to down-weight noisy
+        genes. With few replicates this estimate is itself noisy — DESeq2 /
+        edgeR moderated SEs (computed upstream, passed via
+        :meth:`from_dataframe`) are steadier.
+        """
+        c = self.gene_expr[self.sample_groups[condition]]
+        b = self.gene_expr[self.sample_groups[baseline]]
+        return (
+            c.var(axis=1, ddof=1) / c.shape[1]
+            + b.var(axis=1, ddof=1) / b.shape[1]
         )
 
 
@@ -654,6 +800,7 @@ class ConcordanceResult:
     sign_agreement: float = 0.0
     spearman_r: float = 0.0
     n_compared: int = 0
+    mean_abs_error: float = 0.0
 
     def __str__(self) -> str:
         lines = [
@@ -690,7 +837,7 @@ def compute_concordance(
         ``{observable_name: Δ_sim}``.
     delta_gene_expression:
         ``pd.Series`` indexed by gene symbol, values are Δ_data
-        (log2 fold change for microarray).
+        (a log2 fold change).
     condition_name:
         Label for the report (e.g. ``"DDIS_D14_vs_D00"``).
     reporters:
@@ -729,6 +876,7 @@ def compute_concordance(
         return ConcordanceResult(condition_name=condition_name)
     from scipy.stats import spearmanr
 
+    sims, datas = np.asarray(sims), np.asarray(datas)
     sa = float(np.mean([r.sign_match for r in rows]))
     rho, _ = spearmanr(sims, datas)
     return ConcordanceResult(
@@ -737,4 +885,5 @@ def compute_concordance(
         sign_agreement=sa,
         spearman_r=float(rho) if np.isfinite(rho) else 0.0,
         n_compared=n,
+        mean_abs_error=float(np.mean(np.abs(sims - datas))),
     )

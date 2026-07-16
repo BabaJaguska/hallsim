@@ -5,7 +5,7 @@ Consolidates the per-figure scripts into subcommands (pick with the first arg):
   schematic      wiring diagram of the composite (dials → dp14 → gz06/ih04).
   trajectories   reporter observables over the day axis, ctrl/DDIS/DDIS+rapa.
   reporter-levels calibrated reporter dynamics per condition (model units).
-  oob            out-of-the-box reporter concordance (measured vs prior model).
+  concordance    measured-vs-simulated dumbbells per gene (oob + calibrated).
   temporal       out-of-the-box → calibrated log2FC trajectories vs data.
   before-after   each constituent standalone vs inside the composite.
 
@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from hallsim.composite import Composite  # noqa: E402
 from hallsim.hallmarks import apply_hallmarks  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
+from hallsim.calibration import load_checkpoint  # noqa: E402
 
 plt.rcParams.update({"font.family": "sans-serif",
                      "font.sans-serif": ["DejaVu Sans", "Helvetica", "Arial"]})
@@ -37,14 +38,23 @@ plt.rcParams.update({"font.family": "sans-serif",
 ROOT = Path(__file__).resolve().parent.parent
 OUT_CAL = ROOT / "outputs" / "multi_hallmark_calibrate"
 
-# Fitted parameters from the calibration run (best loss 0.3445); shared by the
-# calibrated-model figures.
-FIT = {
-    "etoposide_potency": 7.724, "ROS_turnover": 0.8289,
-    "CDKN1A_transcr": 0.0275, "mitophagy_inactiv": 648.37,
-    "alpha_y": 0.80233, "psi_basal": 0.3188,
-    "damage_to_nfkb": 0.066146, "mtor_to_nfkb": 0.14229,
-}
+_CKPT = OUT_CAL / "checkpoint.npz"
+
+
+def load_fit() -> dict:
+    """Fitted parameters, read live from the calibration checkpoint.
+
+    The calibrated-model figures track whatever ``multi_hallmark_calibrate``
+    last wrote — no transcribed constants to drift out of sync with the fit.
+    """
+    if not _CKPT.exists():
+        raise FileNotFoundError(
+            f"no calibration checkpoint at {_CKPT}; run "
+            "`multi_hallmark_calibrate` first to produce the fit these "
+            "figures plot."
+        )
+    params, _ = load_checkpoint(_CKPT)
+    return {k: float(v) for k, v in params.items()}
 
 
 # ── schematic ────────────────────────────────────────────────────────────
@@ -197,7 +207,7 @@ def fig_reporter_levels(args):
         return np.asarray(problem._reporter_summaries(res.ts, trajs, qt))
 
     problem = build_problem()
-    fit = {k: jnp.asarray(v) for k, v in FIT.items()}
+    fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
     qt = jnp.arange(0.5, t_end + 1e-6, 0.5)
     genes = [r.gene_symbol for r in problem.reporters]
     obs = [r.observable for r in problem.reporters]
@@ -233,72 +243,90 @@ def fig_reporter_levels(args):
 
 
 # ── oob (transcribed concordance table) ──────────────────────────────────
-def fig_oob(args):
+def fig_concordance(args):
+    """Reporter concordance dumbbells — measured vs simulated log2FC per gene
+    across all six condition/day points, computed live from the model via
+    ``problem.evaluate``. Rendered for both the out-of-the-box (init) and the
+    calibrated (checkpoint) parameters. ``dir N/6`` counts sign-matching
+    conditions.
+    """
     from matplotlib.lines import Line2D
+    from multi_hallmark_calibrate import build_problem, _rows_by_gene
     C_DATA, C_MODEL, INK, DIM, BAND = ("#2563eb", "#d97706", "#1f2937",
                                        "#6b7280", "#f1f5f9")
-    cond = ["DDIS\nD7", "DDIS\nD14", "RAPA\nD7", "RAPA\nD14", "RAS\nD4",
-            "RAS\nD7"]
-    reporters = [
-        ("CDKN1A", "6/6", [0.53, 0.36, -0.37, -0.34, 0.53, 0.60],
-         [2.49, 1.39, -1.14, -0.76, 2.76, 2.49]),
-        ("DDB2", "6/6", [0.20, 0.29, -0.12, -0.17, 0.26, 0.54],
-         [0.02, 0.35, -0.02, -0.07, 0.03, 0.02]),
-        ("EIF4EBP1", "4/6", [-0.10, -0.03, -0.01, -0.21, -0.00, 0.09],
-         [-0.33, -0.08, -0.65, -0.47, 0.32, -0.33]),
-        ("CYCS", "4/6", [-0.12, -0.17, -0.10, -0.25, 0.03, 0.04],
-         [-2.30, -1.25, -0.57, 0.04, 0.18, -2.30]),
-        ("NFKBIA", "4/6", [-0.36, 0.32, 0.09, -0.38, 0.90, 0.68],
-         [0.48, 0.27, -0.12, -0.08, 0.13, 0.48]),
-        ("HMOX1", "4/6", [-0.01, 0.01, -0.10, -0.09, 0.10, 0.05],
-         [-1.15, -0.13, -1.32, -1.29, 0.40, -1.15]),
-    ]
-    arms = [("DDIS", 0, 2), ("RAPA", 2, 4), ("RAS", 4, 6)]
+    problem = build_problem()
+    arms_order = ["DDIS_vs_ctrl", "RAPA_vs_DDIS", "RAS_vs_ctrl"]
+    short = {"DDIS_vs_ctrl": "DDIS", "RAPA_vs_DDIS": "RAPA",
+             "RAS_vs_ctrl": "RAS"}
+    cond = [(a, t) for a in arms_order for t in sorted(problem.data[a])]
+    cond_labels = [f"{short[a]}\nD{int(t)}" for a, t in cond]
+    spans, i = [], 0  # alternating per-arm bands for visual grouping
+    for a in arms_order:
+        n = len(sorted(problem.data[a]))
+        spans.append((i, i + n))
+        i += n
+    order = ["CDKN1A", "DDB2", "EIF4EBP1", "CYCS", "NFKBIA", "HMOX1"]
+    nC = len(cond)
 
-    def panel(ax, title, agree, data, model):
-        x = range(6)
-        for i, (_, lo, hi) in enumerate(arms):
-            if i % 2 == 1:
-                ax.axvspan(lo - 0.5, hi - 0.5, color=BAND, zorder=0)
-        ax.axhline(0, color="#cbd5e1", lw=1.0, zorder=1)
-        for xi, d, m in zip(x, data, model):
-            ax.plot([xi, xi], [d, m], color="#d1d5db", lw=1.4, zorder=2)
-        ax.scatter(x, data, s=46, color=C_DATA, zorder=4)
-        ax.scatter(x, model, s=46, facecolors="none", edgecolors=C_MODEL,
-                   linewidths=1.8, zorder=4)
-        ax.set_title(title, fontsize=10.5, color=INK, fontweight="bold",
-                     loc="left", pad=6)
-        ax.text(1.0, 1.02, f"dir {agree}", transform=ax.transAxes, ha="right",
-                va="bottom", fontsize=9, color=DIM, fontweight="bold")
-        ax.set_xticks(list(x))
-        ax.set_xticklabels(cond, fontsize=8, color=DIM)
-        ax.set_xlim(-0.5, 5.5)
-        ax.tick_params(axis="y", labelsize=8, colors=DIM)
-        for s in ("top", "right"):
-            ax.spines[s].set_visible(False)
-        for s in ("left", "bottom"):
-            ax.spines[s].set_color("#cbd5e1")
+    def render(params, subtitle, stem):
+        ev = problem.evaluate(params)
+        rows = [_rows_by_gene(ev[a][t]) for a, t in cond]
+        genes = [g for g in order if g in rows[0]]
 
-    fig, axes = plt.subplots(2, 3, figsize=(12.4, 6.6))
-    for ax, (title, agree, data, model) in zip(axes.flat, reporters):
-        panel(ax, title, agree, data, model)
-        ax.set_ylabel("log2 FC", fontsize=8.5, color=DIM)
-    handles = [
-        Line2D([0], [0], marker="o", color="none", markerfacecolor=C_DATA,
-               markersize=8, label="measured"),
-        Line2D([0], [0], marker="o", color="none", markeredgecolor=C_MODEL,
-               markerfacecolor="none", markeredgewidth=1.8, markersize=8,
-               label="simulated")]
-    fig.legend(handles=handles, loc="upper center", ncol=2, frameon=False,
-               fontsize=10, bbox_to_anchor=(0.5, 1.005))
-    fig.suptitle("Reporter concordance", fontsize=12.5, fontweight="bold",
-                 color=INK, x=0.09, ha="left", y=1.02)
-    fig.tight_layout(rect=(0, 0, 1, 0.96), h_pad=2.4, w_pad=2.2)
-    OUT_CAL.mkdir(parents=True, exist_ok=True)
-    for ext in ("png", "pdf"):
-        fig.savefig(OUT_CAL / f"oob_reporters.{ext}", dpi=200,
-                    bbox_inches="tight", facecolor="white")
-    print(f"wrote oob_reporters.png/.pdf -> {OUT_CAL}", flush=True)
+        def panel(ax, gene):
+            data = [rows[k][gene].delta_data for k in range(nC)]
+            model = [rows[k][gene].delta_sim for k in range(nC)]
+            agree = sum(rows[k][gene].sign_match for k in range(nC))
+            x = range(nC)
+            for bi, (lo, hi) in enumerate(spans):
+                if bi % 2 == 1:
+                    ax.axvspan(lo - 0.5, hi - 0.5, color=BAND, zorder=0)
+            ax.axhline(0, color="#cbd5e1", lw=1.0, zorder=1)
+            for xi, d, m in zip(x, data, model):
+                ax.plot([xi, xi], [d, m], color="#d1d5db", lw=1.4, zorder=2)
+            ax.scatter(x, data, s=46, color=C_DATA, zorder=4)
+            ax.scatter(x, model, s=46, facecolors="none", edgecolors=C_MODEL,
+                       linewidths=1.8, zorder=4)
+            ax.set_title(gene, fontsize=10.5, color=INK, fontweight="bold",
+                         loc="left", pad=6)
+            ax.text(1.0, 1.02, f"dir {agree}/{nC}", transform=ax.transAxes,
+                    ha="right", va="bottom", fontsize=9, color=DIM,
+                    fontweight="bold")
+            ax.set_xticks(list(x))
+            ax.set_xticklabels(cond_labels, fontsize=8, color=DIM)
+            ax.set_xlim(-0.5, nC - 0.5)
+            ax.tick_params(axis="y", labelsize=8, colors=DIM)
+            for s in ("top", "right"):
+                ax.spines[s].set_visible(False)
+            for s in ("left", "bottom"):
+                ax.spines[s].set_color("#cbd5e1")
+
+        fig, axes = plt.subplots(2, 3, figsize=(12.4, 6.6))
+        for ax, gene in zip(axes.flat, genes):
+            panel(ax, gene)
+            ax.set_ylabel("log2 FC", fontsize=8.5, color=DIM)
+        handles = [
+            Line2D([0], [0], marker="o", color="none", markerfacecolor=C_DATA,
+                   markersize=8, label="measured"),
+            Line2D([0], [0], marker="o", color="none", markeredgecolor=C_MODEL,
+                   markerfacecolor="none", markeredgewidth=1.8, markersize=8,
+                   label="simulated")]
+        fig.legend(handles=handles, loc="upper center", ncol=2, frameon=False,
+                   fontsize=10, bbox_to_anchor=(0.5, 1.005))
+        fig.suptitle(f"Reporter concordance — {subtitle}", fontsize=12.5,
+                     fontweight="bold", color=INK, x=0.09, ha="left", y=1.02)
+        fig.tight_layout(rect=(0, 0, 1, 0.96), h_pad=2.4, w_pad=2.2)
+        OUT_CAL.mkdir(parents=True, exist_ok=True)
+        for ext in ("png", "pdf"):
+            fig.savefig(OUT_CAL / f"{stem}.{ext}", dpi=200,
+                        bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        print(f"wrote {stem}.png/.pdf -> {OUT_CAL}", flush=True)
+
+    init = {k: jnp.asarray(p.init) for k, p in problem.params.items()}
+    render(init, "out-of-the-box", "reporter_concordance_oob")
+    fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
+    render(fit, "calibrated", "reporter_concordance_calibrated")
 
 
 # ── temporal (oob → calibrated log2FC vs data) ───────────────────────────
@@ -322,7 +350,7 @@ def fig_temporal(args):
             res = problem._scheduler.run(comp, t_span=(0.0, t_end),
                                          macro_dt=macro_dt,
                                          y0=comp.initial_state_vec(),
-                                         save_dt=macro_dt)
+                                         save_dt=0.05)
             trajs = jnp.stack([res.ys[..., i]
                                for i in problem._reporter_indices])
             return res.ts, trajs
@@ -339,7 +367,7 @@ def fig_temporal(args):
         cond, base = problem.arm_pairs[arm]
         data_times = sorted(problem.data[arm])
         genes = [r.gene_symbol for r in problem.reporters]
-        qt = jnp.arange(0.5, t_end + 1e-6, 0.5)
+        qt = jnp.arange(0.1, t_end + 1e-6, 0.1)
         lfc_oob = np.asarray(lfc_curve(problem, init, cond, base, qt))
         lfc_fit = np.asarray(lfc_curve(problem, fit, cond, base, qt))
         qt = np.concatenate([[0.0], np.asarray(qt)])
@@ -383,7 +411,7 @@ def fig_temporal(args):
 
     problem = build_problem()
     init = {k: jnp.asarray(p.init) for k, p in problem.params.items()}
-    fit = {k: jnp.asarray(v) for k, v in FIT.items()}
+    fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
     OUT_CAL.mkdir(parents=True, exist_ok=True)
     for arm, subtitle in arms.items():
         figure_for_arm(problem, init, fit, arm, subtitle)
@@ -501,7 +529,8 @@ def fig_before_after(args):
 
 
 FIGURES = {"schematic": fig_schematic, "trajectories": fig_trajectories,
-           "reporter-levels": fig_reporter_levels, "oob": fig_oob,
+           "reporter-levels": fig_reporter_levels,
+           "concordance": fig_concordance,
            "temporal": fig_temporal, "before-after": fig_before_after}
 
 

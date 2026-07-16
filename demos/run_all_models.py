@@ -26,8 +26,8 @@ matplotlib.use("Agg")  # non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 
-PLOT_DIR = os.path.join(os.path.dirname(__file__), "plots")
-os.makedirs(PLOT_DIR, exist_ok=True)
+from outdir import outdir
+PLOT_DIR = str(outdir("run_all_models"))
 
 saved_plots = []
 

@@ -319,10 +319,11 @@ class Calibrator:
         for s in range(steps):
             loss, grad = value_and_grad(params)
             lf = float(loss)
-            # `loss` is of `params` before this step's update, so `params`
-            # is the point that achieved it — the best-params candidate. With
-            # a validation loss, that held-out score, not the training loss,
-            # is the selection criterion.
+            # `loss`/`grad` are evaluated at `params` (before this step's
+            # update), so `params` is the point that achieved `lf`. Record and
+            # log this evaluated point — loss and params correspond — then take
+            # the step. With a validation loss, that held-out score, not the
+            # training loss, is the selection criterion.
             monitored = float(val_fn(params)) if val_fn else lf
             if val_fn:
                 history.val_losses.append(monitored)
@@ -331,14 +332,6 @@ class Calibrator:
                 self._save_checkpoint(best_params, best_loss, s)
             else:
                 no_improve += 1
-            if self._uses_plateau:
-                updates, opt_state = self.optimizer.update(
-                    grad, opt_state, params, value=loss
-                )
-            else:
-                updates, opt_state = self.optimizer.update(grad, opt_state)
-            params = optax.apply_updates(params, updates)
-            params = self._clamp(params)
             history.losses.append(lf)
             history.param_history.append(params)
             if self.verbose and (s % self.log_every == 0 or s == steps - 1):
@@ -355,6 +348,14 @@ class Calibrator:
                     if pieces:
                         msg += "  " + "  ".join(pieces)
                 log.info(msg)
+            if self._uses_plateau:
+                updates, opt_state = self.optimizer.update(
+                    grad, opt_state, params, value=loss
+                )
+            else:
+                updates, opt_state = self.optimizer.update(grad, opt_state)
+            params = optax.apply_updates(params, updates)
+            params = self._clamp(params)
             if (
                 self.early_stop_patience
                 and no_improve >= self.early_stop_patience
@@ -601,6 +602,30 @@ def _substitute_param(proc, field: str, value: Any):
     return eqx.tree_at(lambda p, pn=field: getattr(p, pn), proc, value)
 
 
+def gaussian_nll(
+    model: jnp.ndarray, data: jnp.ndarray, weight: jnp.ndarray
+) -> jnp.ndarray:
+    """Weighted-Gaussian negative log-likelihood of ``data`` given ``model``.
+
+    Both ``(n_reporter, n_timepoint)`` on the same log2-fold-change scale.
+    ``weight`` is per-entry precision (1/variance) — replicate precision or a
+    DESeq2/edgeR moderated SE for count data — so noisy genes count for less.
+    Non-finite ``data`` entries (gene absent at a timepoint) are masked out.
+    With ``weight ≡ 1`` this is exactly the masked mean-squared error, so the
+    default fit is unchanged.
+
+    This is the right likelihood when the *residual* on the log-ratio is
+    Gaussian (microarray, log-CPM). Raw counts are not Gaussian — their noise
+    is mean-dependent (Poisson/negative-binomial) — and want either a
+    variance-stabilised log2FC + precision weights fed here, or a count-native
+    likelihood that predicts absolute expression (not implemented).
+    """
+    mask = jnp.isfinite(data)
+    w = jnp.where(mask, weight, 0.0)
+    err2 = jnp.where(mask, w * (model - data) ** 2, 0.0)
+    return jnp.sum(err2) / jnp.maximum(jnp.sum(mask), 1.0)
+
+
 class CalibrationProblem:
     """Wire a composite + conditions + data + params into a calibration.
 
@@ -646,6 +671,16 @@ class CalibrationProblem:
     held_out_arms:
         Subset of ``arm_pairs`` keys excluded from the loss but
         evaluated in ``evaluate`` for held-out concordance.
+    likelihood:
+        ``(model, data, weight) -> scalar`` NLL over one arm's
+        ``(n_reporter, n_timepoint)`` block. Defaults to
+        :func:`gaussian_nll` (weighted MSE) — the right choice when the
+        residual on the log-ratio is Gaussian (microarray, log-CPM). Swap
+        for a count-native likelihood otherwise.
+    weights:
+        Optional per-reporter precision, same ``{arm: {t: series}}`` shape
+        as ``data`` (e.g. ``1/dataset.variance(cond, base)`` or DESeq2 SEs).
+        Absent → unit weights, so ``gaussian_nll`` reduces to plain MSE.
     t_end, macro_dt, scheduler_kwargs:
         Forwarded to ``Scheduler.run``.
     n_save:
@@ -669,6 +704,8 @@ class CalibrationProblem:
         macro_dt: float = 5.0,
         n_save: int = 6,
         prior_weight: float = 1.0,
+        likelihood: Callable | None = None,
+        weights: dict | None = None,
         scheduler_kwargs: dict | None = None,
         hallmark_registry: dict | None = None,
     ) -> None:
@@ -813,9 +850,29 @@ class CalibrationProblem:
         # to the same graph size (only the array length differs). A Python
         # loop here would unroll under JIT into O(n_reporters × n_timepoints)
         # nodes and blow up compile time.
+        # The loss is a negative log-likelihood of Δ_data given the model's
+        # Δ_sim. Default is a weighted Gaussian (weight = per-reporter
+        # precision); with unit weights it is the plain masked MSE. Swap in a
+        # different likelihood (e.g. count-based) via `likelihood`.
+        self.likelihood = (
+            likelihood if likelihood is not None else gaussian_nll
+        )
+        # Optional per-reporter precision, same {arm: {t: series}} shape as
+        # `data` (e.g. 1/variance from replicate spread or DESeq2 SEs). None →
+        # unit weights, so every reporter counts equally (the MSE default).
+        weights = weights or {}
+        weights = {
+            arm: (
+                {float(t): s for t, s in w.items()}
+                if isinstance(w, dict)
+                else {float(t_end): w}
+            )
+            for arm, w in weights.items()
+        }
         self._arm_times: dict[str, list[float]] = {}
         self._arm_query_times: dict[str, jnp.ndarray] = {}
         self._arm_data_matrix: dict[str, jnp.ndarray] = {}
+        self._arm_weight_matrix: dict[str, jnp.ndarray] = {}
         for arm, per_t in self.data.items():
             times = sorted(per_t.keys())
             self._arm_times[arm] = times
@@ -825,6 +882,16 @@ class CalibrationProblem:
                 [
                     [
                         float(per_t[t].get(r.gene_symbol, jnp.nan))
+                        for t in times
+                    ]
+                    for r in reporters
+                ]
+            )
+            per_w = weights.get(arm, {})
+            self._arm_weight_matrix[arm] = jnp.asarray(
+                [
+                    [
+                        float(per_w.get(t, {}).get(r.gene_symbol, 1.0))
                         for t in times
                     ]
                     for r in reporters
@@ -955,15 +1022,15 @@ class CalibrationProblem:
             )  # (n_rep, n_t)
             summ_b = self._reporter_summaries(ts_b, trajs_b, qt)
             lfc_sim = self._log2_fold_change(summ_c, summ_b)  # (n_rep, n_t)
-            # Δ_data is already a log2 fold-change (microarray), so the two
-            # are commensurable: MSE keeps magnitude and weighs every
-            # reporter's O(1) log-ratio comparably regardless of the
-            # observable's absolute scale (a 1e-4 pool and a 1e1 pool both
-            # contribute their fold-change, not their raw amplitude).
+            # The loss compares two log2 ratios, so Δ_data must be supplied as
+            # a log2 fold-change (the microarray demo already is; count data
+            # is log-normalized upstream). MSE then weighs every reporter's
+            # O(1) log-ratio comparably regardless of the observable's absolute
+            # scale (a 1e-4 pool and a 1e1 pool both contribute their
+            # fold-change, not their raw amplitude).
             delta_data = self._arm_data_matrix[arm]  # (n_rep, n_t)
-            mask = jnp.isfinite(delta_data)
-            err2 = jnp.where(mask, (lfc_sim - delta_data) ** 2, 0.0)
-            arm_losses.append(jnp.sum(err2) / jnp.maximum(jnp.sum(mask), 1.0))
+            weight = self._arm_weight_matrix[arm]  # (n_rep, n_t)
+            arm_losses.append(self.likelihood(lfc_sim, delta_data, weight))
         return jnp.mean(jnp.stack(arm_losses))
 
     def loss(self, param_values: dict[str, jnp.ndarray]) -> jnp.ndarray:

@@ -402,7 +402,7 @@ def flagship_results(block, fitted):
               - float(_ddb2_for_severity(hyb_p, 1.0 - 1e-3))) / 2e-3
         out[f"{alpha_y:g}"] = dict(
             alpha_y=alpha_y,
-            regime="pulsatile" if alpha_y < 1.1 else "sustained (calibrated)",
+            regime="pulsatile" if alpha_y < 1.1 else "sustained",
             severities=SEVERITIES, mech=mech, hybrid=hyb,
             grad_autodiff=g, grad_finite_diff=fd)
     return out
@@ -423,15 +423,24 @@ def flagship_figure(results):
                 label="mechanistic")
         ax.plot(r["severities"], r["hybrid"], "s--", color=C_H,
                 label="hybrid (NeuralODE)")
+        # De-stretch panels whose DDB2 barely varies (e.g. sustained): a tight
+        # auto-scale would magnify a sub-1% mech/hybrid gap into a visual chasm.
+        vals = list(r["mech"]) + list(r["hybrid"])
+        lo, hi = min(vals), max(vals)
+        if hi - lo < 0.06:
+            mid = 0.5 * (lo + hi)
+            ax.set_ylim(mid - 0.035, mid + 0.035)
+        else:
+            span = hi - lo  # lift the data off the axis floor with headroom
+            ax.set_ylim(lo - 0.25 * span, hi + 0.12 * span)
         ax.set_xlabel("Genomic Instability severity")
-        ax.set_ylabel(r"DDB2  $\sqrt{\langle x^2\rangle}$")
-        ax.set_title(f"α_y={r['alpha_y']:g} · {r['regime']}\n"
-                     f"∂DDB2/∂sev (hybrid) = {r['grad_autodiff']:+.4f}")
+        ax.set_ylabel("DDB2 readout")
+        ax.set_title(f"α_y = {r['alpha_y']:g}")
         ax.legend(frameon=False, fontsize=8)
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
-    fig.suptitle("Flagship swap: hybrid reproduces DDB2 and stays "
-                 "differentiable", fontweight="bold")
+    fig.suptitle("Hybrid composite reproduces the mechanistic DDB2 readout",
+                 fontweight="bold")
     fig.tight_layout()
     for ext in ("png", "pdf"):
         fig.savefig(OUT / f"flagship_ddb2.{ext}", dpi=160,

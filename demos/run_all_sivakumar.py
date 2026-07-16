@@ -83,7 +83,8 @@ axes[-1].set_xlabel("Time (hours)")
 fig.suptitle("Sivakumar2011 -- All 5 BioModels reproduced",
              fontsize=14, fontweight="bold", y=0.995)
 fig.tight_layout(rect=[0, 0, 1, 0.98])
-out = Path(__file__).parent / "sivakumar2011_all_models.png"
+from outdir import outdir
+out = outdir("run_all_sivakumar") / "all_models.png"
 fig.savefig(str(out), dpi=150)
 plt.close()
 print(f"\nPlot saved to {out}")

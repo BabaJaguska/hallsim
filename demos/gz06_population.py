@@ -110,9 +110,10 @@ def main():
     ap.add_argument("--t-end", type=float, default=120.0)
     ap.add_argument("--dt", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
+    from outdir import outdir
     ap.add_argument(
         "--out",
-        default=os.path.join(_REPO, "outputs/gz06_population.png"),
+        default=str(outdir("gz06_population") / "gz06_population.png"),
     )
     a = ap.parse_args()
 
