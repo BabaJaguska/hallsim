@@ -295,9 +295,26 @@ _ASSIGN_NUM = re.compile(
     r"([A-Za-z_]\w*)\s*=\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)"
 )
 
-_KEYWORDS_PARAM = {"par", "param", "parameter", "parameters", "p", "number", "num"}
+_KEYWORDS_PARAM = {
+    "par",
+    "param",
+    "parameter",
+    "parameters",
+    "p",
+    "number",
+    "num",
+}
 _KEYWORDS_INIT = {"init", "initial", "i"}
-_UNSUPPORTED = {"wiener", "global", "table", "special", "markov", "volt", "bndry", "bdry"}
+_UNSUPPORTED = {
+    "wiener",
+    "global",
+    "table",
+    "special",
+    "markov",
+    "volt",
+    "bndry",
+    "bdry",
+}
 
 
 class _ParsedXPP:
@@ -305,11 +322,11 @@ class _ParsedXPP:
 
     def __init__(self) -> None:
         self.states: list[str] = []
-        self.ode_src: list[str] = []            # parallel to states, XPP syntax
+        self.ode_src: list[str] = []  # parallel to states, XPP syntax
         self.inits: dict[str, float] = {}
-        self.params: dict[str, float] = {}      # insertion order preserved
+        self.params: dict[str, float] = {}  # insertion order preserved
         self.inter_names: list[str] = []
-        self.inter_src: list[str] = []          # fixed formulas + '!' vars, in order
+        self.inter_src: list[str] = []  # fixed formulas + '!' vars, in order
         self.aux_names: list[str] = []
         self.aux_src: list[str] = []
         self.func_names: list[str] = []
@@ -349,7 +366,9 @@ def _parse_xpp_text(text: str) -> _ParsedXPP:
         # translation, so every declared name is lowercased here to match.
 
         # dX/dt = ...
-        m = re.match(r"^d([A-Za-z_]\w*)\s*/\s*dt\s*=(.*)$", line, re.IGNORECASE)
+        m = re.match(
+            r"^d([A-Za-z_]\w*)\s*/\s*dt\s*=(.*)$", line, re.IGNORECASE
+        )
         if m:
             p.states.append(m.group(1).lower())
             p.ode_src.append(m.group(2).strip())
@@ -380,14 +399,18 @@ def _parse_xpp_text(text: str) -> _ParsedXPP:
                 p.inits[name.lower()] = float(val)
             continue
         if kw == "aux":
-            m = re.match(r"^aux\s+([A-Za-z_]\w*)\s*=(.*)$", line, re.IGNORECASE)
+            m = re.match(
+                r"^aux\s+([A-Za-z_]\w*)\s*=(.*)$", line, re.IGNORECASE
+            )
             if m:
                 p.aux_names.append(m.group(1).lower())
                 p.aux_src.append(m.group(2).strip())
             continue
 
         # user function:  f(a, b) = expr   (args are identifiers)
-        m = re.match(r"^([A-Za-z_]\w*)\s*\(([A-Za-z_][\w\s,]*)\)\s*=(.*)$", line)
+        m = re.match(
+            r"^([A-Za-z_]\w*)\s*\(([A-Za-z_][\w\s,]*)\)\s*=(.*)$", line
+        )
         if m:
             p.func_names.append(m.group(1).lower())
             p.func_args.append(
@@ -479,7 +502,9 @@ class XPPProcess(Process):
         for name, args, src in zip(
             self._func_names, self._func_args, self._func_py
         ):
-            ns[name] = eval(f"lambda {','.join(args)}: ({src})", ns)  # noqa: S307
+            ns[name] = eval(
+                f"lambda {','.join(args)}: ({src})", ns
+            )  # noqa: S307
         for name, src in zip(self._inter_names, self._inter_py):
             ns[name] = eval(src, ns)  # noqa: S307
         return ns
@@ -628,6 +653,10 @@ def process_from_xpp(
     object.__setattr__(
         proc,
         "timescale",
-        float(timescale) if timescale is not None else float(native_time_seconds),
+        (
+            float(timescale)
+            if timescale is not None
+            else float(native_time_seconds)
+        ),
     )
     return proc

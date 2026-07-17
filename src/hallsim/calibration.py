@@ -808,6 +808,11 @@ class CalibrationProblem:
 
         self.composite = composite
         self.reporters = reporters
+        from hallsim.reporter_wiring import validate_reporter_mappings
+
+        self.reporter_wiring = validate_reporter_mappings(reporters, composite)
+        for r in self.reporter_wiring.warnings:
+            log.warning("reporter wiring: %s", r.message)
         self.conditions = conditions
         # Trajectory-native: each arm's Δ_data is a {timepoint: Δseries}
         # map. A plain Series is the degenerate single-timepoint case —

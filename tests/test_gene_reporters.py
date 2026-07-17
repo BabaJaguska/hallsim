@@ -47,7 +47,9 @@ class TestZerophaseMean:
         qt = jnp.array([5.0, 10.0, 15.0])
         sm = zerophase_mean(2.0)(ts, y, query_times=qt)
         want = 2.0 + 0.05 * qt
-        assert jnp.allclose(sm, want, atol=0.05)  # ripple gone, DC tracked, no lag
+        assert jnp.allclose(
+            sm, want, atol=0.05
+        )  # ripple gone, DC tracked, no lag
 
     def test_reflection_beats_constant_pad_at_boundary(self):
         # Reflection padding keeps the first smoothed point near y[0] for a

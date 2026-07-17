@@ -191,9 +191,7 @@ def test_derivative_is_batched_and_differentiable(tmp_path):
 def test_reconciled_to_rescales_rate(tmp_path):
     # native unit = hours; canonical = seconds → rate scales by 1/3600
     src = "par k=1.0\nx'=-k*x\ndone\n"
-    proc = process_from_xpp(
-        _write(tmp_path, src), native_time_seconds=3600.0
-    )
+    proc = process_from_xpp(_write(tmp_path, src), native_time_seconds=3600.0)
     rec = proc.reconciled_to(1.0)
     d_native = proc.derivative(0.0, {"x": 1.0})["x"]
     d_canonical = rec.derivative(0.0, {"x": 1.0})["x"]
