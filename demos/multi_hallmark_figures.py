@@ -255,8 +255,8 @@ def fig_concordance(args):
     C_DATA, C_MODEL, INK, DIM, BAND = ("#2563eb", "#d97706", "#1f2937",
                                        "#6b7280", "#f1f5f9")
     problem = build_problem()
-    arms_order = ["DDIS_vs_ctrl", "RAPA_vs_DDIS", "RAS_vs_ctrl"]
-    short = {"DDIS_vs_ctrl": "DDIS", "RAPA_vs_DDIS": "RAPA",
+    arms_order = ["DDIS_vs_ctrl", "RAPA_vs_ctrl", "RAS_vs_ctrl"]
+    short = {"DDIS_vs_ctrl": "DDIS", "RAPA_vs_ctrl": "RAPA",
              "RAS_vs_ctrl": "RAS"}
     cond = [(a, t) for a in arms_order for t in sorted(problem.data[a])]
     cond_labels = [f"{short[a]}\nD{int(t)}" for a, t in cond]
@@ -333,47 +333,21 @@ def fig_concordance(args):
 def fig_temporal(args):
     from multi_hallmark_calibrate import build_problem
     C_OOB, C_FIT, C_DATA, grid_c = "#9a9a95", "#2a78d6", "#0b0b0b", "#e6e6e2"
-    arms = {"DDIS_vs_ctrl": "DDIS vs control  (etoposide, fit arm)",
-            "RAPA_vs_DDIS": "rapamycin vs DDIS  (held-out intervention)",
+    arms = {"DDIS_vs_ctrl": "DDIS  (etoposide, fit arm)",
+            "RAPA_vs_ctrl": "rapamycin  (etoposide + rapa @ day 2, held-out)",
             "RAS_vs_ctrl":
-            "RAS vs control  (oncogene-induced senescence, held-out)"}
-    macro_dt, t_end = 1.0, 14.0
-
-    def lfc_curve(problem, params, cond, base, qt):
-        sub = problem._substitute(problem.composite.processes, params)
-
-        def run(cname):
-            procs = apply_hallmarks(sub, problem.conditions[cname].hallmarks)
-            comp = Composite(processes=procs,
-                             topology=problem.composite.topology,
-                             validate=False, semantic_validation=False)
-            res = problem._scheduler.run(comp, t_span=(0.0, t_end),
-                                         macro_dt=macro_dt,
-                                         y0=comp.initial_state_vec(),
-                                         save_dt=0.05)
-            trajs = jnp.stack([res.ys[..., i]
-                               for i in problem._reporter_indices])
-            return res.ts, trajs
-
-        ts_c, tr_c = run(cond)
-        ts_b, tr_b = run(base)
-        sc = problem._reporter_summaries(ts_c, tr_c, qt)
-        sb = problem._reporter_summaries(ts_b, tr_b, qt)
-        signs = jnp.asarray([float(r.sign) for r in problem.reporters])[:, None]
-        return signs * (jnp.log2(jnp.maximum(sc, 1e-12))
-                        - jnp.log2(jnp.maximum(sb, 1e-12)))
+            "RAS  (oncogene-induced senescence, held-out)"}
+    t_end = 14.0
 
     def figure_for_arm(problem, init, fit, arm, subtitle):
-        cond, base = problem.arm_pairs[arm]
         data_times = sorted(problem.data[arm])
         genes = [r.gene_symbol for r in problem.reporters]
-        qt = jnp.arange(0.5, t_end + 1e-6, 0.1)
-        lfc_oob = np.asarray(lfc_curve(problem, init, cond, base, qt))
-        lfc_fit = np.asarray(lfc_curve(problem, fit, cond, base, qt))
-        qt = np.concatenate([[0.0], np.asarray(qt)])
-        z = np.zeros((lfc_oob.shape[0], 1))
-        lfc_oob = np.concatenate([z, lfc_oob], axis=1)
-        lfc_fit = np.concatenate([z, lfc_fit], axis=1)
+        # model_lfc reproduces exactly what the loss fits: within-arm
+        # (X_t/X_0) fold change, with the arm's timed interventions applied.
+        # At t=0 it is 0 by construction, matching the measured day-0 anchor.
+        qt = np.arange(0.0, t_end + 1e-6, 0.1)
+        lfc_oob = np.asarray(problem.model_lfc(init, arm, jnp.asarray(qt)))
+        lfc_fit = np.asarray(problem.model_lfc(fit, arm, jnp.asarray(qt)))
         fig, axes = plt.subplots(2, 3, figsize=(11, 6.4), sharex=True)
         for i, (ax, gene) in enumerate(zip(axes.ravel(), genes)):
             ax.axhline(0, color=grid_c, lw=1.2, zorder=0)
@@ -420,16 +394,30 @@ def fig_temporal(args):
 
 # ── before-after (standalone vs composite) ───────────────────────────────
 def fig_before_after(args):
+    """Standalone-vs-composite check on the composite the PIPELINE runs.
+
+    Constituents and composite are both built from the calibration
+    parameterization (``--params init``/``fit``) — not the raw SBML
+    defaults — so this verifies that coupling doesn't distort the model
+    actually calibrated. Constituent BEFORE ≈ composite AFTER means the
+    coupling only adds the intended edges.
+    """
+    from multi_hallmark_calibrate import build_problem
     from hallsim.sbml_import import process_from_sbml
     from hallsim.models.multi_hallmark import (
-        build_multi_hallmark_composite, CANONICAL_TIME_SECONDS, DP14_SBML_PATH,
-        DP14_IRRADIATION_RATE_NAME, DP14_IRRADIATION_RATE_DEFAULT,
-        DP14_MTOR_PHOS_RATE_NAME, DP14_MTOR_PHOS_RATE_DEFAULT, GZ06_SBML_PATH,
-        GZ06_PSI_NAME, GZ06_PSI_BASAL_DEFAULT, GZ06_PSI_FULL, NFKB_SBML_PATH)
+        CANONICAL_TIME_SECONDS, DP14_SBML_PATH, GZ06_SBML_PATH, NFKB_SBML_PATH)
     out = ROOT / "outputs" / "multi_hallmark_before_after"
-    t_end, macro_dt, save_dt = 4.0, 0.1, 0.001
-    hallmarks = ("Genomic Instability", "Deregulated Nutrient Sensing")
-    hrs, mins = CANONICAL_TIME_SECONDS / 3600.0, CANONICAL_TIME_SECONDS / 60.0
+    # save_dt is decoupled from macro_dt: sample fine enough for the fastest
+    # row (NF-kB, ~100 min period) without changing the solve.
+    t_end, macro_dt, save_dt = float(getattr(args, "t_end", 14.0)), 0.1, 0.001
+    problem = build_problem()
+    if getattr(args, "params", "init") == "fit":
+        pvals, tag = load_fit(), "calibrated fit"
+    else:
+        pvals = {k: float(p.init) for k, p in problem.params.items()}
+        tag = "calibration init (out-of-the-box)"
+    pj = {k: jnp.asarray(v) for k, v in pvals.items()}
+    cond, base = problem.arm_pairs["DDIS_vs_ctrl"]  # DDIS, control
     dp14_vars = [("dp14/mTORC1_pS2448", "mTORC1", "#6d28d9"),
                  ("dp14/DNA_damage", "DNA damage", "#b91c1c"),
                  ("dp14/ROS", "ROS", "#ca8a04"),
@@ -440,44 +428,42 @@ def fig_before_after(args):
                  ("nfkb/IkBat", "IkBa transcript", "#0e7490"),
                  ("nfkb/NFkBn", "NF-kB nuclear", "#6d28d9")]
 
-    def solo(proc, te, n=1200):
+    # Constituents and composite come from the pipeline's own substituted
+    # processes; nothing is a hand-passed parameter value.
+    def procs_of(cname):
+        sub = problem._substitute(problem.composite.processes, pj)
+        return apply_hallmarks(sub, problem.conditions[cname].hallmarks)
+
+    def solo(proc, te, sdt):
         comp = Composite({proc._name: proc}, topology={}, validate=False,
                          semantic_validation={"check_semantics": False})
-        r = Scheduler().run(comp, (0.0, te), macro_dt=te, save_dt=te / n)
+        r = Scheduler().run(comp, (0.0, te), macro_dt=te, save_dt=sdt)
         return np.asarray(r.ts), r
 
-    def solo_dp14(sev):
-        dp = process_from_sbml(str(DP14_SBML_PATH), name="dp14", parameters={
-            DP14_MTOR_PHOS_RATE_NAME: DP14_MTOR_PHOS_RATE_DEFAULT,
-            DP14_IRRADIATION_RATE_NAME: DP14_IRRADIATION_RATE_DEFAULT})
-        proc = apply_hallmarks({"dp14": dp},
-                               dict.fromkeys(hallmarks, sev))["dp14"]
-        return solo(proc, t_end)
+    def solo_of(name, cname, te, sdt):
+        return solo(procs_of(cname)[name], te, sdt)
 
-    def solo_gz06(psi):
-        gz = process_from_sbml(str(GZ06_SBML_PATH), name="gz06",
-                               parameters={GZ06_PSI_NAME: psi})
-        return solo(gz, t_end * hrs)
+    # Raw model at its published SBML defaults — no calibration, no
+    # hallmark. A permanent reference so any reparametrization break shows
+    # up as a divergence from this column.
+    def solo_default(sbml_path, nm, te, sdt):
+        p = process_from_sbml(str(sbml_path), name=nm).reconciled_to(
+            CANONICAL_TIME_SECONDS)
+        return solo(p, te, sdt)
 
-    def solo_nfkb():
-        return solo(process_from_sbml(str(NFKB_SBML_PATH), name="nfkb"),
-                    t_end * CANONICAL_TIME_SECONDS)
-
-    def run_comp(sev):
-        base = build_multi_hallmark_composite(validate=False)
-        procs = apply_hallmarks(base.processes, dict.fromkeys(hallmarks, sev))
-        comp = Composite(procs, topology=base.topology, validate=False,
+    def run_comp(cname):
+        comp = Composite(procs_of(cname), topology=problem.composite.topology,
+                         validate=False,
                          semantic_validation={"check_semantics": False})
         r = Scheduler().run(comp, (0.0, t_end), macro_dt=macro_dt,
                             save_dt=save_dt)
         return np.asarray(r.ts), r
 
     def panel(ax, series, vars_, xlim, logy=False):
-        for cond, ls in (("control", "-"), ("DDIS", "--")):
-            t, res = series[cond]
+        for label_c, (t, res), ls in series:
             for path, label, col in vars_:
                 ax.plot(t, np.asarray(res.get(path)), ls, color=col, lw=1.4,
-                        label=f"{label} · {cond}" if ls == "-" else None)
+                        label=f"{label} · {label_c}" if ls == "-" else None)
         ax.set_xlim(*xlim)
         if logy:
             ax.set_yscale("log")
@@ -486,41 +472,51 @@ def fig_before_after(args):
             ax.spines[s].set_visible(False)
 
     out.mkdir(parents=True, exist_ok=True)
-    ctrl_t, ctrl = run_comp(0.0)
-    ddis_t, ddis = run_comp(1.0)
-    ctrl_h, ddis_h = ctrl_t * hrs, ddis_t * hrs
-    ctrl_m, ddis_m = ctrl_t * mins, ddis_t * mins
-    fig, ax = plt.subplots(3, 2, figsize=(13, 11))
-    ax[0, 0].set_title("BEFORE — standalone", fontsize=12, fontweight="bold")
-    ax[0, 1].set_title("AFTER — in composite", fontsize=12, fontweight="bold")
-    panel(ax[0, 0], {"control": solo_dp14(0.0), "DDIS": solo_dp14(1.0)},
+    ct, ctrl = run_comp(base)
+    dt, ddis = run_comp(cond)
+    # gz06/nfkb have no coupled input standalone, so they're condition-
+    # independent: one basal line. Both over the full run — gz06's DDIS
+    # limit cycle has a delayed onset (psi ramps through its Hopf over
+    # days), invisible in a short window.
+    gz = solo_of("gz06", base, t_end, save_dt)
+    nf = solo_of("nfkb", base, t_end, save_dt)
+    # Col 0: raw models at SBML defaults (reparametrization reference).
+    dp0 = solo_default(DP14_SBML_PATH, "dp14", t_end, save_dt)
+    gz0 = solo_default(GZ06_SBML_PATH, "gz06", t_end, save_dt)
+    nf0 = solo_default(NFKB_SBML_PATH, "nfkb", t_end, save_dt)
+
+    fig, ax = plt.subplots(3, 3, figsize=(19, 11))
+    ax[0, 0].set_title("ORIGINAL — SBML defaults", fontsize=12,
+                       fontweight="bold")
+    ax[0, 1].set_title("BEFORE — standalone (calibrated)", fontsize=12,
+                       fontweight="bold")
+    ax[0, 2].set_title("AFTER — in composite", fontsize=12, fontweight="bold")
+    panel(ax[0, 0], [("default", dp0, "-")], dp14_vars, (0, t_end), logy=True)
+    panel(ax[0, 1], [("control", solo_of("dp14", base, t_end, save_dt), "-"),
+                     ("DDIS", solo_of("dp14", cond, t_end, save_dt), "--")],
           dp14_vars, (0, t_end), logy=True)
-    panel(ax[0, 1], {"control": (ctrl_t, ctrl), "DDIS": (ddis_t, ddis)},
+    panel(ax[0, 2], [("control", (ct, ctrl), "-"), ("DDIS", (dt, ddis), "--")],
           dp14_vars, (0, t_end), logy=True)
-    for a in ax[0]:
-        a.set_xlabel("time (days)")
     ax[0, 0].set_ylabel("DP14\nspecies value", fontsize=11)
-    panel(ax[1, 0], {"control": solo_gz06(GZ06_PSI_BASAL_DEFAULT),
-                     "DDIS": solo_gz06(GZ06_PSI_FULL)}, gz06_vars, (0, 48))
-    panel(ax[1, 1], {"control": (ctrl_h, ctrl), "DDIS": (ddis_h, ddis)},
-          gz06_vars, (0, 48))
-    for a in ax[1]:
-        a.set_xlabel("time (hours)")
+    panel(ax[1, 0], [("default", (gz0[0], gz0[1]), "-")], gz06_vars, (0, t_end))
+    panel(ax[1, 1], [("standalone", (gz[0], gz[1]), "-")],
+          gz06_vars, (0, t_end))
+    panel(ax[1, 2], [("control", (ct, ctrl), "-"),
+                     ("DDIS", (dt, ddis), "--")], gz06_vars, (0, t_end))
     ax[1, 0].set_ylabel("GZ06\np53 / Mdm2", fontsize=11)
-    nf = solo_nfkb()
-    nf_t = nf[0] / 60.0
-    panel(ax[2, 0], {"control": (nf_t, nf[1]), "DDIS": (nf_t, nf[1])},
-          nfkb_vars, (0, 600))
-    panel(ax[2, 1], {"control": (ctrl_m, ctrl), "DDIS": (ddis_m, ddis)},
-          nfkb_vars, (0, 600))
-    for a in ax[2]:
-        a.set_xlabel("time (minutes)")
+    panel(ax[2, 0], [("default", (nf0[0], nf0[1]), "-")], nfkb_vars, (0, t_end))
+    panel(ax[2, 1], [("standalone", (nf[0], nf[1]), "-")],
+          nfkb_vars, (0, t_end))
+    panel(ax[2, 2], [("control", (ct, ctrl), "-"),
+                     ("DDIS", (dt, ddis), "--")], nfkb_vars, (0, t_end))
     ax[2, 0].set_ylabel("NFKB\nIKK / IkBa / NF-kB", fontsize=11)
     for row in ax:
+        for a in row:
+            a.set_xlabel("time (days)")
         row[0].legend(loc="best", fontsize=7, frameon=False)
-    fig.suptitle("Multi-hallmark composite — every component before vs after "
-                 "coupling  (solid = control, dashed = DDIS)", fontsize=13,
-                 fontweight="bold", y=0.995)
+    fig.suptitle(f"Every component: SBML defaults → calibrated standalone → "
+                 f"in composite  ·  {tag}  (solid = control, dashed = DDIS)",
+                 fontsize=13, fontweight="bold", y=0.995)
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     for ext in ("png", "pdf"):
         fig.savefig(out / f"before_after.{ext}", dpi=140, bbox_inches="tight",
@@ -537,6 +533,11 @@ FIGURES = {"schematic": fig_schematic, "trajectories": fig_trajectories,
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("figure", choices=list(FIGURES) + ["all"])
+    ap.add_argument("--t-end", type=float, default=14.0,
+                    help="day horizon for the before-after figure.")
+    ap.add_argument("--params", choices=("init", "fit"), default="init",
+                    help="before-after parameterization: calibration init "
+                         "(out-of-the-box) or the saved fit.")
     args = ap.parse_args()
     todo = FIGURES.values() if args.figure == "all" else [FIGURES[args.figure]]
     for fn in todo:

@@ -164,6 +164,29 @@ DP14_MTOR_PHOS_RATE_NAME = "mTORC1_S2448_phos_by_AA_n_Akt_pS473"
 DP14_IRRADIATION_RATE_DEFAULT = 9237.72311545872
 DP14_IRRADIATION_RATE_NAME = "DNA_damaged_by_irradiation"
 
+# Etoposide dose window (days), composite time. GSE248823 protocol:
+# "etoposide treatment at 20µM for two 2 days; cells were then washed and
+# incubated with fresh medium without drug." So the DDIS damage input is a
+# 2-day dose pulse, not a sustained 14-day exposure — delivered via
+# `SBMLProcess.with_pulse_window` on the `Irradiation` boundary input.
+# After washout DNA_damage decays (DNA_repair) but the senescence phenotype
+# persists (ROS-sustained damage + downstream network).
+#
+# Dose at [0, 2] assumes reporter days count from experiment start (day 0 =
+# etoposide applied) — the common convention; the fold-change data has only
+# d7/d14 (no d0), so nothing pins it further. If the source paper counts
+# reporter days from washout instead, shift the *read* timepoints +2 (to
+# 9/16); the dose window stays [0, 2].
+DDIS_ETOPOSIDE_DOSE_WINDOW = (0.0, 2.0)
+DP14_IRRADIATION_INPUT_NAME = "Irradiation"
+
+# Rapamycin is added to fresh medium at washout (GSE248823: "rapamycin was
+# added to fresh medium ... just before use"), i.e. the end of the etoposide
+# dose window — so the mTOR-suppression intervention starts at day 2, not t=0.
+# The rapamycin arm is identical to DDIS until this day; a calibration
+# ParamStep on the mTOR rate constant delivers the timed drop.
+RAPA_INTERVENTION_DAY = DDIS_ETOPOSIDE_DOSE_WINDOW[1]
+
 # GZ06's damage-signal parameter. Geva-Zatorsky 2006 calibrated their
 # p53-Mdm2 oscillator with ψ representing the damage stimulus; ψ ≈ 1 is
 # the "full irradiation" reference.
@@ -249,7 +272,11 @@ def build_multi_hallmark_composite(*, validate: bool = True):
                 DP14_MTOR_PHOS_RATE_NAME: DP14_MTOR_PHOS_RATE_DEFAULT,
                 DP14_IRRADIATION_RATE_NAME: DP14_IRRADIATION_RATE_DEFAULT,
             },
-        ).reconciled_to(CANONICAL_TIME_SECONDS),
+        )
+        .reconciled_to(CANONICAL_TIME_SECONDS)
+        .with_pulse_window(
+            DP14_IRRADIATION_INPUT_NAME, *DDIS_ETOPOSIDE_DOSE_WINDOW
+        ),
         "nfkb": nfkb,
         "gz06": gz06,
         # mTORC1 → IKK crosstalk edge: couples DP14's nutrient-sensing

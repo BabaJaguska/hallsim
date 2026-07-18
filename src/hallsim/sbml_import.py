@@ -178,16 +178,9 @@ def _precheck_sbml_supported(xml_path: str) -> list[str]:
 
     issues: list[str] = []
 
-    n_events = model.getNumEvents()
-    if n_events > 0:
-        ids = [
-            model.getEvent(i).getId() or "<unnamed>" for i in range(n_events)
-        ]
-        issues.append(
-            f"contains {n_events} <event> element(s) "
-            f"(ids: {', '.join(ids)}); discrete state changes are not "
-            f"translated by sbmltoodejax"
-        )
+    # <event> elements are translated separately (hallsim.sbml_events) and
+    # stripped from the copy sbmltoodejax generates from, so they are not a
+    # blocker here.
 
     # Mirror sbmltoodejax's identifier-resolution path: serialize each
     # math AST to infix via libsbml (the same conversion sbmltoodejax
@@ -325,6 +318,72 @@ class SBMLProcess(Process):
     # (pure metadata) so it round-trips untouched through the ``eqx.tree_at``
     # substitutions the hallmark / Calibrator paths apply to `parameters`.
     _param_drivers: tuple = eqx.field(static=True, default=())
+    # Translated SBML <event> elements as EVENT processes (see
+    # hallsim.sbml_events). Static metadata; expand into a composite with
+    # ``hallsim.sbml_events.expand_events``. Empty for event-free models.
+    _events: tuple = eqx.field(static=True, default=())
+    # Boundary inputs delivered as a bounded dose pulse:
+    # ``((input_name, t_start, t_end), ...)``. The input holds its
+    # ``parameters`` value while composite time ``t_start <= t < t_end``,
+    # else 0 — a dose-then-washout protocol (e.g. etoposide at [-2, 0],
+    # washout at day 0) instead of a sustained exposure.
+    _pulse_windows: tuple = eqx.field(static=True, default=())
+    # SBML constants delivered as a one-time step at a threshold time:
+    # ``((param_name, t_step, value_before), ...)``. The constant holds
+    # ``value_before`` while composite time ``t < t_step`` and its configured
+    # ``parameters`` value once ``t >= t_step`` — a timed intervention (e.g.
+    # rapamycin added at washout day 2 drops the mTOR rate) instead of a
+    # severity applied for the whole trajectory.
+    _param_steps: tuple = eqx.field(static=True, default=())
+
+    def with_param_step(
+        self, param_name: str, t_step: float, value_before: float
+    ) -> "SBMLProcess":
+        """Return a copy whose SBML constant ``param_name`` steps at
+        ``t_step``: it holds ``value_before`` while ``t < t_step`` and its
+        configured ``parameters[param_name]`` value once ``t >= t_step``.
+        ``t_step`` is in composite time. Use for a timed pharmacological
+        intervention where the pre-intervention level differs from the
+        (severity-set) post-intervention level."""
+        if param_name not in self._param_names:
+            raise KeyError(
+                f"{param_name!r} is not an SBML constant on {self._name!r}; "
+                f"available: {sorted(self._param_names)}"
+            )
+        import copy
+
+        new = copy.copy(self)
+        object.__setattr__(
+            new,
+            "_param_steps",
+            self._param_steps
+            + ((param_name, float(t_step), float(value_before)),),
+        )
+        return new
+
+    def with_pulse_window(
+        self, input_name: str, t_start: float, t_end: float
+    ) -> "SBMLProcess":
+        """Return a copy that delivers boundary input ``input_name`` as a
+        pulse: its ``parameters`` value while ``t_start <= t < t_end``, else
+        0. ``input_name`` must be a boundary input (in ``_w_names``). The
+        window is in composite time, so a dose at ``[-2, 0]`` needs the run
+        to start at (or before) ``-2``."""
+        if input_name not in self._w_names:
+            raise KeyError(
+                f"{input_name!r} is not a boundary input on {self._name!r}; "
+                f"available: {sorted(self._w_names)}"
+            )
+        import copy
+
+        new = copy.copy(self)
+        object.__setattr__(
+            new,
+            "_pulse_windows",
+            self._pulse_windows
+            + ((input_name, float(t_start), float(t_end)),),
+        )
+        return new
 
     def with_param_driver(
         self,
@@ -414,8 +473,18 @@ class SBMLProcess(Process):
         # was modified from its SBML default.
         if self._param_indexes:
             indexes = jnp.asarray(self._param_indexes)
-            values = jnp.asarray(
-                [self.parameters[n] for n in self._param_names]
+            steps = {n: (ts, v0) for n, ts, v0 in self._param_steps}
+            values = jnp.stack(
+                [
+                    (
+                        jnp.where(
+                            t >= steps[n][0], self.parameters[n], steps[n][1]
+                        )
+                        if n in steps
+                        else jnp.asarray(self.parameters[n], dtype=float)
+                    )
+                    for n in self._param_names
+                ]
             )
             c = self._c.at[indexes].set(values)
         else:
@@ -475,7 +544,22 @@ class SBMLProcess(Process):
         # severity-driven exposure wins over the source model's transient.
         if self._w_indexes:
             w_indexes = jnp.asarray(self._w_indexes)
-            w_values = jnp.asarray([self.parameters[n] for n in self._w_names])
+            windows = {n: (ts, te) for n, ts, te in self._pulse_windows}
+            w_values = jnp.stack(
+                [
+                    (
+                        self.parameters[n]
+                        * jnp.where(
+                            (t >= windows[n][0]) & (t < windows[n][1]),
+                            1.0,
+                            0.0,
+                        )
+                        if n in windows
+                        else jnp.asarray(self.parameters[n], dtype=float)
+                    )
+                    for n in self._w_names
+                ]
+            )
             w = w.at[..., w_indexes].set(w_values)
 
         if is_batched:
@@ -715,6 +799,32 @@ def _extract_native_time_seconds(xml_path: str) -> float:
     return float(seconds)
 
 
+def _strip_events(sbml_path: str) -> str:
+    """Write an event-free copy of the SBML for sbmltoodejax.
+
+    Events carry no ODE-core information (they only impose discrete state
+    changes, imported separately by :mod:`hallsim.sbml_events`), so
+    removing them lets the continuous model generate. Returns the original
+    path unchanged when there are no events.
+    """
+    import os
+
+    import libsbml
+
+    doc = libsbml.SBMLReader().readSBMLFromFile(str(sbml_path))
+    model = doc.getModel()
+    if model is None or model.getNumEvents() == 0:
+        return sbml_path
+    while model.getNumEvents() > 0:
+        model.removeEvent(0)
+    cache_dir = os.path.expanduser("~/.cache/hallsim/converted")
+    os.makedirs(cache_dir, exist_ok=True)
+    base = os.path.basename(sbml_path)
+    out_path = os.path.join(cache_dir, f"noevents_{base}")
+    libsbml.writeSBMLToFile(doc, out_path)
+    return out_path
+
+
 def _load_local_sbml(sbml_path: str):
     """Load a local SBML XML file via sbmltoodejax.
 
@@ -733,6 +843,9 @@ def _load_local_sbml(sbml_path: str):
     # Flatten features that sbmltoodejax can't translate but libsbml
     # knows how to expand (currently: user-defined function definitions).
     sbml_path = _preprocess_sbml(sbml_path)
+    # Events are imported separately (hallsim.sbml_events); strip them so
+    # the ODE core generates cleanly.
+    sbml_path = _strip_events(sbml_path)
 
     issues = _precheck_sbml_supported(sbml_path)
     if issues:
@@ -1112,5 +1225,22 @@ def process_from_sbml(
         "timescale",
         float(timescale) if timescale is not None else native_time_seconds,
     )
+
+    # Translate SBML <event> elements (stripped from the ODE core above)
+    # into EVENT processes. Expand into a composite via
+    # hallsim.sbml_events.expand_events(proc).
+    from hallsim.sbml_events import translate_events
+
+    events = translate_events(
+        _preprocess_sbml(xml_path), species_names, params_dict, name
+    )
+    object.__setattr__(proc, "_events", tuple(events))
+    if events:
+        log.info(
+            "%s: imported %d SBML event(s); compose with "
+            "sbml_events.expand_events(proc).",
+            name,
+            len(events),
+        )
 
     return proc

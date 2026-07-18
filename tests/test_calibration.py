@@ -570,3 +570,83 @@ class TestCalibrationProblemEndToEnd:
         assert jnp.isfinite(v) and v.shape == ()
         results = problem.evaluate({"rate": jnp.asarray(0.2)})
         assert set(results["high_vs_ctrl"]) == {2.0, 5.0}
+
+
+class TestNormalizationModes:
+    """The three loss-reference modes: baseline (X_t/X_0), paired
+    (X_cond,t/X_base,t), raw (X_t, no reference)."""
+
+    def _problem(self, normalization):
+        import pandas as pd
+
+        from hallsim.calibration import (
+            CalibrationProblem,
+            Condition,
+            ParameterRef,
+        )
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter
+        from hallsim.process import Port, PortRole, Process
+
+        class Decay(Process):
+            rate: float = 0.1
+
+            def ports_schema(self):
+                # x(0)=2 (≠1) so baseline (÷x₀) and raw (÷1) differ — at x₀=1
+                # log2(x₀)=0 collapses the two modes.
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=2.0, units="uM")
+                }
+
+            def derivative(self, t, state):
+                return {"x": -self.rate * state["x"]}
+
+        comp = Composite(
+            processes={"decay": Decay()},
+            topology={"decay": {"x": "pool/x"}},
+            validate=False,
+            semantic_validation=False,
+        )
+        reporters = [GeneReporter(observable="pool/x", gene_symbol="GENE_X")]
+        return CalibrationProblem(
+            composite=comp,
+            reporters=reporters,
+            conditions={
+                "ctrl": Condition("ctrl", {}),
+                "high": Condition("high", {}),
+            },
+            data={"high_vs_ctrl": {5.0: pd.Series({"GENE_X": -0.5})}},
+            arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
+            params={
+                "rate": ParameterRef(
+                    process_name="decay", field="rate", init=0.2
+                )
+            },
+            fit_arms=["high_vs_ctrl"],
+            normalization=normalization,
+            t_end=5.0,
+            macro_dt=1.0,
+            n_save=6,
+        )
+
+    def test_each_mode_finite(self):
+        for mode in ("baseline", "paired", "raw"):
+            v = self._problem(mode).loss({"rate": jnp.asarray(0.2)})
+            assert jnp.isfinite(v) and v.shape == ()
+
+    def test_modes_are_distinct(self):
+        # ctrl and high share dynamics (no hallmarks), so paired's ratio is
+        # exactly 1 (lfc 0) while baseline (÷ t=0) and raw (no ÷) are not — the
+        # three branches must produce different losses.
+        p = {"rate": jnp.asarray(0.2)}
+        vals = {
+            m: float(self._problem(m).loss(p))
+            for m in ("baseline", "paired", "raw")
+        }
+        assert vals["paired"] != vals["baseline"]
+        assert vals["paired"] != vals["raw"]
+        assert vals["baseline"] != vals["raw"]
+
+    def test_invalid_mode_rejected(self):
+        with pytest.raises(ValueError, match="normalization must be"):
+            self._problem("cross_arm")

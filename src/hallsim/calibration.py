@@ -503,6 +503,32 @@ def default_clamp(value: float) -> tuple[float, float]:
 
 
 @dataclass(frozen=True)
+class ParamStep:
+    """A timed SBML-constant intervention on one process in a condition.
+
+    Represents a pharmacological intervention delivered partway through the
+    trajectory (e.g. rapamycin added at washout): the constant holds
+    ``value_before`` until ``t_step`` and its condition-configured (hallmark-
+    set) value afterwards. Applied after :func:`apply_hallmarks` via
+    :meth:`hallsim.sbml_import.SBMLProcess.with_param_step`, so the severity
+    sets the post-intervention level and this supplies the pre-intervention
+    level and the switch time.
+    """
+
+    process_name: str
+    param_name: str
+    t_step: float
+    value_before: float
+
+    def apply(self, processes: dict) -> dict:
+        out = dict(processes)
+        out[self.process_name] = out[self.process_name].with_param_step(
+            self.param_name, self.t_step, self.value_before
+        )
+        return out
+
+
+@dataclass(frozen=True)
 class Condition:
     """A named experimental arm — a hallmark severity profile.
 
@@ -517,12 +543,17 @@ class Condition:
         Human-readable label, e.g. ``"DDIS"``.
     hallmarks:
         ``{hallmark_name: severity}`` passed to :func:`apply_hallmarks`.
+    interventions:
+        Timed :class:`ParamStep` interventions applied after the hallmark
+        severities — for a pharmacological effect that starts partway through
+        the trajectory rather than a severity held for its whole duration.
     description:
         Optional notes for the report.
     """
 
     name: str
     hallmarks: dict[str, float]
+    interventions: tuple = ()
     description: str = ""
 
 
@@ -671,6 +702,14 @@ class CalibrationProblem:
     held_out_arms:
         Subset of ``arm_pairs`` keys excluded from the loss but
         evaluated in ``evaluate`` for held-out concordance.
+    normalization:
+        What each reporter value is compared against in the loss.
+        ``"baseline"`` (default) — the arm's own t=0, i.e. the model
+        reproduces X_t/X_0 fold-change-from-day-0 (supply ``data`` as
+        log2(X_t/X_0)). ``"paired"`` — the paired baseline condition at
+        matched t, a cross-arm contrast (``data`` = log2(X_cond,t/X_base,t)).
+        ``"raw"`` — no reference; the loss fits sign·log2(reporter) directly,
+        for a target that is an absolute (log) value rather than a comparison.
     likelihood:
         ``(model, data, weight) -> scalar`` NLL over one arm's
         ``(n_reporter, n_timepoint)`` block. Defaults to
@@ -700,6 +739,7 @@ class CalibrationProblem:
         params: dict[str, ParameterRef],
         fit_arms: list[str],
         held_out_arms: list[str] | None = None,
+        normalization: str = "baseline",
         t_end: float = 25.0,
         macro_dt: float = 5.0,
         n_save: int = 6,
@@ -826,6 +866,12 @@ class CalibrationProblem:
             for arm, d in data.items()
         }
         self.arm_pairs = arm_pairs
+        if normalization not in ("baseline", "paired", "raw"):
+            raise ValueError(
+                "normalization must be 'baseline', 'paired', or 'raw'; "
+                f"got {normalization!r}"
+            )
+        self.normalization = normalization
         self.params = params
         self.prior_weight = prior_weight
         self.fit_arms = fit_arms
@@ -935,6 +981,8 @@ class CalibrationProblem:
         from hallsim.hallmarks import apply_hallmarks
 
         procs = apply_hallmarks(processes, condition.hallmarks)
+        for iv in condition.interventions:
+            procs = iv.apply(procs)
         return self._Composite(
             processes=procs,
             topology=self.composite.topology,
@@ -986,6 +1034,62 @@ class CalibrationProblem:
 
     # ── Loss / fit / evaluate ─────────────────────────────────────
 
+    def _arm_reference(self, run_for, arm: str, qt):
+        """``(summ_c, summ_b)`` for one arm under the configured
+        ``normalization`` — the two reporter summaries whose log2 ratio is the
+        arm's fold change. Single source of truth for the normalization,
+        shared by :meth:`data_loss`, :meth:`model_lfc`, and :meth:`evaluate`.
+        ``run_for(cond_name) -> (ts, reporter_trajs)`` is a (usually caching)
+        condition solver.
+
+        What ``summ_b`` (the reference each reporter is divided by) is:
+          baseline — the arm's own t=0 (the fold-change-from-day-0 the
+                     transcriptomics measures, X_t/X_0);
+          paired   — the paired condition at matched t (cross-arm contrast);
+          raw      — unity (no reference) → the raw reporter summary.
+        """
+        cond, base = self.arm_pairs[arm]
+        ts_c, trajs_c = run_for(cond)
+        summ_c = self._reporter_summaries(ts_c, trajs_c, qt)  # (n_rep, n_t)
+        if self.normalization == "baseline":
+            summ_b = self._reporter_summaries(
+                ts_c, trajs_c, jnp.zeros_like(qt)
+            )
+        elif self.normalization == "paired":
+            ts_b, trajs_b = run_for(base)
+            summ_b = self._reporter_summaries(ts_b, trajs_b, qt)
+        else:  # raw
+            summ_b = jnp.ones_like(summ_c)
+        return summ_c, summ_b
+
+    def _arm_lfc(self, run_for, arm: str, qt) -> jnp.ndarray:
+        """One arm's sign-aligned model log2 fold-change at ``qt``. Shared by
+        :meth:`data_loss` and :meth:`model_lfc` so figures plot exactly what
+        the loss fits."""
+        summ_c, summ_b = self._arm_reference(run_for, arm, qt)
+        return self._log2_fold_change(summ_c, summ_b)
+
+    def model_lfc(
+        self, param_values: dict[str, jnp.ndarray], arm: str, query_times
+    ) -> jnp.ndarray:
+        """The model's sign-aligned log2 fold-change for ``arm`` at
+        ``query_times`` — the exact quantity :meth:`data_loss` fits, so a
+        trajectory figure never drifts from the loss. Returns ``(n_rep, n_t)``.
+        """
+        substituted = self._substitute(self.composite.processes, param_values)
+        cache: dict[str, tuple] = {}
+
+        def run_for(cond_name: str):
+            if cond_name not in cache:
+                cache[cond_name] = self._simulate_condition(
+                    substituted, self.conditions[cond_name]
+                )
+            return cache[cond_name]
+
+        return self._arm_lfc(
+            run_for, arm, jnp.atleast_1d(jnp.asarray(query_times))
+        )
+
     def data_loss(
         self, param_values: dict[str, jnp.ndarray], arms: list[str]
     ) -> jnp.ndarray:
@@ -1018,15 +1122,8 @@ class CalibrationProblem:
         # single-timepoint arm is the degenerate n_t=1 case.
         arm_losses = []
         for arm in arms:
-            cond, base = self.arm_pairs[arm]
-            ts_c, trajs_c = run_for(cond)
-            ts_b, trajs_b = run_for(base)
             qt = self._arm_query_times[arm]  # (n_t,)
-            summ_c = self._reporter_summaries(
-                ts_c, trajs_c, qt
-            )  # (n_rep, n_t)
-            summ_b = self._reporter_summaries(ts_b, trajs_b, qt)
-            lfc_sim = self._log2_fold_change(summ_c, summ_b)  # (n_rep, n_t)
+            lfc_sim = self._arm_lfc(run_for, arm, qt)  # (n_rep, n_t)
             # The loss compares two log2 ratios, so Δ_data must be supplied as
             # a log2 fold-change (the microarray demo already is; count data
             # is log-normalized upstream). MSE then weighs every reporter's
@@ -1194,15 +1291,11 @@ class CalibrationProblem:
         results: dict[str, dict[float, Any]] = {}
         all_arms = list(self.fit_arms) + list(self.held_out_arms)
         for arm in all_arms:
-            cond, base = self.arm_pairs[arm]
-            ts_c, trajs_c = run_for(cond)
-            ts_b, trajs_b = run_for(base)
             times = self._arm_times[arm]
             qt = self._arm_query_times[arm]
             # Vectorized read: (n_rep, n_t) in one interp per condition, then
-            # slice per timepoint to build each concordance table.
-            summ_c = self._reporter_summaries(ts_c, trajs_c, qt)
-            summ_b = self._reporter_summaries(ts_b, trajs_b, qt)
+            # slice per timepoint. Same normalization as the loss.
+            summ_c, summ_b = self._arm_reference(run_for, arm, qt)
             lfc = jnp.log2(jnp.maximum(summ_c, eps)) - jnp.log2(
                 jnp.maximum(summ_b, eps)
             )  # (n_rep, n_t), unsigned; compute_concordance applies the sign

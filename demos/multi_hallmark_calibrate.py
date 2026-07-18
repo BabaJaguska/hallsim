@@ -36,6 +36,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from hallsim.calibration import (  # noqa: E402
     CalibrationProblem,
     Condition,
+    ParamStep,
     ParameterRef,
 )
 from hallsim.composite import Composite  # noqa: E402
@@ -53,6 +54,7 @@ from hallsim.models.multi_hallmark import (  # noqa: E402
     DP14_IRRADIATION_RATE_DEFAULT,
     DP14_MTOR_PHOS_RATE_NAME,
     DP14_MTOR_PHOS_RATE_DEFAULT,
+    RAPA_INTERVENTION_DAY,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -76,7 +78,7 @@ SAMPLE_POSITION_GROUPS = {
     "RAS_D07": [14, 15],
 }
 
-ARMS = ["DDIS_vs_ctrl", "RAPA_vs_DDIS", "RAS_vs_ctrl"]
+ARMS = ["DDIS_vs_ctrl", "RAPA_vs_ctrl", "RAS_vs_ctrl"]
 
 
 def build_problem(composite=None) -> CalibrationProblem:
@@ -106,12 +108,25 @@ def build_problem(composite=None) -> CalibrationProblem:
                     "Deregulated Nutrient Sensing": 1.0,
                 },
             ),
+            # Etoposide + rapamycin: identical to DDIS (GI=1, DNS→mTOR at
+            # base) until rapamycin is added at washout (day 2), when the mTOR
+            # rate steps down to the DNS=0.3 rapamycin-suppressed level. The
+            # severity sets that post-step level; the ParamStep supplies the
+            # untreated pre-step level (the DDIS mTOR rate) and the switch time.
             "RAPA": Condition(
                 "RAPA",
                 {
                     "Genomic Instability": 1.0,
                     "Deregulated Nutrient Sensing": 0.3,
                 },
+                interventions=(
+                    ParamStep(
+                        process_name="dp14",
+                        param_name=DP14_MTOR_PHOS_RATE_NAME,
+                        t_step=RAPA_INTERVENTION_DAY,
+                        value_before=DP14_MTOR_PHOS_RATE_DEFAULT,
+                    ),
+                ),
             ),
             # Oncogene-induced senescence: mapped to the same full-senescence
             # severities as DDIS (oncogenic RAS drives replication-stress DNA
@@ -128,17 +143,22 @@ def build_problem(composite=None) -> CalibrationProblem:
             ),
         },
         # Trajectory-native: each arm is a {day: Δlog2FC} time course. Model
-        # time is in days (t_end=14), so the measured D07 / D14 samples map
-        # to query times 7.0 and 14.0. DDIS vs the D00 baseline; rapamycin
-        # vs the time-matched etoposide arm.
+        # time is in days (t_end=14), so the measured D07 / D14 samples map to
+        # query times 7.0 and 14.0. Every arm is normalized within-arm to its
+        # own D00 (fold-change-from-day-0) — matching the model's
+        # ``normalization="baseline"``. The rapamycin culture's day-0 is the
+        # shared etoposide D00 (rapamycin is not added until day 2), so the
+        # rapamycin arm normalizes to ETOPOSIDE_D00. The drug contrast (rapa
+        # vs no-rapa) is recovered post-hoc by differencing the two within-arm
+        # curves, not by cross-arm normalization.
         data={
             "DDIS_vs_ctrl": {
                 7.0: ds.delta("ETOPOSIDE_D07", "ETOPOSIDE_D00"),
                 14.0: ds.delta("ETOPOSIDE_D14", "ETOPOSIDE_D00"),
             },
-            "RAPA_vs_DDIS": {
-                7.0: ds.delta("ETOPOSIDE_RAPA_D07", "ETOPOSIDE_D07"),
-                14.0: ds.delta("ETOPOSIDE_RAPA_D14", "ETOPOSIDE_D14"),
+            "RAPA_vs_ctrl": {
+                7.0: ds.delta("ETOPOSIDE_RAPA_D07", "ETOPOSIDE_D00"),
+                14.0: ds.delta("ETOPOSIDE_RAPA_D14", "ETOPOSIDE_D00"),
             },
             # RAS vs its own pre-oncogene D00 baseline, at D04 and D07.
             "RAS_vs_ctrl": {
@@ -146,9 +166,12 @@ def build_problem(composite=None) -> CalibrationProblem:
                 7.0: ds.delta("RAS_D07", "RAS_D00"),
             },
         },
+        # Model reproduces X_t/X_0 within each arm — the same reference the
+        # data deltas use. `base` in arm_pairs is unused under this mode.
+        normalization="baseline",
         arm_pairs={
             "DDIS_vs_ctrl": ("DDIS", "ctrl"),
-            "RAPA_vs_DDIS": ("RAPA", "DDIS"),
+            "RAPA_vs_ctrl": ("RAPA", "DDIS"),
             "RAS_vs_ctrl": ("RAS_OIS", "ctrl"),
         },
         # One mechanism knob per reporter axis, plus the two NF-κB IKK edge
@@ -225,7 +248,7 @@ def build_problem(composite=None) -> CalibrationProblem:
             # p53 → CDKN1A edge (P53CDKN1AActivator.k_act) is fixed, not fitted.
         },
         fit_arms=["DDIS_vs_ctrl"],
-        held_out_arms=["RAPA_vs_DDIS", "RAS_vs_ctrl"],
+        held_out_arms=["RAPA_vs_ctrl", "RAS_vs_ctrl"],
         prior_weight=0.03,
         t_end=14.0,
         macro_dt=3.5,
@@ -603,7 +626,7 @@ def cmd_earlystop(args) -> None:
                         format="%(asctime)s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")
     logging.getLogger("hallsim").setLevel(logging.INFO)
-    val_arm, test_arm, fit_arm = "RAS_vs_ctrl", "RAPA_vs_DDIS", "DDIS_vs_ctrl"
+    val_arm, test_arm, fit_arm = "RAS_vs_ctrl", "RAPA_vs_ctrl", "DDIS_vs_ctrl"
     problem = build_problem()
     print("[1/2] fitting (train=DDIS, early-stop on RAS, patience 15) ...",
           flush=True)
