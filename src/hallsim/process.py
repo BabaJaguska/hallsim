@@ -367,6 +367,22 @@ class Process(eqx.Module):
             meta["dt_step"] = self.dt_step
         return meta
 
+    def coupling_structure(self) -> dict | None:
+        """The process's own equation structure, for the coupling-wiring check.
+
+        Returns a dict with ``param_constant`` (``{name: bool}``),
+        ``param_sbo`` (``{name: int}``), ``variables`` (ids of dynamic
+        quantities — states, rule/aux targets, non-constant params),
+        ``rules`` (``[(target, frozenset(deps)), …]`` — the algebraic
+        dependency graph), and ``boundary`` (ids held constant / as inputs).
+
+        Returns ``None`` for an *opaque* process (a hand-coded or neural
+        process with no declared rule graph); the structural coupling check
+        is then skipped for it. Format importers (SBML, XPP) override this so
+        the checker is format-agnostic. See :mod:`hallsim.coupling_wiring`.
+        """
+        return None
+
     # --- Helpers -------------------------------------------------------------
 
     def ports_with_role(self, role: PortRole) -> dict[str, Port]:

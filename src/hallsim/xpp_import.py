@@ -486,6 +486,40 @@ class XPPProcess(Process):
             for name, y0 in zip(self._state_names, self._state_y0)
         }
 
+    def coupling_structure(self) -> dict:
+        """XPP equation structure for the coupling-wiring check: ``par``/``p``
+        constants, ``dx/dt`` states, and ``fixed``/``!``/``aux`` intermediates
+        as the algebraic-rule graph. See :mod:`hallsim.coupling_wiring`."""
+        import re
+
+        universe = (
+            set(self._state_names)
+            | set(self._param_names)
+            | set(self._inter_names)
+            | set(self._aux_names)
+        )
+
+        def deps(expr: str) -> frozenset:
+            ids = set(re.findall(r"[A-Za-z_]\w*", expr))
+            return frozenset(ids & universe)
+
+        rules = tuple(
+            (name, deps(src))
+            for name, src in list(zip(self._inter_names, self._inter_py))
+            + list(zip(self._aux_names, self._aux_py))
+        )
+        return {
+            "param_constant": {p: True for p in self._param_names},
+            "param_sbo": {},
+            "variables": frozenset(
+                set(self._state_names)
+                | set(self._inter_names)
+                | set(self._aux_names)
+            ),
+            "rules": rules,
+            "boundary": frozenset(),
+        }
+
     def _eval_namespace(self, t, state):
         """Build the evaluation namespace for one derivative call.
 

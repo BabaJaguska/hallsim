@@ -275,6 +275,12 @@ class SBMLProcess(Process):
     _species_names: tuple[str, ...] = ()
     _species_y0: tuple[float, ...] = ()
     _species_ontology: tuple[dict[str, str], ...] = ()
+    # Structure for the coupling-wiring checker: param constancy + SBO, the
+    # set of dynamic variables, and the assignment-rule dependency graph — so a
+    # driver targeting a rate constant that the model modulates via a rule can
+    # be flagged (see hallsim.coupling_wiring, _extract_coupling_metadata).
+    # Static metadata; round-trips untouched through eqx.tree_at substitutions.
+    _coupling_meta: dict = eqx.field(static=True, default=None)
     # Seconds per native time unit the SBML rate laws are written in
     # (day = 86400, hour = 3600, second = 1). Extracted at import; pure
     # metadata until a composite picks a canonical clock.
@@ -335,6 +341,11 @@ class SBMLProcess(Process):
     # rapamycin added at washout day 2 drops the mTOR rate) instead of a
     # severity applied for the whole trajectory.
     _param_steps: tuple = eqx.field(static=True, default=())
+
+    def coupling_structure(self) -> dict:
+        """SBML equation structure for the coupling-wiring check (extracted at
+        import; see :func:`_extract_coupling_metadata`)."""
+        return self._coupling_meta
 
     def with_param_step(
         self, param_name: str, t_step: float, value_before: float
@@ -757,6 +768,75 @@ def _extract_species_ontology(xml_path: str) -> dict[str, dict[str, str]]:
     return result
 
 
+def _extract_coupling_metadata(xml_path: str) -> dict:
+    """Structure a coupling-wiring checker needs to judge what may drive what.
+
+    Returns ``{param_constant, param_sbo, variables, rules}``:
+    - ``param_constant`` — ``{param_id: bool}`` (SBML ``constant`` flag).
+    - ``param_sbo`` — ``{param_id: int}`` SBO term (−1 if unset); lets a driver
+      target be classified as a kinetic rate constant.
+    - ``variables`` — ids of *dynamic* quantities: species, assignment-rule
+      targets, and non-constant parameters. These are the model's own
+      state / input channels.
+    - ``rules`` — ``[(target_id, frozenset(referenced_ids)), …]`` for every
+      assignment rule, so the checker can see that e.g. ``kd2_0`` is modulated
+      by both the constant ``kd2`` and the variable ``DNAdamage`` — i.e. the
+      model routes the influence through ``DNAdamage``, not ``kd2``.
+
+    Empty structure if libsbml cannot parse the file.
+    """
+    import libsbml
+
+    reader = libsbml.SBMLReader()
+    model = reader.readSBMLFromFile(str(xml_path)).getModel()
+    if model is None:
+        return {
+            "param_constant": {},
+            "param_sbo": {},
+            "variables": frozenset(),
+            "rules": (),
+        }
+
+    def ast_names(node) -> frozenset:
+        if node is None:
+            return frozenset()
+        names, stack = set(), [node]
+        while stack:
+            n = stack.pop()
+            if n.getType() == libsbml.AST_NAME:
+                names.add(n.getName())
+            for i in range(n.getNumChildren()):
+                stack.append(n.getChild(i))
+        return frozenset(names)
+
+    param_constant = {
+        p.getId(): p.getConstant() for p in model.getListOfParameters()
+    }
+    param_sbo = {
+        p.getId(): p.getSBOTerm() for p in model.getListOfParameters()
+    }
+    species_ids = {s.getId() for s in model.getListOfSpecies()}
+    boundary = frozenset(
+        s.getId()
+        for s in model.getListOfSpecies()
+        if s.getBoundaryCondition() or s.getConstant()
+    )
+    rules, rule_targets = [], set()
+    for r in model.getListOfRules():
+        if r.isSetVariable() and r.isSetMath():
+            rules.append((r.getVariable(), ast_names(r.getMath())))
+            rule_targets.add(r.getVariable())
+    nonconst_params = {k for k, c in param_constant.items() if not c}
+    variables = frozenset(species_ids | rule_targets | nonconst_params)
+    return {
+        "param_constant": param_constant,
+        "param_sbo": param_sbo,
+        "variables": variables,
+        "rules": tuple(rules),
+        "boundary": boundary,
+    }
+
+
 def _extract_native_time_seconds(xml_path: str) -> float:
     """Seconds-per-time-unit the model's rate constants are expressed in.
 
@@ -1126,6 +1206,7 @@ def process_from_sbml(
     # composability analyzer can detect shared biology across imported
     # SBML models by their identifiers.org references.
     ontology_map = _extract_species_ontology(xml_path)
+    coupling_meta = _extract_coupling_metadata(xml_path)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
 
     native_time_seconds = _extract_native_time_seconds(xml_path)
@@ -1204,6 +1285,7 @@ def process_from_sbml(
         tuple(float(y0[i]) for i in range(len(species_names))),
     )
     object.__setattr__(proc, "_species_ontology", species_ontology)
+    object.__setattr__(proc, "_coupling_meta", coupling_meta)
     object.__setattr__(proc, "native_time_seconds", native_time_seconds)
     object.__setattr__(proc, "time_scale", 1.0)
     object.__setattr__(proc, "_model", model)

@@ -81,7 +81,7 @@ SAMPLE_POSITION_GROUPS = {
 ARMS = ["DDIS_vs_ctrl", "RAPA_vs_ctrl", "RAS_vs_ctrl"]
 
 
-def build_problem(composite=None) -> CalibrationProblem:
+def build_problem(composite=None, reporters=None) -> CalibrationProblem:
     ds = GeneExpressionDataset.from_series_matrix(
         SERIES_MATRIX,
         PLATFORM,
@@ -92,7 +92,9 @@ def build_problem(composite=None) -> CalibrationProblem:
         composite=composite
         if composite is not None
         else build_multi_hallmark_composite(),
-        reporters=MULTI_HALLMARK_REPORTERS,
+        reporters=reporters
+        if reporters is not None
+        else MULTI_HALLMARK_REPORTERS,
         conditions={
             "ctrl": Condition(
                 "ctrl",

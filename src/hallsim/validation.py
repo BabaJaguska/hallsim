@@ -552,8 +552,39 @@ class CouplingAuditor:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Subsystem 5: Range Checker
+# Subsystem 5: Driver-semantics Checker
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+class DriverSemanticChecker:
+    """Flags a coupling-edge driver that targets a parameter the model already
+    modulates through a rule — i.e. driving a rate constant when the model
+    routes that influence through its own variable (a semantic bypass). The
+    coupling-layer sibling of the reporter-wiring check; see
+    :mod:`hallsim.coupling_wiring`.
+    """
+
+    def check(
+        self,
+        processes: dict[str, Process],
+        topology: dict[str, dict[str, str]],
+    ) -> list[ValidationResult]:
+        from hallsim.coupling_wiring import (
+            classify_driver_target,
+            topology_writer_verdicts,
+        )
+
+        verdicts = [
+            classify_driver_target(proc, d.param_name)
+            for proc in processes.values()
+            for d in getattr(proc, "_param_drivers", ())
+        ]
+        verdicts += topology_writer_verdicts(processes, topology)
+        return [
+            ValidationResult(Severity.WARNING, "coupling", v.message)
+            for v in verdicts
+            if v.is_warning
+        ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -597,6 +628,7 @@ class CompositeValidator:
             self.checkers.append(self._graph_analyzer)
         if check_coupling:
             self.checkers.append(CouplingAuditor())
+            self.checkers.append(DriverSemanticChecker())
         self.strict = strict
 
     def validate(
