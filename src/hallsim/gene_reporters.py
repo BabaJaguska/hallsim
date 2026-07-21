@@ -467,22 +467,36 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         reference="el-Deiry et al. 1993, Cell 75:817–825",
     ),
     oscillating_reporter(
-        observable="gz06/x2_integral",
+        observable="gz06/x_integral",
         gene_symbol="DDB2",
         sign=+1,
-        readout="zerophase",  # smooth, lag-free amplitude; onset timing matters
-        tau=2.0,  # forward-backward EMA memory (~7 p53 periods)
+        readout="mean",  # exact grid-independent trailing mean of p53 (∫x)
+        window=2.0,
         description=(
             "Damage-specific DNA Binding Protein 2 — direct p53 "
             "transcription target, mapped to GZ06's p53 (x). Read as the "
-            "zero-phase RMS √⟨x²⟩ envelope, not the mean: GZ06 encodes damage "
-            "in p53 *pulsing*, and its mean p53 is analytically buffered "
-            "against the damage signal (psi cancels in the steady state), "
-            "so the mean is damage-blind. A RunningIntegral (power=2, the "
-            "default) writes ∫x² to `gz06/x2_integral`. "
-            "See docs/gz06-basal-p53.md."
+            "trailing MEAN of p53 (window_mean over ∫x, a power=1 "
+            "RunningIntegral): a bulk transcript is a population/time average "
+            "of p53 transcriptional output, not a pulse amplitude. Under the "
+            "composite's damage→psi coupling and the pre-perturbation "
+            "(equilibrated) baseline, mean p53 is damage-graded."
         ),
-        reference="Geva-Zatorsky 2006; Lahav 2004; Purvis 2012",
+        reference="Hwang et al. 1999, Nature 401:430–432",
+    ),
+    oscillating_reporter(
+        observable="gz06/y_integral",
+        gene_symbol="MDM2",
+        sign=+1,
+        readout="mean",  # exact grid-independent trailing mean of Mdm2 (∫y)
+        window=2.0,
+        description=(
+            "MDM2 — the canonical p53 transcriptional target; GZ06's Mdm2 (y). "
+            "Its time-mean encodes the damage signal directly (⟨y⟩ ∝ psi in "
+            "the p53–Mdm2 steady state), so it is the cleanest damage-graded "
+            "p53-axis readout. Read as window_mean over ∫y (power=1 "
+            "RunningIntegral)."
+        ),
+        reference="Barak et al. 1993, EMBO J 12:461–468",
     ),
     GeneReporter(
         observable="dp14/FoxO3a",

@@ -62,6 +62,27 @@ DATA_DIR = ROOT / "data" / "FibroblastsDNA_dmg_Rapamycin"
 SERIES_MATRIX = DATA_DIR / "GSE248823_series_matrix.txt"
 PLATFORM = DATA_DIR / "GPL17586-45144.txt"
 
+# Each calibrate run writes to its own timestamped subfolder so results never
+# overwrite; `latest` symlinks the most recent so the figure scripts follow it.
+RUNS_DIR = ROOT / "outputs" / "multi_hallmark_calibrate"
+LATEST_RUN = RUNS_DIR / "latest"
+
+
+def make_run_dir() -> Path:
+    from datetime import datetime
+
+    run = RUNS_DIR / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run.mkdir(parents=True, exist_ok=True)
+    if LATEST_RUN.is_symlink() or LATEST_RUN.exists():
+        if LATEST_RUN.is_symlink():
+            LATEST_RUN.unlink()
+        else:
+            import shutil
+
+            shutil.rmtree(LATEST_RUN)
+    LATEST_RUN.symlink_to(run.name)
+    return run
+
 # GSE248823 columns: etoposide DDIS sampled at D00 (baseline), D07, D14,
 # and etoposide + rapamycin at D07, D14 (2 replicates each). We fit the
 # whole D07 + D14 time course, not just the endpoint.
@@ -91,7 +112,7 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
     return CalibrationProblem(
         composite=composite
         if composite is not None
-        else build_multi_hallmark_composite(),
+        else build_multi_hallmark_composite(dose_window=None),
         reporters=reporters
         if reporters is not None
         else MULTI_HALLMARK_REPORTERS,
@@ -169,8 +190,15 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
             },
         },
         # Model reproduces X_t/X_0 within each arm — the same reference the
-        # data deltas use. `base` in arm_pairs is unused under this mode.
+        # data deltas use. `base` in arm_pairs is unused under this mode. Every
+        # arm starts from the shared pre-perturbation homeostasis (the control
+        # condition run to its settled state), so the within-arm t=0 is the
+        # healthy baseline the data's D00 measures — not the composite's
+        # arbitrary initial condition (whose relaxation transient otherwise
+        # dominates and flips the damage sign).
         normalization="baseline",
+        equilibrate=True,
+        equilibration_condition="ctrl",
         arm_pairs={
             "DDIS_vs_ctrl": ("DDIS", "ctrl"),
             "RAPA_vs_ctrl": ("RAPA", "DDIS"),
@@ -254,9 +282,12 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
         prior_weight=0.03,
         t_end=14.0,
         macro_dt=3.5,
-        # Save every 0.5 day so the D07/D14 query times and their 2-day window
-        # edges (5, 7, 12, 14) land exactly on the grid; save density is free
-        # (dense output, no extra ODE solves).
+        # Every reporter is grid-independent — the oscillator readouts route
+        # through RunningIntegral means/RMS (exact regardless of save spacing)
+        # and the rest are slow DP14 states. Verified: DDIS-d14 concordance is
+        # identical at n_save 29 vs 450 (max|Δ| 9e-5). So the loss uses a modest
+        # grid (fast under the reverse-mode adjoint); raw-state *plots* resample
+        # densely (``save_outputs(n_save_plot=…)``, above the Nyquist guardrail).
         n_save=29,
     )
 
@@ -369,7 +400,7 @@ def plot_history(problem, history, path: Path) -> None:
     losses = np.asarray(history.losses)
     epochs = np.arange(1, len(losses) + 1)
     best = int(np.argmin(losses))
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
 
     ax1.plot(epochs, losses, color="#2a7")
     ax1.scatter(
@@ -384,6 +415,25 @@ def plot_history(problem, history, path: Path) -> None:
     ax1.set_ylabel("loss (log2FC MSE)")
     ax1.set_title("training loss")
     ax1.legend()
+
+    # Grad norm + effective LR — to see whether loss spikes track large
+    # gradients (→ clip) or LR-schedule events (→ plateau scheduler).
+    if history.grad_norms:
+        gn = np.asarray(history.grad_norms)
+        ax3.plot(epochs, gn, color="#c0392b", label="|grad| (global norm)")
+        ax3.set_yscale("log")
+        ax3.set_ylabel("|grad|", color="#c0392b")
+        ax3.tick_params(axis="y", labelcolor="#c0392b")
+        if history.lr_scales:
+            axlr = ax3.twinx()
+            axlr.step(epochs, np.asarray(history.lr_scales), where="post",
+                      color="#2563eb")
+            axlr.set_ylabel("reduce-on-plateau LR scale", color="#2563eb")
+            axlr.tick_params(axis="y", labelcolor="#2563eb")
+        for e in epochs[np.r_[False, np.diff(losses) > 0.02]]:
+            ax3.axvline(e, color="#999", lw=0.7, ls=":", zorder=0)
+    ax3.set_xlabel("epoch")
+    ax3.set_title("grad norm · LR scale  (dotted = loss spike)")
 
     # Each param's position within its clamp range, in log space (the
     # params span orders of magnitude), so trajectories are comparable.
@@ -469,6 +519,136 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
     print(f"wrote concordance_table.png/.csv -> {out_dir}", flush=True)
 
 
+# ── OOB-immediate figures (written before the fit, for review while training) ─
+_ARM_STYLE = {"DDIS_vs_ctrl": ("#c0392b", "DDIS"),
+              "RAPA_vs_ctrl": ("#2a78d6", "RAPA"),
+              "RAS_vs_ctrl": ("#2a9d5a", "RAS")}
+
+
+def fig_oob_overview(problem, params, out_dir: Path, stem="oob_overview",
+                     title="Out-of-the-box: reporter trajectories vs data") -> None:
+    """Per reporter, every arm's model trajectory (from ``params``) + its data —
+    all conditions in one figure, so there is something to read while the fit
+    trains. Reuses the loss's own ``model_lfc`` (starts at t>0; the t=0
+    window-mean degeneracy is a plotting-only artifact)."""
+    genes = [r.gene_symbol for r in problem.reporters]
+    n, ncol = len(genes), 3
+    nrow = -(-n // ncol)
+    qt = np.arange(0.1, problem.t_end + 1e-6, 0.1)
+    lfc = {a: np.asarray(problem.model_lfc(params, a, jnp.asarray(qt)))
+           for a in _ARM_STYLE}
+    fig, axes = plt.subplots(nrow, ncol, figsize=(11, 3.2 * nrow),
+                             sharex=True, squeeze=False)
+    axf = axes.ravel()
+    for i, ax in enumerate(axf):
+        if i >= n:
+            ax.axis("off")
+            continue
+        g = genes[i]
+        ax.axhline(0, color="#e6e6e2", lw=1.2, zorder=0)
+        for a, (col, lbl) in _ARM_STYLE.items():
+            ax.plot(qt, lfc[a][i], color=col, lw=1.7, label=lbl)
+            dts = sorted(problem.data[a])
+            ax.plot([0.0] + list(dts),
+                    [0.0] + [float(problem.data[a][t][g]) for t in dts],
+                    "o", color=col, ms=5)
+        ax.set_title(g, fontsize=11, fontweight="bold", loc="left")
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+        if i % ncol == 0:
+            ax.set_ylabel("log2 fold-change")
+        if i >= n - ncol:
+            ax.set_xlabel("day")
+    axf[0].legend(fontsize=8, loc="best", frameon=False)
+    fig.suptitle(title, fontsize=12.5, x=0.02, ha="left", fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    for ext in ("png", "pdf"):
+        fig.savefig(out_dir / f"{stem}.{ext}", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {stem}.png -> {out_dir}", flush=True)
+
+
+def write_oob_table(pre, out_dir: Path) -> None:
+    """OOB per-arm concordance (sign, rho, mean|err|) as a small table."""
+    header = ["Arm", "Day", "sign", "ρ", "mean|err|"]
+    text = [header]
+    for arm in ARMS:
+        tag = "fit" if arm == "DDIS_vs_ctrl" else "held-out"
+        for t in sorted(pre[arm]):
+            r = pre[arm][t]
+            n_ok = sum(x.sign_match for x in r.rows)
+            text.append([f"{arm.split('_')[0]} ({tag})", f"{t:g}",
+                         f"{n_ok}/{r.n_compared}", f"{r.spearman_r:+.2f}",
+                         f"{r.mean_abs_error:.2f}"])
+    fig, ax = plt.subplots(figsize=(7, 0.5 + 0.42 * len(text)))
+    ax.axis("off")
+    tbl = ax.table(cellText=text, cellLoc="center", loc="center")
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(10.5)
+    tbl.scale(1, 1.55)
+    for (rr, _), cell in tbl.get_celld().items():
+        cell.set_edgecolor("#dcdcdc")
+        if rr == 0:
+            cell.set_facecolor("#f2f3f5")
+            cell.set_text_props(fontweight="bold")
+    ax.set_title("Out-of-the-box concordance", fontsize=12.5,
+                 fontweight="bold", loc="left", pad=12)
+    for ext in ("png", "pdf"):
+        fig.savefig(out_dir / f"oob_concordance_table.{ext}", dpi=200,
+                    bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"wrote oob_concordance_table.png -> {out_dir}", flush=True)
+
+
+# Representative internal state per constituent — the "what's happening inside"
+# view, independent of the reporter mapping.
+_CONSTITUENT_STATES = [
+    ("gz06/x", "GZ06 p53 (x)"), ("gz06/y", "GZ06 Mdm2 (y)"),
+    ("dp14/DNA_damage", "DP14 DNA damage"), ("dp14/ROS", "DP14 ROS"),
+    ("dp14/FoxO3a", "DP14 FoxO3a"), ("dp14/mTORC1_pS2448", "DP14 mTORC1-P"),
+    ("dp14/Mito_mass_new", "DP14 new mito mass"), ("nfkb/NFkB", "NF-κB (free)"),
+    ("nfkb/IkBa", "IκBα protein"),
+]
+
+
+def fig_constituents(problem, init, final, out_dir: Path,
+                     cond="DDIS", stem="constituents_DDIS_pre_vs_post") -> None:
+    """Constituent internal states, pre- vs post-fit, for one condition — the
+    dynamics behind the reporters (not a fit quantity)."""
+    pre = problem._simulate_all_conditions(init, n_save=200)[cond]
+    post = problem._simulate_all_conditions(final, n_save=200)[cond]
+    states = [(p, lbl) for p, lbl in _CONSTITUENT_STATES
+              if pre.get(p) is not None]
+    n, ncol = len(states), 3
+    nrow = -(-n // ncol)
+    ts = np.asarray(pre.ts)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(12, 3.0 * nrow),
+                             sharex=True, squeeze=False)
+    axf = axes.ravel()
+    for i, ax in enumerate(axf):
+        if i >= n:
+            ax.axis("off")
+            continue
+        path, lbl = states[i]
+        ax.plot(ts, np.asarray(pre.get(path)), color="#9a9a95", lw=1.6,
+                ls=(0, (4, 2)), label="pre-fit")
+        ax.plot(ts, np.asarray(post.get(path)), color="#2a78d6", lw=2.0,
+                label="calibrated")
+        ax.set_title(lbl, fontsize=10.5, fontweight="bold", loc="left")
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+        if i >= n - ncol:
+            ax.set_xlabel("day")
+    axf[0].legend(fontsize=8, loc="best", frameon=False)
+    fig.suptitle(f"Constituent states, {cond}: pre vs post-fit",
+                 fontsize=12.5, x=0.02, ha="left", fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    for ext in ("png", "pdf"):
+        fig.savefig(out_dir / f"{stem}.{ext}", dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {stem}.png -> {out_dir}", flush=True)
+
+
 def cmd_calibrate(args) -> None:
     logging.basicConfig(
         level=logging.WARNING,
@@ -478,30 +658,34 @@ def cmd_calibrate(args) -> None:
     logging.getLogger("hallsim").setLevel(logging.INFO)
     problem = build_problem()
     init = {k: jnp.asarray(p.init) for k, p in problem.params.items()}
+    out_dir = make_run_dir()
+    print(f"[run] writing to {out_dir.relative_to(ROOT)}/", flush=True)
 
-    print("[1/3] out-of-the-box concordance ...", flush=True)
+    # ── wave 1: out-of-the-box, written immediately so there's something to
+    # review while the fit trains. ──
+    print("[1/4] out-of-the-box concordance + figures ...", flush=True)
     pre = problem.evaluate(init)
     for arm in ARMS:
         for t in sorted(pre[arm]):
             print(pre[arm][t], flush=True)
+    write_oob_table(pre, out_dir)
+    fig_oob_overview(problem, init, out_dir)
 
-    out_dir = ROOT / "outputs" / "multi_hallmark_calibrate"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    print("[2/3] fitting ...", flush=True)
-
+    # ── wave 2: fit ──
+    print("[2/4] fitting ...", flush=True)
     history = problem.fit(
         steps=150,
         mode="reverse",
         learning_rate=0.005,
-        reduce_on_plateau=True,
+        grad_clip=getattr(args, "grad_clip", None),
+        reduce_on_plateau=not getattr(args, "no_plateau", False),
         plateau_patience=8,
         early_stop_patience=20,
         verbose=True,
         checkpoint_path=out_dir / "checkpoint.npz",
     )
 
-    print("[3/3] calibrated concordance ...", flush=True)
+    print("[3/4] calibrated concordance ...", flush=True)
     post = problem.evaluate(history.final_params)
 
     print_table(pre, post)
@@ -512,17 +696,16 @@ def cmd_calibrate(args) -> None:
             f"{float(history.final_params[k]):>12.5g}"
         )
 
+    # ── wave 4: post-fit figures (before/after + what changed inside) ──
+    print("[4/4] post-fit figures ...", flush=True)
     write_concordance_table(pre, post, out_dir)
     plot_history(problem, history, out_dir / "training_history.png")
     problem.save_outputs(str(out_dir), history)
-
-    # Re-plot the calibrated figures on the fit just written, so the
-    # time-domain trajectories and concordance dumbbells never lag behind the
-    # checkpoint.
-    from multi_hallmark_figures import fig_temporal, fig_concordance
-    print("temporal reporter trajectories ...", flush=True)
+    fig_constituents(problem, init, history.final_params, out_dir)
+    # Calibrated reporter figures on the fit just written, so the time-domain
+    # trajectories and concordance dumbbells never lag behind the checkpoint.
+    from multi_hallmark_figures import fig_concordance, fig_temporal
     fig_temporal(args)
-    print("reporter concordance dumbbells ...", flush=True)
     fig_concordance(args)
 
     print(
@@ -679,6 +862,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("command", nargs="?", default="calibrate",
                     choices=_COMMANDS)
+    ap.add_argument("--grad-clip", type=float, default=None,
+                    dest="grad_clip",
+                    help="clip gradient global-norm to this value")
+    ap.add_argument("--no-plateau", action="store_true", dest="no_plateau",
+                    help="disable reduce-on-plateau LR schedule")
     args = ap.parse_args()
     _COMMANDS[args.command](args)
 

@@ -104,7 +104,9 @@ compares against transcriptomic data):
 - CDKN1A → ``dp14/CDKN1A`` (direct state)
 - EIF4EBP1 → ``dp14/mTORC1_pS2448`` (kinase-level proxy)
 - CYCS → ``dp14/Mito_mass_new`` (biogenesis proxy)
-- DDB2 → ``gz06/x`` (p53 level proxy; DDB2 is a direct p53 target)
+- DDB2 → ``gz06/x_integral`` (trailing mean of p53; DDB2 is a direct p53 target)
+- MDM2 → ``gz06/y_integral`` (trailing mean of Mdm2; ⟨y⟩∝ψ, the damage-graded
+  canonical p53 target)
 - NFKBIA → ``nfkb/IkBat`` (IκBα transcript). Transcriptomic NFKBIA
   measures the IκBα *transcript*, an NF-κB target that rises *with*
   activity — not the cytoplasmic IκBα *protein* (``nfkb/IkBa``), whose
@@ -284,10 +286,16 @@ def build_multi_hallmark_composite(
         # DNA damage → IKK (activating; ATM→NEMO→IKK, Wu 2006 / Miyamoto 2011):
         # drives the NF-κB-dependent SASP of DDIS senescence (Salminen 2012).
         "damage_nfkb": DamageNFkBActivator(timescale=nfkb.timescale),
-        # ∫x² observers for the two oscillating reporters (read in the source's
-        # group so the integral sees the oscillation); window_rms → √⟨x²⟩. DDB2
-        # needs RMS (GZ06 mean p53 is damage-blind); NFKBIA mean ≈ rms.
-        "gz06_x2_integral": RunningIntegral(timescale=gz06.timescale),
+        # ∫ observers for the oscillating reporters (read in the source's group
+        # so the integral sees the oscillation); window_mean differences ∫x to
+        # an exact, grid-independent trailing mean — what bulk transcriptomics
+        # measures. power=1 for the p53-axis means (∫x, ∫y); NFKBIA keeps ∫x².
+        "gz06_x_integral": RunningIntegral(
+            timescale=gz06.timescale, power=1.0
+        ),
+        "gz06_y_integral": RunningIntegral(
+            timescale=gz06.timescale, power=1.0
+        ),
         "nfkb_ikbat_integral": RunningIntegral(timescale=nfkb.timescale),
         # p53 → CDKN1A (p21): canonical p53 target. GZ06's group to read p53
         # live; Hill-gated flux integrated by DP14's CDKN1A turnover.
@@ -310,9 +318,13 @@ def build_multi_hallmark_composite(
             "DNA_damage": "dp14/DNA_damage",
             "IKK": "nfkb/IKK",
         },
-        "gz06_x2_integral": {
+        "gz06_x_integral": {
             "source": "gz06/x",
-            "integral": "gz06/x2_integral",
+            "integral": "gz06/x_integral",
+        },
+        "gz06_y_integral": {
+            "source": "gz06/y",
+            "integral": "gz06/y_integral",
         },
         "nfkb_ikbat_integral": {
             "source": "nfkb/IkBat",

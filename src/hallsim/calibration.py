@@ -94,6 +94,8 @@ class CalibrationHistory:
     losses: list[float] = field(default_factory=list)
     val_losses: list[float] = field(default_factory=list)
     param_history: list[ParamPytree] = field(default_factory=list)
+    grad_norms: list[float] = field(default_factory=list)
+    lr_scales: list[float] = field(default_factory=list)
     final_params: ParamPytree | None = None
     best_loss: float = float("inf")
     stopped_epoch: int | None = None
@@ -168,6 +170,7 @@ class Calibrator:
         method: Literal["adam", "lbfgs"] = "adam",
         optimizer: optax.GradientTransformation | None = None,
         learning_rate: float = 0.05,
+        grad_clip: float | None = None,
         reduce_on_plateau: bool = False,
         plateau_patience: int = 3,
         plateau_factor: float = 0.5,
@@ -216,7 +219,12 @@ class Calibrator:
                     rtol=1e-3,
                 ),
             )
+        # Clip the raw gradient's global norm first (before adam/plateau) — caps
+        # the occasional large step that spikes the loss on a stiff ODE surface.
+        if grad_clip is not None:
+            base = optax.chain(optax.clip_by_global_norm(grad_clip), base)
         self.optimizer = base
+        self.learning_rate = learning_rate
         self.verbose = verbose
         self.log_every = max(1, log_every)
         # Built once, on first fit() step, then reused: jitting the whole
@@ -299,6 +307,19 @@ class Calibrator:
 
     # ── Fit loop ───────────────────────────────────────────────
 
+    @staticmethod
+    def _plateau_scale(opt_state) -> float:
+        """The reduce-on-plateau LR multiplier in ``opt_state`` (1.0 if none) —
+        so ``learning_rate * scale`` is the effective LR at this step."""
+        stack = [opt_state]
+        while stack:
+            x = stack.pop()
+            if type(x).__name__ == "ReduceLROnPlateauState":
+                return float(x.scale)
+            if isinstance(x, tuple):
+                stack.extend(x)
+        return 1.0
+
     def fit(self, steps: int) -> CalibrationHistory:
         """Run ``steps`` optimizer iterations (Adam or L-BFGS).
 
@@ -334,8 +355,15 @@ class Calibrator:
                 no_improve += 1
             history.losses.append(lf)
             history.param_history.append(params)
+            gnorm = float(optax.global_norm(grad))
+            scale = self._plateau_scale(opt_state)
+            history.grad_norms.append(gnorm)
+            history.lr_scales.append(scale)
             if self.verbose and (s % self.log_every == 0 or s == steps - 1):
-                msg = f"  [{s+1:3d}/{steps}] loss = {lf:.4g}"
+                msg = (
+                    f"  [{s+1:3d}/{steps}] loss = {lf:.4g}  "
+                    f"|grad| = {gnorm:.3g}  lr = {self.learning_rate * scale:.2g}"
+                )
                 if val_fn:
                     msg += f"  val = {monitored:.4g}"
                 if isinstance(params, dict):
@@ -710,6 +738,18 @@ class CalibrationProblem:
         matched t, a cross-arm contrast (``data`` = log2(X_cond,t/X_base,t)).
         ``"raw"`` — no reference; the loss fits sign·log2(reporter) directly,
         for a target that is an absolute (log) value rather than a comparison.
+    equilibrate:
+        If ``True``, every arm starts from the shared **pre-perturbation
+        fixed point** rather than ``Composite.initial_state_vec()`` — so a
+        within-arm fold-change is measured against the biological baseline
+        (healthy cells before treatment), not the arbitrary initial condition's
+        relaxation transient. The ``equilibration_condition`` is solved to its
+        steady state by Newton (:func:`hallsim.steady_state.steady_state`),
+        exact and differentiable in the fitted params (see :meth:`_equilibrate`).
+    equilibration_condition:
+        Name of the condition whose fixed point is the shared baseline (e.g. an
+        untreated control — autonomous, with any timed input off). Required when
+        ``equilibrate=True``.
     likelihood:
         ``(model, data, weight) -> scalar`` NLL over one arm's
         ``(n_reporter, n_timepoint)`` block. Defaults to
@@ -740,6 +780,8 @@ class CalibrationProblem:
         fit_arms: list[str],
         held_out_arms: list[str] | None = None,
         normalization: str = "baseline",
+        equilibrate: bool = False,
+        equilibration_condition: str | None = None,
         t_end: float = 25.0,
         macro_dt: float = 5.0,
         n_save: int = 6,
@@ -872,6 +914,16 @@ class CalibrationProblem:
                 f"got {normalization!r}"
             )
         self.normalization = normalization
+        if equilibrate and equilibration_condition not in conditions:
+            raise KeyError(
+                "equilibrate=True needs equilibration_condition to name a "
+                f"condition; {equilibration_condition!r} not in "
+                f"{sorted(conditions)}"
+            )
+        self.equilibrate = equilibrate
+        self.equilibration_condition = equilibration_condition
+        self._laws = None  # conservation laws (structural; computed once)
+        self._reporter_src = None  # reporter → source store-index map
         self.params = params
         self.prior_weight = prior_weight
         self.fit_arms = fit_arms
@@ -990,13 +1042,71 @@ class CalibrationProblem:
             semantic_validation=False,
         )
 
-    def _simulate_condition(self, processes: dict, condition: Condition):
+    def _reporter_source_indices(self) -> list[int]:
+        """Store index of each reporter's *source* state — the RunningIntegral's
+        source for an integral observable, else the observable itself. At a
+        fixed point every reporter's mean equals its source value, so ``summ_b``
+        reads straight off ``y*`` with no run."""
+        from hallsim.models.running_integral import RunningIntegral
+
+        integral_source = {
+            self.composite.topology[n]["integral"]: self.composite.topology[n][
+                "source"
+            ]
+            for n, p in self.composite.processes.items()
+            if isinstance(p, RunningIntegral)
+        }
+        return [
+            self._store_idx[integral_source.get(r.observable, r.observable)]
+            for r in self.reporters
+        ]
+
+    def _equilibrate(self, processes: dict):
+        """Shared pre-perturbation baseline ``(y0, summ_b)`` — the unperturbed
+        condition's fixed point.
+
+        A perturbation baseline is the unperturbed steady state; that condition
+        sits at a fixed point (any limit cycle belongs to the perturbation), so
+        it is found by Newton (:func:`hallsim.steady_state.steady_state`) rather
+        than a burn-in — no horizon, no transient phase, and an exact
+        implicit-function-theorem gradient in the fitted params. ``y0`` is the
+        fixed point (shared t=0 for every arm; accumulators zero); ``summ_b`` is
+        each reporter's source value at ``y0`` (its homeostatic mean), the
+        shared healthy day-0 the within-arm fold-change divides by.
+
+        Returns ``(initial_state_vec, None)`` when equilibrate is off, so
+        callers fall back to each arm's own t=0 baseline."""
+        comp = self._condition_composite(
+            processes, next(iter(self.conditions.values()))
+        )
+        if not self.equilibrate:
+            return comp.initial_state_vec(), None
+        from hallsim.steady_state import conservation_laws, steady_state
+
+        eq_comp = self._condition_composite(
+            processes, self.conditions[self.equilibration_condition]
+        )
+        # Conservation laws are structural (param-independent) — compute once.
+        if self._laws is None:
+            self._laws = conservation_laws(
+                eq_comp, eq_comp.initial_state_vec()
+            )
+            self._reporter_src = self._reporter_source_indices()
+        y0 = steady_state(eq_comp, laws=self._laws)
+        summ_b = y0[jnp.asarray(self._reporter_src)][:, None]  # (n_rep, 1)
+        return y0, summ_b
+
+    def _simulate_condition(
+        self, processes: dict, condition: Condition, y0=None
+    ):
         """Apply hallmarks + run Scheduler for one condition. Returns the
         full ``(ts, reporter_trajectories)`` — ``ts`` shape ``(n_save,)``
         and ``reporter_trajectories`` shape ``(n_reporters, n_save)`` — so
-        the loss can read each reporter at arbitrary query times."""
+        the loss can read each reporter at arbitrary query times. ``y0``
+        overrides the initial state (the shared equilibrated baseline)."""
         comp = self._condition_composite(processes, condition)
-        y0 = comp.initial_state_vec()
+        if y0 is None:
+            y0 = comp.initial_state_vec()
         save_dt = max(1e-6, self.t_end / max(1, self.n_save - 1))
         # The diffeqsolve adjoint must match the outer autodiff: ForwardMode
         # under a JVP (forward fit), the default recursive-checkpoint reverse
@@ -1010,6 +1120,11 @@ class CalibrationProblem:
             y0=y0,
             save_dt=save_dt,
             adjoint=adjoint,
+            # Reporter readouts are grid-independent (RunningIntegral summaries
+            # + slow states), so the modest loss grid is exact; the Nyquist
+            # guardrail targets raw fast-oscillator readouts this loss has none
+            # of. Raw plots resample densely via save_outputs.
+            warn_save_resolution=False,
         )
         # res.ys is (n_save, ..., n_vars). Trailing-axis convention.
         trajs = jnp.stack([res.ys[..., idx] for idx in self._reporter_indices])
@@ -1034,7 +1149,7 @@ class CalibrationProblem:
 
     # ── Loss / fit / evaluate ─────────────────────────────────────
 
-    def _arm_reference(self, run_for, arm: str, qt):
+    def _arm_reference(self, run_for, arm: str, qt, baseline=None):
         """``(summ_c, summ_b)`` for one arm under the configured
         ``normalization`` — the two reporter summaries whose log2 ratio is the
         arm's fold change. Single source of truth for the normalization,
@@ -1043,8 +1158,9 @@ class CalibrationProblem:
         condition solver.
 
         What ``summ_b`` (the reference each reporter is divided by) is:
-          baseline — the arm's own t=0 (the fold-change-from-day-0 the
-                     transcriptomics measures, X_t/X_0);
+          baseline — the shared homeostatic day-0 value (``baseline``, from the
+                     equilibration burn-in) when equilibrating, else the arm's
+                     own t=0 (the fold-change-from-day-0 X_t/X_0);
           paired   — the paired condition at matched t (cross-arm contrast);
           raw      — unity (no reference) → the raw reporter summary.
         """
@@ -1052,9 +1168,12 @@ class CalibrationProblem:
         ts_c, trajs_c = run_for(cond)
         summ_c = self._reporter_summaries(ts_c, trajs_c, qt)  # (n_rep, n_t)
         if self.normalization == "baseline":
-            summ_b = self._reporter_summaries(
-                ts_c, trajs_c, jnp.zeros_like(qt)
-            )
+            if baseline is not None:
+                summ_b = jnp.broadcast_to(baseline, summ_c.shape)
+            else:
+                summ_b = self._reporter_summaries(
+                    ts_c, trajs_c, jnp.zeros_like(qt)
+                )
         elif self.normalization == "paired":
             ts_b, trajs_b = run_for(base)
             summ_b = self._reporter_summaries(ts_b, trajs_b, qt)
@@ -1062,11 +1181,11 @@ class CalibrationProblem:
             summ_b = jnp.ones_like(summ_c)
         return summ_c, summ_b
 
-    def _arm_lfc(self, run_for, arm: str, qt) -> jnp.ndarray:
+    def _arm_lfc(self, run_for, arm: str, qt, baseline=None) -> jnp.ndarray:
         """One arm's sign-aligned model log2 fold-change at ``qt``. Shared by
         :meth:`data_loss` and :meth:`model_lfc` so figures plot exactly what
         the loss fits."""
-        summ_c, summ_b = self._arm_reference(run_for, arm, qt)
+        summ_c, summ_b = self._arm_reference(run_for, arm, qt, baseline)
         return self._log2_fold_change(summ_c, summ_b)
 
     def model_lfc(
@@ -1077,17 +1196,18 @@ class CalibrationProblem:
         trajectory figure never drifts from the loss. Returns ``(n_rep, n_t)``.
         """
         substituted = self._substitute(self.composite.processes, param_values)
+        y0, baseline = self._equilibrate(substituted)
         cache: dict[str, tuple] = {}
 
         def run_for(cond_name: str):
             if cond_name not in cache:
                 cache[cond_name] = self._simulate_condition(
-                    substituted, self.conditions[cond_name]
+                    substituted, self.conditions[cond_name], y0=y0
                 )
             return cache[cond_name]
 
         return self._arm_lfc(
-            run_for, arm, jnp.atleast_1d(jnp.asarray(query_times))
+            run_for, arm, jnp.atleast_1d(jnp.asarray(query_times)), baseline
         )
 
     def data_loss(
@@ -1101,6 +1221,7 @@ class CalibrationProblem:
         early stopping. ``arms`` must be keys of ``arm_pairs``.
         """
         substituted = self._substitute(self.composite.processes, param_values)
+        y0, baseline = self._equilibrate(substituted)
         # Each condition is solved once (whole trajectory) and cached, then
         # read at each arm's measured timepoints — so a condition that is
         # both a condition and a baseline in different arm_pairs still runs
@@ -1110,7 +1231,7 @@ class CalibrationProblem:
         def run_for(cond_name: str):
             if cond_name not in run_cache:
                 run_cache[cond_name] = self._simulate_condition(
-                    substituted, self.conditions[cond_name]
+                    substituted, self.conditions[cond_name], y0=y0
                 )
             return run_cache[cond_name]
 
@@ -1123,7 +1244,7 @@ class CalibrationProblem:
         arm_losses = []
         for arm in arms:
             qt = self._arm_query_times[arm]  # (n_t,)
-            lfc_sim = self._arm_lfc(run_for, arm, qt)  # (n_rep, n_t)
+            lfc_sim = self._arm_lfc(run_for, arm, qt, baseline)  # (n_rep, n_t)
             # The loss compares two log2 ratios, so Δ_data must be supplied as
             # a log2 fold-change (the microarray demo already is; count data
             # is log-normalized upstream). MSE then weighs every reporter's
@@ -1197,6 +1318,10 @@ class CalibrationProblem:
         self._scheduler.warm_up(
             comp, (0.0, self.t_end), macro_dt=self.macro_dt
         )
+        # Conservation laws (structural) are computed eagerly here — they can't
+        # be recovered from tracers once the loss is under autodiff.
+        if self.equilibrate and self._laws is None:
+            self._equilibrate(substituted)
         self._warmed_up = True
 
     def fit(
@@ -1262,6 +1387,7 @@ class CalibrationProblem:
         from hallsim.gene_reporters import compute_concordance
 
         substituted = self._substitute(self.composite.processes, param_values)
+        y0, baseline = self._equilibrate(substituted)
 
         # Per-condition simulation cache: cond_name -> (ts, reporter_trajs).
         run_cache: dict[str, tuple] = {}
@@ -1272,7 +1398,6 @@ class CalibrationProblem:
             comp = self._condition_composite(
                 substituted, self.conditions[cond_name]
             )
-            y0 = comp.initial_state_vec()
             save_dt = max(1e-6, self.t_end / max(1, self.n_save - 1))
             res = self._scheduler.run(
                 comp,
@@ -1280,6 +1405,7 @@ class CalibrationProblem:
                 macro_dt=self.macro_dt,
                 y0=y0,
                 save_dt=save_dt,
+                warn_save_resolution=False,  # grid-independent readouts
             )
             trajs = jnp.stack(
                 [res.ys[..., idx] for idx in self._reporter_indices]
@@ -1295,7 +1421,7 @@ class CalibrationProblem:
             qt = self._arm_query_times[arm]
             # Vectorized read: (n_rep, n_t) in one interp per condition, then
             # slice per timepoint. Same normalization as the loss.
-            summ_c, summ_b = self._arm_reference(run_for, arm, qt)
+            summ_c, summ_b = self._arm_reference(run_for, arm, qt, baseline)
             lfc = jnp.log2(jnp.maximum(summ_c, eps)) - jnp.log2(
                 jnp.maximum(summ_b, eps)
             )  # (n_rep, n_t), unsigned; compute_concordance applies the sign
@@ -1326,12 +1452,12 @@ class CalibrationProblem:
         adjoint (no forward-mode JVP), so wall-time is fast — meant
         for post-fit visualisation, not loss evaluation."""
         substituted = self._substitute(self.composite.processes, param_values)
+        y0, _ = self._equilibrate(substituted)
         n = n_save if n_save is not None else self.n_save
         save_dt = max(1e-6, self.t_end / max(1, n - 1))
         results: dict = {}
         for cond_name, cond in self.conditions.items():
             comp = self._condition_composite(substituted, cond)
-            y0 = comp.initial_state_vec()
             results[cond_name] = self._scheduler.run(
                 comp,
                 t_span=(0.0, self.t_end),
@@ -1346,7 +1472,7 @@ class CalibrationProblem:
         out_dir: str,
         history: "CalibrationHistory",
         *,
-        n_save_plot: int = 50,
+        n_save_plot: int = 500,
     ) -> dict:
         """Produce the post-fit artifact bundle in ``out_dir``.
 

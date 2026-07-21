@@ -191,3 +191,5 @@ shared `t` and the result is meaningless — screen for it.
 - If we are debugging, we are debugging together. I want to see the output graphs, tables, figures that you are basing your decisions on. Not your scratchpad. 
 - Historical decisions generally belong in your diary. Not in comment novels.
 - The demo models are irrelevant to me. The machinery is what ships. Never sacrifice the architecture and automation for a demo model.
+- If a problem has been solved by e.g. COPASI, Tellurium, AMICI, etc - borrow it, do not reinvent the wheel.
+- 

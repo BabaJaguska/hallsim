@@ -429,6 +429,7 @@ class Scheduler:
         # eigenvalues would be tracers.
         self._integrator_cache: dict[Any, dict[str, GroupIntegrator]] = {}
         self._warned_cold_trace = False
+        self._warned_save_res = False
         # Adjoint method used by every diffeqsolve in this run.
         # Default (None) → diffrax picks RecursiveCheckpointAdjoint, which
         # is memory-cheap but step-expensive. For calibration through
@@ -460,6 +461,7 @@ class Scheduler:
         y0: jnp.ndarray | None = None,
         save_dt: float | None = None,
         adjoint: dfx.AbstractAdjoint | None = None,
+        warn_save_resolution: bool = True,
     ) -> SchedulerResult:
         """Run the composite with multi-rate scheduling.
 
@@ -492,6 +494,12 @@ class Scheduler:
             forward-mode calibration without changing scheduler identity,
             so one Scheduler instance (and its stiffness cache) serves
             both the eager evaluate pass and the differentiated loss.
+        warn_save_resolution:
+            Emit a once-only Nyquist warning when ``save_dt`` undersamples
+            the fastest oscillation (see :meth:`_check_save_resolution`). Set
+            ``False`` for a run whose readouts are provably grid-independent
+            (e.g. a burn-in read only through a ``RunningIntegral``), so the
+            deliberately coarse grid does not raise a false alarm.
 
         Returns
         -------
@@ -570,6 +578,10 @@ class Scheduler:
         integrators = self._resolve_integrators(
             composite, groups, state, t0, macro_dt
         )
+        if warn_save_resolution:
+            self._check_save_resolution(
+                integrators, save_dt if save_dt is not None else macro_dt
+            )
 
         # ─── Fast path: single continuous group, no events, no
         # discrete, no adaptive macro_dt ───────────────────────────────
@@ -592,12 +604,10 @@ class Scheduler:
             integ = integrators[gname]
             rhs_fn, _ = composite.build_rhs(proc_names)
             save_step = save_dt if save_dt is not None else macro_dt
-            # Fixed-length save grid t0..t1 inclusive. Computing the count as a
-            # Python int (not a boolean mask over arange) keeps this jit-safe:
-            # under jit every array is a tracer, so `arange[arange <= t1]` would
-            # raise NonConcreteBooleanIndexError.
-            n_save = int(round((t1 - t0) / save_step)) + 1
-            save_ts = t0 + save_step * jnp.arange(n_save)
+            # Fixed-length save grid on [t0, t1] inclusive via linspace: pins
+            # both endpoints exactly (never a SaveAt time past t1, which would
+            # make diffeqsolve raise) and stays jit-safe (count is a Python int).
+            save_ts = self._save_grid(t0, t1, save_step)
             sol = dfx.diffeqsolve(
                 dfx.ODETerm(rhs_fn),
                 integ.solver,
@@ -1192,6 +1202,71 @@ class Scheduler:
             sorted((g, tuple(sorted(procs))) for g, procs in groups.items())
         )
         return (gstruct, int(state.shape[-1]), float(macro_dt))
+
+    @staticmethod
+    def _save_grid(t0: float, t1: float, save_step: float) -> jnp.ndarray:
+        """Save times spanning ``[t0, t1]`` inclusive, ~``save_step`` apart.
+
+        The systematic rule so a save grid never errors: pick the point *count*
+        ``round((t1−t0)/save_step)+1`` and place them with ``jnp.linspace``,
+        which pins both endpoints exactly and never overshoots ``t1`` — a
+        ``SaveAt`` time past ``t1`` makes ``diffeqsolve`` raise. ``save_step``
+        need not divide ``(t1−t0)``; linspace fits the count to the span, so the
+        realized spacing is ``(t1−t0)/(n−1)`` (≈ ``save_step``). JIT-safe:
+        ``t0``/``t1``/``save_step`` are concrete floats, so ``n`` is a Python
+        int (static output shape)."""
+        span = t1 - t0
+        if not save_step or save_step <= 0.0 or save_step >= span:
+            return jnp.asarray([t0, t1], dtype=float)
+        n = int(round(span / save_step)) + 1
+        return jnp.linspace(t0, t1, n)
+
+    def _check_save_resolution(
+        self, integrators: dict[str, GroupIntegrator], save_dt: float
+    ) -> None:
+        """Warn (once) if the save grid undersamples the fastest oscillation.
+
+        A group whose Jacobian carries an imaginary part ``max|Im λ| = ω``
+        (run-time units) oscillates with period ``T = 2π/ω``. Sampling the
+        raw trajectory at ``save_dt > T/2`` violates Nyquist — the oscillation
+        aliases, and any readout of a *raw* oscillating state (an amplitude,
+        an endpoint, a plain mean of saved points) is corrupted. This is the
+        Nyquist theorem, not a tuned threshold. Phase-insensitive readouts
+        routed through a :class:`~hallsim.models.running_integral.RunningIntegral`
+        are grid-independent and unaffected — the recommended fix, alongside
+        simply saving finer (``save_dt`` is decoupled from ``macro_dt`` via
+        dense output, so it costs no extra ODE steps).
+
+        Fires only when the Jacobian spectrum is available (the
+        ``auto_stiffness`` path, after ``warm_up``); a manual-solver run
+        carries no spectrum to check against.
+        """
+        if not save_dt or self._warned_save_res:
+            return
+        import math
+
+        offenders = []
+        for g, gi in integrators.items():
+            omega = getattr(gi.info, "max_abs_im", 0.0) if gi.info else 0.0
+            if omega > 0.0:
+                period = 2.0 * math.pi / omega
+                if save_dt > 0.5 * period:
+                    offenders.append((g, period))
+        if offenders:
+            self._warned_save_res = True
+            worst = min(p for _, p in offenders)
+            log.warning(
+                "save_dt=%.4g undersamples the fastest oscillation "
+                "(period %.4g, group(s) %s) below Nyquist — raw-state "
+                "readouts on this grid alias. Save finer (save_dt < %.4g, "
+                "~%d+ samples/period) or read oscillators through a "
+                "RunningIntegral (grid-independent).",
+                save_dt,
+                worst,
+                ", ".join(g for g, _ in offenders),
+                0.5 * worst,
+                10,
+            )
 
     def _resolve_integrators(
         self,

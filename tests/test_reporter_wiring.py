@@ -43,7 +43,7 @@ def composite():
 
 
 def test_observer_hop_resolves_to_annotated_source(composite):
-    ont, resolved = resolve_ontology("gz06/x2_integral", composite)
+    ont, resolved = resolve_ontology("gz06/x_integral", composite)
     assert resolved == "gz06/x"
     assert ont.get("uniprot") == "P04637"
 

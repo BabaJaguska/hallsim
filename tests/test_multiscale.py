@@ -1255,3 +1255,120 @@ class TestSchedulerIsDue:
 
     def test_zero_dt_step_never_due(self):
         assert not Scheduler._is_due(0.0, 10.0, 0.0)
+
+
+_OMEGA = 20.0  # rad/time → oscillation period 2π/20 ≈ 0.314
+
+
+class DampedOscillator(Process):
+    """2-state damped oscillator ``dx=ω y − ε x, dy=−ω x − ε y`` — Jacobian
+    eigenvalues ``−ε ± iω``, so ``max|Im λ| = ω`` (period ``2π/ω``) and a small
+    ``ε`` decay keeps an explicit solver from anti-damping. Fixture for the
+    Nyquist save-grid guardrail, which keys off the imaginary spectrum."""
+
+    timescale: float = 1.0
+    omega: float = _OMEGA
+    damp: float = 1.0
+
+    def ports_schema(self):
+        return {
+            "x": Port(
+                role=PortRole.EVOLVED, default=1.0, units="dimensionless"
+            ),
+            "y": Port(
+                role=PortRole.EVOLVED, default=0.0, units="dimensionless"
+            ),
+        }
+
+    def derivative(self, t, state):
+        x, y = state["x"], state["y"]
+        return {
+            "x": self.omega * y - self.damp * x,
+            "y": -self.omega * x - self.damp * y,
+        }
+
+
+def _osc_composite():
+    return Composite(
+        processes={"osc": DampedOscillator()},
+        topology={},
+        validate=False,
+        semantic_validation={"check_semantics": False},
+    )
+
+
+def test_nyquist_guardrail_warns_on_coarse_grid(caplog):
+    """save_dt above period/2 (Nyquist) warns once; the message names the
+    aliasing and points at RunningIntegral / finer saves."""
+    import logging
+
+    comp = _osc_composite()
+    s = Scheduler(auto_stiffness=True)
+    with caplog.at_level(logging.WARNING, logger="hallsim.scheduler"):
+        s.run(
+            comp,
+            t_span=(0.0, 1.0),
+            macro_dt=0.5,
+            y0=comp.initial_state_vec(),
+            save_dt=0.2,  # > period/2 (≈0.157) → below Nyquist; divides t_span
+        )
+    assert s._warned_save_res
+    assert any("undersamples" in r.message for r in caplog.records)
+
+
+def test_nyquist_guardrail_silent_on_fine_grid():
+    """A Nyquist-satisfying grid (save_dt < period/2) does not warn."""
+    comp = _osc_composite()
+    s = Scheduler(auto_stiffness=True)
+    s.run(
+        comp,
+        t_span=(0.0, 1.0),
+        macro_dt=0.5,
+        y0=comp.initial_state_vec(),
+        save_dt=0.1,  # < period/2 (≈0.157) → resolves the oscillation
+    )
+    assert not s._warned_save_res
+
+
+def test_nyquist_guardrail_opt_out():
+    """warn_save_resolution=False suppresses the check even on a coarse grid —
+    for runs whose readouts are grid-independent (RunningIntegral-based)."""
+    comp = _osc_composite()
+    s = Scheduler(auto_stiffness=True)
+    s.run(
+        comp,
+        t_span=(0.0, 1.0),
+        macro_dt=0.5,
+        y0=comp.initial_state_vec(),
+        save_dt=0.2,
+        warn_save_resolution=False,
+    )
+    assert not s._warned_save_res
+
+
+def test_save_grid_never_overshoots_t1():
+    """_save_grid pins both endpoints on [t0, t1] and never places a point past
+    t1, for save_step values that do NOT divide the span (the footgun that made
+    diffeqsolve raise). linspace fits the count to the span."""
+    for t0, t1, step in [(0.0, 1.0, 0.06), (0.0, 14.0, 0.5), (2.0, 5.0, 0.7)]:
+        ts = Scheduler._save_grid(t0, t1, step)
+        assert float(ts[0]) == t0
+        assert float(ts[-1]) == pytest.approx(t1)
+        assert float(jnp.max(ts)) <= t1 + 1e-9
+
+
+def test_run_nondividing_save_dt_no_error():
+    """Regression: a save_dt that doesn't divide t_span used to round up and
+    place a SaveAt past t1, crashing the solve. Now the run completes and ends
+    exactly at t1."""
+    comp = _osc_composite()
+    s = Scheduler(auto_stiffness=True)
+    res = s.run(
+        comp,
+        t_span=(0.0, 1.0),
+        macro_dt=0.5,
+        y0=comp.initial_state_vec(),
+        save_dt=0.06,  # 1/0.06 = 16.67 → old code rounded to a point past t1
+        warn_save_resolution=False,
+    )
+    assert float(res.ts[-1]) == pytest.approx(1.0)

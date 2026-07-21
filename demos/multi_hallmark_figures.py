@@ -36,7 +36,9 @@ plt.rcParams.update({"font.family": "sans-serif",
                      "font.sans-serif": ["DejaVu Sans", "Helvetica", "Arial"]})
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT_CAL = ROOT / "outputs" / "multi_hallmark_calibrate"
+# The most recent timestamped calibrate run (symlink maintained by
+# multi_hallmark_calibrate.make_run_dir); figures track whatever last ran.
+OUT_CAL = ROOT / "outputs" / "multi_hallmark_calibrate" / "latest"
 
 _CKPT = OUT_CAL / "checkpoint.npz"
 
@@ -265,7 +267,7 @@ def fig_concordance(args):
         n = len(sorted(problem.data[a]))
         spans.append((i, i + n))
         i += n
-    order = ["CDKN1A", "DDB2", "EIF4EBP1", "CYCS", "NFKBIA", "HMOX1"]
+    order = [r.gene_symbol for r in problem.reporters]
     nC = len(cond)
 
     def render(params, subtitle, stem):
@@ -301,9 +303,17 @@ def fig_concordance(args):
             for s in ("left", "bottom"):
                 ax.spines[s].set_color("#cbd5e1")
 
-        fig, axes = plt.subplots(2, 3, figsize=(12.4, 6.6))
-        for ax, gene in zip(axes.flat, genes):
-            panel(ax, gene)
+        ncol = 3
+        nrow = -(-len(genes) // ncol)  # ceil
+        fig, axes = plt.subplots(
+            nrow, ncol, figsize=(12.4, 3.3 * nrow), squeeze=False
+        )
+        axf = axes.ravel()
+        for j, ax in enumerate(axf):
+            if j >= len(genes):
+                ax.axis("off")
+                continue
+            panel(ax, genes[j])
             ax.set_ylabel("log2 FC", fontsize=8.5, color=DIM)
         handles = [
             Line2D([0], [0], marker="o", color="none", markerfacecolor=C_DATA,
@@ -342,14 +352,25 @@ def fig_temporal(args):
     def figure_for_arm(problem, init, fit, arm, subtitle):
         data_times = sorted(problem.data[arm])
         genes = [r.gene_symbol for r in problem.reporters]
+        n = len(genes)
+        ncol = 3
+        nrow = -(-n // ncol)  # ceil
         # model_lfc reproduces exactly what the loss fits: within-arm
-        # (X_t/X_0) fold change, with the arm's timed interventions applied.
-        # At t=0 it is 0 by construction, matching the measured day-0 anchor.
-        qt = np.arange(0.0, t_end + 1e-6, 0.1)
+        # (X_t/X_0) fold change. Start at t>0: at exactly t=0 a window-mean
+        # reporter reads a zero-width window (→0, log2 floors), a plotting-only
+        # degeneracy; the fold-change is 0 as t→0⁺ by construction.
+        qt = np.arange(0.1, t_end + 1e-6, 0.1)
         lfc_oob = np.asarray(problem.model_lfc(init, arm, jnp.asarray(qt)))
         lfc_fit = np.asarray(problem.model_lfc(fit, arm, jnp.asarray(qt)))
-        fig, axes = plt.subplots(2, 3, figsize=(11, 6.4), sharex=True)
-        for i, (ax, gene) in enumerate(zip(axes.ravel(), genes)):
+        fig, axes = plt.subplots(
+            nrow, ncol, figsize=(11, 3.2 * nrow), sharex=True, squeeze=False
+        )
+        axf = axes.ravel()
+        for i, ax in enumerate(axf):
+            if i >= n:
+                ax.axis("off")
+                continue
+            gene = genes[i]
             ax.axhline(0, color=grid_c, lw=1.2, zorder=0)
             ax.plot(qt, lfc_oob[i], color=C_OOB, lw=1.8, ls=(0, (4, 2)),
                     zorder=2, label="out-of-the-box")
@@ -365,11 +386,11 @@ def fig_temporal(args):
             ax.set_axisbelow(True)
             for s in ("top", "right"):
                 ax.spines[s].set_visible(False)
-            if i % 3 == 0:
+            if i % ncol == 0:
                 ax.set_ylabel("log2 fold-change")
-            if i >= 3:
+            if i >= n - ncol:
                 ax.set_xlabel("day")
-        handles, labels = axes.ravel()[0].get_legend_handles_labels()
+        handles, labels = axf[0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False,
                    fontsize=9.5, bbox_to_anchor=(0.5, -0.005))
         fig.suptitle(f"{subtitle} — reporter trajectories, out-of-the-box vs "
