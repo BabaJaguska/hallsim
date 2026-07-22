@@ -24,6 +24,7 @@ active state) — is flagged low-confidence, never silently asserted.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -34,7 +35,18 @@ import pandas as pd
 
 from hallsim.process import PortRole
 
-_DATA = Path(__file__).resolve().parent.parent.parent / "data"
+
+def _data_dir() -> Path:
+    """Reference-table root; overridable via ``HALLSIM_DATA_DIR`` (tests point
+    it at bundled subset fixtures)."""
+    env = os.environ.get("HALLSIM_DATA_DIR")
+    return (
+        Path(env)
+        if env
+        else Path(__file__).resolve().parent.parent.parent / "data"
+    )
+
+
 _PHOSPHO = re.compile(r"_p[STY]\d")
 
 
@@ -52,7 +64,7 @@ class ObservableKind(Enum):
 
 @lru_cache(maxsize=1)
 def _go_aspect() -> dict[str, str]:
-    df = pd.read_csv(_DATA / "ontology" / "go_aspect.tsv", sep="\t")
+    df = pd.read_csv(_data_dir() / "ontology" / "go_aspect.tsv", sep="\t")
     return dict(zip(df.go_id, df.aspect))
 
 
@@ -60,7 +72,7 @@ def _go_aspect() -> dict[str, str]:
 def _uniprot_symbol() -> dict[str, tuple[str, str]]:
     """UniProt accession → (gene symbol, NCBI taxon id)."""
     df = pd.read_csv(
-        _DATA / "ontology" / "uniprot_symbol.tsv", sep="\t", dtype=str
+        _data_dir() / "ontology" / "uniprot_symbol.tsv", sep="\t", dtype=str
     )
     return {
         a: (s, t)
@@ -73,7 +85,9 @@ def _uniprot_symbol() -> dict[str, tuple[str, str]]:
 def _orthologs() -> dict[str, str]:
     """Mouse gene symbol → human ortholog symbol (MGI)."""
     df = pd.read_csv(
-        _DATA / "ontology" / "ortholog_mouse_human.tsv", sep="\t", dtype=str
+        _data_dir() / "ontology" / "ortholog_mouse_human.tsv",
+        sep="\t",
+        dtype=str,
     )
     return dict(zip(df.mouse_symbol, df.human_symbol))
 
@@ -81,7 +95,9 @@ def _orthologs() -> dict[str, str]:
 @lru_cache(maxsize=1)
 def _collectri() -> tuple[frozenset, dict, dict]:
     """(TF symbols, {(tf, target): sign}, {target: {tf: sign}})."""
-    df = pd.read_csv(_DATA / "collectri" / "collectri_human.tsv", sep="\t")
+    df = pd.read_csv(
+        _data_dir() / "collectri" / "collectri_human.tsv", sep="\t"
+    )
     edges = {
         (t, g): int(w) for t, g, w in zip(df.source, df.target, df.weight)
     }

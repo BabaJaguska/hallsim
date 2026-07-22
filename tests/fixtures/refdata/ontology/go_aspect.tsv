@@ -1,0 +1,7 @@
+go_id	aspect	name
+GO:0000422	biological_process	autophagy of mitochondrion
+GO:0005739	cellular_component	mitochondrion
+GO:0006357	biological_process	regulation of transcription by RNA polymerase II
+GO:0006974	biological_process	DNA damage response
+GO:0008384	molecular_function	IkappaB kinase activity
+GO:0031931	cellular_component	TORC1 complex

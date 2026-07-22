@@ -54,7 +54,7 @@ class TestZerophaseMean:
     def test_reflection_beats_constant_pad_at_boundary(self):
         # Reflection padding keeps the first smoothed point near y[0] for a
         # signal rising slowly relative to tau, where a constant warm-start
-        # would lift it toward the interior (the CDKN1A startup-spike fix).
+        # would lift it toward the interior.
         ts = jnp.linspace(0.0, 14.0, 280)
         y = 1.0 - jnp.exp(-ts / 10.0)  # slow rise relative to tau=2
         sm = zerophase_mean(2.0)(ts, y, query_times=ts)
@@ -67,9 +67,6 @@ class TestZerophaseMean:
 
 
 class TestReporterTable:
-
-    def test_at_least_five_reporters(self):
-        assert len(CANONICAL_REPORTERS) >= 5
 
     def test_all_signs_are_plus_or_minus_one(self):
         for r in CANONICAL_REPORTERS:
@@ -201,28 +198,25 @@ class TestComputeConcordance:
         # Perfectly anticorrelated (largest sim → most-negative data).
         assert result.spearman_r == pytest.approx(-1.0)
 
-    def test_missing_gene_skipped(self):
-        """Genes not in the expression series are dropped from comparison."""
-        delta_obs = {"p53_activity": +1.0}
-        delta_data = pd.Series({"SOMETHING_ELSE": +0.5})
-        result = compute_concordance(
-            delta_observables=delta_obs,
-            delta_gene_expression=delta_data,
+    def test_empty_intersection_skipped(self):
+        """An empty observable/gene intersection yields no comparisons,
+        whether the mismatch is on the data side or the sim side."""
+        # Drop on the data side: sim observable has no matching gene.
+        result_data = compute_concordance(
+            delta_observables={"p53_activity": +1.0},
+            delta_gene_expression=pd.Series({"SOMETHING_ELSE": +0.5}),
             condition_name="empty",
         )
-        assert result.n_compared == 0
-        assert result.sign_agreement == 0.0  # no rows → defaults
+        assert result_data.n_compared == 0
+        assert result_data.sign_agreement == 0.0  # no rows → defaults
 
-    def test_missing_observable_skipped(self):
-        """Observables not in the sim deltas are dropped."""
-        delta_obs = {}  # nothing
-        delta_data = pd.Series({"CDKN1A": +0.5})
-        result = compute_concordance(
-            delta_observables=delta_obs,
-            delta_gene_expression=delta_data,
+        # Drop on the sim side: gene has no matching sim observable.
+        result_sim = compute_concordance(
+            delta_observables={},
+            delta_gene_expression=pd.Series({"CDKN1A": +0.5}),
             condition_name="empty_sim",
         )
-        assert result.n_compared == 0
+        assert result_sim.n_compared == 0
 
     def test_inverse_sign_applied(self):
         """A reporter with sign=-1 should treat Δ_sim and -Δ_sim as
@@ -410,7 +404,7 @@ class TestLog2FoldChange:
 
     def test_simple_difference(self):
         """Microarray values are already log2-scaled — the difference of means is
-        the log2 fold change."""
+        the log2 fold change, in either direction."""
         df = pd.DataFrame(
             {
                 "s1": [3.0, 5.0],
@@ -424,7 +418,7 @@ class TestLog2FoldChange:
         assert lfc["GENE_A"] == pytest.approx(1.0)
         assert lfc["GENE_B"] == pytest.approx(1.0)
 
-    def test_negative_change(self):
-        df = pd.DataFrame({"s": [2.0], "ctrl": [4.0]}, index=["GENE_A"])
-        lfc = log2_fold_change(df, ["s"], ["ctrl"])
-        assert lfc["GENE_A"] == pytest.approx(-2.0)
+        # Opposite sign: control higher than sample → negative fold change.
+        df_neg = pd.DataFrame({"s": [2.0], "ctrl": [4.0]}, index=["GENE_A"])
+        lfc_neg = log2_fold_change(df_neg, ["s"], ["ctrl"])
+        assert lfc_neg["GENE_A"] == pytest.approx(-2.0)

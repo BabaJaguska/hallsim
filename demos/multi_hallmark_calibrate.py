@@ -328,8 +328,8 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
             # The DNS→mTOR affine floor: mTOR's residual fraction under
             # rapamycin (severity=0). Sets the DDIS:ctrl mTOR contrast the
             # EIF4EBP1 reporter reads, and the h=0 anchor the held-out RAPA arm
-            # lands on — was a frozen 0.3, now fitted like GZ06's basal ψ. Rides
-            # the hallmark registry, not a process field (no SBML host).
+            # lands on. Rides the hallmark registry, not a process field (no
+            # SBML host).
             "dns_mtor_floor": HallmarkCoeffRef(
                 hallmark="Deregulated Nutrient Sensing",
                 param_name=f"parameters.{DP14_MTOR_PHOS_RATE_NAME}",
@@ -838,10 +838,8 @@ def cmd_calibrate(args) -> None:
     print("[2/4] fitting ...", flush=True)
     steps = getattr(args, "steps", None) or 150
     base_lr = getattr(args, "lr", None) or 0.005
-    # Cosine-decayed LR (fast descent into the basin, then a small-step tail
-    # that doesn't overshoot the narrow valley walls) beats a fixed LR: it
-    # keeps the early speed of a high LR without the late bouncing. It replaces
-    # reduce-on-plateau (a proactive schedule, not a reactive one).
+    # Cosine-decayed LR: fast descent into the basin, then a small-step tail
+    # that doesn't overshoot the narrow valley walls.
     if getattr(args, "cosine", False):
         import optax
 

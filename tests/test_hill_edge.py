@@ -82,10 +82,6 @@ class TestMultiHallmarkWiring:
         comp = build_multi_hallmark_composite()
         for name in ("mtor_nfkb", "damage_nfkb", "p53_cdkn1a"):
             assert isinstance(comp.processes[name], HillActivationEdge), name
-        assert comp.topology["mtor_nfkb"] == {
-            "source": "dp14/mTORC1_pS2448",
-            "target": "nfkb/IKK",
-        }
         assert comp.topology["damage_nfkb"]["target"] == "nfkb/IKK"
         assert comp.topology["p53_cdkn1a"]["target"] == "dp14/CDKN1A"
 

@@ -883,13 +883,10 @@ def _load_local_sbml(sbml_path: str):
     os.close(fd)
     try:
         GenerateModel(model_data, tmp_py)
-        # Patch sbmltoodejax bug: some SBML models (e.g. Sivakumar2011
-        # crosstalk BIOMD0000000398) contain MathML that sbmltoodejax
-        # translates into bare `no.sqrt(...)` calls — an undefined name
-        # `no` that is never imported.  This appears to come from the
-        # SBML MathML namespace prefix "no" being emitted verbatim
-        # instead of mapping to jax.numpy.  We patch the generated
-        # source to alias `no` to `jax.numpy` before loading.
+        # sbmltoodejax emits bare `no.sqrt(...)` for some models (e.g.
+        # Sivakumar2011 BIOMD0000000398): the SBML MathML namespace prefix
+        # "no" passes through verbatim instead of mapping to jax.numpy, so
+        # `no` is undefined. Alias `no` to jax.numpy in the generated source.
         with open(tmp_py, "r") as f:
             code = f.read()
         patched = False

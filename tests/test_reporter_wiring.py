@@ -42,6 +42,7 @@ def composite():
     return build_multi_hallmark_composite(validate=False)
 
 
+@pytest.mark.network
 def test_observer_hop_resolves_to_annotated_source(composite):
     ont, resolved = resolve_ontology("gz06/x_integral", composite)
     assert resolved == "gz06/x"

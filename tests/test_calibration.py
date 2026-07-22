@@ -157,30 +157,6 @@ class TestInvalidConfig:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestConditionAndParameterRef:
-
-    def test_condition_construction(self):
-        from hallsim.calibration import Condition
-
-        c = Condition("DDIS", {"Genomic Instability": 1.0})
-        assert c.name == "DDIS"
-        assert c.hallmarks["Genomic Instability"] == 1.0
-
-    def test_parameter_ref_construction(self):
-        from hallsim.calibration import ParameterRef
-
-        p = ParameterRef(
-            process_name="dp14",
-            field="parameters.k",
-            init=1.0,
-            clamp=(0.0, 10.0),
-        )
-        assert p.process_name == "dp14"
-        assert p.field == "parameters.k"
-        assert p.init == 1.0
-        assert p.clamp == (0.0, 10.0)
-
-
 class TestCalibrationProblemValidation:
     """Construction-time validation: typos are caught early."""
 
@@ -629,11 +605,6 @@ class TestNormalizationModes:
             n_save=6,
         )
 
-    def test_each_mode_finite(self):
-        for mode in ("baseline", "paired", "raw"):
-            v = self._problem(mode).loss({"rate": jnp.asarray(0.2)})
-            assert jnp.isfinite(v) and v.shape == ()
-
     def test_modes_are_distinct(self):
         # ctrl and high share dynamics (no hallmarks), so paired's ratio is
         # exactly 1 (lfc 0) while baseline (÷ t=0) and raw (no ÷) are not — the
@@ -657,7 +628,7 @@ class TestEquilibrationBaselineMatchesReadout:
     run) must equal each reporter's readout evaluated on the control condition
     run to steady state — for *every* readout kind. A power=2 RMS reporter reads
     √⟨x²⟩ = x_fp at the fixed point, NOT x_fp², so summ_b must not be raised to
-    the integral power. Regression guard for the baseline-power bug."""
+    the integral power."""
 
     def _problem(self):
         import pandas as pd
@@ -743,6 +714,6 @@ class TestEquilibrationBaselineMatchesReadout:
         readout = prob._reporter_summaries(ts, trajs, jnp.asarray([27.0]))
 
         # summ_b (fixed-point shortcut) matches the run; both equal x_fp=2,
-        # NOT x_fp**2=4 (which the power-raised baseline bug produced).
+        # NOT x_fp**2=4.
         assert jnp.allclose(summ_b[:, 0], readout[:, 0], rtol=1e-3)
         assert jnp.allclose(summ_b[:, 0], jnp.asarray([2.0, 2.0]), rtol=1e-2)

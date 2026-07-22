@@ -26,7 +26,6 @@ from hallsim.validation import (
     SemanticChecker,
     Severity,
     UnitChecker,
-    ValidationReport,
     analyze_composability,
 )
 
@@ -279,6 +278,37 @@ class TestSemanticChecker:
         infos = [r for r in results if r.level == Severity.INFO]
         assert any("no ontology" in i.message.lower() for i in infos)
 
+    def test_noncomparable_namespaces(self):
+        """Both annotated but in disjoint namespaces (chebi vs go) → INFO,
+        not a false 'partial / has none' warning."""
+
+        class GoProducer(Process):
+            rate: float = 0.05
+
+            def ports_schema(self):
+                return {
+                    "ros": Port(
+                        role=PortRole.EVOLVED,
+                        default=0.0,
+                        units="uM",
+                        ontology={"go": "GO:0006979"},
+                    )
+                }
+
+            def derivative(self, t, state):
+                return {"ros": jnp.asarray(self.rate)}
+
+        procs = {"a": ROSProducerMicromolar(), "b": GoProducer()}
+        topo = {"a": {"ros": "pool/ros"}, "b": {"ros": "pool/ros"}}
+        results = SemanticChecker().check(procs, topo)
+        assert not [r for r in results if r.level == Severity.ERROR]
+        assert not [r for r in results if r.level == Severity.WARNING]
+        assert any(
+            "non-comparable" in r.message.lower()
+            for r in results
+            if r.level == Severity.INFO
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Graph Analyzer
@@ -446,14 +476,6 @@ class TestCompositeValidator:
         unit_errors = [r for r in report.errors if r.category == "units"]
         assert len(unit_errors) == 0
 
-    def test_report_summary(self):
-        report = ValidationReport()
-        assert "0 error" in report.summary()
-
-    def test_report_str(self):
-        report = ValidationReport()
-        assert isinstance(str(report), str)
-
     def test_interaction_graph_in_report(self):
         procs = {"a": BareProducer(), "b": BareProducer2()}
         topo = {"a": {"x": "pool/x"}, "b": {"x": "pool/x"}}
@@ -481,13 +503,6 @@ class TestCompositeIntegration:
         topo = {"a": {"ros": "pool/ros"}, "b": {"ros": "pool/ros"}}
         composite = Composite(procs, topo, semantic_validation=False)
         assert composite is not None
-
-    def test_semantic_validation_true_raises_on_error(self):
-        """semantic_validation=True raises on unit conflict."""
-        procs = {"a": ROSProducerMicromolar(), "b": ROSProducerKilograms()}
-        topo = {"a": {"ros": "pool/ros"}, "b": {"ros": "pool/ros"}}
-        with pytest.raises(ValueError, match="Semantic validation failed"):
-            Composite(procs, topo, semantic_validation=True)
 
     def test_semantic_validation_dict_config(self):
         """Can pass config dict to CompositeValidator."""

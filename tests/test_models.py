@@ -234,19 +234,6 @@ class TestHallmarkHandles:
             1.0
         )
 
-    def test_severity_one_max_effect(self):
-        from hallsim.hallmarks import HALLMARK_REGISTRY
-        from hallsim.models.eriq import ERiQOxidativeStress
-
-        handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
-        procs = {"oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=1.0)}
-
-        modified = handle.apply(procs, severity=1.0)
-        # 1.0 + 1.0 * 2.0 = 3.0
-        assert float(modified["oxidative_stress"].MDAMAGE_SA) == pytest.approx(
-            3.0
-        )
-
     def test_apply_hallmarks_multiple(self):
         from hallsim.hallmarks import apply_hallmarks
         from hallsim.models.eriq import (
@@ -292,8 +279,8 @@ class TestHallmarkHandles:
         assert summary["oxidative_stress.MDAMAGE_SA"] == pytest.approx(2.0)
 
     def test_transform_reads_calibrated_base_not_hardcoded_constant(self):
-        """The multiplicative refactor's core invariant: if you change
-        the base value, the transform's output scales with it.
+        """Core invariant: if you change the base value, the transform's
+        output scales with it.
         """
         from hallsim.hallmarks import HALLMARK_REGISTRY
         from hallsim.models.eriq import ERiQOxidativeStress

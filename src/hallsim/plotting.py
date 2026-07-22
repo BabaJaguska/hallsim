@@ -1,8 +1,7 @@
 """Plotting utilities for HallSim simulations.
 
-Provides quick visualization for simulation results from Scheduler
-and Scheduler, including trajectory plots, phase portraits, and
-composite overviews.
+Provides quick visualization for simulation results from Scheduler,
+including trajectory plots, phase portraits, and composite overviews.
 """
 
 from __future__ import annotations

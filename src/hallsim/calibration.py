@@ -1529,8 +1529,8 @@ class CalibrationProblem:
         each parameter basis (cost scales with parameter count) and is
         robust through the multi-rate macro loop. ``"reverse"`` is a
         single VJP (cost independent of parameter count, the way neural
-        networks train) — much cheaper for several parameters, now that
-        the phase-insensitive ``window_mean`` summaries make the reverse
+        networks train) — much cheaper for several parameters; the
+        phase-insensitive ``window_mean`` summaries keep the reverse
         pass through the oscillators well-behaved.
         """
         init = {k: jnp.asarray(p.init) for k, p in self._all_refs.items()}

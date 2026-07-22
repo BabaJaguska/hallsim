@@ -382,8 +382,5 @@ def build_multi_hallmark_composite(
         processes=processes,
         topology=topology,
         validate=validate,
-        # Cross-model ontology IDs at the coupling points carry
-        # different GO terms by design — the semantic checker would
-        # flag this as a conflict. Unit and graph checks remain active.
-        semantic_validation={"check_semantics": False},
+        semantic_validation=True,
     )

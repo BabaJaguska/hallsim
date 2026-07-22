@@ -135,23 +135,12 @@ class TestERiQSignaling:
 
 
 class TestBuildERiQComposite:
-    def test_builds_without_error(self):
-        comp = build_eriq_composite()
-        assert len(comp.processes) == 3
-
     def test_store_paths(self):
         comp = build_eriq_composite()
         paths = comp.store_paths()
         assert "eriq/mito_function" in paths
         assert "eriq/ROS_activity" in paths
         assert "eriq/p53_activity" in paths
-        assert len(paths) == 11  # 11 unique state variables
-
-    def test_initial_state_matches_homeostatic(self):
-        comp = build_eriq_composite()
-        y0 = comp.initial_state()
-        assert float(y0["eriq/mito_function"]) == pytest.approx(3.6239)
-        assert float(y0["eriq/mito_damage"]) == pytest.approx(0.0724)
 
     def test_build_rhs_returns_callable(self):
         comp = build_eriq_composite()

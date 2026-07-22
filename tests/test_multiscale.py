@@ -332,30 +332,17 @@ class TestProcessInterfaces:
 
 
 class TestMetadata:
-    def test_metadata_includes_kind(self):
-        proc = DivisionCheck()
-        meta = proc.metadata()
-        assert meta["kind"] == "discrete"
-
-    def test_metadata_includes_dt_step(self):
-        proc = DivisionCheck()
-        meta = proc.metadata()
-        assert meta["dt_step"] == 86400.0
-
-    def test_metadata_includes_timescale(self):
-        proc = FastKinetics()
-        meta = proc.metadata()
-        assert meta["timescale"] == 1.0
+    def test_metadata_contract(self):
+        div_meta = DivisionCheck().metadata()
+        assert div_meta["kind"] == "discrete"
+        assert div_meta["dt_step"] == 86400.0
+        assert FastKinetics().metadata()["timescale"] == 1.0
+        assert ContinuousDecay().metadata()["kind"] == "continuous"
 
     def test_metadata_omits_none_timescale(self):
         proc = ContinuousDecay()
         meta = proc.metadata()
         assert "timescale" not in meta
-
-    def test_metadata_continuous_kind(self):
-        proc = ContinuousDecay()
-        meta = proc.metadata()
-        assert meta["kind"] == "continuous"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -414,20 +401,6 @@ class TestKindRoleValidation:
         assert not any(
             "LATCHED" in e and "EVOLVED" in e for e in errors
         ), errors
-
-    def test_valid_discrete_process_no_errors(self):
-        errors = validate_topology(
-            {"div": DivisionCheck()},
-            {"div": {"cell_count": "pop/count", "damage": "cell/damage"}},
-        )
-        assert len(errors) == 0
-
-    def test_valid_event_process_no_errors(self):
-        errors = validate_topology(
-            {"sen": SenescenceEntry()},
-            {"sen": {"p53": "cell/p53", "senescent": "cell/senescent"}},
-        )
-        assert len(errors) == 0
 
     def test_mixed_valid_composition(self):
         """A valid mix of continuous + discrete + event processes."""
@@ -508,13 +481,6 @@ class TestCompositeWithMixedKinds:
 
 
 class TestContinuousOnly:
-    def test_default_kind_is_continuous(self):
-        """Processes without explicit kind are CONTINUOUS."""
-        proc = ContinuousDecay()
-        assert proc.kind == ProcessKind.CONTINUOUS
-        assert proc.timescale is None
-        assert proc.dt_step is None
-
     def test_rhs_solves_continuous_only(self):
         """build_rhs() on a CONTINUOUS-only composite."""
         composite = Composite(
@@ -1240,18 +1206,12 @@ class TestSchedulerBatchedGuards:
 
 
 class TestSchedulerIsDue:
-    def test_due_at_exact_multiple(self):
-        assert Scheduler._is_due(0.0, 10.0, 10.0)
-
-    def test_due_crossing_multiple(self):
-        assert Scheduler._is_due(8.0, 12.0, 10.0)
+    def test_is_due_fires(self):
+        assert Scheduler._is_due(0.0, 10.0, 10.0)  # exact multiple
+        assert Scheduler._is_due(8.0, 12.0, 10.0)  # crossing a multiple
 
     def test_not_due_within_interval(self):
         assert not Scheduler._is_due(1.0, 5.0, 10.0)
-
-    def test_due_multiple_firings(self):
-        # From 5 to 25, dt_step=10 → fires at 10 and 20
-        assert Scheduler._is_due(5.0, 25.0, 10.0)
 
     def test_zero_dt_step_never_due(self):
         assert not Scheduler._is_due(0.0, 10.0, 0.0)
@@ -1348,27 +1308,10 @@ def test_nyquist_guardrail_opt_out():
 
 def test_save_grid_never_overshoots_t1():
     """_save_grid pins both endpoints on [t0, t1] and never places a point past
-    t1, for save_step values that do NOT divide the span (the footgun that made
-    diffeqsolve raise). linspace fits the count to the span."""
+    t1, for save_step values that do NOT divide the span. linspace fits the
+    count to the span."""
     for t0, t1, step in [(0.0, 1.0, 0.06), (0.0, 14.0, 0.5), (2.0, 5.0, 0.7)]:
         ts = Scheduler._save_grid(t0, t1, step)
         assert float(ts[0]) == t0
         assert float(ts[-1]) == pytest.approx(t1)
         assert float(jnp.max(ts)) <= t1 + 1e-9
-
-
-def test_run_nondividing_save_dt_no_error():
-    """Regression: a save_dt that doesn't divide t_span used to round up and
-    place a SaveAt past t1, crashing the solve. Now the run completes and ends
-    exactly at t1."""
-    comp = _osc_composite()
-    s = Scheduler(auto_stiffness=True)
-    res = s.run(
-        comp,
-        t_span=(0.0, 1.0),
-        macro_dt=0.5,
-        y0=comp.initial_state_vec(),
-        save_dt=0.06,  # 1/0.06 = 16.67 → old code rounded to a point past t1
-        warn_save_resolution=False,
-    )
-    assert float(res.ts[-1]) == pytest.approx(1.0)

@@ -286,8 +286,26 @@ class SemanticChecker:
                                 )
                             )
 
-                    # Partial annotation
-                    if not shared_ns and (ont1 or ont2):
+                    # Beyond same-namespace conflicts (handled above),
+                    # characterize what can and cannot be verified.
+                    if shared_ns:
+                        pass  # a shared namespace was compared above
+                    elif ont1 and ont2:
+                        # Both annotated, but in disjoint ID namespaces (e.g. a
+                        # UniProt protein ID vs a GO activity term): no shared
+                        # namespace to compare in, so identity is *unverifiable*,
+                        # not missing. Verifying it needs an ontology cross-walk.
+                        results.append(
+                            ValidationResult(
+                                Severity.INFO,
+                                "semantics",
+                                f"Non-comparable annotations at {store_path!r}: "
+                                f"{e1.proc_name}.{e1.port_name} has {ont1}, "
+                                f"{e2.proc_name}.{e2.port_name} has {ont2} — no "
+                                f"shared ID namespace, cannot verify same entity.",
+                            )
+                        )
+                    elif ont1 or ont2:
                         annotated = e1 if ont1 else e2
                         bare = e2 if ont1 else e1
                         results.append(
@@ -300,9 +318,7 @@ class SemanticChecker:
                                 f"{bare.proc_name}.{bare.port_name} has none.",
                             )
                         )
-
-                    # Both bare
-                    if not ont1 and not ont2:
+                    else:
                         results.append(
                             ValidationResult(
                                 Severity.INFO,
@@ -637,7 +653,7 @@ class CompositeValidator:
         topology: dict[str, dict[str, str]],
     ) -> ValidationReport:
         """Run all enabled checks and return a :class:`ValidationReport`."""
-        # Structural validation first (reuse existing logic)
+        # Structural validation first
         structural_errors = validate_topology(processes, topology)
         results = [
             ValidationResult(Severity.ERROR, "structure", e)

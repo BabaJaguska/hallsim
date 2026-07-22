@@ -42,11 +42,10 @@ from hallsim.process import Port, PortRole, Process
 def _compute_algebraic_original(state: dict) -> dict:
     """Original ERiQ algebraic equations with raw reciprocal terms.
 
-    The pre-revision baseline: these equations have numerical
-    singularities (1/x terms) that blow up as state variables approach
-    zero — the reference for why the revised form exists and a ready
-    example of a model the pre-flight screen flags. Use
-    ``_compute_algebraic`` for the revised, numerically stable version.
+    These equations have numerical singularities (1/x terms) that blow up
+    as state variables approach zero — a ready example of a model the
+    pre-flight screen flags. Use ``_compute_algebraic`` for the revised,
+    numerically stable version.
     """
     eps = 1e-6
 

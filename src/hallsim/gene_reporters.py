@@ -253,7 +253,7 @@ def cycle_average(fraction: float = 0.25):
     degrades to ~the endpoint, and it cannot be evaluated at an arbitrary
     query time. Prefer :func:`window_mean` over a
     :class:`~hallsim.models.running_integral.RunningIntegral`, which is
-    exact and query-time-aware. Kept for the legacy ERiQ reporter path.
+    exact and query-time-aware.
 
     Parameters
     ----------

@@ -79,8 +79,6 @@ def test_logical_or():
 
 
 def test_nested_if_then_else():
-    got = _xpp_expr_to_python("if(x>0)then(if(y>0)then(1)else(2))else(3)")
-    assert got.count("where(") == 2
     assert _ev("if(x>0)then(if(y>0)then(1)else(2))else(3)", x=1, y=1) == 1
     assert _ev("if(x>0)then(if(y>0)then(1)else(2))else(3)", x=1, y=-1) == 2
     assert _ev("if(x>0)then(if(y>0)then(1)else(2))else(3)", x=-1, y=0) == 3

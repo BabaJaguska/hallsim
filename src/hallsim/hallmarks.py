@@ -420,9 +420,7 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             "Geva-Zatorsky 2006 (BIOMD0000000157)",
         ],
         mappings=[
-            # ERiQ-based composites: severity=0 → base; severity=1 → 5*base
-            # (matches the prior absolute mapping with default base=0.5
-            # giving 0.5→2.5).
+            # ERiQ-based composites: severity=0 → base; severity=1 → 5*base.
             ParameterMapping(
                 process_name="damage_repair",
                 param_name="eta",
@@ -450,12 +448,9 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
                     "(sustained DDIS exposure)"
                 ),
             ),
-            # GZ06's psi is NOT mapped here. It is driven by DP14's
-            # DNA_damage state via a topology edge (SBMLProcess param
-            # driver, see multi_hallmark), so the p53 oscillator's damage
-            # input is caused mechanistically by DP14 rather than set
-            # independently by this severity. The GI severity still reaches
-            # GZ06 — through DP14's Irradiation → DNA_damage → psi.
+            # GZ06's psi is not mapped here — it is driven by DP14's
+            # DNA_damage via a topology edge (see multi_hallmark), so GI
+            # severity reaches GZ06 through Irradiation → DNA_damage → psi.
         ],
     ),
 }

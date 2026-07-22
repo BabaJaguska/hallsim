@@ -529,9 +529,8 @@ class Scheduler:
         # residual reduction). These paths use ``bool()`` / ``float()``
         # on traced JAX arrays which would either crash under ``vmap`` or
         # silently collapse the batch axis. The Scheduler's batched-y0
-        # support is currently the continuous-only path (fast path or
-        # multi-group Lie/Strang). A future PR can lift these by masking
-        # event firing per-batch-element via ``lax.cond``.
+        # support is the continuous-only path (fast path or
+        # multi-group Lie/Strang).
         is_batched = state.ndim > 1
         if is_batched:
             blockers = []

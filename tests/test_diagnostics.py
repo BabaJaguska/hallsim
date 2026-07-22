@@ -28,34 +28,36 @@ WNT_SBML_PATH = (
 )
 
 
-def test_screenreport_ok_logic():
-    clean = ScreenReport("m", False, False, False, 1.0, 1e-4)
-    assert (
-        clean.ok
-    )  # dataclass positional vs kw — rebuild explicitly to flip one flag
-    assert ScreenReport("m", True, False, False, 1.0, 1e-4).ok is False
-    assert ScreenReport("m", False, True, False, 1.0, 1e-4).ok is False
-    assert ScreenReport("m", False, False, True, 1.0, 1e2).ok is False
-
-
-def test_negative_domain_feeds_ok_logic():
-    """A state that went out of domain (materially negative) is not ok."""
-    assert (
-        ScreenReport("m", False, False, False, 1.0, 1e-4, negative=True).ok
-        is False
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        # base flags: exploding / vanishing / tolerance-sensitive gate ok
+        ({}, True),
+        ({"exploding": True}, False),
+        ({"vanishing": True}, False),
+        ({"tol_sensitive": True, "tol_delta": 1e2}, False),
+        # negative-domain flag (out-of-domain state is not ok)
+        ({"negative": True}, False),
+        ({"negative": False}, True),
+        # 'tunes' half of constituents-first: None/True leave ok, False gates
+        ({"tunes": None}, True),
+        ({"tunes": True}, True),
+        ({"tunes": False}, False),
+    ],
+)
+def test_screenreport_ok_logic(kwargs, expected):
+    kwargs.setdefault("tol_delta", 1e-4)
+    tol_delta = kwargs.pop("tol_delta")
+    report = ScreenReport(
+        "m",
+        kwargs.pop("exploding", False),
+        kwargs.pop("vanishing", False),
+        kwargs.pop("tol_sensitive", False),
+        1.0,
+        tol_delta,
+        **kwargs,
     )
-    assert ScreenReport("m", False, False, False, 1.0, 1e-4, negative=False).ok
-
-
-def test_tunes_feeds_ok_logic():
-    """The 'tunes' half of constituents-first gates ``ok``: a non-tunable
-    model is not ok; ``None`` (unprobed) and ``True`` leave it."""
-    assert ScreenReport("m", False, False, False, 1.0, 1e-4, tunes=None).ok
-    assert ScreenReport("m", False, False, False, 1.0, 1e-4, tunes=True).ok
-    assert (
-        ScreenReport("m", False, False, False, 1.0, 1e-4, tunes=False).ok
-        is False
-    )
+    assert report.ok is expected
 
 
 def test_check_tunability_opt_out_skips_gradient():
