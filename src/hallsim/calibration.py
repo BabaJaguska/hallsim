@@ -96,6 +96,9 @@ class CalibrationHistory:
     param_history: list[ParamPytree] = field(default_factory=list)
     grad_norms: list[float] = field(default_factory=list)
     lr_scales: list[float] = field(default_factory=list)
+    lrs: list[float] = field(
+        default_factory=list
+    )  # effective LR (schedule×scale)
     final_params: ParamPytree | None = None
     best_loss: float = float("inf")
     stopped_epoch: int | None = None
@@ -170,6 +173,7 @@ class Calibrator:
         method: Literal["adam", "lbfgs"] = "adam",
         optimizer: optax.GradientTransformation | None = None,
         learning_rate: float = 0.05,
+        adam_b1: float = 0.9,
         grad_clip: float | None = None,
         reduce_on_plateau: bool = False,
         plateau_patience: int = 3,
@@ -207,7 +211,7 @@ class Calibrator:
         # without ≥rtol improvement — damps the overshoot a fixed LR shows
         # on the flat direction-only loss. The tail reads the loss via
         # update(..., value=loss); `_uses_plateau` gates that call.
-        base = optimizer or optax.adam(learning_rate)
+        base = optimizer or optax.adam(learning_rate, b1=adam_b1)
         self._uses_plateau = reduce_on_plateau and optimizer is None
         if self._uses_plateau:
             base = optax.chain(
@@ -264,7 +268,7 @@ class Calibrator:
                 )(eye)
                 return primal, unravel(grad_flat)
 
-        self._vg = jax.jit(vg)
+        self._vg = eqx.filter_jit(vg)
         return self._vg
 
     # ── Clamping ───────────────────────────────────────────────
@@ -331,7 +335,7 @@ class Calibrator:
         params = self.init_params
         opt_state = self.optimizer.init(params)
         value_and_grad = self._value_and_grad_fn()
-        val_fn = jax.jit(self.val_loss_fn) if self.val_loss_fn else None
+        val_fn = eqx.filter_jit(self.val_loss_fn) if self.val_loss_fn else None
         history = CalibrationHistory()
         best_loss = float("inf")
         best_params = params
@@ -348,7 +352,11 @@ class Calibrator:
             monitored = float(val_fn(params)) if val_fn else lf
             if val_fn:
                 history.val_losses.append(monitored)
-            if monitored < best_loss - self.early_stop_tol:
+            # Relative improvement: patience accumulates once the loss stops
+            # dropping by more than `early_stop_tol` *fraction* per step —
+            # scale-invariant, so it can't fire mid-descent regardless of the
+            # loss magnitude (an absolute gradient threshold could).
+            if monitored < best_loss * (1.0 - self.early_stop_tol):
                 best_loss, best_params, no_improve = monitored, params, 0
                 self._save_checkpoint(best_params, best_loss, s)
             else:
@@ -357,12 +365,19 @@ class Calibrator:
             history.param_history.append(params)
             gnorm = float(optax.global_norm(grad))
             scale = self._plateau_scale(opt_state)
+            lr_base = (
+                float(self.learning_rate(s))
+                if callable(self.learning_rate)
+                else self.learning_rate
+            )
+            eff_lr = lr_base * scale
             history.grad_norms.append(gnorm)
             history.lr_scales.append(scale)
+            history.lrs.append(eff_lr)
             if self.verbose and (s % self.log_every == 0 or s == steps - 1):
                 msg = (
                     f"  [{s+1:3d}/{steps}] loss = {lf:.4g}  "
-                    f"|grad| = {gnorm:.3g}  lr = {self.learning_rate * scale:.2g}"
+                    f"|grad| = {gnorm:.3g}  lr = {eff_lr:.2g}"
                 )
                 if val_fn:
                     msg += f"  val = {monitored:.4g}"
@@ -417,11 +432,11 @@ class Calibrator:
         params = self.init_params
         opt_state = opt.init(params)
 
-        @jax.jit
+        @eqx.filter_jit
         def value_grad(p, state):
             return value_and_grad(p, state=state)
 
-        @jax.jit
+        @eqx.filter_jit
         def apply(p, state, value, grad):
             updates, state = opt.update(
                 grad, state, p, value=value, grad=grad, value_fn=loss_fn
@@ -546,12 +561,20 @@ class ParamStep:
     process_name: str
     param_name: str
     t_step: float
-    value_before: float
+    value_before: float | None = None
 
-    def apply(self, processes: dict) -> dict:
+    def apply(self, processes: dict, reference: dict | None = None) -> dict:
+        """Wire the timed step. ``value_before=None`` holds the pre-step level
+        at the param's value in ``reference`` (the substituted, pre-hallmark
+        processes) — i.e. the fitted, untreated-severity level — so it tracks a
+        fitted rate rather than a frozen constant."""
+        vb = self.value_before
+        if vb is None:
+            src = (reference or processes)[self.process_name]
+            vb = src.parameters[self.param_name]
         out = dict(processes)
         out[self.process_name] = out[self.process_name].with_param_step(
-            self.param_name, self.t_step, self.value_before
+            self.param_name, self.t_step, vb
         )
         return out
 
@@ -1034,7 +1057,7 @@ class CalibrationProblem:
 
         procs = apply_hallmarks(processes, condition.hallmarks)
         for iv in condition.interventions:
-            procs = iv.apply(procs)
+            procs = iv.apply(procs, reference=processes)
         return self._Composite(
             processes=procs,
             topology=self.composite.topology,
@@ -1044,8 +1067,9 @@ class CalibrationProblem:
 
     def _reporter_source_indices(self) -> list[int]:
         """Store index of each reporter's *source* state — the RunningIntegral's
-        source for an integral observable, else the observable itself. At a
-        fixed point every reporter's mean equals its source value, so ``summ_b``
+        source for an integral observable, else the observable itself. At the
+        control fixed point the source is constant, and every readout (mean over
+        ∫x, or RMS √⟨x²⟩ over ∫x²) evaluates to that constant, so ``summ_b``
         reads straight off ``y*`` with no run."""
         from hallsim.models.running_integral import RunningIntegral
 

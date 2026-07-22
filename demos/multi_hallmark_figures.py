@@ -341,7 +341,7 @@ def fig_concordance(args):
 
 # ── temporal (oob → calibrated log2FC vs data) ───────────────────────────
 def fig_temporal(args):
-    from multi_hallmark_calibrate import build_problem
+    from multi_hallmark_calibrate import build_problem, _annotate_interventions
     C_OOB, C_FIT, C_DATA, grid_c = "#9a9a95", "#2a78d6", "#0b0b0b", "#e6e6e2"
     arms = {"DDIS_vs_ctrl": "DDIS  (etoposide, fit arm)",
             "RAPA_vs_ctrl": "rapamycin  (etoposide + rapa @ day 2, held-out)",
@@ -381,6 +381,7 @@ def fig_temporal(args):
                           for t in data_times]
             ax.plot(dx, dy, "o", color=C_DATA, ms=7, zorder=4,
                     label="measured (GSE248823)")
+            _annotate_interventions(ax, arm)
             ax.set_title(gene, fontsize=11, fontweight="bold", loc="left")
             ax.grid(True, color=grid_c, lw=0.6, alpha=0.7)
             ax.set_axisbelow(True)

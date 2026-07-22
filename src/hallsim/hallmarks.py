@@ -303,9 +303,12 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
                 transform=lambda h, base: base * (1.0 + h * 0.5),
                 description="Glycolytic flux scales 1x→1.5x with nutrient dysregulation (ERiQ-based composites)",
             ),
-            # DP14-based composites: scale the mTORC1 phosphorylation
-            # rate around the calibrated base. severity=0 → 0.3*base
-            # (rapamycin-rescued); severity=1 → base (untreated DDIS).
+            # DP14-based composites: scale the mTORC1 phosphorylation rate
+            # around the (fitted) base. severity=0 → 0.3*base (rapamycin-
+            # rescued floor), severity=1 → base (untreated DDIS). The 0.3 floor
+            # sets the DDIS:control contrast; making it a fitted parameter is a
+            # follow-up (a linear base*h over-widened the contrast and regressed
+            # the fit).
             ParameterMapping(
                 process_name="dp14",
                 param_name=(
@@ -353,9 +356,10 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             # identity dial, not a scaled rate constant. The damage
             # *potency* per unit exposure (`DNA_damaged_by_irradiation`) is
             # a mechanism parameter Calibrator fits separately; severity
-            # never touches it. DDIS is modeled as a *sustained* exposure
-            # (HallSim holds the boundary input constant), not DP14's acute
-            # γ pulse — appropriate for etoposide, a continuous insult.
+            # never touches it. The exposure is delivered as a bounded dose
+            # window (`with_pulse_window`, default 2 days for etoposide);
+            # persistence past washout comes from the ROS→damage feedback,
+            # not a sustained input.
             ParameterMapping(
                 process_name="dp14",
                 param_name="parameters.Irradiation",

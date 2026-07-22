@@ -287,16 +287,23 @@ def build_multi_hallmark_composite(
         # drives the NF-κB-dependent SASP of DDIS senescence (Salminen 2012).
         "damage_nfkb": DamageNFkBActivator(timescale=nfkb.timescale),
         # ∫ observers for the oscillating reporters (read in the source's group
-        # so the integral sees the oscillation); window_mean differences ∫x to
-        # an exact, grid-independent trailing mean — what bulk transcriptomics
-        # measures. power=1 for the p53-axis means (∫x, ∫y); NFKBIA keeps ∫x².
+        # so the integral sees the oscillation), differenced to a grid-
+        # independent readout. p53 (x) uses power=2 → ∫x² feeds DDB2's RMS
+        # amplitude √⟨x²⟩: GZ06's ψ-cancellation makes ⟨x⟩ damage-blind, but the
+        # oscillation amplitude grows with damage. Mdm2 (y) and IκBα-transcript
+        # use power=1: their DC level ⟨·⟩ is already damage-responsive.
         "gz06_x_integral": RunningIntegral(
-            timescale=gz06.timescale, power=1.0
+            timescale=gz06.timescale, power=2.0
         ),
         "gz06_y_integral": RunningIntegral(
             timescale=gz06.timescale, power=1.0
         ),
-        "nfkb_ikbat_integral": RunningIntegral(timescale=nfkb.timescale),
+        # NFKBIA reads the IκBα *transcript* (nfkb/IkBat) directly, not a TF
+        # activity, so power=1 (mean): its DC level is damage-responsive (no
+        # mean-cancellation), unlike the p53 axis. power=2 over-predicts it.
+        "nfkb_ikbat_integral": RunningIntegral(
+            timescale=nfkb.timescale, power=1.0
+        ),
         # p53 → CDKN1A (p21): canonical p53 target. GZ06's group to read p53
         # live; Hill-gated flux integrated by DP14's CDKN1A turnover.
         "p53_cdkn1a": P53CDKN1AActivator(timescale=gz06.timescale),

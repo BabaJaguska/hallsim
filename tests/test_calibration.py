@@ -650,3 +650,99 @@ class TestNormalizationModes:
     def test_invalid_mode_rejected(self):
         with pytest.raises(ValueError, match="normalization must be"):
             self._problem("cross_arm")
+
+
+class TestEquilibrationBaselineMatchesReadout:
+    """The equilibration baseline ``summ_b`` (read off the fixed point without a
+    run) must equal each reporter's readout evaluated on the control condition
+    run to steady state — for *every* readout kind. A power=2 RMS reporter reads
+    √⟨x²⟩ = x_fp at the fixed point, NOT x_fp², so summ_b must not be raised to
+    the integral power. Regression guard for the baseline-power bug."""
+
+    def _problem(self):
+        import pandas as pd
+
+        from hallsim.calibration import (
+            CalibrationProblem,
+            Condition,
+            ParameterRef,
+        )
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter, oscillating_reporter
+        from hallsim.models.running_integral import RunningIntegral
+        from hallsim.process import Port, PortRole, Process
+
+        class SetPoint(Process):
+            """dx/dt = k(target - x): a nonzero stable fixed point at x=target
+            (target != 1 so x_fp and x_fp**2 are distinguishable)."""
+
+            k: float = 1.0
+            target: float = 2.0
+
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=2.0)}
+
+            def derivative(self, t, state):
+                return {"x": self.k * (self.target - state["x"])}
+
+        comp = Composite(
+            processes={
+                "sp": SetPoint(),
+                "xi": RunningIntegral(power=2.0),  # ∫x² → RMS reporter
+            },
+            topology={
+                "sp": {"x": "s/x"},
+                "xi": {"source": "s/x", "integral": "s/x2"},
+            },
+            validate=False,
+            semantic_validation=False,
+        )
+        reporters = [
+            oscillating_reporter(  # RMS √⟨x²⟩ over ∫x² → x_fp at steady state
+                observable="s/x2",
+                gene_symbol="RMS_GENE",
+                readout="zerophase",
+                tau=2.0,
+                sign=+1,
+            ),
+            GeneReporter(observable="s/x", gene_symbol="LEVEL_GENE", sign=+1),
+        ]
+        conditions = {
+            "ctrl": Condition("ctrl", {}),
+            "DDIS": Condition("DDIS", {}),
+        }
+        data = {
+            "DDIS_vs_ctrl": pd.Series({"RMS_GENE": 0.0, "LEVEL_GENE": 0.0})
+        }
+        return CalibrationProblem(
+            composite=comp,
+            reporters=reporters,
+            conditions=conditions,
+            data=data,
+            arm_pairs={"DDIS_vs_ctrl": ("DDIS", "ctrl")},
+            params={"k": ParameterRef(process_name="sp", field="k", init=1.0)},
+            fit_arms=["DDIS_vs_ctrl"],
+            normalization="baseline",
+            equilibrate=True,
+            equilibration_condition="ctrl",
+            t_end=30.0,
+            macro_dt=5.0,
+        )
+
+    def test_summ_b_equals_control_readout(self):
+        prob = self._problem()
+        init = {"k": jnp.asarray(1.0)}
+        prob.warm_up(init)
+        subst = prob._substitute(prob.composite.processes, init)
+        y0, summ_b = prob._equilibrate(subst)
+
+        # Run the control from the fixed point and read each reporter late.
+        ts, trajs = prob._simulate_condition(
+            subst, prob.conditions["ctrl"], y0=y0
+        )
+        readout = prob._reporter_summaries(ts, trajs, jnp.asarray([27.0]))
+
+        # summ_b (fixed-point shortcut) matches the run; both equal x_fp=2,
+        # NOT x_fp**2=4 (which the power-raised baseline bug produced).
+        assert jnp.allclose(summ_b[:, 0], readout[:, 0], rtol=1e-3)
+        assert jnp.allclose(summ_b[:, 0], jnp.asarray([2.0, 2.0]), rtol=1e-2)

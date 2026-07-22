@@ -621,7 +621,7 @@ class Scheduler:
                 max_steps=self.max_steps,
                 throw=False,
             )
-            ys = self._guard_result(sol.ys, sol.result, gname, integ)
+            ys = self._guard_result(sol.ys, sol.result, gname, integ, keys)
             stats = {
                 gname: {
                     "num_macro_steps": 1,
@@ -1062,7 +1062,7 @@ class Scheduler:
                 throw=False,
             )
             final = self._guard_result(
-                sol.ys[-1], sol.result, g, integrators[g]
+                sol.ys[-1], sol.result, g, integrators[g], keys
             )
             ld = (t_b - t_a) / jnp.maximum(sol.stats["num_steps"], 1)
             return (
@@ -1519,24 +1519,66 @@ class Scheduler:
 
         return final_vec, last_dt, diag
 
-    def _guard_result(self, value, result, group_name: str, integ):
-        """Re-raise a labelled error on a failed solve when ``self.throw``.
+    def _guard_result(self, value, result, group_name: str, integ, keys=None):
+        """On a failed solve (when ``self.throw``) emit a self-diagnosing
+        report, then re-raise.
 
         ``eqx.error_if`` bakes the check into ``value`` so it fires both
-        eagerly and under JIT/grad; with ``throw=False`` it is a no-op
-        and the ``RESULTS`` code reaches stats instead.
+        eagerly and under JIT/grad; with ``throw=False`` it is a no-op and the
+        ``RESULTS`` code reaches stats instead. The report is a runtime callback
+        gated by ``lax.cond`` on the failure path (no per-solve overhead on
+        success), so a crash names the failure *kind* (max_steps vs stiff/Newton
+        divergence) and the worst state — no re-run needed to diagnose.
         """
         if not self.throw:
             return value
-        reason = (
-            f"Scheduler: continuous group {group_name!r} did not solve "
-            f"to RESULTS.successful (solver="
-            f"{type(integ.solver).__name__}, stiff={integ.stiff}). "
-            f"Re-run with Scheduler(throw=False) to record the RESULTS "
-            f"code in result.stats[{group_name!r}]['result'] and "
-            f"diagnose (max_steps vs implicit/Newton divergence)."
+        solver = type(integ.solver).__name__
+        stiff = bool(integ.stiff)
+        failed = result != dfx.RESULTS.successful
+        is_maxsteps = result == dfx.RESULTS.max_steps_reached
+
+        def _report(is_ms, ys):
+            ys = np.asarray(ys)
+            per = np.abs(ys).reshape(-1, ys.shape[-1])
+            finite = np.isfinite(per)
+            score = np.where(finite, per, np.inf).max(axis=0)
+            widx = int(np.argmax(score)) if score.size else -1
+            wname = (
+                keys[widx]
+                if (keys is not None and 0 <= widx < len(keys))
+                else f"state#{widx}"
+            )
+            kind = (
+                "max_steps_reached — the stiff solve ran out of steps; raise "
+                "Scheduler(max_steps=…) or reduce the group's stiffness"
+                if bool(is_ms)
+                else "stiff/implicit-Newton divergence — the state got too "
+                "stiff for the implicit step (a fast mode; find the parameter "
+                "driving it)"
+            )
+            log.error(
+                "Scheduler SOLVE FAILED — group=%r solver=%s stiff=%s: %s. "
+                "worst state=%s (|y|=%.3g)  any_nonfinite=%s",
+                group_name,
+                solver,
+                stiff,
+                kind,
+                wname,
+                float(score[widx]) if widx >= 0 else float("nan"),
+                bool((~finite).any()),
+            )
+
+        jax.lax.cond(
+            failed,
+            lambda: jax.debug.callback(_report, is_maxsteps, value),
+            lambda: None,
         )
-        return eqx.error_if(value, result != dfx.RESULTS.successful, reason)
+        reason = (
+            f"Scheduler: group {group_name!r} did not solve (solver={solver}, "
+            f"stiff={stiff}) — see the SOLVE FAILED report logged above for the "
+            f"RESULTS kind and worst state."
+        )
+        return eqx.error_if(value, failed, reason)
 
     def _solve_group_interpolated(
         self,

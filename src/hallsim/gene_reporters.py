@@ -470,16 +470,16 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         observable="gz06/x_integral",
         gene_symbol="DDB2",
         sign=+1,
-        readout="mean",  # exact grid-independent trailing mean of p53 (∫x)
-        window=2.0,
+        readout="zerophase",  # RMS √⟨x²⟩ (power=2 ∫), lag-free
+        tau=2.0,
         description=(
             "Damage-specific DNA Binding Protein 2 — direct p53 "
-            "transcription target, mapped to GZ06's p53 (x). Read as the "
-            "trailing MEAN of p53 (window_mean over ∫x, a power=1 "
-            "RunningIntegral): a bulk transcript is a population/time average "
-            "of p53 transcriptional output, not a pulse amplitude. Under the "
-            "composite's damage→psi coupling and the pre-perturbation "
-            "(equilibrated) baseline, mean p53 is damage-graded."
+            "transcription target, mapped to GZ06's p53 (x). Read as the RMS "
+            "amplitude √⟨x²⟩ (zero-phase envelope over a power=2 "
+            "RunningIntegral): under GZ06's ψ-cancellation the mean ⟨x⟩ is "
+            "damage-blind, while the oscillation amplitude grows with damage. "
+            "Zero-phase so a day-7/14 query reads the amplitude at that time, "
+            "no trailing lag."
         ),
         reference="Hwang et al. 1999, Nature 401:430–432",
     ),
@@ -508,24 +508,19 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
     oscillating_reporter(
         observable="nfkb/IkBat_integral",
         gene_symbol="NFKBIA",
-        # Zero-phase RMS like DDB2. Unlike p53, the IκBα-transcript DC level
-        # also moves with integrated NF-κB activity, so mean and rms coincide
-        # here (6/6 timepoints, scratchpad/nfkbia_mean_vs_rms.py); the
-        # zero-phase envelope is used for uniformity with DDB2 — smooth and
-        # lag-free.
         sign=+1,
-        readout="zerophase",
-        tau=2.0,  # forward-backward EMA memory
+        readout="mean",  # trailing mean of the IκBα transcript (power=1 ∫x)
+        window=2.0,
         description=(
             "IκBα transcript — direct NF-κB target via the autoregulatory "
             "negative feedback loop. Maps to Ihekwaba 2004's IκBα mRNA "
             "species (IkBat), which rises with NF-κB transcriptional "
             "activity. Transcriptomic NFKBIA measures the transcript, not "
-            "the cytoplasmic protein (IkBa), whose abundance moves "
-            "inversely to activity through IKK-driven degradation. A "
-            "RunningIntegral(power=2) writes ∫IkBat² to `nfkb/IkBat_integral` "
-            "and window_rms differences it — phase-insensitive amplitude with "
-            "a bounded calibration gradient."
+            "the cytoplasmic protein (IkBa), whose abundance moves inversely "
+            "to activity through IKK-driven degradation. Read as the trailing "
+            "MEAN (window over a power=1 RunningIntegral): IkBat is a "
+            "transcript, so its damage-responsive DC level is the readout — "
+            "not a second moment (that is for TF-activity proxies like p53)."
         ),
         reference="Sun et al. 1993, Science 259:1912–1915",
     ),

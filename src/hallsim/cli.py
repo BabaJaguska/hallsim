@@ -452,6 +452,56 @@ def stiffness(macro_dt):
     )
 
 
+@simulate.command("calibrate")
+@click.option(
+    "--lr",
+    type=float,
+    default=None,
+    help="Adam learning rate / cosine start (default 0.005)",
+)
+@click.option(
+    "--steps", type=int, default=None, help="fit steps (default 150)"
+)
+@click.option(
+    "--cosine",
+    is_flag=True,
+    help="cosine-decay the LR over the run (replaces plateau)",
+)
+@click.option(
+    "--grad-clip",
+    "grad_clip",
+    type=float,
+    default=None,
+    help="clip gradient global-norm to this value",
+)
+@click.option(
+    "--no-plateau",
+    "no_plateau",
+    is_flag=True,
+    help="disable reduce-on-plateau LR schedule",
+)
+def calibrate(lr, steps, cosine, grad_clip, no_plateau):
+    """Fit the multi-hallmark composite (DP14+GZ06+Ihekwaba) to GSE248823 and
+    write the OOB + post-fit concordance figures."""
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos"))
+    from multi_hallmark_calibrate import cmd_calibrate
+
+    cmd_calibrate(
+        SimpleNamespace(
+            command="calibrate",
+            lr=lr,
+            steps=steps,
+            cosine=cosine,
+            grad_clip=grad_clip,
+            no_plateau=no_plateau,
+        )
+    )
+
+
 @simulate.command("info")
 def info():
     """Show info about the composable architecture."""
@@ -504,6 +554,9 @@ def info():
     )
     click.echo(
         "  simulate stiffness        — per-group Jacobian-spectrum solver verdict"
+    )
+    click.echo(
+        "  simulate calibrate        — fit the multi-hallmark composite to data"
     )
     click.echo("  simulate info             — this help")
     click.echo()

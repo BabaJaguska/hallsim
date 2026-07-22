@@ -55,7 +55,24 @@ from hallsim.models.multi_hallmark import (  # noqa: E402
     DP14_MTOR_PHOS_RATE_NAME,
     DP14_MTOR_PHOS_RATE_DEFAULT,
     RAPA_INTERVENTION_DAY,
+    DDIS_ETOPOSIDE_DOSE_WINDOW,
 )
+
+
+def _annotate_interventions(ax, arm: str) -> None:
+    """Shade the etoposide dose window and mark the rapamycin step, so the
+    experimental protocol is visible on the trajectory. The dose applies to
+    every damaged arm (all but the control); rapamycin is added at washout on
+    the rapamycin arm only."""
+    treated = arm.split("_vs_")[0].lower()  # "DDIS_vs_ctrl" -> "ddis"
+    damaged = treated != "ctrl"
+    if damaged and DDIS_ETOPOSIDE_DOSE_WINDOW is not None:
+        t0, t1 = DDIS_ETOPOSIDE_DOSE_WINDOW
+        ax.axvspan(t0, t1, color="#e8a33d", alpha=0.15, lw=0, zorder=0,
+                   label="etoposide")
+    if "rapa" in treated:
+        ax.axvline(RAPA_INTERVENTION_DAY, color="#2a78d6", ls=":", lw=1.1,
+                   zorder=1, label="rapamycin")
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data" / "FibroblastsDNA_dmg_Rapamycin"
@@ -147,7 +164,7 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
                         process_name="dp14",
                         param_name=DP14_MTOR_PHOS_RATE_NAME,
                         t_step=RAPA_INTERVENTION_DAY,
-                        value_before=DP14_MTOR_PHOS_RATE_DEFAULT,
+                        value_before=None,
                     ),
                 ),
             ),
@@ -241,6 +258,19 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
                 init=646.0,
                 clamp=(1.0, 10000.0),
                 prior=646.0,
+                prior_sigma=0.5,
+            ),
+            # The knob on the hallmark→EIF4EBP1 line: the untreated mTORC1
+            # phosphorylation rate. DNS severity scales it per condition; fitting
+            # the base lets the DDIS/ctrl mTOR readout match data, and the shared
+            # base transfers to the held-out rapamycin arm (severity applied on
+            # top, never fit there).
+            "mtor_phos_rate": ParameterRef(
+                "dp14",
+                f"parameters.{DP14_MTOR_PHOS_RATE_NAME}",
+                init=DP14_MTOR_PHOS_RATE_DEFAULT,
+                clamp=(1.0, 10000.0),
+                prior=DP14_MTOR_PHOS_RATE_DEFAULT,
                 prior_sigma=0.5,
             ),
             "alpha_y": ParameterRef(
@@ -424,11 +454,10 @@ def plot_history(problem, history, path: Path) -> None:
         ax3.set_yscale("log")
         ax3.set_ylabel("|grad|", color="#c0392b")
         ax3.tick_params(axis="y", labelcolor="#c0392b")
-        if history.lr_scales:
+        if history.lrs:
             axlr = ax3.twinx()
-            axlr.step(epochs, np.asarray(history.lr_scales), where="post",
-                      color="#2563eb")
-            axlr.set_ylabel("reduce-on-plateau LR scale", color="#2563eb")
+            axlr.plot(epochs, np.asarray(history.lrs), color="#2563eb")
+            axlr.set_ylabel("effective LR", color="#2563eb")
             axlr.tick_params(axis="y", labelcolor="#2563eb")
         for e in epochs[np.r_[False, np.diff(losses) > 0.02]]:
             ax3.axvline(e, color="#999", lw=0.7, ls=":", zorder=0)
@@ -634,6 +663,7 @@ def fig_constituents(problem, init, final, out_dir: Path,
                 ls=(0, (4, 2)), label="pre-fit")
         ax.plot(ts, np.asarray(post.get(path)), color="#2a78d6", lw=2.0,
                 label="calibrated")
+        _annotate_interventions(ax, cond)
         ax.set_title(lbl, fontsize=10.5, fontweight="bold", loc="left")
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
@@ -673,14 +703,29 @@ def cmd_calibrate(args) -> None:
 
     # ── wave 2: fit ──
     print("[2/4] fitting ...", flush=True)
+    steps = getattr(args, "steps", None) or 150
+    base_lr = getattr(args, "lr", None) or 0.005
+    # Cosine-decayed LR (fast descent into the basin, then a small-step tail
+    # that doesn't overshoot the narrow valley walls) beats a fixed LR: it
+    # keeps the early speed of a high LR without the late bouncing. It replaces
+    # reduce-on-plateau (a proactive schedule, not a reactive one).
+    if getattr(args, "cosine", False):
+        import optax
+
+        lr = optax.cosine_decay_schedule(base_lr, decay_steps=steps)
+        use_plateau = False
+    else:
+        lr = base_lr
+        use_plateau = not getattr(args, "no_plateau", False)
     history = problem.fit(
-        steps=150,
+        steps=steps,
         mode="reverse",
-        learning_rate=0.005,
+        learning_rate=lr,
         grad_clip=getattr(args, "grad_clip", None),
-        reduce_on_plateau=not getattr(args, "no_plateau", False),
+        reduce_on_plateau=use_plateau,
         plateau_patience=8,
-        early_stop_patience=20,
+        early_stop_patience=12,
+        early_stop_tol=1e-3,  # relative: stop after the loss plateaus <0.1%/step
         verbose=True,
         checkpoint_path=out_dir / "checkpoint.npz",
     )
@@ -862,6 +907,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("command", nargs="?", default="calibrate",
                     choices=_COMMANDS)
+    ap.add_argument("--lr", type=float, default=None,
+                    help="Adam learning rate / cosine start (default 0.005)")
+    ap.add_argument("--steps", type=int, default=None,
+                    help="fit steps (default 150)")
+    ap.add_argument("--cosine", action="store_true",
+                    help="cosine-decay the LR over the run (replaces plateau)")
     ap.add_argument("--grad-clip", type=float, default=None,
                     dest="grad_clip",
                     help="clip gradient global-norm to this value")
