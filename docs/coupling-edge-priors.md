@@ -4,11 +4,11 @@ Reference note for the preprint: how the strengths of the composite's
 literature-derived coupling edges are bounded, and why they have no direct
 off-the-shelf literature value.
 
-The flagship has two coupling edges that inject a Hill-gated source into
-the Ihekwaba 2004 NF-κB module's IKK pool:
+The flagship has two `HillActivationEdge`s that inject a Hill-gated source
+into the Ihekwaba 2004 NF-κB module's IKK pool:
 
-- **`MtorNFkBActivator`** (`mtor_nfkb.k_act`): DP14 `mTORC1_pS2448` → `nfkb/IKK`.
-- **`DamageNFkBActivator`** (`damage_nfkb.k_act`): DP14 `DNA_damage` → `nfkb/IKK`.
+- **`mtor_nfkb`** (`mtor_nfkb.k_act`): DP14 `mTORC1_pS2448` → `nfkb/IKK`.
+- **`ikkbeta_nfkb`** (`ikkbeta_nfkb.k_act`): DP14 `IKKbeta` → `nfkb/IKK`.
 
 Each contributes `d(IKK)/dt += k_act · H_act(signal; K, n)`, where
 `H_act ∈ [0,1]` is a Hill gate. `k_act` is therefore the **maximum rate at
@@ -22,10 +22,19 @@ The *existence and direction* of both edges are well established:
 - **mTORC1 → IKK** (activating): Dan et al. 2008, *Genes Dev* (mTORC1/Raptor
   required for IKK activity); Laberge et al. 2015, *Nat Cell Biol* (mTOR →
   IL1A → NF-κB/SASP; rapamycin lowers it).
-- **DNA damage → IKK** (activating), via the ATM → NEMO → IKK genotoxic
-  axis: Wu et al. 2006, *Science*; Miyamoto 2011, *Cell Res*; required for
-  the NF-κB-dependent SASP in senescence, Salminen et al. 2012, *Cell
-  Signal*.
+- **IKKβ → IKK** (activating): DP14's IKKβ is the same kinase (IKBKB) as
+  the Ihekwaba signalosome pool; its defining catalytic role is to activate
+  NF-κB (Karin & Ben-Neriah 2000, *Annu Rev Immunol*; primary: DiDonato et
+  al. 1997, *Nature*). The genomic-instability drive reaches it because IKKβ
+  is ROS-activated inside DP14 (DallePezze 2014's own reaction), not through
+  a separate ROS→IKK edge — required for the NF-κB-dependent SASP in
+  senescence (Salminen et al. 2012, *Cell Signal*).
+  Replaces an earlier phenomenological `DNA_damage → IKK` gate. IKKβ's
+  homeostatic band is narrow (ctrl 11.9 → DDIS 16.5), so `K=25/n=4` sits in
+  the gate's low-occupancy foot — near-silent at baseline (`H≈0.05`, so the
+  NF-κB module equilibrates) and rising super-linearly with the ROS-driven
+  IKKβ increase (`H≈0.16` at DDIS). Not a free knob; anchored to IKKβ's
+  measured operating range.
 
 But **no paper reports `k_act` in our units.** The Hill-gated source is a
 phenomenological abstraction of a multi-step signalling cascade; its

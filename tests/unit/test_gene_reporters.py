@@ -323,6 +323,7 @@ class TestTrajectorySummaries:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+@pytest.mark.demo
 class TestMultiHallmarkReporters:
 
     def test_table_integrity(self):

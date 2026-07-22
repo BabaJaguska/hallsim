@@ -121,6 +121,7 @@ def test_gz06_flagged_tolerance_sensitive():
     assert not report.ok
 
 
+@pytest.mark.demo
 @pytest.mark.slow
 def test_screen_sensitivity_flags_saturated_reporter():
     """In the default dp14 regime the etoposide dose saturates ψ→1, so DDB2

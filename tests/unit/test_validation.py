@@ -23,6 +23,7 @@ from hallsim.validation import (
     CompositeValidator,
     CouplingAuditor,
     GraphAnalyzer,
+    RedundancyChecker,
     SemanticChecker,
     Severity,
     UnitChecker,
@@ -308,6 +309,89 @@ class TestSemanticChecker:
             for r in results
             if r.level == Severity.INFO
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Redundancy Checker
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _UniprotProducer(Process):
+    """Writes an EVOLVED port annotated with a given UniProt ID."""
+
+    uid: str = "P00001"
+
+    def ports_schema(self):
+        return {
+            "x": Port(
+                role=PortRole.EVOLVED,
+                default=0.0,
+                ontology={"uniprot": self.uid},
+            )
+        }
+
+    def derivative(self, t, state):
+        return {"x": jnp.asarray(0.0)}
+
+
+class TestRedundancyChecker:
+    """Cross-model entity duplication — invisible to store-path-keyed checks."""
+
+    def test_cross_namespace_entity_flagged(self):
+        # Same UniProt ID, two namespaces, never wired together.
+        procs = {"a": _UniprotProducer(), "b": _UniprotProducer()}
+        topo = {"a": {"x": "modelA/IKK"}, "b": {"x": "modelB/IKK"}}
+        results = RedundancyChecker().check(procs, topo)
+        warns = [r for r in results if r.level == Severity.WARNING]
+        assert len(warns) == 1
+        assert "uniprot:P00001" in warns[0].message
+        assert "modelA/IKK" in warns[0].message
+        assert "modelB/IKK" in warns[0].message
+
+    def test_within_namespace_complexes_silent(self):
+        # One protein appearing as free species + a complex, same namespace:
+        # legitimate, must not fire.
+        procs = {"free": _UniprotProducer(), "cplx": _UniprotProducer()}
+        topo = {"free": {"x": "nfkb/IKK"}, "cplx": {"x": "nfkb/IKKIkBa"}}
+        results = RedundancyChecker().check(procs, topo)
+        assert not [r for r in results if r.level == Severity.WARNING]
+
+    def test_distinct_entities_silent(self):
+        procs = {
+            "a": _UniprotProducer(uid="P1"),
+            "b": _UniprotProducer(uid="P2"),
+        }
+        topo = {"a": {"x": "modelA/p"}, "b": {"x": "modelB/q"}}
+        assert not RedundancyChecker().check(procs, topo)
+
+    def test_wired_pools_not_flagged(self):
+        # Same entity in two namespaces, but a coupling edge reads one pool
+        # and writes the other → wired, not redundant.
+        class _Edge(Process):
+            def ports_schema(self):
+                return {
+                    "src": Port(role=PortRole.INPUT, default=0.0),
+                    "dst": Port(role=PortRole.EVOLVED, default=0.0),
+                }
+
+            def derivative(self, t, state):
+                return {"dst": state["src"]}
+
+        procs = {
+            "a": _UniprotProducer(),
+            "b": _UniprotProducer(),
+            "edge": _Edge(),
+        }
+        topo = {
+            "a": {"x": "modelA/IKK"},
+            "b": {"x": "modelB/IKK"},
+            "edge": {"src": "modelA/IKK", "dst": "modelB/IKK"},
+        }
+        assert not [
+            r
+            for r in RedundancyChecker().check(procs, topo)
+            if r.level == Severity.WARNING
+        ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

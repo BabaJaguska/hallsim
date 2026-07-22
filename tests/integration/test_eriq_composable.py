@@ -1,7 +1,13 @@
-"""Tests for the composable ERiQ model (decomposed into 3 Processes)."""
+"""Tests for the composable ERiQ model (decomposed into 3 Processes).
+
+ERiQ is a demo composite, not framework machinery, so the whole module is
+marked ``demo`` and excluded from CI (see pyproject markers / ``make test``).
+"""
 
 import jax.numpy as jnp
 import pytest
+
+pytestmark = pytest.mark.demo
 
 from hallsim.models.eriq import (
     ERIQ_HOMEOSTATIC_IC,

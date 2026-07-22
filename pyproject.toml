@@ -37,4 +37,5 @@ testpaths = ["tests"]
 markers = [
   "slow: tests that take more than ~10s (typically multi-process Scheduler runs); deselect with '-m \"not slow\"'",
   "network: tests that need network access or un-bundled SBML downloads; deselected in CI via '-m \"not network\"'",
+  "demo: tests bound to a specific biological demo model (eriq, saturating_removal, stem_cell_niche, multi_hallmark) rather than framework machinery; excluded from CI. Run with '-m demo' or 'make test-all'.",
 ]

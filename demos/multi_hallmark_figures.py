@@ -201,7 +201,7 @@ def fig_schematic(args):
         ax,
         5.0,
         1.64,
-        "reporters:  CDKN1A · EIF4EBP1 · CYCS · HMOX1",
+        "readouts:  CDKN1A · EIF4EBP1 · CYCS · FOXO3",
         C_DP,
         fs=9.2,
     )
@@ -224,7 +224,7 @@ def fig_schematic(args):
         color=BODY,
         ha="center",
     )
-    reporters(ax, 10.45, 3.50, "reporters:  DDB2", C_GZ)
+    reporters(ax, 10.45, 3.50, "readouts:  DDB2 · MDM2", C_GZ)
     block(ax, 8.9, 0.9, 3.1, 1.2, C_NF, F_NF)
     ax.text(
         10.45,
@@ -237,15 +237,15 @@ def fig_schematic(args):
     )
     ax.text(10.45, 1.46, "BIOMD230", fontsize=9.4, color=DIM, ha="center")
     ax.text(10.45, 1.20, "NF-κB / IκBα", fontsize=9.6, color=BODY, ha="center")
-    reporters(ax, 10.45, 0.68, "reporters:  NFKBIA", C_NF)
+    reporters(ax, 10.45, 0.68, "readouts:  NFKBIA", C_NF)
     arrow(ax, (2.9, 3.82), (3.7, 3.28), C_DIAL, rad=-0.14)
     arrow(ax, (2.9, 1.88), (3.7, 2.55), C_DIAL, rad=0.14)
     arrow(ax, (6.3, 3.45), (8.9, 4.25), C_GZ, rad=0.14)
-    elabel(ax, 7.6, 4.12, "DNA damage → ψ\n(ATM→p53)", C_GZ, 17)
+    elabel(ax, 7.6, 4.05, "DNA damage → ψ", C_GZ, 17)
     arrow(ax, (6.3, 2.8), (8.9, 1.82), C_DP, rad=-0.11)
     elabel(ax, 7.6, 2.44, "mTOR → IKK", C_DP, -17)
     arrow(ax, (6.3, 2.3), (8.9, 1.32), C_NF, rad=-0.14)
-    elabel(ax, 7.55, 1.66, "DNA damage → IKK", C_NF, -17)
+    elabel(ax, 7.55, 1.6, "IKKβ → IKK", C_NF, -17)
     fig.tight_layout(pad=0.2)
     OUT_CAL.mkdir(parents=True, exist_ok=True)
     for ext in ("png", "pdf"):

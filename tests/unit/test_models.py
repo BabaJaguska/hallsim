@@ -13,6 +13,7 @@ from hallsim.scheduler import Scheduler
 # ── SaturatingRemoval ───────────────────────────────────────────────────
 
 
+@pytest.mark.demo
 class TestSaturatingRemoval:
     def test_ports(self):
         from hallsim.models.saturating_removal import SaturatingRemoval
@@ -208,6 +209,9 @@ def test_shooting_stabilizer_knobs_run_and_stay_finite():
 # ── Hallmark Handles ────────────────────────────────────────────────────
 
 
+# Machinery (apply_hallmarks) but exercised through the ERiQ demo model; demo
+# until decoupled onto a toy process.
+@pytest.mark.demo
 class TestHallmarkHandles:
     def test_apply_modifies_parameter(self):
         from hallsim.hallmarks import HALLMARK_REGISTRY

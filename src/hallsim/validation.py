@@ -8,8 +8,9 @@ Four subsystems, orchestrated by :class:`CompositeValidator`:
 
 1. **UnitChecker** — pint-based dimensional analysis across shared store paths.
 2. **SemanticChecker** — ontology ID comparison (ChEBI, GO, SBO) for species disambiguation.
-3. **GraphAnalyzer** — feedback cycle detection, fan-in analysis, coupling density.
-4. **CouplingAuditor** — heuristic duplicate-reaction detection via description overlap.
+3. **RedundancyChecker** — one entity modeled in >1 namespace (ortholog-normalized cross-model duplication).
+4. **GraphAnalyzer** — feedback cycle detection, fan-in analysis, coupling density.
+5. **CouplingAuditor** — heuristic duplicate-reaction detection via description overlap.
 
 Usage::
 
@@ -334,7 +335,128 @@ class SemanticChecker:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Subsystem 3: Interaction Graph Analyzer
+# Subsystem 3: Cross-model redundancy
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _symbol_resolver():
+    """Return a ``uniprot_id -> human_symbol_or_None`` resolver.
+
+    Orthologs (mouse vs human UniProt IDs for the same protein) map to a
+    common human gene symbol, so entities can be compared across models
+    annotated in different species. Degrades to ``None`` (raw-ID fallback)
+    when the crosswalk tables are absent, so validation never hard-depends
+    on reference data being provisioned.
+    """
+    try:
+        from hallsim.reporter_wiring import _human_symbol
+    except Exception:
+        return lambda _u: None
+
+    def resolve(uniprot_id: str) -> str | None:
+        try:
+            symbol, _err = _human_symbol(uniprot_id)
+            return symbol
+        except Exception:
+            return None
+
+    return resolve
+
+
+def _canonical_entity(ontology: dict[str, str], resolve) -> str | None:
+    """Species-agnostic identity for one port's ontology annotation.
+
+    UniProt IDs are ortholog-normalized to a human symbol; ChEBI/GO/SBO
+    are already species-agnostic and used as-is.
+    """
+    if not ontology:
+        return None
+    if "uniprot" in ontology:
+        symbol = resolve(ontology["uniprot"])
+        return f"symbol:{symbol}" if symbol else f"uniprot:{ontology['uniprot']}"
+    for ns in ("chebi", "go", "sbo"):
+        if ns in ontology:
+            return f"{ns}:{ontology[ns]}"
+    ns = sorted(ontology)[0]
+    return f"{ns}:{ontology[ns]}"
+
+
+class RedundancyChecker:
+    """Flags the same biological entity modeled in more than one namespace.
+
+    The store-path-keyed checkers only compare ports wired to the *same*
+    path, so a species duplicated across two composed models — each living
+    in its own ``<model>/`` namespace and never wired together — is
+    invisible to them (the canonical example: IKKβ modeled independently by
+    DallePezze 2014 and by an NF-κB module). This checker canonicalizes
+    every annotated writer port to an ortholog-normalized identity and
+    reports identities that surface under more than one namespace prefix.
+
+    Within-namespace repeats (a protein and the complexes / phospho-forms it
+    appears in, all sharing one ``<model>/`` prefix) collapse to a single
+    representative and never fire — only genuine cross-model redundancy does.
+    Pools already joined by a coupling process (one edge reads pool A and
+    writes pool B) are *wired*, not redundant, and are suppressed.
+
+    - WARNING: one entity modeled in ≥2 namespaces (unwired distinct pools).
+    """
+
+    def check(
+        self,
+        processes: dict[str, Process],
+        topology: dict[str, dict[str, str]],
+    ) -> list[ValidationResult]:
+        spm = _store_port_map(processes, topology)
+        resolve = _symbol_resolver()
+        # canonical entity -> {namespace: representative store path}
+        seen: dict[str, dict[str, str]] = {}
+        for store_path, entries in spm.items():
+            writers = _writers(entries)
+            if not writers:
+                continue
+            namespace = store_path.split("/", 1)[0] if "/" in store_path else ""
+            ident = _canonical_entity(writers[0].port.ontology or {}, resolve)
+            if ident is None:
+                continue
+            reps = seen.setdefault(ident, {})
+            # Shortest path per namespace = the free species, not a complex.
+            if namespace not in reps or len(store_path) < len(reps[namespace]):
+                reps[namespace] = store_path
+
+        # Store paths each process touches — a process spanning ≥2 of an
+        # entity's pools is the coupling edge that wires them together.
+        proc_paths = [
+            {
+                topology.get(pn, {}).get(port, port)
+                for port in proc.ports_schema()
+            }
+            for pn, proc in processes.items()
+        ]
+
+        results: list[ValidationResult] = []
+        for ident, reps in seen.items():
+            if len(reps) < 2:
+                continue
+            pools = set(reps.values())
+            if any(len(pools & touched) >= 2 for touched in proc_paths):
+                continue  # a coupling edge already joins these pools
+            locs = ", ".join(repr(p) for p in sorted(reps.values()))
+            results.append(
+                ValidationResult(
+                    Severity.WARNING,
+                    "redundancy",
+                    f"Entity {ident} is modeled in {len(reps)} namespaces "
+                    f"({locs}) as unwired, distinct pools. If they are the "
+                    f"same physical species, merge them onto one store path "
+                    f"(rewire). If compartment-distinct, annotate the "
+                    f"compartment to make the separation explicit.",
+                )
+            )
+        return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Subsystem 4: Interaction Graph Analyzer
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -488,7 +610,7 @@ class GraphAnalyzer:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Subsystem 4: Coupling Auditor
+# Subsystem 5: Coupling Auditor
 # ═══════════════════════════════════════════════════════════════════════════
 
 _STOP_WORDS = frozenset(
@@ -568,7 +690,7 @@ class CouplingAuditor:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Subsystem 5: Driver-semantics Checker
+# Subsystem 6: Driver-semantics Checker
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -617,6 +739,8 @@ class CompositeValidator:
         Run pint-based unit analysis.
     check_semantics:
         Run ontology-based semantic analysis.
+    check_redundancy:
+        Run cross-model entity-redundancy analysis (ortholog-normalized).
     check_graph:
         Run interaction graph analysis (cycles, fan-in, density).
     check_coupling:
@@ -629,6 +753,7 @@ class CompositeValidator:
         self,
         check_units: bool = True,
         check_semantics: bool = True,
+        check_redundancy: bool = True,
         check_graph: bool = True,
         check_coupling: bool = True,
         strict: bool = False,
@@ -638,6 +763,8 @@ class CompositeValidator:
             self.checkers.append(UnitChecker())
         if check_semantics:
             self.checkers.append(SemanticChecker())
+        if check_redundancy:
+            self.checkers.append(RedundancyChecker())
         self._graph_analyzer: GraphAnalyzer | None = None
         if check_graph:
             self._graph_analyzer = GraphAnalyzer()

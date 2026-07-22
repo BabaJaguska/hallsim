@@ -41,17 +41,21 @@ The three cross-publication mechanistic edges:
   damage-input between its fitted basal value and ``GZ06_PSI_FULL`` on
   DP14's accumulated DNA_damage. Activating per the canonical ATM/ATR →
   p53 DNA-damage-response axis. ψ's range is anchored by GZ06's own
-  calibration, so this edge is structural (no free strength), unlike the
-  two phenomenological IKK edges below.
-- **mTORC1 → IKK** (a :class:`hallsim.models.hill_edge.HillActivationEdge`)
-  reads DP14's ``mTORC1_pS2448`` and Hill-gates a positive derivative
-  onto ``IKK``. Activating sign per Dan 2008 / Laberge 2015 — the
-  nutrient-sensing / rapamycin channel.
-- **DNA damage → IKK** (another ``HillActivationEdge``) reads DP14's
-  ``DNA_damage`` and Hill-gates a positive derivative onto ``IKK``.
-  Activating sign per the ATM → NEMO → IKK genotoxic pathway (Wu 2006 /
-  Miyamoto 2011) — the genomic-instability channel through which the
-  Genomic Instability hallmark reaches NF-κB.
+  calibration, so this edge is structural (no free strength).
+- **IKKβ → IKK** (a :class:`hallsim.models.hill_edge.HillActivationEdge`)
+  reads DP14's ``IKKbeta`` and Hill-gates a positive derivative onto
+  Ihekwaba's ``IKK``. DP14's IKKβ is the same kinase (IKBKB) as the
+  signalosome pool, and its defining catalytic role is to activate NF-κB
+  (Karin & Ben-Neriah 2000); the Genomic Instability hallmark reaches it
+  because IKKβ is ROS-activated inside DP14 (DallePezze 2014's own
+  reaction), not via a phenomenological damage→IKK gate. This also wires
+  the two IKBKB pools together, so ``RedundancyChecker`` no longer flags
+  them as unwired duplicates.
+- **mTORC1 → IKK** (another ``HillActivationEdge``) reads DP14's
+  ``mTORC1_pS2448`` and Hill-gates a positive derivative onto ``IKK``.
+  Activating sign per Dan 2008 / Laberge 2015 — the nutrient-sensing /
+  rapamycin channel, distinct from the ROS→IKKβ path above (mTOR→SASP is
+  not captured by DP14's ROS-driven IKKβ).
 
 Geva-Zatorsky 2006 ships vendored under ``models/zatorsky2006/`` and
 loads from disk. DallePezze 2014 and Ihekwaba 2004 are not vendored in
@@ -293,22 +297,32 @@ def build_multi_hallmark_composite(
             reference="Dan et al. 2008; Laberge et al. 2015",
             description="mTORC1 → IKK edge (DallePezze 2014 → Ihekwaba 2004).",
         ),
-        # DNA damage → IKK (activating; ATM→NEMO→IKK, Wu 2006 / Miyamoto 2011):
-        # drives the NF-κB-dependent SASP of DDIS senescence (Salminen 2012).
-        # K=19.0 = DP14 DNA_damage midpoint in the etoposide regime.
-        "damage_nfkb": HillActivationEdge(
+        # IKKβ → IKK (activating): DP14's IKKβ and Ihekwaba's signalosome IKK
+        # are the same kinase (IKBKB); this edge lets DP14's mechanistically
+        # computed IKKβ drive the NF-κB cascade, which is IKKβ's defining
+        # catalytic role (Karin & Ben-Neriah 2000). The genomic-instability
+        # drive reaches it because IKKβ is ROS-activated *inside* DP14
+        # (DallePezze 2014's own reaction), not via a phenomenological
+        # damage→IKK gate. IKKβ's homeostatic band is narrow (ctrl 11.9 → DDIS
+        # 16.5), so K=25/n=4 puts the gate in its low-occupancy foot: near-
+        # silent at baseline (H≈0.05, matching NF-κB homeostasis) and rising
+        # super-linearly with the IKKβ increase (H≈0.16 at DDIS). A gate
+        # centered in the band (K≈14) leaves NF-κB half-driven at rest and
+        # blocks equilibration. Also wires the two IKBKB pools together,
+        # resolving the cross-model redundancy.
+        "ikkbeta_nfkb": HillActivationEdge(
             timescale=nfkb.timescale,
-            k_act=0.02,
-            K=(19.0,),
-            n=(2.0,),
+            k_act=0.1,
+            K=(25.0,),
+            n=(4.0,),
             target_default=0.1,
             target_ontology={"go": "GO:0008384"},
-            target_description="genomic-instability drive summed into IKK",
-            source_ontology=({"go": "GO:0006974"},),
-            source_descriptions=("DP14 accumulated DNA damage",),
+            target_description="DP14 IKKβ activity summed into the NF-κB IKK pool",
+            source_ontology=({"uniprot": "O14920"},),
+            source_descriptions=("DP14 active IKKβ",),
             hallmark="Genomic Instability",
-            reference="Wu et al. 2006; Miyamoto 2011; Salminen et al. 2012",
-            description="DNA damage → IKK edge (DallePezze 2014 → Ihekwaba).",
+            reference="Karin & Ben-Neriah 2000",
+            description="IKKβ → IKK edge (DallePezze 2014 → Ihekwaba 2004).",
         ),
         # ∫ observers for the oscillating reporters (read in the source's group
         # so the integral sees the oscillation), differenced to a grid-
@@ -359,8 +373,8 @@ def build_multi_hallmark_composite(
             "source": "dp14/mTORC1_pS2448",
             "target": "nfkb/IKK",
         },
-        "damage_nfkb": {
-            "source": "dp14/DNA_damage",
+        "ikkbeta_nfkb": {
+            "source": "dp14/IKKbeta",
             "target": "nfkb/IKK",
         },
         "gz06_x_integral": {

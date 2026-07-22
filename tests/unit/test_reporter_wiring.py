@@ -42,6 +42,7 @@ def composite():
     return build_multi_hallmark_composite(validate=False)
 
 
+@pytest.mark.demo
 @pytest.mark.network
 def test_observer_hop_resolves_to_annotated_source(composite):
     ont, resolved = resolve_ontology("gz06/x_integral", composite)
@@ -49,6 +50,7 @@ def test_observer_hop_resolves_to_annotated_source(composite):
     assert ont.get("uniprot") == "P04637"
 
 
+@pytest.mark.demo
 @pytest.mark.slow
 def test_flagship_reporter_verdicts(composite):
     from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
@@ -66,6 +68,7 @@ def test_flagship_reporter_verdicts(composite):
     assert status["NFKBIA"] == "unannotated"  # no MIRIAM on IkBat
 
 
+@pytest.mark.demo
 @pytest.mark.slow
 def test_recommender_finds_foxo3_targets(composite):
     recs = recommend_reporters(composite, ["SOD2", "BNIP3", "IL6"])

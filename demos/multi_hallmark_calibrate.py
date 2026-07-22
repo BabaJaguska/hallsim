@@ -309,8 +309,8 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
                 prior=0.3,
                 prior_sigma=0.5,
             ),
-            "damage_to_nfkb": ParameterRef(
-                "damage_nfkb",
+            "ikkbeta_to_nfkb": ParameterRef(
+                "ikkbeta_nfkb",
                 "k_act",
                 init=0.1,
                 clamp=(1e-4, 1.0),
@@ -840,7 +840,7 @@ def cmd_calibrate(args) -> None:
     base_lr = getattr(args, "lr", None) or 0.005
     # Cosine-decayed LR: fast descent into the basin, then a small-step tail
     # that doesn't overshoot the narrow valley walls.
-    if getattr(args, "cosine", False):
+    if getattr(args, "cosine", True):
         import optax
 
         lr = optax.cosine_decay_schedule(base_lr, decay_steps=steps)
@@ -1132,9 +1132,11 @@ def main() -> None:
         "--steps", type=int, default=None, help="fit steps (default 150)"
     )
     ap.add_argument(
-        "--cosine",
-        action="store_true",
-        help="cosine-decay the LR over the run (replaces plateau)",
+        "--no-cosine",
+        action="store_false",
+        dest="cosine",
+        help="use constant LR + reduce-on-plateau instead of cosine decay "
+        "(cosine is the default)",
     )
     ap.add_argument(
         "--grad-clip",

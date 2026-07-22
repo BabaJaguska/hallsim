@@ -1,4 +1,4 @@
-.PHONY: install install-dev format lint test run run-compose run-validate help all
+.PHONY: install install-dev format lint test test-all run run-compose run-validate help all
 
 install:
 	pip install --upgrade pip
@@ -19,7 +19,10 @@ lint:
 	flake8 --ignore E501,E402,W504,W503,E226,E203 demos/
 
 test:
-	python -m pytest tests/ -m "not slow and not network"
+	python -m pytest tests/ -m "not slow and not network and not demo"
+
+test-all:
+	python -m pytest tests/ -m "not network"
 
 run:
 	simulate basic

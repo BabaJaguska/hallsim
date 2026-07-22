@@ -70,6 +70,7 @@ class TestHillActivationEdge:
         assert float(d["target"]) == pytest.approx(0.25, abs=1e-6)
 
 
+@pytest.mark.demo
 @pytest.mark.network
 class TestMultiHallmarkWiring:
     # Builds the full composite (downloads DP14/GZ06/Ihekwaba SBML on a
@@ -80,9 +81,9 @@ class TestMultiHallmarkWiring:
         )
 
         comp = build_multi_hallmark_composite()
-        for name in ("mtor_nfkb", "damage_nfkb", "p53_cdkn1a"):
+        for name in ("mtor_nfkb", "ikkbeta_nfkb", "p53_cdkn1a"):
             assert isinstance(comp.processes[name], HillActivationEdge), name
-        assert comp.topology["damage_nfkb"]["target"] == "nfkb/IKK"
+        assert comp.topology["ikkbeta_nfkb"]["target"] == "nfkb/IKK"
         assert comp.topology["p53_cdkn1a"]["target"] == "dp14/CDKN1A"
 
     def test_ikk_receives_additive_contribution(self):
