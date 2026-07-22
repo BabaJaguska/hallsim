@@ -16,7 +16,9 @@ the hallsim venv.
 
     .venv/bin/python demos/bench_gradient.py [config.json]
 """
+
 import jax
+
 jax.config.update("jax_enable_x64", True)
 
 import json
@@ -27,6 +29,7 @@ import numpy as np
 import jax.numpy as jnp
 import equinox as eqx
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -34,7 +37,9 @@ from hallsim.sbml_import import process_from_sbml
 from hallsim.composite import Composite
 from hallsim.scheduler import Scheduler
 
-CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else "configs/bench_population.json"
+CONFIG_PATH = (
+    sys.argv[1] if len(sys.argv) > 1 else "configs/bench_population.json"
+)
 with open(CONFIG_PATH) as f:
     cfg = json.load(f)
 MODEL = cfg["model"]
@@ -61,13 +66,16 @@ SAVE_DT = T_END / (N_SAVE - 1)
 
 # ----- tellurium setup -----
 import tellurium as te
+
 rr = te.loadSBMLModel(MODEL)
 rr_params = set(rr.model.getGlobalParameterIds())
 rr_species = list(rr.model.getFloatingSpeciesIds())
 
 # Parameters both tools can set: SBML global constants present in roadrunner.
-PNAMES = [n for n in proc._param_names if n in rr_params][:max(P_SWEEP)]
-assert len(PNAMES) >= max(P_SWEEP), f"only {len(PNAMES)} shared settable params"
+PNAMES = [n for n in proc._param_names if n in rr_params][: max(P_SWEEP)]
+assert len(PNAMES) >= max(
+    P_SWEEP
+), f"only {len(PNAMES)} shared settable params"
 THETA0 = np.array([float(proc.parameters[n]) for n in PNAMES])
 READOUT = species[5]
 readout_i = species.index(READOUT)
@@ -84,13 +92,21 @@ def population(dim, seed=0):
 def hallsim_loss_factory(pnames, yb):
     def loss(theta):
         proc_i = eqx.tree_at(
-            lambda p: [p.parameters[n] for n in pnames], proc,
-            [theta[i] for i in range(len(pnames))])
-        comp_i = Composite(processes={"model": proc_i}, topology=topo,
-                           validate=False, semantic_validation=False)
-        ys = sched.run(comp_i, t_span=(0.0, T_END), macro_dt=1.0,
-                       save_dt=SAVE_DT, y0=yb).ys
+            lambda p: [p.parameters[n] for n in pnames],
+            proc,
+            [theta[i] for i in range(len(pnames))],
+        )
+        comp_i = Composite(
+            processes={"model": proc_i},
+            topology=topo,
+            validate=False,
+            semantic_validation=False,
+        )
+        ys = sched.run(
+            comp_i, t_span=(0.0, T_END), macro_dt=1.0, save_dt=SAVE_DT, y0=yb
+        ).ys
         return jnp.mean(ys[-1, :, readout_i])
+
     return loss
 
 
@@ -113,10 +129,14 @@ def tellurium_fd_grad(theta, pnames, factors):
     g = np.empty(len(theta))
     for i in range(len(theta)):
         h = H_FD * (abs(theta[i]) + H_FD)
-        tp = theta.copy(); tp[i] += h
-        tm = theta.copy(); tm[i] -= h
-        g[i] = (tellurium_loss(tp, pnames, factors)
-                - tellurium_loss(tm, pnames, factors)) / (2 * h)
+        tp = theta.copy()
+        tp[i] += h
+        tm = theta.copy()
+        tm[i] -= h
+        g[i] = (
+            tellurium_loss(tp, pnames, factors)
+            - tellurium_loss(tm, pnames, factors)
+        ) / (2 * h)
     return g
 
 
@@ -126,7 +146,9 @@ def tellurium_fd_grad(theta, pnames, factors):
 # different physical constants in each tool (trajectories still match at the
 # nominal defaults). The rigorous check that the autodiff is exact is therefore
 # against hallsim's own central differences.
-log("\n=== autodiff correctness: hallsim autodiff vs hallsim finite-diff (P=6) ===")
+log(
+    "\n=== autodiff correctness: hallsim autodiff vs hallsim finite-diff (P=6) ==="
+)
 pn = PNAMES[:6]
 th = THETA0[:6]
 loss1 = hallsim_loss_factory(pn, jnp.asarray(base_y0[None, :]))
@@ -135,14 +157,19 @@ fwd1 = eqx.filter_jit(loss1)
 g_hfd = np.empty(len(pn))
 for i in range(len(pn)):
     h = 1e-4 * (abs(th[i]) + 1e-4)
-    tp = th.copy(); tp[i] += h
-    tm = th.copy(); tm[i] -= h
-    g_hfd[i] = (float(fwd1(jnp.asarray(tp)))
-                - float(fwd1(jnp.asarray(tm)))) / (2 * h)
+    tp = th.copy()
+    tp[i] += h
+    tm = th.copy()
+    tm[i] -= h
+    g_hfd[i] = (
+        float(fwd1(jnp.asarray(tp))) - float(fwd1(jnp.asarray(tm)))
+    ) / (2 * h)
 for n, a, b in zip(pn, g_auto, g_hfd):
     log(f"  {n:>10}: autodiff={a:+.4e}  hallsim_FD={b:+.4e}")
-cos = float(np.dot(g_auto, g_hfd)
-            / (np.linalg.norm(g_auto) * np.linalg.norm(g_hfd) + 1e-30))
+cos = float(
+    np.dot(g_auto, g_hfd)
+    / (np.linalg.norm(g_auto) * np.linalg.norm(g_hfd) + 1e-30)
+)
 log(f"  cosine similarity = {cos:.6f}  (1.0 => autodiff is exact)")
 
 # ----- timing vs number of parameters P -----
@@ -155,23 +182,31 @@ for P in P_SWEEP:
     th = jnp.asarray(THETA0[:P])
     vg = eqx.filter_jit(jax.value_and_grad(hallsim_loss_factory(pn, yb)))
     vg(th)[1].block_until_ready()  # compile
-    t0 = time.time(); vg(th)[1].block_until_ready(); t_had = time.time() - t0
-    t0 = time.time(); tellurium_fd_grad(np.asarray(THETA0[:P]), pn, fac_t)
+    t0 = time.time()
+    vg(th)[1].block_until_ready()
+    t_had = time.time() - t0
+    t0 = time.time()
+    tellurium_fd_grad(np.asarray(THETA0[:P]), pn, fac_t)
     t_fd = time.time() - t0
     rows.append((P, t_had, t_fd))
-    log(f"  P={P:>3}  hallsim_autodiff={t_had:7.4f}s  tellurium_FD={t_fd:7.3f}s  "
-        f"({t_fd/t_had:5.1f}x)")
+    log(
+        f"  P={P:>3}  hallsim_autodiff={t_had:7.4f}s  tellurium_FD={t_fd:7.3f}s  "
+        f"({t_fd/t_had:5.1f}x)"
+    )
 
 # ----- plot -----
 arr = np.array(rows)
 fig, ax = plt.subplots(figsize=(7, 5))
 ax.plot(arr[:, 0], arr[:, 1], "o-", label="HallSim autodiff (reverse-mode)")
 ax.plot(arr[:, 0], arr[:, 2], "s-", label="tellurium finite differences")
-ax.set_xlabel("number of parameters P"); ax.set_ylabel("gradient wall time (s)")
+ax.set_xlabel("number of parameters P")
+ax.set_ylabel("gradient wall time (s)")
 ax.set_title(f"dL/dθ over a {N_POP}-cell population: autodiff vs finite diff")
-ax.legend(); ax.grid(True, alpha=0.3)
+ax.legend()
+ax.grid(True, alpha=0.3)
 plt.tight_layout()
-from outdir import outdir
+from hallsim.io import outdir
+
 out = str(outdir("bench_gradient") / "bench_gradient.png")
 plt.savefig(out, dpi=120)
 log(f"\nsaved {out}\nDONE")

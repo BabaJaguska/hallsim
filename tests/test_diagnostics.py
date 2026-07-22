@@ -38,6 +38,15 @@ def test_screenreport_ok_logic():
     assert ScreenReport("m", False, False, True, 1.0, 1e2).ok is False
 
 
+def test_negative_domain_feeds_ok_logic():
+    """A state that went out of domain (materially negative) is not ok."""
+    assert (
+        ScreenReport("m", False, False, False, 1.0, 1e-4, negative=True).ok
+        is False
+    )
+    assert ScreenReport("m", False, False, False, 1.0, 1e-4, negative=False).ok
+
+
 def test_tunes_feeds_ok_logic():
     """The 'tunes' half of constituents-first gates ``ok``: a non-tunable
     model is not ok; ``None`` (unprobed) and ``True`` leave it."""

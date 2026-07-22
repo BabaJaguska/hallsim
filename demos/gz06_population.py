@@ -21,6 +21,7 @@ fully differentiable.
 Run:
     .venv_hallsim/bin/python demos/gz06_population.py --n-cells 1000
 """
+
 from __future__ import annotations
 
 import argparse
@@ -61,9 +62,9 @@ def batched_runner(comp, sched, t_end, dt):
             comp,
             (beta_x, alpha_y),
         )
-        return sched.run(c, (0.0, t_end), macro_dt=t_end, save_dt=dt, y0=y0).get(
-            "gz06/x"
-        )
+        return sched.run(
+            c, (0.0, t_end), macro_dt=t_end, save_dt=dt, y0=y0
+        ).get("gz06/x")
 
     return jax.jit(jax.vmap(run))
 
@@ -110,7 +111,8 @@ def main():
     ap.add_argument("--t-end", type=float, default=120.0)
     ap.add_argument("--dt", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
-    from outdir import outdir
+    from hallsim.io import outdir
+
     ap.add_argument(
         "--out",
         default=str(outdir("gz06_population") / "gz06_population.png"),
@@ -146,20 +148,28 @@ def main():
         phase_y0,
     )
 
-    print(f"\nGZ06 population: {n} cells, per-cell CV={a.cv:.2f}, "
-          f"t_end={a.t_end:g} h\n" + "=" * 68)
+    print(
+        f"\nGZ06 population: {n} cells, per-cell CV={a.cv:.2f}, "
+        f"t_end={a.t_end:g} h\n" + "=" * 68
+    )
     stats = {}
     for name, xs in conditions.items():
         s = stats[name] = measure(np.asarray(xs), tg, a.dt, a.t_end)
         tag = name.replace("\n", " ")
         print(f"\n  {tag}")
-        print(f"    amplitude CV = {s['amp_cv']*100:5.1f}%    "
-              f"period CV = {s['period_cv']*100:5.1f}%")
-        print(f"    bulk coherence = {s['coherence']:.2f}  "
-              f"(1=coherent, ->0=fully damped)")
-        print(f"    reporter: per-cell-RMS-then-avg = {s['rms_percell']:.3f}   "
-              f"avg-then-RMS = {s['rms_pooled']:.3f}   "
-              f"({s['rms_percell']/s['rms_pooled']:.2f}x)")
+        print(
+            f"    amplitude CV = {s['amp_cv']*100:5.1f}%    "
+            f"period CV = {s['period_cv']*100:5.1f}%"
+        )
+        print(
+            f"    bulk coherence = {s['coherence']:.2f}  "
+            f"(1=coherent, ->0=fully damped)"
+        )
+        print(
+            f"    reporter: per-cell-RMS-then-avg = {s['rms_percell']:.3f}   "
+            f"avg-then-RMS = {s['rms_pooled']:.3f}   "
+            f"({s['rms_percell']/s['rms_pooled']:.2f}x)"
+        )
 
     _plot(conditions, stats, tg, a.out)
     print(f"\nsaved figure -> {a.out}")

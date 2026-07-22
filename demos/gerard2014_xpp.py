@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from hallsim.composite import Composite
 from hallsim.scheduler import Scheduler
 from hallsim.xpp_import import process_from_xpp
-from outdir import outdir
+from hallsim.io import outdir
 
 ODE_PATH = "data/xpp/gerard2014_inflammation.ode"
 T_END = 4500.0  # the model's own @ Total

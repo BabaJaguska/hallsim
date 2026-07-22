@@ -60,10 +60,9 @@ High-level usage::
 
 from __future__ import annotations
 
-import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
@@ -654,6 +653,36 @@ class ParameterRef:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class HallmarkCoeffRef:
+    """Declarative pointer to a fittable coefficient of a hallmark mapping.
+
+    Points at the affine ``floor`` of the
+    :class:`hallsim.hallmarks.ParameterMapping` identified by
+    ``(hallmark, param_name)``. The Calibrator fits it exactly like a
+    :class:`ParameterRef` (same ``init`` / ``clamp`` / ``prior`` /
+    ``prior_sigma`` surface), but instead of substituting into a process it
+    overrides the coefficient in a per-evaluation hallmark registry — so the
+    severity map ``base * (floor + slope * h)`` calibrates end to end. This is
+    the home for a coefficient that has no SBML-parameter host (the mTOR
+    rapamycin-floor fraction, say): it lives on the hallmark edge, not a
+    process, so it rides the registry rather than ``eqx.tree_at``.
+
+    Attributes mirror :class:`ParameterRef`; ``hallmark`` + ``param_name``
+    together select the mapping, and ``coeff`` names which coefficient
+    (only ``"floor"`` today).
+    """
+
+    hallmark: str
+    param_name: str
+    init: float
+    clamp: tuple[float, float] | None = None
+    prior: float | None = None
+    prior_sigma: float = 0.5
+    coeff: str = "floor"
+    description: str = ""
+
+
 def _substitute_param(proc, field: str, value: Any):
     """Return a new Process with ``field`` set to ``value`` via eqx.tree_at.
 
@@ -799,7 +828,7 @@ class CalibrationProblem:
         conditions: dict[str, Condition],
         data: dict[str, "pd.Series"],
         arm_pairs: dict[str, tuple[str, str]],
-        params: dict[str, ParameterRef],
+        params: dict[str, "ParameterRef | HallmarkCoeffRef"],
         fit_arms: list[str],
         held_out_arms: list[str] | None = None,
         normalization: str = "baseline",
@@ -816,6 +845,17 @@ class CalibrationProblem:
     ) -> None:
         from hallsim.composite import Composite  # local import — avoid cycle
         from hallsim.hallmarks import HALLMARK_REGISTRY
+
+        # A ParameterRef substitutes into a process (`eqx.tree_at`); a
+        # HallmarkCoeffRef overrides a hallmark-mapping coefficient in a
+        # per-eval registry. Both share the optimizer surface (init / clamp /
+        # prior); only the application path differs.
+        proc_params = {
+            k: v for k, v in params.items() if isinstance(v, ParameterRef)
+        }
+        coeff_params = {
+            k: v for k, v in params.items() if isinstance(v, HallmarkCoeffRef)
+        }
 
         # Validation pass over the wiring — catch typos early so the
         # JIT trace doesn't fail with a confusing message later.
@@ -836,7 +876,7 @@ class CalibrationProblem:
         for arm in held_out_arms or []:
             if arm not in arm_pairs:
                 raise KeyError(f"held_out_arms entry {arm!r} not in arm_pairs")
-        for pname, pref in params.items():
+        for pname, pref in proc_params.items():
             if pref.process_name not in composite.processes:
                 raise KeyError(
                     f"params[{pname!r}].process_name={pref.process_name!r} "
@@ -865,22 +905,22 @@ class CalibrationProblem:
         for hname, handle in reg.items():
             for mapping in handle.mappings:
                 key = (mapping.process_name, mapping.param_name)
-                hallmark_targets.setdefault(key, []).append(
-                    (hname, mapping.transform)
-                )
+                hallmark_targets.setdefault(key, []).append((hname, mapping))
 
-        def _ignores_base(transform) -> bool:
+        def _ignores_base(mapping) -> bool:
             try:
-                return float(transform(0.5, 1.0)) == float(transform(0.5, 2.0))
+                return float(mapping.value(0.5, 1.0)) == float(
+                    mapping.value(0.5, 2.0)
+                )
             except Exception:
                 return False  # can't probe → don't block
 
         offenders = []
-        for pname, pref in params.items():
+        for pname, pref in proc_params.items():
             entries = hallmark_targets.get((pref.process_name, pref.field))
             if not entries:
                 continue
-            if all(_ignores_base(t) for _, t in entries):
+            if all(_ignores_base(m) for _, m in entries):
                 offenders.append((pname, pref, [h for h, _ in entries]))
             else:
                 log.info(
@@ -891,6 +931,31 @@ class CalibrationProblem:
                     pref.process_name,
                     pref.field,
                     ", ".join(h for h, _ in entries),
+                )
+
+        # Validate each HallmarkCoeffRef resolves to a real affine mapping
+        # with a fittable floor — fail early on a typo, not mid-trace.
+        for cname, cref in coeff_params.items():
+            handle = reg.get(cref.hallmark)
+            if handle is None:
+                raise KeyError(
+                    f"params[{cname!r}].hallmark={cref.hallmark!r} not in "
+                    f"registry (have {sorted(reg)})"
+                )
+            hits = [
+                m for m in handle.mappings if m.param_name == cref.param_name
+            ]
+            if not hits:
+                raise KeyError(
+                    f"params[{cname!r}] targets {cref.hallmark!r}."
+                    f"{cref.param_name!r}, which no mapping in that hallmark "
+                    "declares."
+                )
+            if cref.coeff != "floor" or any(m.floor is None for m in hits):
+                raise ValueError(
+                    f"params[{cname!r}] coeff={cref.coeff!r} is not a "
+                    f"fittable affine floor on {cref.hallmark!r}."
+                    f"{cref.param_name!r}."
                 )
         if offenders:
             msgs = []
@@ -947,7 +1012,12 @@ class CalibrationProblem:
         self.equilibration_condition = equilibration_condition
         self._laws = None  # conservation laws (structural; computed once)
         self._reporter_src = None  # reporter → source store-index map
-        self.params = params
+        # `params` (declaration order) is the optimizer surface; `_params`
+        # substitutes into processes, `_coeffs` overrides registry floors.
+        self.params = proc_params
+        self._coeffs = coeff_params
+        self._all_refs = params
+        self._base_registry = reg
         self.prior_weight = prior_weight
         self.fit_arms = fit_arms
         self.held_out_arms = held_out_arms or []
@@ -1041,6 +1111,19 @@ class CalibrationProblem:
 
     # ── Internal: per-condition simulation ────────────────────────
 
+    @property
+    def param_refs(self) -> dict:
+        """All fittable references — process params (:class:`ParameterRef`)
+        plus hallmark coefficients (:class:`HallmarkCoeffRef`) — in
+        declaration order. The optimizer's full surface; iterate this, not
+        ``params`` (process-only), when you need every fitted quantity."""
+        return self._all_refs
+
+    def initial_params(self) -> dict:
+        """``{name: init}`` for every fittable reference — the optimizer's
+        starting vector, exactly what :meth:`fit` packs internally."""
+        return {k: jnp.asarray(p.init) for k, p in self._all_refs.items()}
+
     def _substitute(self, processes: dict, param_values: dict) -> dict:
         new = dict(processes)
         for pname, pref in self.params.items():
@@ -1051,11 +1134,45 @@ class CalibrationProblem:
             )
         return new
 
-    def _condition_composite(self, processes: dict, condition: Condition):
+    def _registry(self, param_values: dict):
+        """The hallmark registry for this evaluation, with each fitted floor
+        (:class:`HallmarkCoeffRef`) overridden by its current value from
+        ``param_values``. Returns the base registry unchanged when no
+        coefficients are fitted, so the affine floor stays at its ``init``."""
+        if not self._coeffs:
+            return self._base_registry
+        floors: dict[str, dict[str, Any]] = {}
+        for name, cref in self._coeffs.items():
+            floors.setdefault(cref.hallmark, {})[cref.param_name] = (
+                param_values[name]
+            )
+        reg = dict(self._base_registry)
+        for hname, by_param in floors.items():
+            handle = reg[hname]
+            reg[hname] = dc_replace(
+                handle,
+                mappings=[
+                    (
+                        dc_replace(m, floor=by_param[m.param_name])
+                        if m.param_name in by_param
+                        else m
+                    )
+                    for m in handle.mappings
+                ],
+            )
+        return reg
+
+    def _condition_composite(
+        self, processes: dict, condition: Condition, registry=None
+    ):
         """Apply a condition's hallmark severities and wire a composite."""
         from hallsim.hallmarks import apply_hallmarks
 
-        procs = apply_hallmarks(processes, condition.hallmarks)
+        procs = apply_hallmarks(
+            processes,
+            condition.hallmarks,
+            registry=registry or self._base_registry,
+        )
         for iv in condition.interventions:
             procs = iv.apply(procs, reference=processes)
         return self._Composite(
@@ -1085,7 +1202,7 @@ class CalibrationProblem:
             for r in self.reporters
         ]
 
-    def _equilibrate(self, processes: dict):
+    def _equilibrate(self, processes: dict, registry=None):
         """Shared pre-perturbation baseline ``(y0, summ_b)`` — the unperturbed
         condition's fixed point.
 
@@ -1101,14 +1218,16 @@ class CalibrationProblem:
         Returns ``(initial_state_vec, None)`` when equilibrate is off, so
         callers fall back to each arm's own t=0 baseline."""
         comp = self._condition_composite(
-            processes, next(iter(self.conditions.values()))
+            processes, next(iter(self.conditions.values())), registry=registry
         )
         if not self.equilibrate:
             return comp.initial_state_vec(), None
         from hallsim.steady_state import conservation_laws, steady_state
 
         eq_comp = self._condition_composite(
-            processes, self.conditions[self.equilibration_condition]
+            processes,
+            self.conditions[self.equilibration_condition],
+            registry=registry,
         )
         # Conservation laws are structural (param-independent) — compute once.
         if self._laws is None:
@@ -1121,22 +1240,30 @@ class CalibrationProblem:
         return y0, summ_b
 
     def _simulate_condition(
-        self, processes: dict, condition: Condition, y0=None
+        self,
+        processes: dict,
+        condition: Condition,
+        y0=None,
+        registry=None,
+        adjoint=None,
     ):
         """Apply hallmarks + run Scheduler for one condition. Returns the
         full ``(ts, reporter_trajectories)`` — ``ts`` shape ``(n_save,)``
         and ``reporter_trajectories`` shape ``(n_reporters, n_save)`` — so
         the loss can read each reporter at arbitrary query times. ``y0``
-        overrides the initial state (the shared equilibrated baseline)."""
-        comp = self._condition_composite(processes, condition)
+        overrides the initial state (the shared equilibrated baseline).
+
+        ``adjoint`` must match the outer autodiff: ``dfx.ForwardMode()``
+        under a JVP (forward fit), ``None`` (the Scheduler default recursive-
+        checkpoint reverse adjoint) under a VJP or a plain post-fit run. A
+        ForwardMode solve cannot be reverse-differentiated (its inner
+        while-loop has dynamic bounds)."""
+        comp = self._condition_composite(
+            processes, condition, registry=registry
+        )
         if y0 is None:
             y0 = comp.initial_state_vec()
         save_dt = max(1e-6, self.t_end / max(1, self.n_save - 1))
-        # The diffeqsolve adjoint must match the outer autodiff: ForwardMode
-        # under a JVP (forward fit), the default recursive-checkpoint reverse
-        # adjoint under a VJP (reverse fit). A ForwardMode solve cannot be
-        # reverse-differentiated (its inner while-loop has dynamic bounds).
-        adjoint = dfx.ForwardMode() if self._fit_mode == "forward" else None
         res = self._scheduler.run(
             comp,
             t_span=(0.0, self.t_end),
@@ -1169,6 +1296,58 @@ class CalibrationProblem:
                 jnp.atleast_1d(rep.summary(ts, trajs[i], qt))
                 for i, rep in enumerate(self.reporters)
             ]
+        )
+
+    def _run_condition_set(self, param_values: dict, *, adjoint=None):
+        """Set up one evaluation over the condition set.
+
+        Substitutes the fitted params, resolves the hallmark registry, and
+        equilibrates the shared baseline, then returns
+        ``(run_for, y0, baseline)`` where ``run_for(cond_name) -> (ts,
+        reporter_trajs)`` solves each condition once and caches it. The one
+        prologue shared by :meth:`model_lfc`, :meth:`data_loss`,
+        :meth:`evaluate`, and :meth:`simulate_reporters`; ``adjoint``
+        threads the autodiff mode through to each solve (see
+        :meth:`_simulate_condition`)."""
+        substituted = self._substitute(self.composite.processes, param_values)
+        registry = self._registry(param_values)
+        y0, baseline = self._equilibrate(substituted, registry=registry)
+        cache: dict[str, tuple] = {}
+
+        def run_for(cond_name: str):
+            if cond_name not in cache:
+                cache[cond_name] = self._simulate_condition(
+                    substituted,
+                    self.conditions[cond_name],
+                    y0=y0,
+                    registry=registry,
+                    adjoint=adjoint,
+                )
+            return cache[cond_name]
+
+        return run_for, y0, baseline
+
+    def _loss_adjoint(self):
+        """ForwardMode under a forward-mode fit, else the Scheduler default."""
+        return dfx.ForwardMode() if self._fit_mode == "forward" else None
+
+    def simulate_reporters(
+        self, param_values: dict, cond_name: str, query_times=None
+    ):
+        """Reporter trajectories for one condition at ``param_values``.
+
+        The public post-fit / figure path — returns ``(ts, reporter_trajs)``
+        (``reporter_trajs`` shape ``(n_reporters, n_save)``), or, when
+        ``query_times`` is given, each reporter's summary at those times
+        (``(n_reporters, n_t)``). Uses the Scheduler default adjoint (no
+        forward-mode unfold), so callers don't reach into the private
+        substitute/run/reporter internals to draw a trajectory."""
+        run_for, _, _ = self._run_condition_set(param_values, adjoint=None)
+        ts, trajs = run_for(cond_name)
+        if query_times is None:
+            return ts, trajs
+        return self._reporter_summaries(
+            ts, trajs, jnp.atleast_1d(jnp.asarray(query_times))
         )
 
     # ── Loss / fit / evaluate ─────────────────────────────────────
@@ -1219,17 +1398,9 @@ class CalibrationProblem:
         ``query_times`` — the exact quantity :meth:`data_loss` fits, so a
         trajectory figure never drifts from the loss. Returns ``(n_rep, n_t)``.
         """
-        substituted = self._substitute(self.composite.processes, param_values)
-        y0, baseline = self._equilibrate(substituted)
-        cache: dict[str, tuple] = {}
-
-        def run_for(cond_name: str):
-            if cond_name not in cache:
-                cache[cond_name] = self._simulate_condition(
-                    substituted, self.conditions[cond_name], y0=y0
-                )
-            return cache[cond_name]
-
+        run_for, _, baseline = self._run_condition_set(
+            param_values, adjoint=self._loss_adjoint()
+        )
         return self._arm_lfc(
             run_for, arm, jnp.atleast_1d(jnp.asarray(query_times)), baseline
         )
@@ -1244,20 +1415,13 @@ class CalibrationProblem:
         arbitrary params, e.g. to trace a train-vs-validation curve for
         early stopping. ``arms`` must be keys of ``arm_pairs``.
         """
-        substituted = self._substitute(self.composite.processes, param_values)
-        y0, baseline = self._equilibrate(substituted)
         # Each condition is solved once (whole trajectory) and cached, then
         # read at each arm's measured timepoints — so a condition that is
         # both a condition and a baseline in different arm_pairs still runs
         # once, and every timepoint reuses the same solve.
-        run_cache: dict[str, tuple] = {}
-
-        def run_for(cond_name: str):
-            if cond_name not in run_cache:
-                run_cache[cond_name] = self._simulate_condition(
-                    substituted, self.conditions[cond_name], y0=y0
-                )
-            return run_cache[cond_name]
+        run_for, _, baseline = self._run_condition_set(
+            param_values, adjoint=self._loss_adjoint()
+        )
 
         # One arm loss = mean squared error over the whole (reporter ×
         # timepoint) block: the model fits the *trajectory* of the log2
@@ -1296,7 +1460,7 @@ class CalibrationProblem:
         estimate treating the prior as a belief.
         """
         terms = []
-        for name, pref in self.params.items():
+        for name, pref in self._all_refs.items():
             if pref.prior is None:
                 continue
             lp = jnp.log10(jnp.clip(param_values[name], 1e-30, None))
@@ -1337,15 +1501,18 @@ class CalibrationProblem:
         if self._warmed_up:
             return
         substituted = self._substitute(self.composite.processes, param_values)
+        registry = self._registry(param_values)
         any_cond = next(iter(self.conditions.values()))
-        comp = self._condition_composite(substituted, any_cond)
+        comp = self._condition_composite(
+            substituted, any_cond, registry=registry
+        )
         self._scheduler.warm_up(
             comp, (0.0, self.t_end), macro_dt=self.macro_dt
         )
         # Conservation laws (structural) are computed eagerly here — they can't
         # be recovered from tracers once the loss is under autodiff.
         if self.equilibrate and self._laws is None:
-            self._equilibrate(substituted)
+            self._equilibrate(substituted, registry=registry)
         self._warmed_up = True
 
     def fit(
@@ -1366,9 +1533,11 @@ class CalibrationProblem:
         the phase-insensitive ``window_mean`` summaries make the reverse
         pass through the oscillators well-behaved.
         """
-        init = {k: jnp.asarray(p.init) for k, p in self.params.items()}
+        init = {k: jnp.asarray(p.init) for k, p in self._all_refs.items()}
         clamps = {
-            k: p.clamp for k, p in self.params.items() if p.clamp is not None
+            k: p.clamp
+            for k, p in self._all_refs.items()
+            if p.clamp is not None
         }
         self._fit_mode = mode
         # Measure stiffness with concrete params before the loss goes
@@ -1410,32 +1579,11 @@ class CalibrationProblem:
         """
         from hallsim.gene_reporters import compute_concordance
 
-        substituted = self._substitute(self.composite.processes, param_values)
-        y0, baseline = self._equilibrate(substituted)
-
-        # Per-condition simulation cache: cond_name -> (ts, reporter_trajs).
-        run_cache: dict[str, tuple] = {}
-
-        def run_for(cond_name: str):
-            if cond_name in run_cache:
-                return run_cache[cond_name]
-            comp = self._condition_composite(
-                substituted, self.conditions[cond_name]
-            )
-            save_dt = max(1e-6, self.t_end / max(1, self.n_save - 1))
-            res = self._scheduler.run(
-                comp,
-                t_span=(0.0, self.t_end),
-                macro_dt=self.macro_dt,
-                y0=y0,
-                save_dt=save_dt,
-                warn_save_resolution=False,  # grid-independent readouts
-            )
-            trajs = jnp.stack(
-                [res.ys[..., idx] for idx in self._reporter_indices]
-            )
-            run_cache[cond_name] = (res.ts, trajs)
-            return run_cache[cond_name]
+        # Default adjoint (no forward-mode unfold): evaluate is not
+        # differentiated, so it runs faster than the loss path.
+        run_for, _, baseline = self._run_condition_set(
+            param_values, adjoint=None
+        )
 
         eps = 1e-12
         results: dict[str, dict[float, Any]] = {}
@@ -1466,22 +1614,27 @@ class CalibrationProblem:
 
     # ── Output bundle: trajectories + topology + concordance JSON ──
 
-    def _simulate_all_conditions(
+    def simulate_all_conditions(
         self,
         param_values: dict,
         n_save: int | None = None,
     ) -> dict:
         """Run each condition once at ``param_values``; return
-        ``{cond_name: SchedulerResult}``. Uses the Scheduler's default
-        adjoint (no forward-mode JVP), so wall-time is fast — meant
-        for post-fit visualisation, not loss evaluation."""
+        ``{cond_name: SchedulerResult}`` (full state, all species). Uses the
+        Scheduler's default adjoint (no forward-mode JVP), so wall-time is
+        fast — the public path for post-fit visualisation, not loss
+        evaluation. For reporter-only trajectories use
+        :meth:`simulate_reporters`."""
         substituted = self._substitute(self.composite.processes, param_values)
-        y0, _ = self._equilibrate(substituted)
+        registry = self._registry(param_values)
+        y0, _ = self._equilibrate(substituted, registry=registry)
         n = n_save if n_save is not None else self.n_save
         save_dt = max(1e-6, self.t_end / max(1, n - 1))
         results: dict = {}
         for cond_name, cond in self.conditions.items():
-            comp = self._condition_composite(substituted, cond)
+            comp = self._condition_composite(
+                substituted, cond, registry=registry
+            )
             results[cond_name] = self._scheduler.run(
                 comp,
                 t_span=(0.0, self.t_end),
@@ -1490,170 +1643,3 @@ class CalibrationProblem:
                 save_dt=save_dt,
             )
         return results
-
-    def save_outputs(
-        self,
-        out_dir: str,
-        history: "CalibrationHistory",
-        *,
-        n_save_plot: int = 500,
-    ) -> dict:
-        """Produce the post-fit artifact bundle in ``out_dir``.
-
-        Generates:
-
-        - ``graph.png`` — composite topology rendered via networkx.
-        - ``trajectories_<cond>_pre_vs_post.png`` — one figure per
-          condition overlaying pre-fit and post-fit reporter
-          trajectories.
-        - ``trajectories_post_all_arms.png`` — all conditions
-          overlaid at post-fit params.
-        - ``trajectories.json`` — per-condition reporter-path
-          trajectories at post-fit (densely sampled, ``n_save_plot``
-          points).
-        - ``summary.json`` — fitted params, init params, loss history,
-          per-arm concordance (pre and post), conditions, params.
-
-        Re-samples each condition at ``n_save_plot`` points so the
-        trajectory plots are smooth (the loss path uses ``self.n_save``
-        which is intentionally low for jvp tractability).
-
-        Returns a dict describing the written artifacts.
-        """
-        from hallsim.plotting import (
-            draw_composite_graph,
-            plot_runs_comparison,
-            save_run_results,
-        )
-
-        out = Path(out_dir)
-        out.mkdir(parents=True, exist_ok=True)
-
-        init = {k: jnp.asarray(p.init) for k, p in self.params.items()}
-        final = history.final_params or init
-
-        # Densely-sampled trajectories at both ends of the fit.
-        pre_runs = self._simulate_all_conditions(init, n_save=n_save_plot)
-        post_runs = self._simulate_all_conditions(final, n_save=n_save_plot)
-
-        # Concordance — uses the standard n_save path (matches the
-        # numbers the demo prints) so the JSON tallies with stdout.
-        results_pre = self.evaluate(init)
-        results_post = self.evaluate(final)
-
-        reporter_paths = [r.observable for r in self.reporters]
-
-        # 1. Topology
-        draw_composite_graph(
-            self.composite,
-            save=str(out / "graph.png"),
-            title="composite topology",
-        )
-
-        # 2. Per-condition pre-vs-post trajectory overlays
-        for cond_name in self.conditions:
-            plot_runs_comparison(
-                {
-                    "pre-fit": pre_runs[cond_name],
-                    "post-fit": post_runs[cond_name],
-                },
-                paths=reporter_paths,
-                title=f"{cond_name}: pre vs post",
-                save=str(out / f"trajectories_{cond_name}_pre_vs_post.png"),
-            )
-
-        # 3. All conditions at post-fit
-        plot_runs_comparison(
-            post_runs,
-            paths=reporter_paths,
-            title="all conditions at post-fit params",
-            save=str(out / "trajectories_post_all_arms.png"),
-        )
-
-        # 4. Trajectories JSON (post-fit only — pre-fit is in the plots)
-        save_run_results(
-            post_runs,
-            str(out / "trajectories.json"),
-            paths=reporter_paths,
-            metadata={
-                "fitted_params": {k: float(v) for k, v in final.items()},
-                "n_save_plot": n_save_plot,
-                "t_end": self.t_end,
-                "macro_dt": self.macro_dt,
-            },
-        )
-
-        # 5. Summary JSON
-        def _conc_to_dict(results_dict):
-            out = {}
-            for arm, per_t in results_dict.items():
-                out[arm] = {}
-                for t, r in per_t.items():
-                    out[arm][f"{t:g}"] = {
-                        "timepoint": float(t),
-                        "sign_agreement": float(r.sign_agreement),
-                        "spearman_r": float(r.spearman_r),
-                        "n_compared": r.n_compared,
-                        "rows": [
-                            {
-                                "gene": row.reporter.gene_symbol,
-                                "observable": row.reporter.observable,
-                                "delta_sim_signed": float(row.delta_sim),
-                                "delta_data": float(row.delta_data),
-                                "sign_match": bool(row.sign_match),
-                            }
-                            for row in r.rows
-                        ],
-                    }
-            return out
-
-        summary = {
-            "params": {
-                k: {
-                    "process_name": p.process_name,
-                    "field": p.field,
-                    "init": p.init,
-                    "clamp": list(p.clamp) if p.clamp else None,
-                    "description": p.description,
-                }
-                for k, p in self.params.items()
-            },
-            "init_params": {k: float(v) for k, v in init.items()},
-            "fitted_params": {k: float(v) for k, v in final.items()},
-            "loss_history": [float(v) for v in history.losses],
-            "wall_time_s": float(history.wall_time_s),
-            "conditions": {
-                name: {
-                    "hallmarks": dict(c.hallmarks),
-                    "description": c.description,
-                }
-                for name, c in self.conditions.items()
-            },
-            "arm_pairs": dict(self.arm_pairs),
-            "fit_arms": list(self.fit_arms),
-            "held_out_arms": list(self.held_out_arms),
-            "t_end": self.t_end,
-            "macro_dt": self.macro_dt,
-            "concordance_pre": _conc_to_dict(results_pre),
-            "concordance_post": _conc_to_dict(results_post),
-            "reporters": [
-                {
-                    "gene_symbol": r.gene_symbol,
-                    "observable": r.observable,
-                    "sign": r.sign,
-                    "summary": (
-                        r.summary.__name__
-                        if hasattr(r.summary, "__name__")
-                        else type(r.summary).__name__
-                    ),
-                }
-                for r in self.reporters
-            ],
-        }
-        with open(out / "summary.json", "w") as f:
-            json.dump(summary, f, indent=2)
-
-        return {
-            "out_dir": str(out),
-            "files": sorted(p.name for p in out.iterdir()),
-        }

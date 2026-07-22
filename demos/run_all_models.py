@@ -22,11 +22,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import jax
 import jax.numpy as jnp
 import matplotlib
+
 matplotlib.use("Agg")  # non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 
-from outdir import outdir
+from hallsim.io import outdir
+
 PLOT_DIR = str(outdir("run_all_models"))
 
 saved_plots = []
@@ -53,13 +55,18 @@ def demo_eriq():
 
     # Key variables
     key_paths = [
-        "eriq/mito_function", "eriq/mito_damage", "eriq/glycolysis",
-        "eriq/ROS_activity", "eriq/mTOR_activity", "eriq/p53_activity",
+        "eriq/mito_function",
+        "eriq/mito_damage",
+        "eriq/glycolysis",
+        "eriq/ROS_activity",
+        "eriq/mTOR_activity",
+        "eriq/p53_activity",
     ]
 
     path = os.path.join(PLOT_DIR, "eriq_trajectories.png")
     fig = plot_trajectories(
-        result, paths=key_paths,
+        result,
+        paths=key_paths,
         title="ERiQ: Cellular Aging Trajectory",
         figsize=(14, 5),
     )
@@ -70,9 +77,11 @@ def demo_eriq():
     # Subplots view
     path = os.path.join(PLOT_DIR, "eriq_subplots.png")
     fig = plot_trajectories(
-        result, paths=key_paths,
+        result,
+        paths=key_paths,
         title="ERiQ: Individual State Variables",
-        figsize=(14, 8), ncols=3,
+        figsize=(14, 8),
+        ncols=3,
     )
     fig.savefig(path, dpi=150, bbox_inches="tight")
     saved_plots.append(path)
@@ -81,15 +90,21 @@ def demo_eriq():
     # Phase portrait: mito_damage vs mito_function
     path = os.path.join(PLOT_DIR, "eriq_phase.png")
     fig = plot_phase_portrait(
-        result, "eriq/mito_damage", "eriq/mito_function",
+        result,
+        "eriq/mito_damage",
+        "eriq/mito_function",
         title="ERiQ: Damage vs Function Phase Portrait",
     )
     fig.savefig(path, dpi=150, bbox_inches="tight")
     saved_plots.append(path)
     print(f"   Saved: {path}")
 
-    print(f"   Final mito_damage: {float(result.get('eriq/mito_damage')[-1]):.4f}")
-    print(f"   Final mito_function: {float(result.get('eriq/mito_function')[-1]):.4f}")
+    print(
+        f"   Final mito_damage: {float(result.get('eriq/mito_damage')[-1]):.4f}"
+    )
+    print(
+        f"   Final mito_function: {float(result.get('eriq/mito_function')[-1]):.4f}"
+    )
 
     plt.close("all")
     return result
@@ -102,7 +117,9 @@ def demo_eriq_plus_damage():
     print("=" * 60)
 
     from hallsim.models.eriq import (
-        ERiQEnergyMetabolism, ERiQOxidativeStress, ERiQSignaling,
+        ERiQEnergyMetabolism,
+        ERiQOxidativeStress,
+        ERiQSignaling,
     )
     from hallsim.models.saturating_removal import SaturatingRemoval
     from hallsim.composite import Composite
@@ -114,7 +131,9 @@ def demo_eriq_plus_damage():
         "energy": ERiQEnergyMetabolism(),
         "oxidative_stress": ERiQOxidativeStress(),
         "signaling": ERiQSignaling(),
-        "damage_repair": SaturatingRemoval(eta=0.5, beta=1.0, K=0.1, tau_scale=0.001),
+        "damage_repair": SaturatingRemoval(
+            eta=0.5, beta=1.0, K=0.1, tau_scale=0.001
+        ),
     }
 
     p = "eriq"
@@ -167,8 +186,12 @@ def demo_eriq_plus_damage():
     path = os.path.join(PLOT_DIR, "eriq_composed.png")
     fig = plot_trajectories(
         result,
-        paths=["eriq/mito_damage", "eriq/mito_function", "eriq/ROS_activity",
-               "cell/generic_damage"],
+        paths=[
+            "eriq/mito_damage",
+            "eriq/mito_function",
+            "eriq/ROS_activity",
+            "cell/generic_damage",
+        ],
         title="ERiQ + SaturatingRemoval: Composed Aging + Damage Model",
         figsize=(14, 5),
     )
@@ -229,7 +252,8 @@ def demo_mapk():
     all_paths = [f"mapk/{s}" for s in species]
     path = os.path.join(PLOT_DIR, "mapk_all.png")
     fig = plot_trajectories(
-        result, paths=all_paths,
+        result,
+        paths=all_paths,
         title="MAPK Cascade (Kholodenko2000, BioModels #10)",
         figsize=(14, 6),
     )
@@ -240,9 +264,11 @@ def demo_mapk():
     # Subplots
     path = os.path.join(PLOT_DIR, "mapk_subplots.png")
     fig = plot_trajectories(
-        result, paths=all_paths,
+        result,
+        paths=all_paths,
         title="MAPK Cascade: Individual Species",
-        figsize=(16, 10), ncols=4,
+        figsize=(16, 10),
+        ncols=4,
     )
     fig.savefig(path, dpi=150, bbox_inches="tight")
     saved_plots.append(path)
@@ -258,11 +284,11 @@ def demo_neuralode():
     print("=" * 60)
 
     from hallsim.models.neuralode import (
-        simulate_conditioned, fit_neuralode_shooting,
+        simulate_conditioned,
+        fit_neuralode_shooting,
     )
     from hallsim.composite import Composite
     from hallsim.scheduler import Scheduler
-    from hallsim.plotting import plot_trajectories, plot_phase_portrait
 
     # Ground truth: damped oscillator
     def oscillator(t, y, args=None):
@@ -273,18 +299,26 @@ def demo_neuralode():
 
     print("   Generating training data (damped oscillator)...")
     ys_data, _ = simulate_conditioned(
-        lambda u: oscillator, ts_data, jnp.zeros((1, 1)), n_ics=64,
-        y0_range=(0.1, 1.0), key=key,
+        lambda u: oscillator,
+        ts_data,
+        jnp.zeros((1, 1)),
+        n_ics=64,
+        y0_range=(0.1, 1.0),
+        key=key,
     )
     print(f"   Data shape: {ys_data.shape}")
 
     print("   Training NeuralODE (multiple shooting, 1000 steps)...")
     proc = fit_neuralode_shooting(
-        ts_data, ys_data,
+        ts_data,
+        ys_data,
         fields=("x", "y"),
         segments=4,
-        width=64, depth=3,
-        steps=1000, batch_size=32, seed=42,
+        width=64,
+        depth=3,
+        steps=1000,
+        batch_size=32,
+        seed=42,
     )
 
     # Run the trained model in a Composite
@@ -301,13 +335,19 @@ def demo_neuralode():
     sim = Scheduler()
 
     print("   Predicting trajectory t=[0, 20]...")
-    result = sim.run(comp, t_span=(0.0, 20.0), macro_dt=0.2, save_dt=0.2, y0=y0)
+    result = sim.run(
+        comp, t_span=(0.0, 20.0), macro_dt=0.2, save_dt=0.2, y0=y0
+    )
 
     # Also generate ground truth for comparison
     import diffrax as dfx
+
     gt_sol = dfx.diffeqsolve(
-        dfx.ODETerm(oscillator), dfx.Tsit5(),
-        t0=0.0, t1=20.0, dt0=0.1,
+        dfx.ODETerm(oscillator),
+        dfx.Tsit5(),
+        t0=0.0,
+        t1=20.0,
+        dt0=0.1,
         y0=jnp.array([0.5, 0.5]),
         saveat=dfx.SaveAt(ts=jnp.arange(0, 20.0, 0.2)),
         stepsize_controller=dfx.PIDController(rtol=1e-3, atol=1e-6),
@@ -317,11 +357,25 @@ def demo_neuralode():
 
     # Time series
     ts_np = np.asarray(result.ts)
-    axes[0].plot(ts_np, np.asarray(result.get("osc/x")), label="NeuralODE x", linewidth=2)
-    axes[0].plot(ts_np, np.asarray(result.get("osc/y")), label="NeuralODE y", linewidth=2)
+    axes[0].plot(
+        ts_np,
+        np.asarray(result.get("osc/x")),
+        label="NeuralODE x",
+        linewidth=2,
+    )
+    axes[0].plot(
+        ts_np,
+        np.asarray(result.get("osc/y")),
+        label="NeuralODE y",
+        linewidth=2,
+    )
     gt_ts = np.asarray(gt_sol.ts)
-    axes[0].plot(gt_ts, np.asarray(gt_sol.ys[:, 0]), "--", label="True x", alpha=0.7)
-    axes[0].plot(gt_ts, np.asarray(gt_sol.ys[:, 1]), "--", label="True y", alpha=0.7)
+    axes[0].plot(
+        gt_ts, np.asarray(gt_sol.ys[:, 0]), "--", label="True x", alpha=0.7
+    )
+    axes[0].plot(
+        gt_ts, np.asarray(gt_sol.ys[:, 1]), "--", label="True y", alpha=0.7
+    )
     axes[0].set_xlabel("Time")
     axes[0].set_ylabel("Value")
     axes[0].set_title("NeuralODE vs Ground Truth")
@@ -329,10 +383,19 @@ def demo_neuralode():
     axes[0].grid(True, alpha=0.3)
 
     # Phase portrait
-    axes[1].plot(np.asarray(result.get("osc/x")), np.asarray(result.get("osc/y")),
-                 label="NeuralODE", linewidth=2)
-    axes[1].plot(np.asarray(gt_sol.ys[:, 0]), np.asarray(gt_sol.ys[:, 1]),
-                 "--", label="True", alpha=0.7)
+    axes[1].plot(
+        np.asarray(result.get("osc/x")),
+        np.asarray(result.get("osc/y")),
+        label="NeuralODE",
+        linewidth=2,
+    )
+    axes[1].plot(
+        np.asarray(gt_sol.ys[:, 0]),
+        np.asarray(gt_sol.ys[:, 1]),
+        "--",
+        label="True",
+        alpha=0.7,
+    )
     axes[1].set_xlabel("x")
     axes[1].set_ylabel("y")
     axes[1].set_title("Phase Portrait")
@@ -372,27 +435,51 @@ def demo_hallmark_sweep():
         comp_mod = Composite(modified_procs, comp.topology, validate=False)
 
         sim = Scheduler()
-        result = sim.run(comp_mod, t_span=(0.0, 3000.0), macro_dt=5.0, save_dt=5.0)
+        result = sim.run(
+            comp_mod, t_span=(0.0, 3000.0), macro_dt=5.0, save_dt=5.0
+        )
 
         ts = np.asarray(result.ts)
         label = f"severity={sev:.1f}"
 
-        axes[0].plot(ts, np.asarray(result.get("eriq/mito_damage")),
-                     color=color, label=label, linewidth=1.5)
-        axes[1].plot(ts, np.asarray(result.get("eriq/mito_function")),
-                     color=color, label=label, linewidth=1.5)
-        axes[2].plot(ts, np.asarray(result.get("eriq/ROS_activity")),
-                     color=color, label=label, linewidth=1.5)
+        axes[0].plot(
+            ts,
+            np.asarray(result.get("eriq/mito_damage")),
+            color=color,
+            label=label,
+            linewidth=1.5,
+        )
+        axes[1].plot(
+            ts,
+            np.asarray(result.get("eriq/mito_function")),
+            color=color,
+            label=label,
+            linewidth=1.5,
+        )
+        axes[2].plot(
+            ts,
+            np.asarray(result.get("eriq/ROS_activity")),
+            color=color,
+            label=label,
+            linewidth=1.5,
+        )
 
-        print(f"   severity={sev:.1f}: final damage={float(result.get('eriq/mito_damage')[-1]):.4f}")
+        print(
+            f"   severity={sev:.1f}: final damage={float(result.get('eriq/mito_damage')[-1]):.4f}"
+        )
 
-    for ax, title in zip(axes, ["Mitochondrial Damage", "Mitochondrial Function", "ROS Activity"]):
+    for ax, title in zip(
+        axes,
+        ["Mitochondrial Damage", "Mitochondrial Function", "ROS Activity"],
+    ):
         ax.set_xlabel("Time")
         ax.set_title(title)
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
-    fig.suptitle("Hallmark Severity Sweep: Mitochondrial Dysfunction", fontsize=13)
+    fig.suptitle(
+        "Hallmark Severity Sweep: Mitochondrial Dysfunction", fontsize=13
+    )
     fig.tight_layout()
     path = os.path.join(PLOT_DIR, "hallmark_sweep.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -411,7 +498,10 @@ def demo_stem_cell_niche():
     try:
         from hallsim.models.stem_cell_niche import (
             build_niche_crosstalk,
-            CROSSTALK_WNT, CROSSTALK_EGF, CROSSTALK_SHH, CROSSTALK_NOTCH,
+            CROSSTALK_WNT,
+            CROSSTALK_EGF,
+            CROSSTALK_SHH,
+            CROSSTALK_NOTCH,
         )
     except ImportError as e:
         print(f"   SKIPPED: {e}")
@@ -421,7 +511,9 @@ def demo_stem_cell_niche():
     import diffrax as dfx
 
     severities = [0.0, 0.3, 0.6, 1.0]
-    sim = Scheduler(solver=dfx.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=500_000, dt0=1e-4)
+    sim = Scheduler(
+        solver=dfx.Tsit5(), rtol=1e-6, atol=1e-8, max_steps=500_000, dt0=1e-4
+    )
 
     ligands = {
         CROSSTALK_WNT: "Wnt",
@@ -438,19 +530,28 @@ def demo_stem_cell_niche():
         print(f"   severity={sev:.1f}...")
         try:
             comp = build_niche_crosstalk(severity=sev)
-            result = sim.run(comp, t_span=(0.0, 100.0), macro_dt=0.5, save_dt=0.5)
+            result = sim.run(
+                comp, t_span=(0.0, 100.0), macro_dt=0.5, save_dt=0.5
+            )
 
             ts = np.asarray(result.ts)
             for ax, (species_id, name) in zip(axes, ligands.items()):
                 vals = np.asarray(result.get(species_id))
-                ax.plot(ts, vals, color=color, label=f"sev={sev:.1f}",
-                        linewidth=1.5)
+                ax.plot(
+                    ts,
+                    vals,
+                    color=color,
+                    label=f"sev={sev:.1f}",
+                    linewidth=1.5,
+                )
                 ax.set_title(f"{name} ({species_id})", fontsize=11)
                 ax.set_xlabel("Time")
                 ax.set_ylabel("Concentration")
                 ax.grid(True, alpha=0.3)
 
-            print(f"   severity={sev:.1f}: final Wnt={float(result.get(CROSSTALK_WNT)[-1]):.3f}")
+            print(
+                f"   severity={sev:.1f}: final Wnt={float(result.get(CROSSTALK_WNT)[-1]):.3f}"
+            )
         except Exception as e:
             print(f"   severity={sev:.1f} FAILED: {e}")
 

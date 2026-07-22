@@ -62,6 +62,13 @@ class StemCellNiche(Process):
         Decay rate constant for Notch receptor availability.
     """
 
+    hallmark = "Stem Cell Exhaustion"
+    reference = "Sivakumar et al. 2011 (BIOMD0000000398)"
+    description = (
+        "Niche deterioration: severity-dependent decay of Wnt, EGF, Shh, "
+        "and Notch signaling ligands/receptors."
+    )
+
     severity: float = 0.0
     wnt_decay: float = 0.08
     egf_decay: float = 0.08
@@ -104,16 +111,6 @@ class StemCellNiche(Process):
             CROSSTALK_SHH: -s * self.shh_decay * state[CROSSTALK_SHH],
             CROSSTALK_NOTCH: -s * self.notch_decay * state[CROSSTALK_NOTCH],
         }
-
-    def metadata(self):
-        base = super().metadata()
-        base["hallmark"] = "Stem Cell Exhaustion"
-        base["reference"] = "Sivakumar et al. 2011 (BIOMD0000000398)"
-        base["description"] = (
-            "Niche deterioration: severity-dependent decay of Wnt, EGF, "
-            "Shh, and Notch signaling ligands/receptors."
-        )
-        return base
 
 
 def build_niche_crosstalk(

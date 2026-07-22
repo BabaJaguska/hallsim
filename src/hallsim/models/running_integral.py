@@ -54,6 +54,12 @@ class RunningIntegral(Process):
         resolution.
     """
 
+    description = (
+        "Cumulative time-integral of an oscillating observable; pair with "
+        "window_mean for a phase-insensitive trailing mean with bounded "
+        "calibration gradient."
+    )
+
     timescale: float | None = None
     # Integrate source**power. Default 2 → ∫x² → √⟨x²⟩: the amplitude-aware
     # readout is the safe default, because a buffered-mean oscillator (e.g.
@@ -88,12 +94,3 @@ class RunningIntegral(Process):
         if self.tau is not None:
             val = val - state["integral"] / self.tau
         return {"integral": val}
-
-    def metadata(self):
-        base = super().metadata()
-        base["description"] = (
-            "Cumulative time-integral of an oscillating observable; pair "
-            "with window_mean for a phase-insensitive trailing mean with "
-            "bounded calibration gradient."
-        )
-        return base

@@ -226,6 +226,14 @@ class Process(eqx.Module):
     timescale: float | None = None
     dt_step: float | None = None
 
+    # Declarative metadata, folded into metadata() when set. Override as
+    # plain class attributes (a per-class constant) or, for a process whose
+    # value varies per instance, as a static eqx.field. Not dataclass fields
+    # here, so they add nothing to the JAX-traced pytree by default.
+    hallmark = None
+    reference = None
+    description = None
+
     # --- Interface: CONTINUOUS -----------------------------------------------
 
     def ports_schema(self) -> dict[str, Port]:
@@ -361,6 +369,10 @@ class Process(eqx.Module):
                 for name, port in self.ports_schema().items()
             },
         }
+        for key in ("hallmark", "reference", "description"):
+            value = getattr(self, key, None)
+            if value:
+                meta[key] = value
         if self.timescale is not None:
             meta["timescale"] = self.timescale
         if self.dt_step is not None:

@@ -428,7 +428,6 @@ class Scheduler:
         # is reused under later grad/jvp/vmap tracing, where the Jacobian
         # eigenvalues would be tracers.
         self._integrator_cache: dict[Any, dict[str, GroupIntegrator]] = {}
-        self._warned_cold_trace = False
         self._warned_save_res = False
         # Adjoint method used by every diffeqsolve in this run.
         # Default (None) → diffrax picks RecursiveCheckpointAdjoint, which
@@ -1314,14 +1313,10 @@ class Scheduler:
             }
 
         # Stiffness analysis needs a concrete Jacobian. Under tracing
-        # (grad/jvp/vmap) with no warmed cache we cannot measure it, so
-        # fall back to the explicit solver — the historical default, which
-        # makes `jax.grad(run)` work out of the box on non-stiff composites
-        # without a warm-up. **Not cached**, so a later eager call still
-        # resolves the per-group implicit treatment. Stiff systems should
-        # `warm_up` (or first run eagerly) to get the implicit solver under
-        # differentiation; an un-warmed stiff grad behaves exactly as it
-        # did before per-group selection existed (explicit).
+        # (grad/jvp/vmap) with no warmed cache the eigenvalues are tracers
+        # and it cannot be measured — this raises (below) rather than
+        # silently falling back to the explicit solver, which would give
+        # wrong (NaN) sensitivities on stiff groups. warm_up() first.
         state_traced = isinstance(state, jax.core.Tracer)
         try:
             report = (
@@ -1353,14 +1348,16 @@ class Scheduler:
             return integ
 
         if report is None:
-            if not self._warned_cold_trace:
-                log.debug(
-                    "Scheduler auto solver selection skipped under tracing "
-                    "(no warmed cache); using the explicit solver. warm_up() "
-                    "eagerly to get the implicit solver for stiff groups."
-                )
-                self._warned_cold_trace = True
-            return _all_explicit()
+            raise RuntimeError(
+                "Scheduler(auto_stiffness=True): cannot measure group "
+                "stiffness under tracing (grad/jvp/vmap) with a cold cache "
+                "— the Jacobian eigenvalues are tracers. Call warm_up(y0) "
+                "once eagerly before differentiating so the per-group "
+                "implicit/explicit verdict is cached "
+                "(CalibrationProblem.fit does this for you). Falling back "
+                "to the explicit solver here would give wrong (NaN) "
+                "sensitivities on stiff groups."
+            )
         # Vector atol for stiff groups: loosen absolute tolerance on
         # large-magnitude states (which would otherwise force
         # stability-tiny steps) while keeping a tight floor near zero.

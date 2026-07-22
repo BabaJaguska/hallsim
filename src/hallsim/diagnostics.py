@@ -53,7 +53,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from hallsim.composite import Composite
+from hallsim.composite import Composite, single_process_composite
 from hallsim.config import DEFAULT_ATOL, DEFAULT_MAX_STEPS
 from hallsim.scheduler import Scheduler
 
@@ -76,11 +76,17 @@ class ScreenReport:
     detail: str = ""
     framework_suspect: bool = False
     tunes: bool | None = None
+    negative: bool = False
 
     @property
     def ok(self) -> bool:
         return (
-            not (self.exploding or self.vanishing or self.tolerance_sensitive)
+            not (
+                self.exploding
+                or self.vanishing
+                or self.tolerance_sensitive
+                or self.negative
+            )
             and self.tunes is not False
         )
 
@@ -92,6 +98,8 @@ class ScreenReport:
             flags.append("VANISHING")
         if self.tolerance_sensitive:
             flags.append("TOLERANCE-SENSITIVE")
+        if self.negative:
+            flags.append("NEGATIVE-DOMAIN")
         if self.tunes is False:
             flags.append("NON-TUNABLE")
         if self.framework_suspect:
@@ -119,7 +127,7 @@ def _on_native_clock(process):
 
 
 def _solo_run(process, t_end, rtol, atol, n_save, max_steps):
-    comp = _solo_composite(process)
+    comp = single_process_composite(process)
     res = Scheduler(rtol=rtol, atol=atol, max_steps=max_steps).run(
         comp,
         t_span=(0.0, t_end),
@@ -164,15 +172,6 @@ def _sbmltoodejax_native_finite(process, t_end: float, n_steps: int):
     return max_abs, finite
 
 
-def _solo_composite(process):
-    return Composite(
-        processes={process._name: process},
-        topology={},
-        validate=False,
-        semantic_validation={"check_semantics": False},
-    )
-
-
 def _tunes(process, t_end: float, n_probe: int = 2):
     """Forward-mode gradient finiteness — the 'tunes' half of the rule.
 
@@ -200,7 +199,7 @@ def _tunes(process, t_end: float, n_probe: int = 2):
 
             def loss(val, field=cp.field):
                 proc = _substitute_param(process, field, val)
-                comp = _solo_composite(proc)
+                comp = single_process_composite(proc)
                 res = sched.run(
                     comp,
                     t_span=(0.0, t_end),
@@ -226,7 +225,9 @@ def _tunes(process, t_end: float, n_probe: int = 2):
     s_imp = Scheduler(auto_stiffness=True)
     try:
         s_imp.warm_up(
-            _solo_composite(process), t_span=(0.0, t_end), macro_dt=t_end
+            single_process_composite(process),
+            t_span=(0.0, t_end),
+            macro_dt=t_end,
         )
     except Exception:
         return False, False
@@ -257,8 +258,10 @@ def screen_process(
 
     Flags ``exploding`` (non-finite, or peak > ``growth_threshold`` ×
     initial scale and still rising), ``vanishing`` (all states end within
-    1e-9 of zero), and ``tolerance_sensitive`` (loose vs tight tolerance
-    differ by more than ``tol_rel_threshold``, peak-normalised). A solver
+    1e-9 of zero), ``tolerance_sensitive`` (loose vs tight tolerance
+    differ by more than ``tol_rel_threshold``, peak-normalised), and
+    ``negative`` (a state that started non-negative dipped materially below
+    zero — a concentration/activity that went out of domain). A solver
     that exceeds ``max_steps`` is reported as exploding/unintegrable.
 
     When an SBML-imported process is flagged exploding/unintegrable, a
@@ -323,6 +326,18 @@ def screen_process(
     )
     vanishing = finite and bool(np.all(np.abs(y_tight[-1]) < 1e-9))
 
+    # Domain violation: a state that starts non-negative but dips materially
+    # below zero during the run — a concentration/activity that went negative.
+    # Gating on "started non-negative" exempts legitimately-signed states
+    # (e.g. ERiQ's negative-valued regulatory integrators); the scaled
+    # threshold ignores sub-percent numerical undershoot near zero.
+    negative = False
+    if finite and y_tight.size:
+        started_nonneg = y_tight[0] >= -1e-9
+        most_neg = np.min(y_tight, axis=0)
+        neg_thresh = -0.02 * np.maximum(np.max(np.abs(y_tight), axis=0), 1e-12)
+        negative = bool(np.any(started_nonneg & (most_neg < neg_thresh)))
+
     scale = max(peak, 1e-12)
     tol_rel_diff = (
         float(np.nanmax(np.abs(y_loose - y_tight)) / scale)
@@ -341,6 +356,8 @@ def screen_process(
             f"rtol {rtol_loose:.0e} vs {rtol_tight:.0e} disagree "
             f"by {tol_rel_diff * 100:.0f}%"
         )
+    elif negative:
+        detail = "a non-negative state went materially negative"
 
     framework_suspect = False
     if exploding:
@@ -372,6 +389,7 @@ def screen_process(
         detail=detail,
         framework_suspect=framework_suspect,
         tunes=tunes,
+        negative=negative,
     )
 
 

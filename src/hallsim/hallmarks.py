@@ -50,9 +50,41 @@ import equinox as eqx
 from hallsim.process import Process
 
 
+@dataclass(frozen=True)
+class FittableCoeff:
+    """A hallmark-mapping coefficient the Calibrator may fit.
+
+    Stands in for a plain float in a mapping's ``floor``. The Calibrator
+    discovers it via a :class:`hallsim.calibration.HallmarkCoeffRef` and
+    substitutes a fitted value per loss evaluation (clamp / prior handled
+    like any :class:`hallsim.calibration.ParameterRef`). Outside calibration
+    the mapping evaluates at ``init``.
+    """
+
+    init: float
+    clamp: tuple[float, float] | None = None
+    prior: float | None = None
+    prior_sigma: float = 0.5
+    description: str = ""
+
+
 @dataclass
 class ParameterMapping:
     """Maps a hallmark severity to a process parameter value.
+
+    Two forms, resolved by :meth:`value`:
+
+    - **Affine** (``floor`` set): ``value = base * (floor + slope * severity)``.
+      ``floor`` is the severity=0 multiple of ``base``, ``slope`` the gain per
+      unit severity. ``slope=None`` pins the map at severity=1
+      (``slope = 1 - floor``) — the form for a rate whose *untreated* level is
+      the fitted ``base`` and whose lower severities are a suppressed fraction
+      of it (e.g. mTOR under rapamycin). Most hallmarks scale up from the
+      control value instead: ``floor=1`` with an explicit ``slope``. ``floor``
+      may be a :class:`FittableCoeff` to calibrate it.
+    - **Custom** (``transform`` set): ``value = transform(severity, base)``.
+      For a severity *dial* that sets the value directly and ignores ``base``
+      (``lambda h, base: h``).
 
     Attributes
     ----------
@@ -62,22 +94,40 @@ class ParameterMapping:
         Name of the Process field to modify. Either a plain attribute
         (``"alpha"``) or a dotted path into a dict-valued field
         (``"parameters.<key>"``).
+    floor, slope:
+        Affine coefficients (see above). ``base`` is read fresh from the
+        target field on each application, so a prior calibration
+        substitution into it flows through cleanly.
     transform:
-        ``(severity, base) -> new_value``. ``base`` is the current
-        value at the target field, read fresh on each hallmark
-        application — so any prior substitution into
-        ``parameters`` (e.g. from a calibration step) flows
-        through cleanly. Typically returns ``base * f(severity)``
-        where ``f(0) = 1`` for "no perturbation" and ``f(1)`` is the
-        full perturbation factor.
+        Escape hatch for non-affine / base-independent dials.
     description:
         Human-readable description of what this mapping does.
     """
 
     process_name: str
     param_name: str
-    transform: Callable[[Any, Any], Any]
+    floor: "float | FittableCoeff | None" = None
+    slope: float | None = None
+    transform: Callable[[Any, Any], Any] | None = None
     description: str = ""
+
+    @property
+    def floor_value(self):
+        f = self.floor
+        return f.init if isinstance(f, FittableCoeff) else f
+
+    def value(self, severity, base):
+        """Resolve the parameter value at ``severity`` given current ``base``."""
+        if self.transform is not None:
+            return self.transform(severity, base)
+        if self.floor is None:
+            raise ValueError(
+                f"ParameterMapping {self.process_name}.{self.param_name} "
+                "needs either an affine `floor` or a `transform`."
+            )
+        floor = self.floor_value
+        slope = (1.0 - floor) if self.slope is None else self.slope
+        return base * (floor + slope * severity)
 
 
 @dataclass
@@ -157,7 +207,7 @@ class HallmarkHandle:
                         f"available: {sorted(current.keys())}"
                     )
                 base = current[key]
-                new_val = mapping.transform(severity, base)
+                new_val = mapping.value(severity, base)
                 result[pname] = eqx.tree_at(
                     lambda p, fn=field_name, k=key: getattr(p, fn)[k],
                     proc,
@@ -165,7 +215,7 @@ class HallmarkHandle:
                 )
             else:
                 base = getattr(proc, mapping.param_name)
-                new_val = mapping.transform(severity, base)
+                new_val = mapping.value(severity, base)
                 result[pname] = eqx.tree_at(
                     lambda p, pn=mapping.param_name: getattr(p, pn),
                     proc,
@@ -196,9 +246,7 @@ class HallmarkHandle:
                     base = getattr(proc, field_name)[key]
                 else:
                     base = getattr(proc, m.param_name)
-            out[f"{m.process_name}.{m.param_name}"] = m.transform(
-                severity, base
-            )
+            out[f"{m.process_name}.{m.param_name}"] = m.value(severity, base)
         return out
 
 
@@ -230,6 +278,27 @@ def apply_hallmarks(
         handle = registry[hname]
         result = handle.apply(result, severity)
     return result
+
+
+def with_hallmarks(composite, hallmarks: dict[str, float], *, registry=None):
+    """Return a new Composite with ``hallmarks`` severities applied.
+
+    Applies :func:`apply_hallmarks` to ``composite.processes`` and rewires
+    them on the same topology, with topology + semantic checks off (the
+    wiring is unchanged from the validated base — only parameter values
+    move). The one call for "give me the treated/severity variant of this
+    composite", e.g. ``Scheduler().run(with_hallmarks(base, {...}), ...)``.
+    """
+    from hallsim.composite import Composite
+
+    return Composite(
+        processes=apply_hallmarks(
+            composite.processes, hallmarks, registry=registry
+        ),
+        topology=composite.topology,
+        validate=False,
+        semantic_validation={"check_semantics": False},
+    )
 
 
 # ── Registry ────────────────────────────────────────────────────────────
@@ -276,7 +345,8 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ParameterMapping(
                 process_name="oxidative_stress",
                 param_name="MDAMAGE_SA",
-                transform=lambda h, base: base * (1.0 + h * 2.0),
+                floor=1.0,
+                slope=2.0,
                 description="Damage accumulation rate scales 1x→3x with dysfunction",
             ),
         ],
@@ -300,24 +370,33 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ParameterMapping(
                 process_name="energy",
                 param_name="GLYCOL_SA",
-                transform=lambda h, base: base * (1.0 + h * 0.5),
+                floor=1.0,
+                slope=0.5,
                 description="Glycolytic flux scales 1x→1.5x with nutrient dysregulation (ERiQ-based composites)",
             ),
             # DP14-based composites: scale the mTORC1 phosphorylation rate
-            # around the (fitted) base. severity=0 → 0.3*base (rapamycin-
-            # rescued floor), severity=1 → base (untreated DDIS). The 0.3 floor
-            # sets the DDIS:control contrast; making it a fitted parameter is a
-            # follow-up (a linear base*h over-widened the contrast and regressed
-            # the fit).
+            # around the (fitted) untreated base. severity=1 → base (untreated
+            # DDIS), severity=0 → floor*base (rapamycin-suppressed residual;
+            # slope=None pins severity=1 at base). The floor is the residual
+            # mTOR fraction under rapamycin — a real biological quantity, fitted
+            # like GZ06's basal ψ rather than frozen. It sets the DDIS:control
+            # mTOR contrast the EIF4EBP1 reporter reads.
             ParameterMapping(
                 process_name="dp14",
                 param_name=(
                     "parameters." "mTORC1_S2448_phos_by_AA_n_Akt_pS473"
                 ),
-                transform=lambda h, base: base * (0.3 + 0.7 * h),
+                floor=FittableCoeff(
+                    init=0.3,
+                    clamp=(0.05, 0.95),
+                    prior=0.3,
+                    prior_sigma=0.3,
+                    description="mTOR residual fraction under rapamycin",
+                ),
+                slope=None,
                 description=(
                     "mTORC1 S2448 phosphorylation rate (DP14): "
-                    "30% of base at severity=0 (rapa-rescued), "
+                    "floor*base at severity=0 (rapa-suppressed), "
                     "full base at severity=1 (untreated)"
                 ),
             ),
@@ -347,7 +426,8 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ParameterMapping(
                 process_name="damage_repair",
                 param_name="eta",
-                transform=lambda h, base: base * (1.0 + h * 4.0),
+                floor=1.0,
+                slope=4.0,
                 description="Damage production rate scales 1x→5x with instability (ERiQ-based composites)",
             ),
             # DP14-based composites: severity IS the exogenous-exposure

@@ -39,7 +39,8 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from hallsim.process import Port, PortRole, Process
+from hallsim.imported import ImportedODEProcess
+from hallsim.process import Port, PortRole
 
 log = logging.getLogger(__name__)
 
@@ -439,7 +440,7 @@ def _parse_xpp_text(text: str) -> _ParsedXPP:
 # ---------------------------------------------------------------------------
 
 
-class XPPProcess(Process):
+class XPPProcess(ImportedODEProcess):
     """Process auto-generated from an XPPAUT ``.ode`` file.
 
     State variables become EVOLVED ports; ``par`` constants become the
@@ -455,6 +456,8 @@ class XPPProcess(Process):
     and differentiable — matching :class:`hallsim.sbml_import.SBMLProcess`.
     """
 
+    _param_label = "XPP parameter"
+
     _state_names: tuple[str, ...] = ()
     _state_y0: tuple[float, ...] = ()
     _ode_py: tuple[str, ...] = ()
@@ -465,15 +468,10 @@ class XPPProcess(Process):
     _func_py: tuple[str, ...] = ()
     _aux_names: tuple[str, ...] = ()
     _aux_py: tuple[str, ...] = ()
-    # Seconds per native time unit the .ode rate laws are written in. XPP
-    # files carry no unit metadata, so this is supplied at import (default
-    # 1.0 = the model runs on its own clock). Mirror of
-    # SBMLProcess.native_time_seconds / time_scale.
-    native_time_seconds: float = 1.0
-    time_scale: float = 1.0
-    parameters: dict[str, float] = None  # type: ignore[assignment]
-    _param_names: tuple[str, ...] = ()
-    _name: str = ""
+    # native_time_seconds / time_scale / parameters / _param_names / _name
+    # are inherited from ImportedODEProcess. XPP files carry no unit
+    # metadata, so native_time_seconds is supplied at import (default 1.0 =
+    # the model runs on its own clock).
 
     def ports_schema(self):
         return {
@@ -553,42 +551,11 @@ class XPPProcess(Process):
             for name, src in zip(self._state_names, self._ode_py)
         }
 
-    def reconciled_to(self, canonical_time_seconds: float) -> "XPPProcess":
-        """Return a copy on a shared canonical clock (see
-        :meth:`hallsim.sbml_import.SBMLProcess.reconciled_to`)."""
-        import equinox as eqx
-
-        scale = canonical_time_seconds / self.native_time_seconds
-        return eqx.tree_at(lambda p: p.time_scale, self, float(scale))
-
     def metadata(self):
         base = super().metadata()
         base["xpp_name"] = self._name
         base["n_states"] = len(self._state_names)
-        base["n_parameters"] = len(self._param_names)
-        base["native_time_seconds"] = self.native_time_seconds
-        base["time_scale"] = self.time_scale
         return base
-
-    def calibratable_params(self) -> list:
-        """Expose every ``par`` constant as a fittable ``parameters.<name>``
-        candidate, mirroring SBMLProcess so the XPP model plugs into
-        :meth:`hallsim.composite.Composite.calibration_targets` unchanged."""
-        from hallsim.calibration import CalibratableParam, default_clamp
-
-        out = super().calibratable_params()
-        for name, value in self.parameters.items():
-            v = float(value)
-            out.append(
-                CalibratableParam(
-                    process_name="",
-                    field=f"parameters.{name}",
-                    default=v,
-                    clamp=default_clamp(v),
-                    description=f"XPP parameter {name!r} on {self._name}",
-                )
-            )
-        return out
 
 
 def process_from_xpp(

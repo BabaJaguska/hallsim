@@ -24,8 +24,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from hallsim.process import Port, PortRole, Process
-from hallsim.utils import h_act
+from hallsim.imported import ImportedODEProcess
+from hallsim.kinetics import hill_gate
+from hallsim.process import Port, PortRole
 
 log = logging.getLogger(__name__)
 
@@ -231,13 +232,17 @@ class HillParamDriver(eqx.Module):
     the parameter surface) and ``hi``, gated on a signal read from an INPUT
     port::
 
-        c[param_name] = basal + (hi - basal) · h_act(signal; K, n)
+        c[param_name] = basal + (hi - basal) · hill_gate(signal; K, n)
 
     so a slow upstream state (e.g. DP14 ``DNA_damage``) can drive an
     imported oscillator's damage input (e.g. GZ06 ``psi``) mechanistically,
     rather than both being set independently by an external knob. The
     basal stays on ``parameters`` so it calibrates through the ordinary
     ``parameters.<name>`` path; ``hi``/``K``/``n`` are structural.
+
+    Parameter-value analogue of
+    :class:`hallsim.models.hill_edge.HillActivationEdge`, which instead
+    adds a Hill-gated *flux* to a state derivative.
     """
 
     param_name: str = eqx.field(static=True)
@@ -248,12 +253,12 @@ class HillParamDriver(eqx.Module):
     n: float = eqx.field(static=True)
 
     def value(self, basal, signal):
-        return basal + (self.hi - basal) * h_act(
+        return basal + (self.hi - basal) * hill_gate(
             jnp.asarray(signal), jnp.asarray(self.K), jnp.asarray(self.n)
         )
 
 
-class SBMLProcess(Process):
+class SBMLProcess(ImportedODEProcess):
     """Process auto-generated from an SBML model via sbmltoodejax.
 
     This wraps the JAX-compiled model step function from sbmltoodejax,
@@ -261,16 +266,18 @@ class SBMLProcess(Process):
 
     Not constructed directly — use :func:`process_from_sbml`.
 
-    The ``parameters`` field is the named, substitutable surface for
-    every SBML ``<parameter>`` and constant-rate species in the model.
-    At construction time it is auto-populated with every SBML constant
-    at its published default value, so the full mechanism surface is
-    immediately discoverable via :meth:`calibratable_params` and
-    :meth:`hallsim.composite.Composite.calibration_targets`. User-
-    supplied ``parameters`` at construction override specific
-    defaults; hallmarks substitute values via ``eqx.tree_at`` on a
-    dotted ``parameters.<key>`` field path; Calibrator does the same.
+    The ``parameters`` field (inherited) is the named, substitutable
+    surface for every SBML ``<parameter>`` and constant-rate species in the
+    model. At construction time it is auto-populated with every SBML
+    constant at its published default value, so the full mechanism surface
+    is immediately discoverable via :meth:`calibratable_params` and
+    :meth:`hallsim.composite.Composite.calibration_targets`. User-supplied
+    ``parameters`` at construction override specific defaults; hallmarks
+    substitute values via ``eqx.tree_at`` on a dotted ``parameters.<key>``
+    field path; Calibrator does the same.
     """
+
+    _param_label = "SBML constant"
 
     _species_names: tuple[str, ...] = ()
     _species_y0: tuple[float, ...] = ()
@@ -281,30 +288,14 @@ class SBMLProcess(Process):
     # be flagged (see hallsim.coupling_wiring, _extract_coupling_metadata).
     # Static metadata; round-trips untouched through eqx.tree_at substitutions.
     _coupling_meta: dict = eqx.field(static=True, default=None)
-    # Seconds per native time unit the SBML rate laws are written in
-    # (day = 86400, hour = 3600, second = 1). Extracted at import; pure
-    # metadata until a composite picks a canonical clock.
-    native_time_seconds: float = 1.0
-    # Chain-rule factor mapping the composite's canonical time to this
-    # model's native time: ``canonical_time_seconds / native_time_seconds``.
-    # 1.0 (the default) runs the model on its own native clock unchanged;
-    # a composite that reconciles units sets this so dt advances every
-    # sub-model by the same real-world duration. See
-    # :meth:`reconciled_to`.
-    time_scale: float = 1.0
+    # native_time_seconds / time_scale / parameters / _param_names / _name
+    # are inherited from ImportedODEProcess. Extraction fills them at import
+    # (native_time_seconds = day 86400 / hour 3600 / second 1). Parallel
+    # tuple below is fixed at construction so derivative-time lookup by name
+    # stays JIT-safe even when eqx.tree_at reorders the parameters dict.
     _model: Any = None  # sbmltoodejax model object
     _w0: Any = None
     _c: Any = None
-    _name: str = ""
-    # parameters is the named, substitutable surface for every SBML
-    # constant. Auto-populated with the published default for each
-    # entry in the model's c_indexes at construction. Values flow
-    # through hallmark / Calibrator substitution via eqx.tree_at.
-    parameters: dict[str, float] = None  # type: ignore[assignment]
-    # Parallel tuples fixed at construction (eqx.tree_at can reorder
-    # the dict on substitution; we iterate the tuples at derivative
-    # time and look up current values by name, JIT-safe).
-    _param_names: tuple[str, ...] = ()
     _param_indexes: tuple[int, ...] = ()
     # Boundary-input species (e.g. Irradiation, Insulin) are the model's
     # experimental input ports. They live in the SBML `w` vector, not `c`,
@@ -594,67 +585,11 @@ class SBMLProcess(Process):
             name: dydt[..., i] for i, name in enumerate(self._species_names)
         }
 
-    def reconciled_to(self, canonical_time_seconds: float) -> "SBMLProcess":
-        """Return a copy of this process on a shared canonical clock.
-
-        Sets :attr:`time_scale` to ``canonical_time_seconds /
-        native_time_seconds`` so the rate law (written in native time) is
-        chain-rule-rescaled onto the composite's canonical axis. The
-        Scheduler grouping is already handled by
-        :attr:`~hallsim.process.Process.timescale`, which import sets to
-        :attr:`native_time_seconds` (canonical-independent) — so
-        ``auto_groups`` clusters fast modules (seconds) into a separate,
-        finely-stepped group from slow ones (days) rather than forcing
-        one stiff solve over all.
-
-        ``canonical_time_seconds`` is the real-world duration of one unit
-        of the composite's ``t_span`` (e.g. ``86400.0`` for a day axis).
-        """
-        import equinox as eqx
-
-        scale = canonical_time_seconds / self.native_time_seconds
-        return eqx.tree_at(lambda p: p.time_scale, self, float(scale))
-
     def metadata(self):
         base = super().metadata()
         base["sbml_name"] = self._name
         base["n_species"] = len(self._species_names)
-        base["n_parameters"] = len(self._param_names)
-        base["native_time_seconds"] = self.native_time_seconds
-        base["time_scale"] = self.time_scale
         return base
-
-    def calibratable_params(self) -> list:
-        """Enumerate every SBML constant as a fittable candidate.
-
-        Returns one :class:`hallsim.calibration.CalibratableParam` per
-        entry in :attr:`parameters` (i.e. every SBML constant — the
-        dict is auto-populated at construction). Each entry has field
-        ``"parameters.<key>"``, the current value as default, and a
-        two-order-of-magnitude clamp around the value. Composes with the
-        base implementation, so any :func:`hallsim.process.calibratable`
-        field declared on a subclass is surfaced alongside the constants.
-
-        :meth:`hallsim.composite.Composite.calibration_targets`
-        subtracts hallmark targets from the listing — so it's fine to
-        expose every parameter here; hallmark-controlled knobs are
-        filtered out in the discovery API.
-        """
-        from hallsim.calibration import CalibratableParam, default_clamp
-
-        out = super().calibratable_params()
-        for name, value in self.parameters.items():
-            v = float(value)
-            out.append(
-                CalibratableParam(
-                    process_name="",
-                    field=f"parameters.{name}",
-                    default=v,
-                    clamp=default_clamp(v),
-                    description=f"SBML constant {name!r} on {self._name}",
-                )
-            )
-        return out
 
 
 def _preprocess_sbml(sbml_path: str) -> str:

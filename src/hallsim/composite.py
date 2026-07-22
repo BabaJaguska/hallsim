@@ -564,3 +564,21 @@ class Composite(eqx.Module):
                     )
                 )
         return out
+
+
+def single_process_composite(process, name: str | None = None) -> Composite:
+    """Wrap one Process as a runnable Composite with identity topology.
+
+    Each port maps to its own name (no cross-model wiring), and topology +
+    semantic checks are off — there is nothing to validate for a lone
+    process. The standard way to run or screen a single Process on its own;
+    ``name`` defaults to the process's own ``_name`` (imported models) or
+    class name.
+    """
+    name = name or getattr(process, "_name", None) or type(process).__name__
+    return Composite(
+        processes={name: process},
+        topology={},
+        validate=False,
+        semantic_validation={"check_semantics": False},
+    )

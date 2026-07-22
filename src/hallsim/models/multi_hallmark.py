@@ -43,12 +43,11 @@ The three cross-publication mechanistic edges:
   p53 DNA-damage-response axis. ψ's range is anchored by GZ06's own
   calibration, so this edge is structural (no free strength), unlike the
   two phenomenological IKK edges below.
-- **mTORC1 → IKK** (:class:`hallsim.models.mtor_nfkb.MtorNFkBActivator`)
+- **mTORC1 → IKK** (a :class:`hallsim.models.hill_edge.HillActivationEdge`)
   reads DP14's ``mTORC1_pS2448`` and Hill-gates a positive derivative
   onto ``IKK``. Activating sign per Dan 2008 / Laberge 2015 — the
   nutrient-sensing / rapamycin channel.
-- **DNA damage → IKK**
-  (:class:`hallsim.models.damage_nfkb.DamageNFkBActivator`) reads DP14's
+- **DNA damage → IKK** (another ``HillActivationEdge``) reads DP14's
   ``DNA_damage`` and Hill-gates a positive derivative onto ``IKK``.
   Activating sign per the ATM → NEMO → IKK genotoxic pathway (Wu 2006 /
   Miyamoto 2011) — the genomic-instability channel through which the
@@ -121,9 +120,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hallsim.composite import Composite
-from hallsim.models.damage_nfkb import DamageNFkBActivator
-from hallsim.models.mtor_nfkb import MtorNFkBActivator
-from hallsim.models.p53_cdkn1a import P53CDKN1AActivator
+from hallsim.models.hill_edge import HillActivationEdge
 from hallsim.models.running_integral import RunningIntegral
 from hallsim.sbml_import import process_from_sbml
 
@@ -281,11 +278,38 @@ def build_multi_hallmark_composite(
         "nfkb": nfkb,
         "gz06": gz06,
         # mTORC1 → IKK (activating; Dan 2008, Laberge 2015): rapamycin ↓mTOR
-        # suppresses NF-κB. NFKB timescale → one solver group.
-        "mtor_nfkb": MtorNFkBActivator(timescale=nfkb.timescale),
+        # suppresses NF-κB. K=4.0 = DP14 mTORC1 midpoint (rapa→DDIS).
+        "mtor_nfkb": HillActivationEdge(
+            timescale=nfkb.timescale,
+            k_act=0.02,
+            K=(4.0,),
+            n=(2.0,),
+            target_default=0.1,
+            target_ontology={"go": "GO:0008384"},
+            target_description="Ihekwaba IKK, receives mTORC1 activation",
+            source_ontology=({"go": "GO:0031931"},),
+            source_descriptions=("DP14 active mTORC1 (pS2448)",),
+            hallmark="Deregulated Nutrient Sensing",
+            reference="Dan et al. 2008; Laberge et al. 2015",
+            description="mTORC1 → IKK edge (DallePezze 2014 → Ihekwaba 2004).",
+        ),
         # DNA damage → IKK (activating; ATM→NEMO→IKK, Wu 2006 / Miyamoto 2011):
         # drives the NF-κB-dependent SASP of DDIS senescence (Salminen 2012).
-        "damage_nfkb": DamageNFkBActivator(timescale=nfkb.timescale),
+        # K=19.0 = DP14 DNA_damage midpoint in the etoposide regime.
+        "damage_nfkb": HillActivationEdge(
+            timescale=nfkb.timescale,
+            k_act=0.02,
+            K=(19.0,),
+            n=(2.0,),
+            target_default=0.1,
+            target_ontology={"go": "GO:0008384"},
+            target_description="genomic-instability drive summed into IKK",
+            source_ontology=({"go": "GO:0006974"},),
+            source_descriptions=("DP14 accumulated DNA damage",),
+            hallmark="Genomic Instability",
+            reference="Wu et al. 2006; Miyamoto 2011; Salminen et al. 2012",
+            description="DNA damage → IKK edge (DallePezze 2014 → Ihekwaba).",
+        ),
         # ∫ observers for the oscillating reporters (read in the source's group
         # so the integral sees the oscillation), differenced to a grid-
         # independent readout. p53 (x) uses power=2 → ∫x² feeds DDB2's RMS
@@ -304,9 +328,23 @@ def build_multi_hallmark_composite(
         "nfkb_ikbat_integral": RunningIntegral(
             timescale=nfkb.timescale, power=1.0
         ),
-        # p53 → CDKN1A (p21): canonical p53 target. GZ06's group to read p53
-        # live; Hill-gated flux integrated by DP14's CDKN1A turnover.
-        "p53_cdkn1a": P53CDKN1AActivator(timescale=gz06.timescale),
+        # p53 → CDKN1A (p21): canonical p53 target (el-Deiry 1993; Shi 2021
+        # Hill n=1.8). GZ06's group to read p53 live; Hill-gated flux
+        # integrated by DP14's CDKN1A turnover.
+        "p53_cdkn1a": HillActivationEdge(
+            timescale=gz06.timescale,
+            k_act=10.0,
+            K=(0.3,),
+            n=(1.8,),
+            target_default=0.0,
+            target_ontology={"go": "GO:0006357"},
+            target_description="p53-driven transcription summed into CDKN1A",
+            source_ontology=({"go": "GO:0006977"},),
+            source_descriptions=("GZ06 p53 level",),
+            hallmark="Genomic Instability",
+            reference="el-Deiry et al. 1993; Purvis et al. 2012; Shi et al. 2021",
+            description="p53 → CDKN1A (p21) edge (Geva-Zatorsky 2006 → DallePezze).",
+        ),
     }
     if dose_window is not None:
         processes["dp14"] = processes["dp14"].with_pulse_window(
@@ -318,12 +356,12 @@ def build_multi_hallmark_composite(
         # DP14 DNA_damage → GZ06 psi (genomic-instability → p53).
         "gz06": {"psi_source": "dp14/DNA_damage"},
         "mtor_nfkb": {
-            "mTORC1_pS2448": "dp14/mTORC1_pS2448",
-            "IKK": "nfkb/IKK",
+            "source": "dp14/mTORC1_pS2448",
+            "target": "nfkb/IKK",
         },
         "damage_nfkb": {
-            "DNA_damage": "dp14/DNA_damage",
-            "IKK": "nfkb/IKK",
+            "source": "dp14/DNA_damage",
+            "target": "nfkb/IKK",
         },
         "gz06_x_integral": {
             "source": "gz06/x",
@@ -338,7 +376,7 @@ def build_multi_hallmark_composite(
             "integral": "nfkb/IkBat_integral",
         },
         # p53 → CDKN1A: read GZ06 p53, add transcription flux to DP14's p21.
-        "p53_cdkn1a": {"p53": "gz06/x", "CDKN1A": "dp14/CDKN1A"},
+        "p53_cdkn1a": {"source": "gz06/x", "target": "dp14/CDKN1A"},
     }
     return Composite(
         processes=processes,

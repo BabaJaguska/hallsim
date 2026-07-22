@@ -36,7 +36,7 @@ import jax
 import jax.numpy as jnp
 
 from hallsim.process import Port, PortRole, Process
-from hallsim.utils import h_act
+from hallsim.kinetics import hill_gate
 
 log = logging.getLogger(__name__)
 
@@ -161,7 +161,7 @@ class NeuralODEProcess(Process):
 
         Adds an INPUT port ``port`` and, at derivative time, fills the MLP's
         ``field`` column with ``parameters[basal_param] + (hi - basal) *
-        h_act(port; K, n)``. The basal lives on ``parameters`` so it stays
+        hill_gate(port; K, n)``. The basal lives on ``parameters`` so it stays
         fittable; ``hi``/``K``/``n`` are structural. ``basal`` seeds the
         parameter entry if not already present.
         """
@@ -228,7 +228,7 @@ class NeuralODEProcess(Process):
         for field, port, basal_param, hi, K, n in self._hill_drivers:
             if field == cf:
                 basal = self.parameters[basal_param]
-                return basal + (hi - basal) * h_act(
+                return basal + (hi - basal) * hill_gate(
                     state[port], jnp.asarray(K), jnp.asarray(n)
                 )
         if cf in self.parameters:

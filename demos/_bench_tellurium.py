@@ -4,13 +4,16 @@ Run as a subprocess by demos/bench_population.py so its multiprocessing fork
 never inherits the parent's CUDA context. Reads the same JSON config, prints
 one JSON line to stdout: {"N": {"serial": s, "parallel": s, "nproc": k}, ...}.
 """
+
 import json
 import sys
 import time
 
 import numpy as np
 
-CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else "configs/bench_population.json"
+CONFIG_PATH = (
+    sys.argv[1] if len(sys.argv) > 1 else "configs/bench_population.json"
+)
 with open(CONFIG_PATH) as f:
     cfg = json.load(f)
 MODEL = cfg["model"]
@@ -27,9 +30,11 @@ _S = {}
 
 def _init(model_path, t_end, n_save):
     import tellurium as te
+
     rr = te.loadSBMLModel(model_path)
-    _S.update(rr=rr, fs=rr.model.getFloatingSpeciesIds(),
-              t_end=t_end, n_save=n_save)
+    _S.update(
+        rr=rr, fs=rr.model.getFloatingSpeciesIds(), t_end=t_end, n_save=n_save
+    )
 
 
 def _sim_chunk(factors_chunk):
@@ -41,7 +46,7 @@ def _sim_chunk(factors_chunk):
             k = f"[{sp}]"
             rr[k] = rr[k] * float(factors_chunk[i, j])
         res = rr.simulate(0, t_end, n)
-        out[i] = res[-1, 1:1 + len(fs)]
+        out[i] = res[-1, 1 : 1 + len(fs)]
     return out
 
 
@@ -64,13 +69,18 @@ def main():
     results = {}
     for N in NS:
         fac = make_population(N, n_sp)
-        t0 = time.time(); _sim_chunk(fac); serial = time.time() - t0
+        t0 = time.time()
+        _sim_chunk(fac)
+        serial = time.time() - t0
         k = min(nproc, N)
         chunks = [c for c in np.array_split(fac, k) if len(c)]
         pool.map(_sim_chunk, chunks)  # warm workers
-        t0 = time.time(); pool.map(_sim_chunk, chunks); par = time.time() - t0
+        t0 = time.time()
+        pool.map(_sim_chunk, chunks)
+        par = time.time() - t0
         results[str(N)] = {"serial": serial, "parallel": par, "nproc": k}
-    pool.close(); pool.join()
+    pool.close()
+    pool.join()
     print(json.dumps(results))
 
 

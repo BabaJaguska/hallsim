@@ -192,4 +192,5 @@ shared `t` and the result is meaningless — screen for it.
 - Historical decisions generally belong in your diary. Not in comment novels.
 - The demo models are irrelevant to me. The machinery is what ships. Never sacrifice the architecture and automation for a demo model.
 - If a problem has been solved by e.g. COPASI, Tellurium, AMICI, etc - borrow it, do not reinvent the wheel.
-- 
+- We care about separation of concerns. There should be no huge monoliths that do several tasks in one place.
+- Using a diffrax solve directly bypassing the scheduler is -5 points. If you are tempted to take that route, ask yourself why and what would make the scheduler more appealing to you - then go implement that scheduler improvement.

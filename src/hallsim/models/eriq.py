@@ -42,10 +42,11 @@ from hallsim.process import Port, PortRole, Process
 def _compute_algebraic_original(state: dict) -> dict:
     """Original ERiQ algebraic equations with raw reciprocal terms.
 
-    Preserved for comparison and for demonstrating the ModelAnalyzer.
-    These equations have numerical singularities (1/x terms) that cause
-    blow-up when state variables approach zero.  Use ``_compute_algebraic``
-    for the revised, numerically stable version.
+    The pre-revision baseline: these equations have numerical
+    singularities (1/x terms) that blow up as state variables approach
+    zero — the reference for why the revised form exists and a ready
+    example of a model the pre-flight screen flags. Use
+    ``_compute_algebraic`` for the revised, numerically stable version.
     """
     eps = 1e-6
 
@@ -599,9 +600,7 @@ class ERiQSignaling(Process):
                 units="dimensionless",
                 description="mTOR regulatory feedback integrator (Cy)",
             ),
-            # EVOLVED — additive: SASP-driven mTOR activators
-            # (e.g. SASPmTORActivator) may contribute additionally.
-            # See models/sasp_mtor.py for the canonical co-writer.
+            # EVOLVED — additive: co-writers may contribute here.
             "mTOR_activity": Port(
                 role=PortRole.EVOLVED,
                 default=-0.1936,
@@ -746,7 +745,7 @@ def build_eriq_composite(
     )
 
 
-# ── Original-equation variants (for ModelAnalyzer demonstration) ───────
+# ── Original-equation variants (singular; pre-flight screening fixture) ─
 
 
 class _OriginalERiQEnergyMetabolism(ERiQEnergyMetabolism):
@@ -839,14 +838,10 @@ def build_eriq_composite_original(
 ):
     """Build ERiQ composite with original (pre-revision) equations.
 
-    This uses the raw reciprocal equations from Alfego & Kriete (2017)
-    that have numerical singularities.  Useful for:
-
-    - Demonstrating the ModelAnalyzer catching issues
-    - Comparing original vs revised dynamics
-    - Reproducing the original paper's results (requires implicit solver)
-    - Showing the revised model doesn't break or explode where the
-      original would (kept as the reference baseline for that claim).
+    Raw reciprocal equations from Alfego & Kriete (2017) with numerical
+    singularities — the pre-revision baseline. Kept to compare original vs
+    revised dynamics and to show the revised model stays bounded where the
+    original explodes.
     """
     from hallsim.composite import Composite
 

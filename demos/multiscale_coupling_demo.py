@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -37,6 +38,7 @@ from hallsim.scheduler import Scheduler
 
 
 # ── Processes ─────────────────────────────────────────────────────────
+
 
 class FastOscillator(Process):
     """Damped harmonic oscillator driven by a slow external signal.
@@ -56,18 +58,29 @@ class FastOscillator(Process):
     kind: ProcessKind = ProcessKind.CONTINUOUS
     timescale: float = 0.5  # ~0.5 second characteristic period
 
-    omega: float = 4.0   # ~0.6 Hz natural frequency (period ~1.6s)
-    zeta: float = 0.05   # very lightly damped — oscillations persist
+    omega: float = 4.0  # ~0.6 Hz natural frequency (period ~1.6s)
+    zeta: float = 0.05  # very lightly damped — oscillations persist
 
     def ports_schema(self):
         return {
-            "x": Port(role=PortRole.EXCLUSIVE, default=0.0,
-                       units="dimensionless", description="Oscillator position"),
-            "v": Port(role=PortRole.EXCLUSIVE, default=1.0,
-                       units="1/s", description="Oscillator velocity"),
-            "slow_drive": Port(role=PortRole.INPUT, default=0.0,
-                               units="dimensionless",
-                               description="Driving signal from slow process"),
+            "x": Port(
+                role=PortRole.EXCLUSIVE,
+                default=0.0,
+                units="dimensionless",
+                description="Oscillator position",
+            ),
+            "v": Port(
+                role=PortRole.EXCLUSIVE,
+                default=1.0,
+                units="1/s",
+                description="Oscillator velocity",
+            ),
+            "slow_drive": Port(
+                role=PortRole.INPUT,
+                default=0.0,
+                units="dimensionless",
+                description="Driving signal from slow process",
+            ),
         }
 
     def derivative(self, t, state):
@@ -78,8 +91,8 @@ class FastOscillator(Process):
         dx = v
         dv = (
             -2.0 * self.zeta * self.omega * v
-            - self.omega ** 2 * x
-            + self.omega ** 2 * drive
+            - self.omega**2 * x
+            + self.omega**2 * drive
         )
         return {"x": dx, "v": dv}
 
@@ -97,29 +110,38 @@ class SlowIntegrator(Process):
     """
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float = 10.0  # ~10 second time constant (closer to fast → more coupling)
+    timescale: float = (
+        10.0  # ~10 second time constant (closer to fast → more coupling)
+    )
 
-    tau: float = 10.0    # time constant
-    gain: float = 2.0    # strong coupling to make splitting error visible
+    tau: float = 10.0  # time constant
+    gain: float = 2.0  # strong coupling to make splitting error visible
 
     def ports_schema(self):
         return {
-            "slow_drive": Port(role=PortRole.EXCLUSIVE, default=0.0,
-                               units="dimensionless",
-                               description="Slow integrator output"),
-            "x": Port(role=PortRole.INPUT, default=0.0,
-                       units="dimensionless",
-                       description="Fast oscillator position"),
+            "slow_drive": Port(
+                role=PortRole.EXCLUSIVE,
+                default=0.0,
+                units="dimensionless",
+                description="Slow integrator output",
+            ),
+            "x": Port(
+                role=PortRole.INPUT,
+                default=0.0,
+                units="dimensionless",
+                description="Fast oscillator position",
+            ),
         }
 
     def derivative(self, t, state):
         y = state["slow_drive"]
         x = state["x"]
-        dy = (-y + self.gain * x ** 2) / self.tau
+        dy = (-y + self.gain * x**2) / self.tau
         return {"slow_drive": dy}
 
 
 # ── Build composite ──────────────────────────────────────────────────
+
 
 def build_composite():
     processes = {
@@ -135,16 +157,27 @@ def build_composite():
 
 # ── Run comparisons ──────────────────────────────────────────────────
 
+
 def run_monolithic(composite, t_span, macro_dt, save_dt=None):
     """Reference: single-group solve via the Scheduler fast path
     (no manual groups → single Diffrax solve over the whole t_span)."""
     return Scheduler().run(
-        composite, t_span=t_span, macro_dt=macro_dt, save_dt=save_dt or macro_dt
+        composite,
+        t_span=t_span,
+        macro_dt=macro_dt,
+        save_dt=save_dt or macro_dt,
     )
 
 
-def run_split(composite, t_span, macro_dt, mode="frozen", save_dt=None,
-              adaptive_dt=False, splitting="lie"):
+def run_split(
+    composite,
+    t_span,
+    macro_dt,
+    mode="frozen",
+    save_dt=None,
+    adaptive_dt=False,
+    splitting="lie",
+):
     """Lie or Strang splitting with frozen or interpolated coupling."""
     scheduler = Scheduler(
         groups={
@@ -156,7 +189,9 @@ def run_split(composite, t_span, macro_dt, mode="frozen", save_dt=None,
         adaptive_dt=adaptive_dt,
     )
     return scheduler.run(
-        composite, t_span=t_span, macro_dt=macro_dt,
+        composite,
+        t_span=t_span,
+        macro_dt=macro_dt,
         save_dt=save_dt or macro_dt,
     )
 
@@ -202,7 +237,9 @@ def main():
 
     # 4. Strang splitting
     print("Running Strang splitting (symmetric)...")
-    strang = run_split(comp, t_span, macro_dt, mode="frozen", splitting="strang")
+    strang = run_split(
+        comp, t_span, macro_dt, mode="frozen", splitting="strang"
+    )
     print(f"  {len(strang.ts)} time points")
 
     # Compute errors
@@ -210,29 +247,66 @@ def main():
     print("RMS Error vs Monolithic Reference")
     print("-" * 40)
 
-    for key, label in [("osc/x", "x (fast)"), ("osc/slow_drive", "slow_drive")]:
+    for key, label in [
+        ("osc/x", "x (fast)"),
+        ("osc/slow_drive", "slow_drive"),
+    ]:
         err_frozen = compute_error(ref, frozen, key)
         err_interp = compute_error(ref, interp, key)
         err_strang = compute_error(ref, strang, key)
-        print(f"  {label:20s}  lie={err_frozen:.6f}  interp={err_interp:.6f}  strang={err_strang:.6f}")
+        print(
+            f"  {label:20s}  lie={err_frozen:.6f}  interp={err_interp:.6f}  strang={err_strang:.6f}"
+        )
 
     # Plot
     fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
 
     ax = axes[0]
-    ax.plot(ref.ts, ref.get("osc/x"), "k-", label="monolithic (reference)", alpha=0.8)
-    ax.plot(frozen.ts, frozen.get("osc/x"), "r--", label="Lie (frozen)", alpha=0.5)
-    ax.plot(interp.ts, interp.get("osc/x"), "b:", label="Lie (interpolated)", alpha=0.7, linewidth=2)
+    ax.plot(
+        ref.ts,
+        ref.get("osc/x"),
+        "k-",
+        label="monolithic (reference)",
+        alpha=0.8,
+    )
+    ax.plot(
+        frozen.ts, frozen.get("osc/x"), "r--", label="Lie (frozen)", alpha=0.5
+    )
+    ax.plot(
+        interp.ts,
+        interp.get("osc/x"),
+        "b:",
+        label="Lie (interpolated)",
+        alpha=0.7,
+        linewidth=2,
+    )
     ax.plot(strang.ts, strang.get("osc/x"), "g-.", label="Strang", alpha=0.7)
     ax.set_ylabel("x (fast oscillator)")
     ax.legend(fontsize=7)
     ax.set_title("Multi-Timescale Coupling: Lie vs Interpolated vs Strang")
 
     ax = axes[1]
-    ax.plot(ref.ts, ref.get("osc/slow_drive"), "k-", label="monolithic", alpha=0.8)
-    ax.plot(frozen.ts, frozen.get("osc/slow_drive"), "r--", label="Lie", alpha=0.5)
-    ax.plot(interp.ts, interp.get("osc/slow_drive"), "b:", label="interpolated", alpha=0.7, linewidth=2)
-    ax.plot(strang.ts, strang.get("osc/slow_drive"), "g-.", label="Strang", alpha=0.7)
+    ax.plot(
+        ref.ts, ref.get("osc/slow_drive"), "k-", label="monolithic", alpha=0.8
+    )
+    ax.plot(
+        frozen.ts, frozen.get("osc/slow_drive"), "r--", label="Lie", alpha=0.5
+    )
+    ax.plot(
+        interp.ts,
+        interp.get("osc/slow_drive"),
+        "b:",
+        label="interpolated",
+        alpha=0.7,
+        linewidth=2,
+    )
+    ax.plot(
+        strang.ts,
+        strang.get("osc/slow_drive"),
+        "g-.",
+        label="Strang",
+        alpha=0.7,
+    )
     ax.set_ylabel("slow_drive")
     ax.legend(fontsize=7)
 
@@ -241,27 +315,58 @@ def main():
     frozen_x = jnp.interp(ref.ts, frozen.ts, frozen.get("osc/x"))
     interp_x = jnp.interp(ref.ts, interp.ts, interp.get("osc/x"))
     strang_x = jnp.interp(ref.ts, strang.ts, strang.get("osc/x"))
-    ax.plot(ref.ts, jnp.abs(frozen_x - ref.get("osc/x")), "r-", label="|Lie - ref|", alpha=0.5)
-    ax.plot(ref.ts, jnp.abs(interp_x - ref.get("osc/x")), "b-", label="|interp - ref|", alpha=0.7)
-    ax.plot(ref.ts, jnp.abs(strang_x - ref.get("osc/x")), "g-", label="|Strang - ref|", alpha=0.7)
+    ax.plot(
+        ref.ts,
+        jnp.abs(frozen_x - ref.get("osc/x")),
+        "r-",
+        label="|Lie - ref|",
+        alpha=0.5,
+    )
+    ax.plot(
+        ref.ts,
+        jnp.abs(interp_x - ref.get("osc/x")),
+        "b-",
+        label="|interp - ref|",
+        alpha=0.7,
+    )
+    ax.plot(
+        ref.ts,
+        jnp.abs(strang_x - ref.get("osc/x")),
+        "g-",
+        label="|Strang - ref|",
+        alpha=0.7,
+    )
     ax.set_ylabel("absolute error (x)")
     ax.set_xlabel("time (s)")
     ax.legend(fontsize=7)
     ax.set_yscale("log")
 
     plt.tight_layout()
-    from outdir import outdir
+    from hallsim.io import outdir
+
     out_path = str(outdir("multiscale_coupling") / "comparison.png")
     plt.savefig(out_path, dpi=150)
     print(f"\nPlot saved to {out_path}")
     print()
     print("What to look for in the plot:")
-    print("  Top panel:    Fast oscillator x(t) — all 3 methods should show oscillations.")
-    print("                Frozen (red) may show phase/amplitude drift vs monolithic (black).")
-    print("  Middle panel: slow_drive(t) — the coupling variable. Frozen (red) diverges")
-    print("                from reference because it integrates stale x values.")
-    print("  Bottom panel: Absolute error of x vs monolithic reference (log scale).")
-    print("                Interpolated (blue) should be consistently below frozen (red).")
+    print(
+        "  Top panel:    Fast oscillator x(t) — all 3 methods should show oscillations."
+    )
+    print(
+        "                Frozen (red) may show phase/amplitude drift vs monolithic (black)."
+    )
+    print(
+        "  Middle panel: slow_drive(t) — the coupling variable. Frozen (red) diverges"
+    )
+    print(
+        "                from reference because it integrates stale x values."
+    )
+    print(
+        "  Bottom panel: Absolute error of x vs monolithic reference (log scale)."
+    )
+    print(
+        "                Interpolated (blue) should be consistently below frozen (red)."
+    )
 
 
 if __name__ == "__main__":

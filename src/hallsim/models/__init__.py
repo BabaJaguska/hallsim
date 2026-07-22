@@ -16,7 +16,9 @@ from hallsim.models.eriq import (
     ERiQSignaling,
     build_eriq_composite,
 )
+from hallsim.models.hill_edge import HillActivationEdge
 from hallsim.models.kick_event import KickEvent
+from hallsim.models.running_integral import RunningIntegral
 from hallsim.models.saturating_removal import SaturatingRemoval
 from hallsim.models.stem_cell_niche import build_niche_crosstalk
 
@@ -25,7 +27,9 @@ __all__ = [
     "ERiQOxidativeStress",
     "ERiQSignaling",
     "ERiQSignalingNoP53",
+    "HillActivationEdge",
     "KickEvent",
+    "RunningIntegral",
     "SaturatingRemoval",
     "build_eriq_composite",
     "build_niche_crosstalk",

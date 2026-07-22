@@ -11,10 +11,12 @@ install-dev:
 format:
 	black --line-length 79 src/
 	black --line-length 79 tests/
+	black --line-length 79 demos/
 
 lint:
 	flake8 --ignore E501,E402,W504,W503,E226,E203 src/
 	flake8 --ignore E501,E402,W504,W503,E226,E203 tests/
+	flake8 --ignore E501,E402,W504,W503,E226,E203 demos/
 
 test:
 	python -m pytest tests/ -m "not slow and not network"

@@ -111,9 +111,8 @@ class TestERiQSignaling:
     def test_ports(self):
         proc = ERiQSignaling()
         schema = proc.ports_schema()
-        # mTOR_activity was relaxed EXCLUSIVE -> EVOLVED so the SASP-mTOR
-        # module (hallsim.models.sasp_mtor.SASPmTORActivator) can compose
-        # additively. The other three remain sole-owner ports.
+        # mTOR_activity is EVOLVED so co-writers compose additively; the
+        # other three remain sole-owner ports.
         exclusive = {
             k for k, v in schema.items() if v.role == PortRole.EXCLUSIVE
         }
