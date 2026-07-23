@@ -20,7 +20,6 @@ from hallsim.models.eriq import (
 from hallsim.process import PortRole
 from hallsim.scheduler import Scheduler
 
-
 # ── Algebraic layer ─────────────────────────────────────────────────────
 
 

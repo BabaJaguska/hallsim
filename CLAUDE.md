@@ -194,3 +194,4 @@ shared `t` and the result is meaningless — screen for it.
 - If a problem has been solved by e.g. COPASI, Tellurium, AMICI, etc - borrow it, do not reinvent the wheel.
 - We care about separation of concerns. There should be no huge monoliths that do several tasks in one place.
 - Using a diffrax solve directly bypassing the scheduler is -5 points. If you are tempted to take that route, ask yourself why and what would make the scheduler more appealing to you - then go implement that scheduler improvement.
+- If possible, figures and other outputs should not hard-code anything. Assume things will be changing, so parametrize the functions.

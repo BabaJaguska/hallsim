@@ -30,7 +30,6 @@ from hallsim.validation import (
     analyze_composability,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Toy processes with rich port metadata
 # ═══════════════════════════════════════════════════════════════════════════

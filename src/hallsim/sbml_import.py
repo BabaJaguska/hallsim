@@ -258,6 +258,25 @@ class HillParamDriver(eqx.Module):
         )
 
 
+class ParamInput(eqx.Module):
+    """Exposes an imported model's constant as a plain INPUT port.
+
+    Each derivative step the parameter takes the port's value directly
+    (identity) — an external process supplies it as a computed store-path
+    value. The transform-free base primitive for parameter coupling: put any
+    Hill / gate / product in a composable edge that writes the driving path,
+    rather than baking it into the driver. :class:`HillParamDriver` is one
+    convenience specialization of this.
+    """
+
+    param_name: str = eqx.field(static=True)
+    input_port: str = eqx.field(static=True)
+    c_index: int = eqx.field(static=True)
+
+    def value(self, basal, signal):
+        return jnp.asarray(signal)
+
+
 class SBMLProcess(ImportedODEProcess):
     """Process auto-generated from an SBML model via sbmltoodejax.
 
@@ -420,6 +439,38 @@ class SBMLProcess(ImportedODEProcess):
         # HillParamDriver is pure static metadata (no array leaves), so
         # tree_at can't grow the tuple; copy + set the field directly,
         # mirroring the object.__setattr__ construction in process_from_sbml.
+        import copy
+
+        new = copy.copy(self)
+        object.__setattr__(
+            new, "_param_drivers", self._param_drivers + (driver,)
+        )
+        return new
+
+    def with_param_input(
+        self, param_name: str, input_port: str
+    ) -> "SBMLProcess":
+        """Return a copy exposing SBML constant ``param_name`` as a plain
+        INPUT port ``input_port``: each step the parameter takes the port's
+        value directly (wire the port to a driving store path via topology).
+
+        The general parameter-coupling primitive — no transform baked in.
+        Compose the transform (Hill, gate, product of several sources) as an
+        edge that writes the driving path, then this reads the result.
+        :meth:`with_param_driver` is the Hill-transform convenience built on
+        the same machinery.
+        """
+        if param_name not in self._param_names:
+            raise KeyError(
+                f"{param_name!r} is not an SBML constant on {self._name!r}; "
+                f"available: {sorted(self._param_names)}"
+            )
+        c_index = self._param_indexes[self._param_names.index(param_name)]
+        driver = ParamInput(
+            param_name=param_name,
+            input_port=input_port,
+            c_index=int(c_index),
+        )
         import copy
 
         new = copy.copy(self)

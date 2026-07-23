@@ -132,12 +132,17 @@ def _store_port_map(
 
 
 def _writers(entries: list[_PortEntry]) -> list[_PortEntry]:
-    """Entries whose role produces derivatives or deltas."""
+    """Entries whose role writes a store path (derivative, delta, or value)."""
     return [
         e
         for e in entries
         if e.port.role
-        in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)
+        in (
+            PortRole.EVOLVED,
+            PortRole.EXCLUSIVE,
+            PortRole.LATCHED,
+            PortRole.ASSIGNED,
+        )
     ]
 
 
@@ -373,7 +378,9 @@ def _canonical_entity(ontology: dict[str, str], resolve) -> str | None:
         return None
     if "uniprot" in ontology:
         symbol = resolve(ontology["uniprot"])
-        return f"symbol:{symbol}" if symbol else f"uniprot:{ontology['uniprot']}"
+        return (
+            f"symbol:{symbol}" if symbol else f"uniprot:{ontology['uniprot']}"
+        )
     for ns in ("chebi", "go", "sbo"):
         if ns in ontology:
             return f"{ns}:{ontology[ns]}"
@@ -414,7 +421,9 @@ class RedundancyChecker:
             writers = _writers(entries)
             if not writers:
                 continue
-            namespace = store_path.split("/", 1)[0] if "/" in store_path else ""
+            namespace = (
+                store_path.split("/", 1)[0] if "/" in store_path else ""
+            )
             ident = _canonical_entity(writers[0].port.ontology or {}, resolve)
             if ident is None:
                 continue
@@ -463,8 +472,9 @@ class RedundancyChecker:
 class GraphAnalyzer:
     """Builds and analyzes the process interaction graph.
 
-    Nodes = processes.  An edge A → B exists when A writes (EVOLVED/EXCLUSIVE)
-    to a store path that B reads (INPUT or EVOLVED).
+    Nodes = processes.  An edge A → B exists when A writes
+    (EVOLVED/EXCLUSIVE/LATCHED/ASSIGNED) to a store path that B reads
+    (INPUT or EVOLVED).
 
     Analyses:
     - Feedback cycle detection.
@@ -494,6 +504,7 @@ class GraphAnalyzer:
                     PortRole.EVOLVED,
                     PortRole.EXCLUSIVE,
                     PortRole.LATCHED,
+                    PortRole.ASSIGNED,
                 ):
                     path_writers.setdefault(sp, []).append(proc_name)
                 if port.role == PortRole.INPUT:
@@ -578,6 +589,7 @@ class GraphAnalyzer:
                     PortRole.EVOLVED,
                     PortRole.EXCLUSIVE,
                     PortRole.LATCHED,
+                    PortRole.ASSIGNED,
                 ):
                     all_written.add(topo.get(port_name, port_name))
 

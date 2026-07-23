@@ -12,7 +12,6 @@ import pytest
 
 from hallsim.calibration import Calibrator, CalibrationHistory
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Forward-mode autodiff on a synthetic problem
 # ═══════════════════════════════════════════════════════════════════════════

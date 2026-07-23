@@ -32,6 +32,10 @@ Documentation = "https://github.com/BabaJaguska/HallSim#readme"
 [project.scripts]
 simulate = "hallsim.cli:simulate"
 
+[tool.black]
+line-length = 79
+target-version = ["py39"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

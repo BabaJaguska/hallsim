@@ -124,7 +124,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hallsim.composite import Composite
-from hallsim.models.hill_edge import HillActivationEdge
+from hallsim.models.hill_edge import HillActivationEdge, HillSignalEdge
 from hallsim.models.running_integral import RunningIntegral
 from hallsim.sbml_import import process_from_sbml
 
@@ -206,12 +206,10 @@ GZ06_PSI_NAME = "psi"
 GZ06_PSI_DEFAULT = 1.0  # full-damage reference (standalone screening)
 GZ06_PSI_BASAL_DEFAULT = 0.3  # control basal ψ; fitted in the composite
 GZ06_PSI_FULL = 1.0  # saturated ψ at full DDIS (the driver's `hi`)
-# Hill gate mapping DP14 DNA_damage → GZ06 psi. K is the geometric midpoint
-# of DP14's DNA_damage operating range *in the calibrated etoposide regime*
-# (~9.6 control → ~37 DDIS at the fitted etoposide potency ~10), NOT the
-# γ-irradiation default (~2.8e4). Control sits near basal ψ; DDIS drives it
-# up toward GZ06_PSI_FULL. n=2 matches the damage→IKK edge's cooperativity.
-# See docs/gz06-basal-p53.md.
+# Hill gate mapping DP14 DNA_damage → GZ06 psi. K=19 sits below the DDIS
+# damage operating point so the damaged arms lift ψ well into the Hill's
+# responsive band (DDB2's p53-amplitude readout tracks it) while control
+# stays near basal. n=2 matches the damage→IKK edge. See docs/gz06-basal-p53.md.
 GZ06_PSI_DRIVE_K = 19.0
 GZ06_PSI_DRIVE_N = 2.0
 
@@ -262,13 +260,7 @@ def build_multi_hallmark_composite(
             parameters={GZ06_PSI_NAME: GZ06_PSI_BASAL_DEFAULT},
         )
         .reconciled_to(CANONICAL_TIME_SECONDS)
-        .with_param_driver(
-            GZ06_PSI_NAME,
-            "psi_source",
-            hi=GZ06_PSI_FULL,
-            K=GZ06_PSI_DRIVE_K,
-            n=GZ06_PSI_DRIVE_N,
-        )
+        .with_param_input(GZ06_PSI_NAME, "psi_in")
     )
     processes: dict = {
         "dp14": process_from_sbml(
@@ -281,6 +273,22 @@ def build_multi_hallmark_composite(
         ).reconciled_to(CANONICAL_TIME_SECONDS),
         "nfkb": nfkb,
         "gz06": gz06,
+        # DNA damage → ψ: GZ06's p53 damage-input, assigned as an algebraic
+        # Hill of DP14's DNA_damage between the fittable basal (control p53)
+        # and GZ06_PSI_FULL (DDIS). GZ06 reads ψ via with_param_input; the
+        # transform lives here as a composable edge on gz06/psi_signal.
+        "psi_bridge": HillSignalEdge(
+            timescale=gz06.timescale,
+            basal=GZ06_PSI_BASAL_DEFAULT,
+            hi=GZ06_PSI_FULL,
+            K=GZ06_PSI_DRIVE_K,
+            n=GZ06_PSI_DRIVE_N,
+            source_ontology={"go": "GO:0006974"},
+            source_description="DP14 accumulated DNA damage",
+            hallmark="Genomic Instability",
+            reference="Banin et al. 1998",
+            description="DNA damage → ψ (Geva-Zatorsky p53 input).",
+        ),
         # mTORC1 → IKK (activating; Dan 2008, Laberge 2015): rapamycin ↓mTOR
         # suppresses NF-κB. K=4.0 = DP14 mTORC1 midpoint (rapa→DDIS).
         "mtor_nfkb": HillActivationEdge(
@@ -367,8 +375,12 @@ def build_multi_hallmark_composite(
     # SBML processes carry no topology entries (each auto-prefixes to its own
     # ``<name>/`` namespace); only these edges cross namespaces.
     topology: dict = {
-        # DP14 DNA_damage → GZ06 psi (genomic-instability → p53).
-        "gz06": {"psi_source": "dp14/DNA_damage"},
+        # DP14 DNA_damage → ψ (algebraic Hill edge) → GZ06 reads ψ as an input.
+        "psi_bridge": {
+            "source": "dp14/DNA_damage",
+            "signal": "gz06/psi_signal",
+        },
+        "gz06": {"psi_in": "gz06/psi_signal"},
         "mtor_nfkb": {
             "source": "dp14/mTORC1_pS2448",
             "target": "nfkb/IKK",

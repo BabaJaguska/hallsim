@@ -4,13 +4,17 @@ THE end-to-end calibration demo. Three published SBML models (DallePezze
 2014 + Geva-Zatorsky 2006 + Ihekwaba 2004), stitched by literature-grounded
 coupling edges, fit against etoposide-DDIS ± rapamycin transcriptomics.
 
-Fits eight mechanism parameters (one per reporter axis, plus the two NF-κB
-IKK edge strengths and GZ06's basal-p53 ψ) on the DDIS-vs-control arm and
-evaluates concordance on the held-out rapamycin arm, using a magnitude-aware
-log2 fold-change loss. Prints out-of-the-box vs calibrated vs measured per
-reporter and writes the comparison plot.
+The default ``run`` command evaluates the composite out-of-the-box against
+every arm and writes the OOB concordance table + trajectory figures — no
+fitting. Add ``--calibrate`` to continue into the fit: it reuses that same
+OOB evaluation as the pre-fit baseline, fits the mechanism parameters (one
+per reporter axis, plus the two NF-κB IKK edge strengths and GZ06's basal-p53
+ψ) on the DDIS-vs-control arm, evaluates concordance on the held-out
+rapamycin arm with a magnitude-aware log2 fold-change loss, and writes the
+before/after comparison figures.
 
-    .venv_hallsim/bin/python demos/multi_hallmark_calibrate.py
+    .venv_hallsim/bin/python demos/multi_hallmark_calibrate.py           # OOB
+    .venv_hallsim/bin/python demos/multi_hallmark_calibrate.py --calibrate
 
 Needs the GSE248823 matrix under data/FibroblastsDNA_dmg_Rapamycin/; the
 SBML models download from BioModels on first import and cache locally.
@@ -264,6 +268,17 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
                 prior=3.231,
                 prior_sigma=0.5,
             ),
+            # ROS → DNA_damage rate: the strength of the ROS-driven damage
+            # term, i.e. how much the mTOR/ROS difference between arms reaches
+            # p53. Freed so the fit can size the rapamycin→p53 channel.
+            "ros_dna_damage": ParameterRef(
+                "dp14",
+                "parameters.DNA_damaged_by_ROS",
+                init=0.119,
+                clamp=(0.001, 5.0),
+                prior=0.119,
+                prior_sigma=0.7,
+            ),
             "CDKN1A_transcr": ParameterRef(
                 "dp14",
                 "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
@@ -302,8 +317,8 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
                 prior_sigma=0.5,
             ),
             "psi_basal": ParameterRef(
-                "gz06",
-                "parameters.psi",
+                "psi_bridge",
+                "basal",
                 init=0.3,
                 clamp=(0.02, 0.95),
                 prior=0.3,
@@ -624,6 +639,144 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
     print(f"wrote concordance_table.png/.csv -> {out_dir}", flush=True)
 
 
+def write_reporter_table(pre, post, out_dir: Path) -> None:
+    """Per-reporter measured / out-of-box / calibrated Δlog2FC, one row per
+    (arm, day, gene). CSV covers every arm; the PNG renders the fit arm (DDIS)
+    at each measured day, colored green where calibration shrinks |error| and
+    orange where it grows (surfacing the per-reporter magnitude-vs-rank
+    trade-offs the per-arm summary hides)."""
+    import csv
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fit_arms = {"DDIS_vs_ctrl"}
+    rows = []  # (arm_short, tag, day, gene, data, oob, cal)
+    for arm in ARMS:
+        tag = "fit" if arm in fit_arms else "held-out"
+        for t in sorted(pre[arm]):
+            pr = _rows_by_gene(pre[arm][t])
+            po = _rows_by_gene(post[arm][t])
+            for g in pr:
+                rows.append(
+                    (
+                        arm.split("_")[0],
+                        tag,
+                        t,
+                        g,
+                        pr[g].delta_data,
+                        pr[g].delta_sim,
+                        po[g].delta_sim,
+                    )
+                )
+
+    with open(out_dir / "reporter_table.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(
+            [
+                "arm",
+                "tag",
+                "day",
+                "gene",
+                "measured",
+                "model_oob",
+                "model_cal",
+                "abserr_oob",
+                "abserr_cal",
+            ]
+        )
+        for arm, tag, t, g, d, o, c in rows:
+            w.writerow(
+                [
+                    arm,
+                    tag,
+                    f"{t:g}",
+                    g,
+                    f"{d:+.4f}",
+                    f"{o:+.4f}",
+                    f"{c:+.4f}",
+                    f"{abs(o - d):.4f}",
+                    f"{abs(c - d):.4f}",
+                ]
+            )
+
+    IMP, REG, DIM, INK = "#1a7f4b", "#c0552b", "#6b7280", "#1f2937"
+    header = [
+        "Gene",
+        "Day",
+        "measured",
+        "model(oob)",
+        "model(cal)",
+        "|err| oob→cal",
+    ]
+    text, colors = [header], [[INK] * 6]
+    for arm, tag, t, g, d, o, c in rows:
+        if arm != "DDIS":
+            continue
+        eo, ec = abs(o - d), abs(c - d)
+        text.append(
+            [
+                g,
+                f"{t:g}",
+                f"{d:+.3f}",
+                f"{o:+.3f}",
+                f"{c:+.3f}",
+                f"{eo:.2f}→{ec:.2f}",
+            ]
+        )
+        colors.append(
+            [
+                INK,
+                INK,
+                DIM,
+                DIM,
+                IMP if ec <= eo else REG,
+                IMP if ec <= eo else REG,
+            ]
+        )
+
+    fig, ax = plt.subplots(figsize=(9.0, 0.55 + 0.4 * len(text)))
+    ax.axis("off")
+    tbl = ax.table(
+        cellText=text,
+        cellLoc="center",
+        loc="center",
+        colWidths=[0.16, 0.08, 0.16, 0.18, 0.18, 0.20],
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(10)
+    tbl.scale(1, 1.5)
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_edgecolor("#dcdcdc")
+        if r == 0:
+            cell.set_facecolor("#f2f3f5")
+            cell.set_text_props(fontweight="bold", color=INK)
+        else:
+            cell.get_text().set_color(colors[r][c])
+            if c == 0:
+                cell.get_text().set_fontweight("bold")
+    ax.set_title(
+        "Per-reporter concordance — DDIS (fit arm), out-of-the-box "
+        "vs calibrated",
+        fontsize=12,
+        fontweight="bold",
+        color=INK,
+        loc="left",
+        pad=14,
+    )
+    for ext in ("png", "pdf"):
+        fig.savefig(
+            out_dir / f"reporter_table.{ext}",
+            dpi=200,
+            bbox_inches="tight",
+            facecolor="white",
+        )
+    plt.close(fig)
+    print(f"wrote reporter_table.png/.csv -> {out_dir}", flush=True)
+
+
 # ── OOB-immediate figures (written before the fit, for review while training) ─
 _ARM_STYLE = {
     "DDIS_vs_ctrl": ("#c0392b", "DDIS"),
@@ -812,7 +965,21 @@ def fig_constituents(
     print(f"wrote {stem}.png -> {out_dir}", flush=True)
 
 
-def cmd_calibrate(args) -> None:
+def run_oob(problem, params, out_dir: Path):
+    """Composite out-of-the-box: per-arm concordance + the immediate figures,
+    written before any fit. Returns the evaluation so the calibrate path can
+    reuse it as its pre-fit baseline instead of re-simulating."""
+    print("[oob] out-of-the-box concordance + figures ...", flush=True)
+    pre = problem.evaluate(params)
+    for arm in ARMS:
+        for t in sorted(pre[arm]):
+            print(pre[arm][t], flush=True)
+    write_oob_table(pre, out_dir)
+    fig_oob_overview(problem, params, out_dir)
+    return pre
+
+
+def cmd_run(args) -> None:
     logging.basicConfig(
         level=logging.WARNING,
         format="%(asctime)s %(name)s: %(message)s",
@@ -824,18 +991,18 @@ def cmd_calibrate(args) -> None:
     out_dir = make_run_dir()
     print(f"[run] writing to {out_dir.relative_to(ROOT)}/", flush=True)
 
-    # ── wave 1: out-of-the-box, written immediately so there's something to
-    # review while the fit trains. ──
-    print("[1/4] out-of-the-box concordance + figures ...", flush=True)
-    pre = problem.evaluate(init)
-    for arm in ARMS:
-        for t in sorted(pre[arm]):
-            print(pre[arm][t], flush=True)
-    write_oob_table(pre, out_dir)
-    fig_oob_overview(problem, init, out_dir)
+    # ── out-of-the-box composite (always) ──
+    pre = run_oob(problem, init, out_dir)
 
-    # ── wave 2: fit ──
-    print("[2/4] fitting ...", flush=True)
+    if not args.calibrate:
+        print(
+            f"\nout-of-the-box run → outputs in {out_dir.relative_to(ROOT)}/",
+            flush=True,
+        )
+        return
+
+    # ── fit ──
+    print("[fit] fitting ...", flush=True)
     steps = getattr(args, "steps", None) or 150
     base_lr = getattr(args, "lr", None) or 0.005
     # Cosine-decayed LR: fast descent into the basin, then a small-step tail
@@ -861,7 +1028,7 @@ def cmd_calibrate(args) -> None:
         checkpoint_path=out_dir / "checkpoint.npz",
     )
 
-    print("[3/4] calibrated concordance ...", flush=True)
+    print("[fit] calibrated concordance ...", flush=True)
     post = problem.evaluate(history.final_params)
 
     print_table(pre, post)
@@ -872,17 +1039,23 @@ def cmd_calibrate(args) -> None:
             f"{float(history.final_params[k]):>12.5g}"
         )
 
-    # ── wave 4: post-fit figures (before/after + what changed inside) ──
-    print("[4/4] post-fit figures ...", flush=True)
+    # ── post-fit figures (before/after + what changed inside) ──
+    print("[fit] post-fit figures ...", flush=True)
     write_concordance_table(pre, post, out_dir)
+    write_reporter_table(pre, post, out_dir)
     plot_history(problem, history, out_dir / "training_history.png")
     save_outputs(problem, str(out_dir), history)
     fig_constituents(problem, init, history.final_params, out_dir)
     # Calibrated reporter figures on the fit just written, so the time-domain
     # trajectories and concordance dumbbells never lag behind the checkpoint.
-    from multi_hallmark_figures import fig_concordance, fig_temporal
+    from multi_hallmark_figures import (
+        fig_concordance,
+        fig_temporal,
+        fig_temporal_compare,
+    )
 
     fig_temporal(args)
+    fig_temporal_compare(args)
     fig_concordance(args)
 
     print(
@@ -1109,7 +1282,7 @@ def cmd_earlystop(args) -> None:
 
 
 _COMMANDS = {
-    "calibrate": cmd_calibrate,
+    "run": cmd_run,
     "baseline": cmd_baseline,
     "sweep": cmd_sweep,
     "diagnose-convergence": cmd_diagnose,
@@ -1119,8 +1292,12 @@ _COMMANDS = {
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("command", nargs="?", default="run", choices=_COMMANDS)
     ap.add_argument(
-        "command", nargs="?", default="calibrate", choices=_COMMANDS
+        "--calibrate",
+        action="store_true",
+        help="after the out-of-the-box run, fit the mechanism parameters and "
+        "write the calibrated figures (default: out-of-the-box only)",
     )
     ap.add_argument(
         "--lr",

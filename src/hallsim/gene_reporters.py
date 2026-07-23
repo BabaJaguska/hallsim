@@ -38,7 +38,6 @@ import pandas as pd
 
 from hallsim.models.eriq import _compute_algebraic
 
-
 # ── Trajectory summaries ───────────────────────────────────────────
 #
 # The trajectory-native contract: a summary maps a saved trajectory to a
@@ -466,6 +465,32 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         ),
         reference="el-Deiry et al. 1993, Cell 75:817–825",
     ),
+    GeneReporter(
+        observable="dp14/SA_beta_gal",
+        gene_symbol="GLB1",
+        sign=+1,
+        summary=zerophase_mean(tau=2.0),
+        description=(
+            "β-galactosidase (GLB1) — the canonical senescence-associated "
+            "SA-β-gal marker; DallePezze 2014 models SA-β-gal directly, so "
+            "GLB1 reads the senescence-state axis at the transcript level."
+        ),
+        reference="Dimri et al. 1995, PNAS 92:9363–9367",
+    ),
+    GeneReporter(
+        observable="dp14/FoxO3a",
+        gene_symbol="BNIP3",
+        sign=+1,
+        summary=zerophase_mean(tau=2.0),
+        description=(
+            "BNIP3 — BCL2-interacting mitophagy receptor and a FoxO3 "
+            "transcriptional target; reads DP14's active FoxO3a, the same "
+            "TF-activity→target mapping DDB2 uses for p53. Reports the "
+            "FoxO-driven autophagy/mitophagy arm — the mTOR→autophagy program "
+            "DP14 is built around — downstream of nutrient sensing."
+        ),
+        reference="Mammucari et al. 2007, Cell Metab 6:458–471",
+    ),
     oscillating_reporter(
         observable="gz06/x_integral",
         gene_symbol="DDB2",
@@ -498,13 +523,6 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         ),
         reference="Barak et al. 1993, EMBO J 12:461–468",
     ),
-    GeneReporter(
-        observable="dp14/FoxO3a",
-        gene_symbol="FOXO3",
-        sign=+1,
-        description="FOXO3 transcription factor — DP14's active FoxO3a.",
-        reference="Brunet et al. 1999, Cell 96:857–868",
-    ),
     oscillating_reporter(
         observable="nfkb/IkBat_integral",
         gene_symbol="NFKBIA",
@@ -523,26 +541,6 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
             "not a second moment (that is for TF-activity proxies like p53)."
         ),
         reference="Sun et al. 1993, Science 259:1912–1915",
-    ),
-    GeneReporter(
-        observable="dp14/Mito_mass_new",
-        gene_symbol="CYCS",
-        sign=+1,
-        description=(
-            "Cytochrome c — OXPHOS / mitochondrial biogenesis readout. "
-            "Mapped to DP14's newly-synthesized mitochondrial mass."
-        ),
-        reference="Scarpulla 2008, Physiol Rev 88:611–638",
-    ),
-    GeneReporter(
-        observable="dp14/mTORC1_pS2448",
-        gene_symbol="EIF4EBP1",
-        sign=+1,
-        description=(
-            "4E-BP1 — mTORC1 substrate and mTOR-target gene. Mapped to "
-            "DP14's phospho-mTORC1 (kinase-level proxy)."
-        ),
-        reference="Brunn et al. 1997, Science 277:99–101",
     ),
 ]
 

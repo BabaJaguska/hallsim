@@ -69,18 +69,19 @@ def validate_topology(
                     f"but it is not in ports_schema()"
                 )
 
-    # Check exclusive conflicts: no two processes may have EXCLUSIVE ports
-    # that map to the same store path.
+    # Sole-owner conflicts: no two processes may claim the same store path
+    # with a sole-owner role (EXCLUSIVE derivative or ASSIGNED algebraic value).
     exclusive_owners: dict[str, str] = {}  # store_path → proc_name
     for proc_name, proc in processes.items():
         topo = topology.get(proc_name, {})
         for port_name, port in proc.ports_schema().items():
-            if port.role == PortRole.EXCLUSIVE:
+            if port.role in (PortRole.EXCLUSIVE, PortRole.ASSIGNED):
                 store_path = topo.get(port_name, port_name)
                 if store_path in exclusive_owners:
                     errors.append(
-                        f"Exclusive conflict: store path {store_path!r} claimed by "
-                        f"both {exclusive_owners[store_path]!r} and {proc_name!r}"
+                        f"Sole-owner conflict: store path {store_path!r} claimed "
+                        f"by both {exclusive_owners[store_path]!r} and "
+                        f"{proc_name!r}"
                     )
                 else:
                     exclusive_owners[store_path] = proc_name

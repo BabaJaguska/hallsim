@@ -23,7 +23,6 @@ from hallsim.process import Port, PortRole, Process
 from hallsim.scheduler import Scheduler, SchedulerResult
 from hallsim.store import build_initial_store, validate_topology
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Toy processes for testing
 # ═══════════════════════════════════════════════════════════════════════════
@@ -198,7 +197,7 @@ class TestValidation:
         procs = {"a": ExclusiveGrowth(), "b": ExclusiveGrowth()}
         topo = {"a": {"x": "pool/x"}, "b": {"x": "pool/x"}}
         errors = validate_topology(procs, topo)
-        assert any("Exclusive conflict" in e for e in errors)
+        assert any("Sole-owner conflict" in e for e in errors)
 
     def test_exclusive_vs_evolved_conflict(self):
         """One process EXCLUSIVE, another EVOLVED on same path."""
@@ -617,3 +616,117 @@ class TestEdgeCases:
         y_vec = composite.flatten({"val": jnp.array(1.0)}, keys)
         dydt = composite.unflatten(rhs(0.0, y_vec), keys)
         assert jnp.allclose(dydt["val"], jnp.array(0.1), atol=1e-6)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ASSIGNED algebraic paths (cross-process assignment rules / DAE-style)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _Ramp(Process):
+    """dx/dt = 1, so x(t) = t."""
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.EVOLVED, default=0.0, reads_value=False)
+        }
+
+    def derivative(self, t, state):
+        return {"x": jnp.asarray(1.0)}
+
+
+class _Scale(Process):
+    """ASSIGNED: out = gain * src (algebraic, not integrated)."""
+
+    gain: float = 2.0
+
+    def ports_schema(self):
+        return {
+            "out": Port(role=PortRole.ASSIGNED, default=0.0),
+            "src": Port(role=PortRole.INPUT, default=0.0),
+        }
+
+    def assign(self, t, state):
+        return {"out": self.gain * state["src"]}
+
+
+class _IntegrateInput(Process):
+    """dy/dt = z (integrates whatever drives the z INPUT)."""
+
+    def ports_schema(self):
+        return {
+            "y": Port(role=PortRole.EVOLVED, default=0.0, reads_value=False),
+            "z": Port(role=PortRole.INPUT, default=0.0),
+        }
+
+    def derivative(self, t, state):
+        return {"y": state["z"]}
+
+
+class TestAssignedPaths:
+    def test_assigned_value_seen_by_derivative(self):
+        # x=t, d := 2x, dy/dt = d → y = ∫2t = t². Proves the algebraic path is
+        # recomputed each RHS step and read live by the integrator.
+        comp = Composite(
+            processes={"r": _Ramp(), "s": _Scale(), "i": _IntegrateInput()},
+            topology={
+                "r": {"x": "x"},
+                "s": {"out": "d", "src": "x"},
+                "i": {"y": "y", "z": "d"},
+            },
+            validate=True,
+            semantic_validation=False,
+        )
+        res = Scheduler().run(
+            comp,
+            t_span=(0.0, 2.0),
+            macro_dt=2.0,
+            y0=comp.initial_state_vec(),
+            save_dt=0.5,
+        )
+        ts = jnp.asarray(res.ts)
+        assert jnp.allclose(jnp.asarray(res.get("y")), ts**2, atol=1e-4)
+
+    def test_dependency_ordering(self):
+        # a := 2x, then b := 2a → b = 4x. b's assignment reads a's output, so
+        # the topo-sort must evaluate a before b within one RHS step.
+        comp = Composite(
+            processes={
+                "r": _Ramp(),
+                "a": _Scale(gain=2.0),
+                "b": _Scale(gain=2.0),
+                "i": _IntegrateInput(),
+            },
+            topology={
+                "r": {"x": "x"},
+                "a": {"out": "a", "src": "x"},
+                "b": {"out": "b", "src": "a"},
+                "i": {"y": "y", "z": "b"},
+            },
+            validate=True,
+            semantic_validation=False,
+        )
+        res = Scheduler().run(
+            comp,
+            t_span=(0.0, 2.0),
+            macro_dt=2.0,
+            y0=comp.initial_state_vec(),
+            save_dt=0.5,
+        )
+        ts = jnp.asarray(res.ts)
+        # dy/dt = 4x = 4t → y = 2t².
+        assert jnp.allclose(jnp.asarray(res.get("y")), 2.0 * ts**2, atol=1e-4)
+
+    def test_algebraic_cycle_rejected(self):
+        # a := 2b and b := 2a is an algebraic loop → build_rhs must raise.
+        comp = Composite(
+            processes={"a": _Scale(), "b": _Scale()},
+            topology={
+                "a": {"out": "a", "src": "b"},
+                "b": {"out": "b", "src": "a"},
+            },
+            validate=False,
+            semantic_validation=False,
+        )
+        with pytest.raises(ValueError, match="[Aa]lgebraic cycle"):
+            comp.build_rhs()

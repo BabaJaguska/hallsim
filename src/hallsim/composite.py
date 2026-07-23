@@ -104,6 +104,45 @@ def _flatten_subcomposites(
     return flat_processes, flat_topology
 
 
+def _order_assignments(assign_procs: list) -> list:
+    """Topologically order algebraic-assignment processes so any that reads a
+    path another *assigns* runs after it.
+
+    ``assign_procs`` is a list of ``(proc, read_pairs, assign_pairs)`` where
+    each ``*_pairs`` element is ``(port, store_index, factor)``. Raises on an
+    algebraic cycle (an ASSIGNED path that depends on itself through others).
+    """
+    writer_of = {
+        idx: i
+        for i, (_, _, assigns) in enumerate(assign_procs)
+        for _, idx, _ in assigns
+    }
+    deps = {
+        i: {
+            writer_of[idx]
+            for _, idx, _ in reads
+            if idx in writer_of and writer_of[idx] != i
+        }
+        for i, (_, reads, _) in enumerate(assign_procs)
+    }
+    order, done = [], set()
+    while len(done) < len(assign_procs):
+        progress = [
+            i
+            for i in range(len(assign_procs))
+            if i not in done and deps[i] <= done
+        ]
+        if not progress:
+            raise ValueError(
+                "Algebraic cycle among ASSIGNED store paths: an assignment "
+                "depends on its own output through others."
+            )
+        for i in progress:
+            order.append(assign_procs[i])
+            done.add(i)
+    return order
+
+
 class Composite(eqx.Module):
     """A wired bundle of Processes sharing a flat state store.
 
@@ -296,7 +335,8 @@ class Composite(eqx.Module):
         # port-unit→canonical — 1.0 unless the port's unit differs from the
         # path's canonical, in which case contributions are reconciled so
         # writers with compatible-but-different units sum correctly.
-        pre = []
+        pre = []  # derivative contributors: (proc, read_pairs, write_pairs)
+        assign_procs = []  # (proc, read_pairs, assign_pairs)
         for proc_name in proc_names:
             proc = self.processes[proc_name]
             proc_topo = self.topology[proc_name]
@@ -318,13 +358,39 @@ class Composite(eqx.Module):
                 for port, p in schema.items()
                 if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
             )
-            pre.append((proc, read_pairs, write_pairs))
+            assign_pairs = tuple(
+                (
+                    port,
+                    key_to_idx[proc_topo[port]],
+                    conversion_factor(p.units, canon.get(proc_topo[port], "")),
+                )
+                for port, p in schema.items()
+                if p.role == PortRole.ASSIGNED
+            )
+            if write_pairs:
+                pre.append((proc, read_pairs, write_pairs))
+            if assign_pairs:
+                assign_procs.append((proc, read_pairs, assign_pairs))
+        # Dependency-order the algebraic assignments so any that reads a path
+        # another assigns runs after it (SBML/DAE assignment-rule semantics).
+        assign_pre = _order_assignments(assign_procs)
 
         def rhs(t, y_vec, args=None):
             # Trailing-axis convention: y_vec is (..., n_vars). Scalars
             # for unbatched runs (shape (n,)); (batch, n) for batched
             # population runs through Scheduler.run with a batched y0.
             # accum follows y_vec's shape so the scatter stays aligned.
+            # Assignment pass first: compute algebraic (ASSIGNED) paths from
+            # the current state and inject them, so the derivative pass reads
+            # the fresh value. Algebraic paths are not integrated (dy stays 0).
+            for proc, read_pairs, assign_pairs in assign_pre:
+                view = {
+                    port: y_vec[..., idx] * rf for port, idx, rf in read_pairs
+                }
+                raw = proc.assign(t, view)
+                for port, idx, wf in assign_pairs:
+                    if port in raw:
+                        y_vec = y_vec.at[..., idx].set(raw[port] * wf)
             accum = jnp.zeros_like(y_vec)
             for proc, read_pairs, write_pairs in pre:
                 view = {

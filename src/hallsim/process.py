@@ -120,12 +120,20 @@ class PortRole(enum.Enum):
         Written by discrete or event processes.  Continuous processes may
         read a LATCHED value but treat it as constant within a macro step.
         Only discrete/event processes may write to a LATCHED port.
+
+    ASSIGNED
+        Algebraic output: the process *computes* this path's value each step
+        from its inputs (via ``assign``), rather than integrating a
+        derivative — a cross-process assignment rule. Evaluated before the
+        derivative pass so integrated processes read the fresh value. Sole
+        owner of the path (like EXCLUSIVE); the path is not integrated.
     """
 
     INPUT = "input"
     EVOLVED = "evolved"
     EXCLUSIVE = "exclusive"
     LATCHED = "latched"
+    ASSIGNED = "assigned"
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +270,20 @@ class Process(eqx.Module):
         ports should appear in the output.
         """
         raise NotImplementedError
+
+    # --- Interface: ASSIGNED (algebraic) -------------------------------------
+
+    def assign(
+        self, t: float, state: dict[str, jnp.ndarray]
+    ) -> dict[str, jnp.ndarray]:
+        """Compute algebraic ASSIGNED port *values* from the current state.
+
+        Evaluated before the derivative pass each step, in dependency order,
+        so integrated processes read the fresh value. Returns ``{port: value}``
+        for the process's ASSIGNED ports (a value, not a derivative). Default:
+        no assignments.
+        """
+        return {}
 
     # --- Interface: DISCRETE -------------------------------------------------
 
@@ -402,7 +424,12 @@ class Process(eqx.Module):
         return {k: v for k, v in self.ports_schema().items() if v.role == role}
 
     def output_port_names(self) -> set[str]:
-        """Names of ports that produce derivatives or deltas (EVOLVED,
-        EXCLUSIVE, or LATCHED)."""
-        writes = (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)
+        """Names of ports that write a store path (EVOLVED, EXCLUSIVE,
+        LATCHED, or ASSIGNED)."""
+        writes = (
+            PortRole.EVOLVED,
+            PortRole.EXCLUSIVE,
+            PortRole.LATCHED,
+            PortRole.ASSIGNED,
+        )
         return {k for k, v in self.ports_schema().items() if v.role in writes}

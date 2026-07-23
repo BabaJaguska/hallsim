@@ -77,3 +77,54 @@ class HillActivationEdge(Process):
                 state[name], jnp.asarray(K), jnp.asarray(n)
             )
         return {"target": self.k_act * drive}
+
+
+class HillSignalEdge(Process):
+    """Assigns a signal store path from a source via a Hill — the algebraic
+    (ASSIGNED) sibling of :class:`HillActivationEdge`. Each step:
+
+        signal = basal + (hi − basal) · hill_gate(source; K, n)
+
+    computed as a cross-process assignment rule (no integration, no timescale
+    lag). An imported model reads the ``signal`` path through a plain
+    parameter INPUT (``ImportedODEProcess.with_param_input``), so the Hill
+    transform is a first-class composable edge rather than baked into a
+    driver. ``basal`` is the fittable floor; ``hi``/``K``/``n`` are structural.
+    """
+
+    timescale: float | None = None
+    basal: float = calibratable(
+        0.3, description="signal floor at source→0; fit against the reporter."
+    )
+    hi: float = eqx.field(static=True, default=1.0)
+    K: float = eqx.field(static=True, default=1.0)
+    n: float = eqx.field(static=True, default=2.0)
+
+    source_ontology: dict | None = eqx.field(static=True, default=None)
+    source_description: str = eqx.field(static=True, default="")
+    hallmark: str | None = eqx.field(static=True, default=None)
+    reference: str | None = eqx.field(static=True, default=None)
+    description: str | None = eqx.field(static=True, default=None)
+
+    def ports_schema(self):
+        return {
+            "signal": Port(
+                role=PortRole.ASSIGNED,
+                default=self.basal,
+                units="dimensionless",
+                description="Hill-bridged algebraic signal.",
+            ),
+            "source": Port(
+                role=PortRole.INPUT,
+                default=0.0,
+                units="dimensionless",
+                description=self.source_description,
+                ontology=self.source_ontology or {},
+            ),
+        }
+
+    def assign(self, t, state):
+        gate = hill_gate(
+            state["source"], jnp.asarray(self.K), jnp.asarray(self.n)
+        )
+        return {"signal": self.basal + (self.hi - self.basal) * gate}

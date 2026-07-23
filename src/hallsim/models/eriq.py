@@ -35,7 +35,6 @@ import jax.numpy as jnp
 
 from hallsim.process import Port, PortRole, Process
 
-
 # ── Original algebraic computation (Alfego & Kriete 2017) ──────────────
 
 

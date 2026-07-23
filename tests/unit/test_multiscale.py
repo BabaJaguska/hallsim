@@ -20,7 +20,6 @@ from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.store import validate_topology
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Toy processes for testing
 # ═══════════════════════════════════════════════════════════════════════════

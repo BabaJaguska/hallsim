@@ -36,7 +36,6 @@ from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.scheduler import Scheduler
 
-
 # ── Processes ─────────────────────────────────────────────────────────
 
 

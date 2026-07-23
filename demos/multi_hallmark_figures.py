@@ -133,6 +133,16 @@ def fig_schematic(args):
             zorder=5,
         )
 
+    from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
+
+    def readouts_for(namespace):
+        genes = [
+            r.gene_symbol
+            for r in MULTI_HALLMARK_REPORTERS
+            if r.observable.split("/")[0] == namespace
+        ]
+        return "readouts:  " + " · ".join(genes)
+
     fig, ax = plt.subplots(figsize=(12.8, 5.9))
     ax.set_xlim(0, 12.8)
     ax.set_ylim(0, 5.9)
@@ -201,7 +211,7 @@ def fig_schematic(args):
         ax,
         5.0,
         1.64,
-        "readouts:  CDKN1A · EIF4EBP1 · CYCS · FOXO3",
+        readouts_for("dp14"),
         C_DP,
         fs=9.2,
     )
@@ -224,7 +234,7 @@ def fig_schematic(args):
         color=BODY,
         ha="center",
     )
-    reporters(ax, 10.45, 3.50, "readouts:  DDB2 · MDM2", C_GZ)
+    reporters(ax, 10.45, 3.50, readouts_for("gz06"), C_GZ)
     block(ax, 8.9, 0.9, 3.1, 1.2, C_NF, F_NF)
     ax.text(
         10.45,
@@ -237,7 +247,7 @@ def fig_schematic(args):
     )
     ax.text(10.45, 1.46, "BIOMD230", fontsize=9.4, color=DIM, ha="center")
     ax.text(10.45, 1.20, "NF-κB / IκBα", fontsize=9.6, color=BODY, ha="center")
-    reporters(ax, 10.45, 0.68, "readouts:  NFKBIA", C_NF)
+    reporters(ax, 10.45, 0.68, readouts_for("nfkb"), C_NF)
     arrow(ax, (2.9, 3.82), (3.7, 3.28), C_DIAL, rad=-0.14)
     arrow(ax, (2.9, 1.88), (3.7, 2.55), C_DIAL, rad=0.14)
     arrow(ax, (6.3, 3.45), (8.9, 4.25), C_GZ, rad=0.14)
@@ -267,13 +277,13 @@ def fig_trajectories(args):
         (1.0, 1.0, "DDIS", "tab:red"),
         (1.0, 0.3, "DDIS+rapa", "tab:blue"),
     ]
+    from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
+
+    # Read the reporter set; plot the raw underlying state for integral-based
+    # readouts (the cumulative ∫ path isn't a useful trajectory).
     panels = [
-        ("dp14/DNA_damage", "—", "DNA damage"),
-        ("dp14/CDKN1A", "CDKN1A", "p21 / CDKN1A"),
-        ("dp14/mTORC1_pS2448", "EIF4EBP1", "mTORC1 (active)"),
-        ("nfkb/IkBat", "NFKBIA", "IκBα transcript (NFKBIA)"),
-        ("gz06/x", "DDB2", "p53 (GZ06 x)"),
-        ("dp14/ROS", "HMOX1", "ROS"),
+        (r.observable.replace("_integral", ""), r.gene_symbol)
+        for r in MULTI_HALLMARK_REPORTERS
     ]
 
     def run(gi, dns):
@@ -291,18 +301,26 @@ def fig_trajectories(args):
         )
 
     runs = {label: run(gi, dns) for gi, dns, label, _ in arms}
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-    for ax, (path, gene, title) in zip(axes.flat, panels):
+    ncol = 3
+    nrow = -(-len(panels) // ncol)
+    fig, axes = plt.subplots(
+        nrow, ncol, figsize=(5 * ncol, 4 * nrow), squeeze=False
+    )
+    axf = axes.ravel()
+    for i, ax in enumerate(axf):
+        if i >= len(panels):
+            ax.axis("off")
+            continue
+        path, gene = panels[i]
         for gi, dns, label, color in arms:
-            res = runs[label]
             ax.plot(
-                np.asarray(res.ts),
-                np.asarray(res.get(path)),
+                np.asarray(runs[label].ts),
+                np.asarray(runs[label].get(path)),
                 label=label,
                 color=color,
                 lw=1.6,
             )
-        ax.set_title(f"{title}{'  [' + gene + ']' if gene != '—' else ''}")
+        ax.set_title(f"{gene}  [{path}]")
         ax.set_xlabel("time (days)")
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
@@ -676,6 +694,112 @@ def fig_temporal(args):
     print(f"→ {OUT_CAL}", flush=True)
 
 
+# ── temporal DDIS vs RAPA overlay (the rapamycin divergence) ─────────────
+def fig_temporal_compare(args):
+    """One panel per reporter overlaying the calibrated DDIS (etoposide) and
+    RAPA (etoposide + rapamycin @ day 2) trajectories, with each arm's measured
+    points. Directly visualizes the held-out rapamycin effect per reporter."""
+    from multi_hallmark_calibrate import build_problem, _annotate_interventions
+
+    arms = {
+        "DDIS_vs_ctrl": ("DDIS", "#c0392b"),
+        "RAPA_vs_ctrl": ("rapamycin", "#2a78d6"),
+    }
+    grid_c = "#e6e6e2"
+    t_end = 14.0
+    qt = np.arange(0.1, t_end + 1e-6, 0.1)
+
+    problem = build_problem()
+    init = problem.initial_params()
+    fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
+    genes = [r.gene_symbol for r in problem.reporters]
+    lfc_fit = {
+        arm: np.asarray(problem.model_lfc(fit, arm, jnp.asarray(qt)))
+        for arm in arms
+    }
+    lfc_oob = {
+        arm: np.asarray(problem.model_lfc(init, arm, jnp.asarray(qt)))
+        for arm in arms
+    }
+
+    n = len(genes)
+    ncol = 3
+    nrow = -(-n // ncol)
+    fig, axes = plt.subplots(
+        nrow, ncol, figsize=(11, 3.2 * nrow), sharex=True, squeeze=False
+    )
+    axf = axes.ravel()
+    for i, ax in enumerate(axf):
+        if i >= n:
+            ax.axis("off")
+            continue
+        gene = genes[i]
+        ax.axhline(0, color=grid_c, lw=1.2, zorder=0)
+        for arm, (label, color) in arms.items():
+            ax.plot(
+                qt,
+                lfc_oob[arm][i],
+                color=color,
+                lw=1.5,
+                ls=(0, (4, 2)),
+                alpha=0.85,
+                zorder=2,
+                label=f"{label} — out-of-the-box",
+            )
+            ax.plot(
+                qt,
+                lfc_fit[arm][i],
+                color=color,
+                lw=2.2,
+                zorder=3,
+                label=f"{label} — calibrated",
+            )
+            dt = sorted(problem.data[arm])
+            dx = [0.0] + list(dt)
+            dy = [0.0] + [float(problem.data[arm][t][gene]) for t in dt]
+            ax.plot(
+                dx, dy, "o", color=color, ms=6, mfc="white", mew=1.6, zorder=4
+            )
+        _annotate_interventions(ax, "RAPA_vs_ctrl")
+        ax.set_title(gene, fontsize=11, fontweight="bold", loc="left")
+        ax.grid(True, color=grid_c, lw=0.6, alpha=0.7)
+        ax.set_axisbelow(True)
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+        if i % ncol == 0:
+            ax.set_ylabel("log2 fold-change")
+        if i >= n - ncol:
+            ax.set_xlabel("day")
+    handles, labels = axf[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        ncol=3,
+        frameon=False,
+        fontsize=9.0,
+        bbox_to_anchor=(0.5, -0.01),
+    )
+    fig.suptitle(
+        "Reporter trajectories — DDIS (fit) vs rapamycin (held-out), "
+        "out-of-the-box vs calibrated",
+        fontsize=12.5,
+        x=0.02,
+        ha="left",
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=(0, 0.05, 1, 0.97))
+    OUT_CAL.mkdir(parents=True, exist_ok=True)
+    for ext in ("png", "pdf"):
+        fig.savefig(
+            OUT_CAL / f"temporal_ddis_vs_rapa.{ext}",
+            dpi=150,
+            bbox_inches="tight",
+        )
+    plt.close(fig)
+    print(f"wrote temporal_ddis_vs_rapa.png/.pdf -> {OUT_CAL}", flush=True)
+
+
 # ── before-after (standalone vs composite) ───────────────────────────────
 def fig_before_after(args):
     """Standalone-vs-composite check on the composite the PIPELINE runs.
@@ -876,6 +1000,7 @@ FIGURES = {
     "reporter-levels": fig_reporter_levels,
     "concordance": fig_concordance,
     "temporal": fig_temporal,
+    "temporal-compare": fig_temporal_compare,
     "before-after": fig_before_after,
 }
 
