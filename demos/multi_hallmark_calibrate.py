@@ -245,12 +245,8 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
             "RAPA_vs_ctrl": ("RAPA", "DDIS"),
             "RAS_vs_ctrl": ("RAS_OIS", "ctrl"),
         },
-        # One mechanism knob per reporter axis, plus the two NF-κB IKK edge
-        # strengths and GZ06's basal-p53 ψ. Each has a log-normal MAP prior
-        # (center = literature/derived value; sigma in log10 decades) so the
-        # under-constrained fit (8 params, 6 fit-arm reporters) stays
-        # physical. Edges are anchored to the Ihekwaba IKK pool scale (0.1);
-        # see docs/coupling-edge-priors.md and docs/gz06-basal-p53.md.
+        # Each fit param is read by ≥1 reporter and has a log-normal MAP prior.
+        # See docs/coupling-edge-priors.md, docs/gz06-basal-p53.md.
         params={
             "etoposide_potency": ParameterRef(
                 "dp14",
@@ -260,25 +256,7 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
                 prior=10.0,
                 prior_sigma=1.0,
             ),
-            "ROS_turnover": ParameterRef(
-                "dp14",
-                "parameters.ROS_turnover",
-                init=3.231,
-                clamp=(0.1, 50.0),
-                prior=3.231,
-                prior_sigma=0.5,
-            ),
-            # ROS → DNA_damage rate: the strength of the ROS-driven damage
-            # term, i.e. how much the mTOR/ROS difference between arms reaches
-            # p53. Freed so the fit can size the rapamycin→p53 channel.
-            "ros_dna_damage": ParameterRef(
-                "dp14",
-                "parameters.DNA_damaged_by_ROS",
-                init=0.119,
-                clamp=(0.001, 5.0),
-                prior=0.119,
-                prior_sigma=0.7,
-            ),
+            # ROS pair frozen — no ROS reporter (see diary).
             "CDKN1A_transcr": ParameterRef(
                 "dp14",
                 "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
@@ -287,35 +265,8 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
                 prior=0.085,
                 prior_sigma=0.5,
             ),
-            "mitophagy_inactiv": ParameterRef(
-                "dp14",
-                "parameters.mitophagy_inactiv_by_mTORC1_pS2448",
-                init=646.0,
-                clamp=(1.0, 10000.0),
-                prior=646.0,
-                prior_sigma=0.5,
-            ),
-            # The knob on the hallmark→EIF4EBP1 line: the untreated mTORC1
-            # phosphorylation rate. DNS severity scales it per condition; fitting
-            # the base lets the DDIS/ctrl mTOR readout match data, and the shared
-            # base transfers to the held-out rapamycin arm (severity applied on
-            # top, never fit there).
-            "mtor_phos_rate": ParameterRef(
-                "dp14",
-                f"parameters.{DP14_MTOR_PHOS_RATE_NAME}",
-                init=DP14_MTOR_PHOS_RATE_DEFAULT,
-                clamp=(1.0, 10000.0),
-                prior=DP14_MTOR_PHOS_RATE_DEFAULT,
-                prior_sigma=0.5,
-            ),
-            "alpha_y": ParameterRef(
-                "gz06",
-                "parameters.alpha_y",
-                init=0.8,
-                clamp=(0.01, 10.0),
-                prior=0.8,
-                prior_sigma=0.5,
-            ),
+            # mtor_phos_rate, alpha_y, mitophagy_inactiv frozen — non-identifiable
+            # here (gain-degenerate / flat gradient); see diary.
             "psi_basal": ParameterRef(
                 "psi_bridge",
                 "basal",
@@ -340,11 +291,7 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
                 prior=0.1,
                 prior_sigma=0.5,
             ),
-            # The DNS→mTOR affine floor: mTOR's residual fraction under
-            # rapamycin (severity=0). Sets the DDIS:ctrl mTOR contrast the
-            # EIF4EBP1 reporter reads, and the h=0 anchor the held-out RAPA arm
-            # lands on. Rides the hallmark registry, not a process field (no
-            # SBML host).
+            # DNS→mTOR affine floor: mTOR residual fraction under rapamycin.
             "dns_mtor_floor": HallmarkCoeffRef(
                 hallmark="Deregulated Nutrient Sensing",
                 param_name=f"parameters.{DP14_MTOR_PHOS_RATE_NAME}",

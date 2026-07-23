@@ -102,6 +102,9 @@ class CalibrationHistory:
     best_loss: float = float("inf")
     stopped_epoch: int | None = None
     wall_time_s: float = 0.0
+    # Post-fit local identifiability at final_params (None if not requested or
+    # if the analysis failed); see hallsim.identifiability.
+    identifiability: Any = None
 
     def __str__(self) -> str:
         if not self.losses:
@@ -1521,6 +1524,7 @@ class CalibrationProblem:
         steps: int = 40,
         mode: str = "forward",
         validation_arms: list[str] | None = None,
+        identifiability: bool = True,
         **calibrator_kwargs,
     ) -> CalibrationHistory:
         """Fit the mechanism parameters.
@@ -1532,6 +1536,12 @@ class CalibrationProblem:
         networks train) — much cheaper for several parameters; the
         phase-insensitive ``window_mean`` summaries keep the reverse
         pass through the oscillators well-behaved.
+
+        ``identifiability`` (default on) runs a post-fit Fisher-information
+        identifiability check at the optimum, logs a one-line summary
+        (escalating to a warning if any parameter moves no reporter), and
+        attaches it to ``history.identifiability``. Set ``False`` to skip it
+        in inner-loop / toy fits. See :mod:`hallsim.identifiability`.
         """
         init = {k: jnp.asarray(p.init) for k, p in self._all_refs.items()}
         clamps = {
@@ -1562,7 +1572,25 @@ class CalibrationProblem:
             mode=mode,
             **calibrator_kwargs,
         )
-        return cal.fit(steps=steps)
+        history = cal.fit(steps=steps)
+        if identifiability:
+            # Post-fit local identifiability at the optimum — a warn-by-default
+            # diagnostic (like the composite's validation layer), never blocks.
+            # Lazy import: identifiability imports from this module.
+            from hallsim.identifiability import (
+                identifiability_report,
+                log_summary,
+            )
+
+            try:
+                report = identifiability_report(
+                    self, history.final_params or init
+                )
+                history.identifiability = report
+                log_summary(report, log)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("identifiability analysis skipped: %s", exc)
+        return history
 
     def evaluate(
         self,

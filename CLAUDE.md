@@ -1,8 +1,10 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Chill with comments.
 
 ## Environment
+Chill with comments.
 
 - Project venv is `.venv_hallsim/` (note the non-standard name). Use `.venv_hallsim/bin/python` for ad-hoc runs.
 - Python >=3.9. Core stack: JAX + Equinox + Diffrax + Optax. Validation uses `pint` (units) and `networkx` (graph analysis). SBML import uses `sbmltoodejax`.
@@ -10,6 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Common commands
 
+Chill with comments.
 ```bash
 # Install
 make install        # editable install of runtime deps from pyproject.toml
@@ -24,6 +27,7 @@ make test
 make format
 make lint
 
+
 # Run demos via the `simulate` entry point (registered in pyproject.toml -> hallsim.cli:simulate)
 simulate compose | compose-kick | multiscale | validate-demo | info
 simulate validate-demo --strict        # warnings -> errors
@@ -33,7 +37,7 @@ simulate validate-demo --strict        # warnings -> errors
 ```
 
 ## Architecture invariants
-
+Chill with comments.
 The README has the full overview. The points below are the load-bearing rules — break them and composition fails silently or at validation time.
 
 **Store has path-like keys, no hierarchy.** Dict shape at API boundaries is `dict[str, jnp.ndarray]` with keys like `"cytoplasm/ROS"`. The `/` is convention, not nesting — there is no nested dict.
@@ -45,25 +49,33 @@ The README has the full overview. The points below are the load-bearing rules �
 - `LATCHED` — written only by DISCRETE/EVENT processes; CONTINUOUS processes read it as a constant within a macro step. Writing LATCHED from a CONTINUOUS process is a contract violation.
 
 **Topology lives outside processes.** Wiring is `{proc_name: {port_name: store_path}}` passed to `Composite`. Don't put store paths inside Process classes.
+Chill with comments.
 
 **`composite.build_rhs(proc_names=None) -> (rhs_fn, keys)`.** Flat by design — operates on a 1-D `jnp.ndarray` in `sorted(store_paths())` order so JAX traces a single array under JIT/grad. Pair with `composite.flatten()` / `composite.unflatten()` to convert at API boundaries. `proc_names=None` (default) uses every CONTINUOUS process; passing an explicit list builds a partial RHS for operator splitting (the Scheduler does this per group). State flows as a flat vector throughout; dict shape only appears at API boundaries and inside the small per-process port-name dict that `Process.derivative` consumes.
+Chill with comments.
 
 **Process kinds drive scheduler dispatch:**
 - `CONTINUOUS` (default) — implements `derivative(t, state)`, solved by Diffrax.
 - `DISCRETE` — implements `update(t, state)`, fired every `dt_step` seconds.
 - `EVENT` — implements `condition(t, state)` and `handler(t, state)`; handler fires on False→True crossing at sync points.
+- Chill with comments.
 
 The Scheduler is the only runner. There is no separate `Simulator` class. For single-group continuous composites with no events / discrete / adaptive_dt / Strang / interpolated, the Scheduler takes a fast path that issues one `dfx.diffeqsolve` over the whole `t_span` (no per-macro-step overhead).
+Chill with comments.
 
 **Timescale auto-grouping.** `Composite.auto_groups(max_ratio=100.0)` clusters CONTINUOUS processes by `proc.timescale`; processes within 100x of each other share a Diffrax solve. Set `timescale` on processes with very different rates (signaling vs damage accumulation) so the Scheduler doesn't force a stiff integrator on all of them.
+Chill with comments.
 
 **Splitting / coupling are independent Scheduler knobs:**
 - `splitting`: `"lie"` (default, O(dt)) vs `"strang"` (symmetric half-step, O(dt²)).
 - `coupling_mode`: `"frozen"` (default snapshot at sync) vs `"interpolated"` (dense-output query).
 - `adaptive_dt=True`: PLL-inspired step control on coupling residual.
 - Strang + interpolated are mutually exclusive and rejected in `Scheduler.__init__` — Strang's reverse pass would need each prior group's interpolant over the second half-step, but that interpolant has not been produced yet (the group runs after, not before). Fixable via predictor-corrector or Picard iteration; not implemented.
+- Chill with comments.
 
 **Hallmarks are immutable parameter modifiers.** `apply_hallmarks(processes, {hallmark: severity})` returns a *new* dict of processes; it doesn't mutate. Severity is differentiable end-to-end — you can `jax.grad` through hallmark severity to a downstream loss.
+Chill with comments.
+Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.Chill with comments.
 
 **Validation layer is on by default and warning-by-default.** `Composite(...)` runs UnitChecker / SemanticChecker / GraphAnalyzer / CouplingAuditor (~ms for realistic composites). Unit/ontology *conflicts* raise; everything else (cycles, fan-in, unfed inputs, unit-scale mismatches) emits Python warnings. Disable with `semantic_validation=False`; promote all warnings to errors with `semantic_validation={"strict": True}`. Topology validation (`validate=True`, default) is always errors.
 
@@ -195,3 +207,4 @@ shared `t` and the result is meaningless — screen for it.
 - We care about separation of concerns. There should be no huge monoliths that do several tasks in one place.
 - Using a diffrax solve directly bypassing the scheduler is -5 points. If you are tempted to take that route, ask yourself why and what would make the scheduler more appealing to you - then go implement that scheduler improvement.
 - If possible, figures and other outputs should not hard-code anything. Assume things will be changing, so parametrize the functions.
+- Chill with comments.
