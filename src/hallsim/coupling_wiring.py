@@ -3,7 +3,7 @@
 The sibling of :mod:`hallsim.reporter_wiring`. Where that guards the *readout*
 layer (an observable mapped to a gene — activity≠transcript), this guards the
 *coupling* layer: when a signal drives a model parameter (a coupling edge, a
-``with_param_driver``, or a hallmark severity mapping), is the target
+``with_param_input`` driver, or a hallmark severity mapping), is the target
 semantically the right place to inject that influence?
 
 The load-bearing check is **structural and needs no external ontology**: it reads
@@ -187,7 +187,7 @@ def classify_topology_edge(
 
 
 def _driven_targets(composite) -> list[tuple[object, str]]:
-    """(process, param_name) for every ``with_param_driver`` coupling edge."""
+    """(process, param_name) for every ``with_param_input`` coupling edge."""
     out = []
     for proc in composite.processes.values():
         for d in getattr(proc, "_param_drivers", ()):
@@ -224,7 +224,7 @@ def topology_writer_verdicts(processes: dict, topology: dict) -> list:
 
 def validate_couplings(composite, extra_targets=None) -> CouplingReport:
     """Check every coupling edge in ``composite`` — both parameter drivers
-    (``with_param_driver``) and topology wires that write into another model.
+    (``with_param_input``) and topology wires that write into another model.
 
     ``extra_targets`` — optional ``[(process, param_name), …]`` for driver
     targets not expressed as ``_param_drivers`` (e.g. hallmark severity

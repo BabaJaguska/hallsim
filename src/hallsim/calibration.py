@@ -116,6 +116,20 @@ class CalibrationHistory:
         )
 
 
+@dataclass(frozen=True)
+class OperatingRange:
+    """Min / mean / max of a store path over a run — the signal band a
+    coupling edge sees. Use it to place a Hill threshold (``K``) at the real
+    operating point that separates conditions, instead of guessing."""
+
+    lo: float
+    mean: float
+    hi: float
+
+    def __str__(self) -> str:
+        return f"[{self.lo:.4g}  μ={self.mean:.4g}  {self.hi:.4g}]"
+
+
 def load_checkpoint(path) -> tuple[dict, dict]:
     """Load a Calibrator checkpoint written via ``checkpoint_path``.
 
@@ -1671,3 +1685,36 @@ class CalibrationProblem:
                 save_dt=save_dt,
             )
         return results
+
+    def operating_ranges(
+        self,
+        param_values: dict,
+        paths: list[str],
+        *,
+        n_save: int = 200,
+    ) -> dict:
+        """Per-condition :class:`OperatingRange` (min/mean/max) of each store
+        path, over the *faithful* calibration simulation (equilibrated
+        baseline, per-arm interventions) — the band each signal spans across
+        conditions. Use it to place a coupling edge's Hill threshold at the
+        operating point separating the conditions, rather than guessing.
+
+        Returns ``{cond_name: {path: OperatingRange}}``. A raw composite run
+        from the initial state (unequilibrated, no dosing) would report a
+        different band — hence this routes through the same simulation the
+        loss uses."""
+        import numpy as np
+
+        sims = self.simulate_all_conditions(param_values, n_save=n_save)
+        out: dict = {}
+        for cond, res in sims.items():
+            row: dict = {}
+            for p in paths:
+                v = res.get(p)
+                if v is not None:
+                    v = np.asarray(v)
+                    row[p] = OperatingRange(
+                        float(v.min()), float(v.mean()), float(v.max())
+                    )
+            out[cond] = row
+        return out

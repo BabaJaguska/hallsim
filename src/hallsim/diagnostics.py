@@ -126,9 +126,11 @@ def _on_native_clock(process):
     return process
 
 
-def _solo_run(process, t_end, rtol, atol, n_save, max_steps):
+def _solo_run(process, t_end, rtol, atol, n_save, max_steps, sched_kwargs):
     comp = single_process_composite(process)
-    res = Scheduler(rtol=rtol, atol=atol, max_steps=max_steps).run(
+    res = Scheduler(
+        rtol=rtol, atol=atol, max_steps=max_steps, **sched_kwargs
+    ).run(
         comp,
         t_span=(0.0, t_end),
         macro_dt=t_end,
@@ -172,7 +174,7 @@ def _sbmltoodejax_native_finite(process, t_end: float, n_steps: int):
     return max_abs, finite
 
 
-def _tunes(process, t_end: float, n_probe: int = 2):
+def _tunes(process, t_end: float, n_probe: int = 2, sched_kwargs=None):
     """Forward-mode gradient finiteness — the 'tunes' half of the rule.
 
     The constituents-first rule requires each model both *runs* and
@@ -190,6 +192,7 @@ def _tunes(process, t_end: float, n_probe: int = 2):
     """
     from hallsim.calibration import _substitute_param
 
+    sched_kwargs = sched_kwargs or {}
     probes = process.calibratable_params()[:n_probe]
     if not probes:
         return None, False
@@ -217,7 +220,7 @@ def _tunes(process, t_end: float, n_probe: int = 2):
                 return False
         return True
 
-    if all_finite(Scheduler()):
+    if all_finite(Scheduler(**sched_kwargs)):
         return True, False
 
     # warm_up runs eagerly outside the jvp trace so the stiffness verdict is
@@ -247,6 +250,7 @@ def screen_process(
     n_save: int = 400,
     max_steps: int = DEFAULT_MAX_STEPS,
     check_tunability: bool = True,
+    **sched_kwargs,
 ) -> ScreenReport:
     """Screen one process solo over ``[0, t_end]`` native time units.
 
@@ -274,6 +278,11 @@ def screen_process(
     ``Scheduler.run`` — setting ``tunes`` (``False`` makes the report not
     ``ok``; a model that tunes only on the implicit solver is noted in
     ``detail``).
+
+    ``sched_kwargs`` are forwarded to the :class:`Scheduler` (e.g.
+    ``solver=dfx.Kvaerno5()`` or ``auto_stiffness=True``) so the screen runs
+    under the *same* solver configuration production will — required to screen
+    a stiff model, which the default explicit solver would flag as exploding.
     """
     proc = _on_native_clock(process)
     name = getattr(proc, "_name", type(proc).__name__)
@@ -283,10 +292,22 @@ def screen_process(
         # loose-vs-tight comparison isolates rtol sensitivity (and the
         # screen integrates exactly what the Scheduler does in production).
         y_tight = _solo_run(
-            proc, t_end, rtol_tight, DEFAULT_ATOL, n_save, max_steps
+            proc,
+            t_end,
+            rtol_tight,
+            DEFAULT_ATOL,
+            n_save,
+            max_steps,
+            sched_kwargs,
         )
         y_loose = _solo_run(
-            proc, t_end, rtol_loose, DEFAULT_ATOL, n_save, max_steps
+            proc,
+            t_end,
+            rtol_loose,
+            DEFAULT_ATOL,
+            n_save,
+            max_steps,
+            sched_kwargs,
         )
     except Exception as exc:  # max_steps / non-finite blow the solve up
         native = _sbmltoodejax_native_finite(proc, t_end, n_save)
@@ -371,7 +392,7 @@ def screen_process(
 
     tunes = None
     if check_tunability and not exploding:
-        tunes, needs_implicit = _tunes(proc, t_end)
+        tunes, needs_implicit = _tunes(proc, t_end, sched_kwargs=sched_kwargs)
         if tunes is False:
             detail = (detail + "; " if detail else "") + "non-finite gradient"
         elif needs_implicit:

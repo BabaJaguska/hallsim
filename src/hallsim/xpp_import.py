@@ -474,7 +474,7 @@ class XPPProcess(ImportedODEProcess):
     # the model runs on its own clock).
 
     def ports_schema(self):
-        return {
+        schema = {
             name: Port(
                 role=PortRole.EVOLVED,
                 default=float(y0),
@@ -483,6 +483,8 @@ class XPPProcess(ImportedODEProcess):
             )
             for name, y0 in zip(self._state_names, self._state_y0)
         }
+        schema.update(self._driver_input_ports())
+        return schema
 
     def coupling_structure(self) -> dict:
         """XPP equation structure for the coupling-wiring check: ``par``/``p``
@@ -531,6 +533,10 @@ class XPPProcess(ImportedODEProcess):
             ns[name] = state[name]
         for name in self._param_names:
             ns[name] = jnp.asarray(self.parameters[name])
+        # Live parameter drivers override their constant by name, before the
+        # functions/intermediates (which close over ns) are evaluated.
+        for name, val in self._driven_param_values(state).items():
+            ns[name] = val
         for name, args, src in zip(
             self._func_names, self._func_args, self._func_py
         ):

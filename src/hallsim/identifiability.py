@@ -41,9 +41,7 @@ def _prediction_fn(problem, base_params: dict, names: list[str]):
     reporter predictions over every fit arm — the residual vector the loss
     squares, built from the same :meth:`CalibrationProblem.model_lfc`."""
     arms = list(problem.fit_arms)
-    qts = {
-        a: jnp.asarray(sorted(problem.data[a]), dtype=float) for a in arms
-    }
+    qts = {a: jnp.asarray(sorted(problem.data[a]), dtype=float) for a in arms}
 
     def preds(theta_log):
         p = dict(base_params)
@@ -69,11 +67,19 @@ def sensitivity_jacobian(problem, params: dict | None = None):
         [jnp.log10(jnp.asarray(float(params[n]))) for n in names]
     )
     fn = _prediction_fn(problem, params, names)
-    # Eager warm-up: the first prediction populates the problem's cached
-    # conservation laws (a concrete-only equilibration diagnostic that traces
-    # badly), so the jacfwd below reuses them instead of re-deriving under trace.
-    fn(theta0)
-    jac = jax.jacfwd(fn)(theta0)
+    # Force the forward-mode (ForwardMode) solver adjoint for the Jacobian:
+    # a reverse-mode fit leaves the problem on a custom_vjp adjoint that
+    # jacfwd cannot differentiate. Restore the fit's mode afterwards.
+    prev_mode = getattr(problem, "_fit_mode", None)
+    problem._fit_mode = "forward"
+    try:
+        # Eager warm-up: the first prediction populates the problem's cached
+        # conservation laws (a concrete-only equilibration diagnostic that
+        # traces badly), so jacfwd reuses them instead of re-deriving.
+        fn(theta0)
+        jac = jax.jacfwd(fn)(theta0)
+    finally:
+        problem._fit_mode = prev_mode
     return np.asarray(jac, dtype=float), names
 
 
@@ -82,7 +88,9 @@ class IdentifiabilityReport:
     """Local identifiability of a fit, from the Fisher information ``JᵀJ``."""
 
     names: list[str]
-    verdict: dict[str, str]  # name -> "identifiable" | "practical" | "structural"
+    verdict: dict[
+        str, str
+    ]  # name -> "identifiable" | "practical" | "structural"
     rel_sensitivity: dict[str, float]  # column norm, normalized to the max
     std_decades: dict[str, float]  # 1σ log10 uncertainty (inf if unbounded)
     eigenvalues: np.ndarray  # Fisher spectrum, ascending
@@ -92,9 +100,7 @@ class IdentifiabilityReport:
 
     def __str__(self) -> str:
         order = {"structural": 0, "practical": 1, "identifiable": 2}
-        rows = sorted(
-            self.names, key=lambda n: (order[self.verdict[n]], n)
-        )
+        rows = sorted(self.names, key=lambda n: (order[self.verdict[n]], n))
         w = max(len(n) for n in self.names)
         lines = [
             "Identifiability (Fisher information JᵀJ, log10-param space)",

@@ -25,7 +25,6 @@ import jax
 import jax.numpy as jnp
 
 from hallsim.imported import ImportedODEProcess
-from hallsim.kinetics import hill_gate
 from hallsim.process import Port, PortRole
 
 log = logging.getLogger(__name__)
@@ -222,61 +221,6 @@ def _precheck_sbml_supported(xml_path: str) -> list[str]:
     return issues
 
 
-class HillParamDriver(eqx.Module):
-    """Drives one SBML constant from another model's state, live.
-
-    An imported model's parameter is normally a fixed constant. This turns
-    a named parameter into a coupling target: at every derivative
-    evaluation the parameter is Hill-interpolated between its own basal
-    value (the ``parameters[param_name]`` entry — still a fittable point on
-    the parameter surface) and ``hi``, gated on a signal read from an INPUT
-    port::
-
-        c[param_name] = basal + (hi - basal) · hill_gate(signal; K, n)
-
-    so a slow upstream state (e.g. DP14 ``DNA_damage``) can drive an
-    imported oscillator's damage input (e.g. GZ06 ``psi``) mechanistically,
-    rather than both being set independently by an external knob. The
-    basal stays on ``parameters`` so it calibrates through the ordinary
-    ``parameters.<name>`` path; ``hi``/``K``/``n`` are structural.
-
-    Parameter-value analogue of
-    :class:`hallsim.models.hill_edge.HillActivationEdge`, which instead
-    adds a Hill-gated *flux* to a state derivative.
-    """
-
-    param_name: str = eqx.field(static=True)
-    input_port: str = eqx.field(static=True)
-    c_index: int = eqx.field(static=True)
-    hi: float = eqx.field(static=True)
-    K: float = eqx.field(static=True)
-    n: float = eqx.field(static=True)
-
-    def value(self, basal, signal):
-        return basal + (self.hi - basal) * hill_gate(
-            jnp.asarray(signal), jnp.asarray(self.K), jnp.asarray(self.n)
-        )
-
-
-class ParamInput(eqx.Module):
-    """Exposes an imported model's constant as a plain INPUT port.
-
-    Each derivative step the parameter takes the port's value directly
-    (identity) — an external process supplies it as a computed store-path
-    value. The transform-free base primitive for parameter coupling: put any
-    Hill / gate / product in a composable edge that writes the driving path,
-    rather than baking it into the driver. :class:`HillParamDriver` is one
-    convenience specialization of this.
-    """
-
-    param_name: str = eqx.field(static=True)
-    input_port: str = eqx.field(static=True)
-    c_index: int = eqx.field(static=True)
-
-    def value(self, basal, signal):
-        return jnp.asarray(signal)
-
-
 class SBMLProcess(ImportedODEProcess):
     """Process auto-generated from an SBML model via sbmltoodejax.
 
@@ -328,12 +272,9 @@ class SBMLProcess(ImportedODEProcess):
     # numerical scaling. Their derivative is frozen to 0 (treated as a
     # boundary species), which is exact since no rate law reads them.
     _frozen_indices: tuple[int, ...] = ()
-    # Live parameter couplings: each drives one SBML constant from an INPUT
-    # port every derivative step (see :class:`HillParamDriver`). Empty for
-    # a plain imported model; populated via :meth:`with_param_driver`. Static
-    # (pure metadata) so it round-trips untouched through the ``eqx.tree_at``
-    # substitutions the hallmark / Calibrator paths apply to `parameters`.
-    _param_drivers: tuple = eqx.field(static=True, default=())
+    # _param_drivers, with_param_input, and the driver INPUT ports are
+    # inherited from ImportedODEProcess; derivative() below applies the driven
+    # values (base helper) onto the c-vector by index.
     # Translated SBML <event> elements as EVENT processes (see
     # hallsim.sbml_events). Static metadata; expand into a composite with
     # ``hallsim.sbml_events.expand_events``. Empty for event-free models.
@@ -406,79 +347,6 @@ class SBMLProcess(ImportedODEProcess):
         )
         return new
 
-    def with_param_driver(
-        self,
-        param_name: str,
-        input_port: str,
-        *,
-        hi: float,
-        K: float,
-        n: float = 2.0,
-    ) -> "SBMLProcess":
-        """Return a copy whose ``param_name`` is driven by ``input_port``.
-
-        Adds an INPUT port ``input_port`` (wire it to the driving store
-        path via topology) and Hill-interpolates ``param_name`` between its
-        basal ``parameters[param_name]`` value and ``hi`` on the port's
-        signal. See :class:`HillParamDriver`.
-        """
-        if param_name not in self._param_names:
-            raise KeyError(
-                f"{param_name!r} is not an SBML constant on {self._name!r}; "
-                f"available: {sorted(self._param_names)}"
-            )
-        c_index = self._param_indexes[self._param_names.index(param_name)]
-        driver = HillParamDriver(
-            param_name=param_name,
-            input_port=input_port,
-            c_index=int(c_index),
-            hi=float(hi),
-            K=float(K),
-            n=float(n),
-        )
-        # HillParamDriver is pure static metadata (no array leaves), so
-        # tree_at can't grow the tuple; copy + set the field directly,
-        # mirroring the object.__setattr__ construction in process_from_sbml.
-        import copy
-
-        new = copy.copy(self)
-        object.__setattr__(
-            new, "_param_drivers", self._param_drivers + (driver,)
-        )
-        return new
-
-    def with_param_input(
-        self, param_name: str, input_port: str
-    ) -> "SBMLProcess":
-        """Return a copy exposing SBML constant ``param_name`` as a plain
-        INPUT port ``input_port``: each step the parameter takes the port's
-        value directly (wire the port to a driving store path via topology).
-
-        The general parameter-coupling primitive — no transform baked in.
-        Compose the transform (Hill, gate, product of several sources) as an
-        edge that writes the driving path, then this reads the result.
-        :meth:`with_param_driver` is the Hill-transform convenience built on
-        the same machinery.
-        """
-        if param_name not in self._param_names:
-            raise KeyError(
-                f"{param_name!r} is not an SBML constant on {self._name!r}; "
-                f"available: {sorted(self._param_names)}"
-            )
-        c_index = self._param_indexes[self._param_names.index(param_name)]
-        driver = ParamInput(
-            param_name=param_name,
-            input_port=input_port,
-            c_index=int(c_index),
-        )
-        import copy
-
-        new = copy.copy(self)
-        object.__setattr__(
-            new, "_param_drivers", self._param_drivers + (driver,)
-        )
-        return new
-
     def ports_schema(self):
         schema = {
             name: Port(
@@ -494,15 +362,7 @@ class SBMLProcess(ImportedODEProcess):
                 self._species_ontology or ({},) * len(self._species_names),
             )
         }
-        # INPUT ports feeding live parameter drivers, wired to the driving
-        # store path via topology.
-        for d in self._param_drivers:
-            schema[d.input_port] = Port(
-                role=PortRole.INPUT,
-                default=0.0,
-                units="dimensionless",
-                description=f"drives SBML constant {d.param_name!r}",
-            )
+        schema.update(self._driver_input_ports())
         return schema
 
     def derivative(self, t, state):
@@ -544,18 +404,20 @@ class SBMLProcess(ImportedODEProcess):
             c = self._c
 
         # Live parameter drivers: override each driven constant with a value
-        # read from an INPUT port this step (see HillParamDriver). A batched
-        # driving signal makes c per-batch, so the ratefunc vmaps over c too.
+        # read from an INPUT port this step (base helper computes the values;
+        # SBML bridges param_name -> c-index here). A batched driving signal
+        # makes c per-batch, so the ratefunc vmaps over c too.
         c_batched = False
         if self._param_drivers:
-            driven = jnp.stack(
+            dv = self._driven_param_values(state)  # {param_name: value}
+            names = list(dv)
+            driven = jnp.stack([dv[n] for n in names], axis=-1)
+            d_idx = jnp.asarray(
                 [
-                    d.value(self.parameters[d.param_name], state[d.input_port])
-                    for d in self._param_drivers
-                ],
-                axis=-1,
+                    self._param_indexes[self._param_names.index(n)]
+                    for n in names
+                ]
             )
-            d_idx = jnp.asarray([d.c_index for d in self._param_drivers])
             if driven.ndim > 1:  # batched signal → per-batch c
                 batch = driven.shape[0]
                 c = (

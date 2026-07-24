@@ -69,7 +69,7 @@ class TestWithParamInput:
         ).with_param_input(GZ06_PSI_NAME, "psi_in")
 
     def test_rejects_unknown_param(self):
-        with pytest.raises(KeyError, match="not an SBML constant"):
+        with pytest.raises(KeyError, match="not a constant"):
             _gz06(0.9).with_param_input("not_a_param", "p_in")
 
     def test_exposes_input_port(self):

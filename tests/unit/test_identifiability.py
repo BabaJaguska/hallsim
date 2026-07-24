@@ -68,14 +68,13 @@ class TestLogSummary:
         logger = logging.getLogger("hallsim.test_ident2")
         with caplog.at_level(logging.INFO, logger="hallsim.test_ident2"):
             log_summary(rep, logger)
-        assert not any(
-            r.levelno == logging.WARNING for r in caplog.records
-        )
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
 
 
 def _toy_problem():
     """One-process decay composite with a single tunable rate and two
-    reporters reading the same pool — a minimal end-to-end CalibrationProblem."""
+    reporters reading the same pool — a minimal end-to-end CalibrationProblem.
+    """
     import pandas as pd
 
     from hallsim.calibration import (
@@ -142,3 +141,12 @@ class TestEndToEnd:
             steps=2, learning_rate=0.05, verbose=False, identifiability=False
         )
         assert history.identifiability is None
+
+    def test_reverse_mode_fit_still_reports(self):
+        # A reverse-mode fit leaves the problem on a custom_vjp adjoint that
+        # forward-mode jacfwd cannot differentiate; the report must still run.
+        history = _toy_problem().fit(
+            steps=2, mode="reverse", learning_rate=0.05, verbose=False
+        )
+        assert history.identifiability is not None
+        assert "rate" in history.identifiability.names

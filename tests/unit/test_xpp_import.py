@@ -194,3 +194,33 @@ def test_reconciled_to_rescales_rate(tmp_path):
     d_native = proc.derivative(0.0, {"x": 1.0})["x"]
     d_canonical = rec.derivative(0.0, {"x": 1.0})["x"]
     assert float(d_canonical) == pytest.approx(float(d_native) / 3600.0)
+
+
+class TestWithParamInput:
+    """with_param_input (inherited from ImportedODEProcess) on an XPP model:
+    the driven constant is overridden by name in the eval namespace."""
+
+    def _proc(self, tmp_path):
+        src = "par k=1.0\ninit x=0\nx' = k\ndone\n"
+        return process_from_xpp(
+            _write(tmp_path, src), name="m"
+        ).with_param_input("k", "k_in")
+
+    def test_exposes_input_port(self, tmp_path):
+        from hallsim.process import PortRole
+
+        schema = self._proc(tmp_path).ports_schema()
+        assert "k_in" in schema
+        assert schema["k_in"].role is PortRole.INPUT
+
+    def test_derivative_uses_driven_value(self, tmp_path):
+        # k defaults to 1; the driven INPUT overrides it to 5 → dx/dt = 5.
+        dy = self._proc(tmp_path).derivative(
+            0.0, {"x": jnp.asarray(0.0), "k_in": jnp.asarray(5.0)}
+        )
+        assert float(dy["x"]) == pytest.approx(5.0)
+
+    def test_rejects_unknown_param(self, tmp_path):
+        proc = process_from_xpp(_write(tmp_path, "par k=1.0\nx'=-k*x\ndone\n"))
+        with pytest.raises(KeyError, match="not a constant"):
+            proc.with_param_input("nope", "p_in")

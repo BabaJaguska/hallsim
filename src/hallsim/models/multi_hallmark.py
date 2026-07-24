@@ -36,10 +36,11 @@ The three constituent SBML models:
 
 The three cross-publication mechanistic edges:
 
-- **DNA damage → p53** (DP14 ``DNA_damage`` → GZ06 ``psi``, via
-  :meth:`SBMLProcess.with_param_driver`) Hill-interpolates GZ06's ψ
-  damage-input between its fitted basal value and ``GZ06_PSI_FULL`` on
-  DP14's accumulated DNA_damage. Activating per the canonical ATM/ATR →
+- **DNA damage → p53** (DP14 ``DNA_damage`` → GZ06 ``psi``, via the
+  ``psi_bridge`` :class:`HillSignalEdge` that GZ06 reads with
+  ``with_param_input``) Hill-interpolates GZ06's ψ damage-input between its
+  fitted basal value and ``GZ06_PSI_FULL`` on DP14's accumulated DNA_damage.
+  Activating per the canonical ATM/ATR →
   p53 DNA-damage-response axis. ψ's range is anchored by GZ06's own
   calibration, so this edge is structural (no free strength).
 - **IKKβ → IKK** (a :class:`hallsim.models.hill_edge.HillActivationEdge`)
@@ -198,9 +199,9 @@ RAPA_INTERVENTION_DAY = DDIS_ETOPOSIDE_DOSE_WINDOW[1]
 # alpha_x=0), so ψ=0 forces p53→0 — biologically wrong: unstressed cells
 # keep a low basal p53 from ~50 spontaneous DSBs per cell cycle
 # (docs/gz06-basal-p53.md). So ψ is driven live from DP14's DNA_damage
-# state (with_param_driver below), Hill-interpolated from a nonzero basal
-# floor (control) to GZ06_PSI_FULL (DDIS). The basal floor is the fitted
-# mechanism parameter, exposed as the ordinary `parameters.psi` entry
+# state (psi_bridge HillSignalEdge → with_param_input below), Hill-interpolated
+# from a nonzero basal floor (control) to GZ06_PSI_FULL (DDIS). The basal floor
+# is the fitted mechanism parameter, exposed as the ordinary `parameters.psi`
 # (the driver reads it as the Hill's lower bound).
 GZ06_PSI_NAME = "psi"
 GZ06_PSI_DEFAULT = 1.0  # full-damage reference (standalone screening)
