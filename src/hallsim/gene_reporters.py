@@ -144,6 +144,26 @@ def leaky_rms():
     return summarize
 
 
+def leaky_mean():
+    """DC level from a *leaky* ``RunningIntegral`` (``power=1``, ``tau`` set).
+
+    The leaky integral path holds ``A = τ·⟨source⟩`` — the τ-weighted mean of
+    the source, so ``A ∝ mean`` and the constant ``τ`` cancels in the log2
+    fold-change. The bounded, fixed-point counterpart of :func:`window_mean`
+    (which differences a growing flat accumulator). Over a flat (``tau=None``)
+    integral this reads a growing cumulative sum, not a mean.
+    """
+
+    def summarize(ts, y, query_times=None):
+        return (
+            y[-1]
+            if query_times is None
+            else jnp.interp(jnp.atleast_1d(jnp.asarray(query_times)), ts, y)
+        )
+
+    return summarize
+
+
 def _zerophase_ema(seq, a, odd=True):
     """Reflection-padded forward-backward EMA: zero phase, unity DC gain, and
     no boundary lift.
@@ -244,6 +264,25 @@ def zerophase_mean(tau: float):
     return summarize
 
 
+def zerophase_rms_leaky(tau: float):
+    """Zero-phase RMS amplitude from a *leaky* ``RunningIntegral(power=2)``.
+
+    The leaky path holds ``A = τ·⟨x²⟩`` — bounded, with a fixed point, so the
+    composite equilibrates (unlike the flat ∫x² that :func:`zerophase_rms`
+    differences). A forward-backward EMA over ``A`` cancels the leaky
+    integral's causal lag (lag-free, like the raw :func:`zerophase_mean`), and
+    ``√`` gives the amplitude envelope. The ``√τ`` constant cancels in the log2
+    fold-change. Use for a pulse-amplitude reporter (e.g. DDB2/p53, whose mean
+    is damage-blind) that must both equilibrate and read *at* the query time.
+    """
+    smooth = zerophase_mean(tau)
+
+    def summarize(ts, y, query_times=None):
+        return jnp.sqrt(jnp.clip(smooth(ts, y, query_times), 0.0, None))
+
+    return summarize
+
+
 def cycle_average(fraction: float = 0.25):
     """Mean over the last ``fraction`` of the *saved* trajectory points.
 
@@ -326,35 +365,42 @@ def oscillating_reporter(
 ) -> GeneReporter:
     """Phase-insensitive reporter for an OSCILLATING model species.
 
-    ``readout="rms"`` (default) reads the pulse amplitude √⟨x²⟩ over a trailing
-    boxcar ``window``; ``"leaky"`` reads the same amplitude from an exponential
-    (τ-memory) envelope instead — smooth, no window edge to alias the
-    oscillation, requires the source's ``RunningIntegral`` to be leaky
-    (``tau`` set); ``"mean"`` reads the DC level. RMS is the default because a
-    *buffered* mean — one
-    the drive cannot move (e.g. p53, whose mean is analytically damage-blind
-    under the Mdm2 feedback) — leaves a mean readout signal-blind, while RMS
-    still sees the amplitude. Use ``"mean"`` only when the species' DC level
-    is known to move with the drive (then mean ≈ rms anyway).
-    ``"zerophase"`` reads √⟨x²⟩ through a forward-backward EMA (``tau`` memory):
-    smooth *and* lag-free, so a timepoint query reads the amplitude *at* that
-    time — the readout of choice when the onset timing matters. ``window`` is
-    the trailing averaging duration (time unit of the trajectory), sized to
-    a few oscillation periods. ``observable`` must be the matching
+    Readouts pair ``_rms`` (pulse amplitude √⟨x²⟩, over a ``power=2`` integral)
+    or ``_mean`` (DC level, over ``power=1``) with a windowing mode. RMS suits a
+    *buffered* mean the drive cannot move (e.g. p53, whose mean is analytically
+    damage-blind under the Mdm2 feedback, so only the pulse amplitude carries
+    the signal); ``_mean`` suits a species whose DC level moves with the drive.
+
+    - ``"rms"`` / ``"mean"`` — trailing **boxcar** ``window`` (differences a
+      *flat* ``RunningIntegral``).
+    - ``"leaky_rms"`` / ``"leaky_mean"`` — **causal** τ-EMA envelope from a
+      *leaky* ``RunningIntegral`` (``tau`` set): bounded with a fixed point, so
+      the composite equilibrates; lags by ~τ.
+    - ``"zerophase_rms"`` / ``"zerophase_mean"`` — as leaky, plus a
+      forward-backward EMA that cancels the causal lag: bounded **and**
+      lag-free, so a timepoint query reads *at* that time. Requires ``tau``.
+
+    ``window`` is the trailing averaging duration (trajectory time unit), sized
+    to a few oscillation periods. ``observable`` must be the matching
     :class:`~hallsim.models.running_integral.RunningIntegral` path — ∫x² (its
     default ``power=2``) for rms/zerophase, ∫x (``power=1``) for mean.
     """
-    if readout not in ("rms", "mean", "leaky", "zerophase"):
-        raise ValueError(
-            "readout must be 'rms', 'mean', 'leaky', or 'zerophase', "
-            f"got {readout!r}"
-        )
-    if readout == "zerophase":
-        if tau is None:
-            raise ValueError("zerophase readout requires tau")
-        summary = zerophase_rms(tau)
-    elif readout == "leaky":
-        summary = leaky_rms()  # source's RunningIntegral must have tau set
+    valid = (
+        "rms", "mean", "leaky_rms", "leaky_mean",
+        "zerophase_rms", "zerophase_mean",
+    )
+    if readout not in valid:
+        raise ValueError(f"readout must be one of {valid}, got {readout!r}")
+    if readout in ("zerophase_rms", "zerophase_mean") and tau is None:
+        raise ValueError(f"{readout} readout requires tau")
+    if readout == "zerophase_rms":  # leaky power=2 → lag-free RMS envelope
+        summary = zerophase_rms_leaky(tau)
+    elif readout == "zerophase_mean":  # leaky power=1 → lag-free DC level
+        summary = zerophase_mean(tau)
+    elif readout == "leaky_rms":  # √A from a leaky power=2 ∫ (causal RMS)
+        summary = leaky_rms()
+    elif readout == "leaky_mean":  # A from a leaky power=1 ∫ (causal DC level)
+        summary = leaky_mean()
     elif readout == "rms":
         summary = window_rms(window)
     else:
@@ -495,16 +541,16 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         observable="gz06/x_integral",
         gene_symbol="DDB2",
         sign=+1,
-        readout="zerophase",  # RMS √⟨x²⟩ (power=2 ∫), lag-free
+        readout="zerophase_rms",  # lag-free √⟨x²⟩ from a leaky power=2 ∫
         tau=2.0,
         description=(
             "Damage-specific DNA Binding Protein 2 — direct p53 "
             "transcription target, mapped to GZ06's p53 (x). Read as the RMS "
-            "amplitude √⟨x²⟩ (zero-phase envelope over a power=2 "
-            "RunningIntegral): under GZ06's ψ-cancellation the mean ⟨x⟩ is "
-            "damage-blind, while the oscillation amplitude grows with damage. "
-            "Zero-phase so a day-7/14 query reads the amplitude at that time, "
-            "no trailing lag."
+            "amplitude √⟨x²⟩ from a *leaky* power=2 RunningIntegral: under "
+            "GZ06's ψ-cancellation the mean ⟨x⟩ is damage-blind, while the "
+            "oscillation amplitude grows with damage. Leaky (bounded, "
+            "fixed-point) so the composite equilibrates; τ-memory envelope, no "
+            "window edge to alias the oscillation."
         ),
         reference="Hwang et al. 1999, Nature 401:430–432",
     ),
@@ -512,14 +558,15 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         observable="gz06/y_integral",
         gene_symbol="MDM2",
         sign=+1,
-        readout="mean",  # exact grid-independent trailing mean of Mdm2 (∫y)
-        window=2.0,
+        readout="zerophase_mean",  # lag-free ⟨y⟩ from a leaky power=1 ∫
+        tau=2.0,
         description=(
             "MDM2 — the canonical p53 transcriptional target; GZ06's Mdm2 (y). "
             "Its time-mean encodes the damage signal directly (⟨y⟩ ∝ psi in "
             "the p53–Mdm2 steady state), so it is the cleanest damage-graded "
-            "p53-axis readout. Read as window_mean over ∫y (power=1 "
-            "RunningIntegral)."
+            "p53-axis readout. Read as the DC level of a *leaky* power=1 "
+            "RunningIntegral (bounded, fixed-point, so the composite "
+            "equilibrates)."
         ),
         reference="Barak et al. 1993, EMBO J 12:461–468",
     ),
@@ -527,18 +574,18 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         observable="nfkb/IkBat_integral",
         gene_symbol="NFKBIA",
         sign=+1,
-        readout="mean",  # trailing mean of the IκBα transcript (power=1 ∫x)
-        window=2.0,
+        readout="zerophase_mean",  # lag-free DC level of a leaky power=1 ∫
+        tau=2.0,
         description=(
             "IκBα transcript — direct NF-κB target via the autoregulatory "
             "negative feedback loop. Maps to Ihekwaba 2004's IκBα mRNA "
             "species (IkBat), which rises with NF-κB transcriptional "
             "activity. Transcriptomic NFKBIA measures the transcript, not "
             "the cytoplasmic protein (IkBa), whose abundance moves inversely "
-            "to activity through IKK-driven degradation. Read as the trailing "
-            "MEAN (window over a power=1 RunningIntegral): IkBat is a "
-            "transcript, so its damage-responsive DC level is the readout — "
-            "not a second moment (that is for TF-activity proxies like p53)."
+            "to activity through IKK-driven degradation. Read as the DC level "
+            "of a *leaky* power=1 RunningIntegral (bounded, fixed-point): "
+            "IkBat is a transcript, so its damage-responsive DC level is the "
+            "readout — not a second moment (that is for TF-activity proxies)."
         ),
         reference="Sun et al. 1993, Science 259:1912–1915",
     ),

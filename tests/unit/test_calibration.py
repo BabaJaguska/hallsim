@@ -658,7 +658,7 @@ class TestEquilibrationBaselineMatchesReadout:
         comp = Composite(
             processes={
                 "sp": SetPoint(),
-                "xi": RunningIntegral(power=2.0),  # ∫x² → RMS reporter
+                "xi": RunningIntegral(power=2.0, tau=2.0),  # leaky ∫x² → RMS
             },
             topology={
                 "sp": {"x": "s/x"},
@@ -671,7 +671,7 @@ class TestEquilibrationBaselineMatchesReadout:
             oscillating_reporter(  # RMS √⟨x²⟩ over ∫x² → x_fp at steady state
                 observable="s/x2",
                 gene_symbol="RMS_GENE",
-                readout="zerophase",
+                readout="zerophase_rms",
                 tau=2.0,
                 sign=+1,
             ),
@@ -699,12 +699,12 @@ class TestEquilibrationBaselineMatchesReadout:
             macro_dt=5.0,
         )
 
-    def test_summ_b_equals_control_readout(self):
+    def test_baseline_readout_equals_control_readout(self):
         prob = self._problem()
         init = {"k": jnp.asarray(1.0)}
         prob.warm_up(init)
         subst = prob._substitute(prob.composite.processes, init)
-        y0, summ_b = prob._equilibrate(subst)
+        y0, ref_readout = prob._equilibrate(subst)
 
         # Run the control from the fixed point and read each reporter late.
         ts, trajs = prob._simulate_condition(
@@ -712,7 +712,11 @@ class TestEquilibrationBaselineMatchesReadout:
         )
         readout = prob._reporter_summaries(ts, trajs, jnp.asarray([27.0]))
 
-        # summ_b (fixed-point shortcut) matches the run; both equal x_fp=2,
-        # NOT x_fp**2=4.
-        assert jnp.allclose(summ_b[:, 0], readout[:, 0], rtol=1e-3)
-        assert jnp.allclose(summ_b[:, 0], jnp.asarray([2.0, 2.0]), rtol=1e-2)
+        # The force-linked baseline applies the SAME summary as the run, so the
+        # two match exactly (not an assumption — the identical transform). The
+        # leaky RMS reporter reads √(τ·x_fp²)=√8 (τ=2), NOT x_fp²=4; the level
+        # reporter reads x_fp=2. The √τ constant cancels in every fold-change.
+        assert jnp.allclose(ref_readout[:, 0], readout[:, 0], rtol=1e-3)
+        assert jnp.allclose(
+            ref_readout[:, 0], jnp.asarray([jnp.sqrt(8.0), 2.0]), rtol=1e-2
+        )

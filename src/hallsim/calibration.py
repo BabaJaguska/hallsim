@@ -1028,7 +1028,6 @@ class CalibrationProblem:
         self.equilibrate = equilibrate
         self.equilibration_condition = equilibration_condition
         self._laws = None  # conservation laws (structural; computed once)
-        self._reporter_src = None  # reporter → source store-index map
         # `params` (declaration order) is the optimizer surface; `_params`
         # substitutes into processes, `_coeffs` overrides registry floors.
         self.params = proc_params
@@ -1199,28 +1198,8 @@ class CalibrationProblem:
             semantic_validation=False,
         )
 
-    def _reporter_source_indices(self) -> list[int]:
-        """Store index of each reporter's *source* state — the RunningIntegral's
-        source for an integral observable, else the observable itself. At the
-        control fixed point the source is constant, and every readout (mean over
-        ∫x, or RMS √⟨x²⟩ over ∫x²) evaluates to that constant, so ``summ_b``
-        reads straight off ``y*`` with no run."""
-        from hallsim.models.running_integral import RunningIntegral
-
-        integral_source = {
-            self.composite.topology[n]["integral"]: self.composite.topology[n][
-                "source"
-            ]
-            for n, p in self.composite.processes.items()
-            if isinstance(p, RunningIntegral)
-        }
-        return [
-            self._store_idx[integral_source.get(r.observable, r.observable)]
-            for r in self.reporters
-        ]
-
     def _equilibrate(self, processes: dict, registry=None):
-        """Shared pre-perturbation baseline ``(y0, summ_b)`` — the unperturbed
+        """Shared pre-perturbation baseline ``(y0, ref_readout)`` — the unperturbed
         condition's fixed point.
 
         A perturbation baseline is the unperturbed steady state; that condition
@@ -1228,7 +1207,7 @@ class CalibrationProblem:
         it is found by Newton (:func:`hallsim.steady_state.steady_state`) rather
         than a burn-in — no horizon, no transient phase, and an exact
         implicit-function-theorem gradient in the fitted params. ``y0`` is the
-        fixed point (shared t=0 for every arm; accumulators zero); ``summ_b`` is
+        fixed point (shared t=0 for every arm; accumulators zero); ``ref_readout`` is
         each reporter's source value at ``y0`` (its homeostatic mean), the
         shared healthy day-0 the within-arm fold-change divides by.
 
@@ -1251,10 +1230,24 @@ class CalibrationProblem:
             self._laws = conservation_laws(
                 eq_comp, eq_comp.initial_state_vec()
             )
-            self._reporter_src = self._reporter_source_indices()
         y0 = steady_state(eq_comp, laws=self._laws)
-        summ_b = y0[jnp.asarray(self._reporter_src)][:, None]  # (n_rep, 1)
-        return y0, summ_b
+        # Force-linked baseline: apply the SAME reporter summaries the arms use
+        # to the settled state (a constant trajectory at y0), so the reference
+        # and the arm readout are the identical transform. Any summary constant
+        # (e.g. a leaky reporter's √τ) then cancels in the log2 ratio by
+        # construction — no "readout == source at the fixed point" assumption to
+        # break, whatever the readout.
+        const_ts = jnp.linspace(0.0, self.t_end, 16)
+        obs = jnp.stack(
+            [
+                jnp.full((const_ts.size,), y0[self._store_idx[r.observable]])
+                for r in self.reporters
+            ]
+        )
+        ref_readout = self._reporter_summaries(
+            const_ts, obs, jnp.asarray([self.t_end])
+        )
+        return y0, ref_readout
 
     def _simulate_condition(
         self,
@@ -1370,14 +1363,14 @@ class CalibrationProblem:
     # ── Loss / fit / evaluate ─────────────────────────────────────
 
     def _arm_reference(self, run_for, arm: str, qt, baseline=None):
-        """``(summ_c, summ_b)`` for one arm under the configured
+        """``(arm_readout, ref_readout)`` for one arm under the configured
         ``normalization`` — the two reporter summaries whose log2 ratio is the
         arm's fold change. Single source of truth for the normalization,
         shared by :meth:`data_loss`, :meth:`model_lfc`, and :meth:`evaluate`.
         ``run_for(cond_name) -> (ts, reporter_trajs)`` is a (usually caching)
         condition solver.
 
-        What ``summ_b`` (the reference each reporter is divided by) is:
+        What ``ref_readout`` (the reference each reporter is divided by) is:
           baseline — the shared homeostatic day-0 value (``baseline``, from the
                      equilibration burn-in) when equilibrating, else the arm's
                      own t=0 (the fold-change-from-day-0 X_t/X_0);
@@ -1386,27 +1379,27 @@ class CalibrationProblem:
         """
         cond, base = self.arm_pairs[arm]
         ts_c, trajs_c = run_for(cond)
-        summ_c = self._reporter_summaries(ts_c, trajs_c, qt)  # (n_rep, n_t)
+        arm_readout = self._reporter_summaries(ts_c, trajs_c, qt)  # (n_rep, n_t)
         if self.normalization == "baseline":
             if baseline is not None:
-                summ_b = jnp.broadcast_to(baseline, summ_c.shape)
+                ref_readout = jnp.broadcast_to(baseline, arm_readout.shape)
             else:
-                summ_b = self._reporter_summaries(
+                ref_readout = self._reporter_summaries(
                     ts_c, trajs_c, jnp.zeros_like(qt)
                 )
         elif self.normalization == "paired":
             ts_b, trajs_b = run_for(base)
-            summ_b = self._reporter_summaries(ts_b, trajs_b, qt)
+            ref_readout = self._reporter_summaries(ts_b, trajs_b, qt)
         else:  # raw
-            summ_b = jnp.ones_like(summ_c)
-        return summ_c, summ_b
+            ref_readout = jnp.ones_like(arm_readout)
+        return arm_readout, ref_readout
 
     def _arm_lfc(self, run_for, arm: str, qt, baseline=None) -> jnp.ndarray:
         """One arm's sign-aligned model log2 fold-change at ``qt``. Shared by
         :meth:`data_loss` and :meth:`model_lfc` so figures plot exactly what
         the loss fits."""
-        summ_c, summ_b = self._arm_reference(run_for, arm, qt, baseline)
-        return self._log2_fold_change(summ_c, summ_b)
+        arm_readout, ref_readout = self._arm_reference(run_for, arm, qt, baseline)
+        return self._log2_fold_change(arm_readout, ref_readout)
 
     def model_lfc(
         self, param_values: dict[str, jnp.ndarray], arm: str, query_times
@@ -1635,9 +1628,9 @@ class CalibrationProblem:
             qt = self._arm_query_times[arm]
             # Vectorized read: (n_rep, n_t) in one interp per condition, then
             # slice per timepoint. Same normalization as the loss.
-            summ_c, summ_b = self._arm_reference(run_for, arm, qt, baseline)
-            lfc = jnp.log2(jnp.maximum(summ_c, eps)) - jnp.log2(
-                jnp.maximum(summ_b, eps)
+            arm_readout, ref_readout = self._arm_reference(run_for, arm, qt, baseline)
+            lfc = jnp.log2(jnp.maximum(arm_readout, eps)) - jnp.log2(
+                jnp.maximum(ref_readout, eps)
             )  # (n_rep, n_t), unsigned; compute_concordance applies the sign
             per_t: dict[float, Any] = {}
             for j, t in enumerate(times):

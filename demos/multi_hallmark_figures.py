@@ -69,9 +69,9 @@ def load_fit() -> dict:
 def fig_schematic(args):
     from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 
-    C_DP, C_GZ, C_NF, C_DIAL = "#2563eb", "#5b3fc4", "#c0392b", "#374151"
-    INK, DIM, BODY = "#111827", "#475569", "#1f2937"
-    F_DP, F_GZ, F_NF, F_DIAL = "#eef4fd", "#f3f0fb", "#fdf0ef", "#f4f5f7"
+    C_DP, C_GZ, C_NF, C_DIAL = "#3a3f4a", "#de8f05", "#2a9d8f", "#6b7280"
+    INK, DIM, BODY = "#1f2530", "#5b6b7d", "#333a44"
+    F_DP, F_GZ, F_NF, F_DIAL = "#eef0f2", "#fbf1e0", "#e6f3f1", "#f4f5f7"
 
     def block(ax, x, y, w, h, edge, fill, r=0.11, lw=2.0):
         ax.add_patch(
@@ -87,7 +87,7 @@ def fig_schematic(args):
             )
         )
 
-    def arrow(ax, p0, p1, color, rad=0.0, lw=2.0):
+    def arrow(ax, p0, p1, color, rad=0.0, lw=2.0, ls="-"):
         ax.add_patch(
             FancyArrowPatch(
                 p0,
@@ -96,6 +96,7 @@ def fig_schematic(args):
                 arrowstyle="-|>",
                 mutation_scale=15,
                 linewidth=lw,
+                linestyle=ls,
                 color=color,
                 zorder=2,
                 shrinkA=2,
@@ -153,21 +154,21 @@ def fig_schematic(args):
         1.65,
         4.17,
         "Genomic Instability",
-        fontsize=11.5,
+        fontsize=12.5,
         color=INK,
         fontweight="bold",
         ha="center",
     )
-    ax.text(1.65, 3.86, "severity 0-1", fontsize=9.2, color=DIM, ha="center")
+    ax.text(1.65, 3.86, "severity 0-1", fontsize=9.9, color=DIM, ha="center")
     ax.text(
-        1.65, 3.63, "→ etoposide dose", fontsize=9.2, color=DIM, ha="center"
+        1.65, 3.63, "→ etoposide dose", fontsize=9.9, color=DIM, ha="center"
     )
     block(ax, 0.4, 1.1, 2.5, 1.18, "#94a3b8", F_DIAL, r=0.10, lw=1.7)
     ax.text(
         1.65,
         2.02,
         "Deregulated",
-        fontsize=11.5,
+        fontsize=12.5,
         color=INK,
         fontweight="bold",
         ha="center",
@@ -176,17 +177,17 @@ def fig_schematic(args):
         1.65,
         1.77,
         "Nutrient Sensing",
-        fontsize=11.5,
+        fontsize=12.5,
         color=INK,
         fontweight="bold",
         ha="center",
     )
-    ax.text(1.65, 1.47, "severity 0-1", fontsize=9.2, color=DIM, ha="center")
+    ax.text(1.65, 1.47, "severity 0-1", fontsize=9.9, color=DIM, ha="center")
     ax.text(
         1.65,
         1.24,
         "→ mTORC1 (rapamycin)",
-        fontsize=9.2,
+        fontsize=9.9,
         color=DIM,
         ha="center",
     )
@@ -195,17 +196,17 @@ def fig_schematic(args):
         5.0,
         3.62,
         "dp14",
-        fontsize=15,
+        fontsize=16,
         color=C_DP,
         fontweight="bold",
         ha="center",
     )
-    ax.text(5.0, 3.30, "BIOMD582", fontsize=9.4, color=DIM, ha="center")
+    ax.text(5.0, 3.30, "BIOMD582", fontsize=10.1, color=DIM, ha="center")
     for k, line in enumerate(
         ["mTOR · AMPK · FoxO3a", "mitophagy · ROS · DNA damage", "CDKN1A"]
     ):
         ax.text(
-            5.0, 2.98 - 0.30 * k, line, fontsize=9.6, color=BODY, ha="center"
+            5.0, 2.98 - 0.30 * k, line, fontsize=10.3, color=BODY, ha="center"
         )
     reporters(
         ax,
@@ -220,17 +221,17 @@ def fig_schematic(args):
         10.45,
         4.60,
         "gz06",
-        fontsize=15,
+        fontsize=16,
         color=C_GZ,
         fontweight="bold",
         ha="center",
     )
-    ax.text(10.45, 4.28, "BIOMD157", fontsize=9.4, color=DIM, ha="center")
+    ax.text(10.45, 4.28, "BIOMD157", fontsize=10.1, color=DIM, ha="center")
     ax.text(
         10.45,
         4.02,
         "p53–Mdm2 oscillator",
-        fontsize=9.6,
+        fontsize=10.3,
         color=BODY,
         ha="center",
     )
@@ -240,18 +241,20 @@ def fig_schematic(args):
         10.45,
         1.78,
         "ih04",
-        fontsize=15,
+        fontsize=16,
         color=C_NF,
         fontweight="bold",
         ha="center",
     )
-    ax.text(10.45, 1.46, "BIOMD230", fontsize=9.4, color=DIM, ha="center")
-    ax.text(10.45, 1.20, "NF-κB / IκBα", fontsize=9.6, color=BODY, ha="center")
+    ax.text(10.45, 1.46, "BIOMD230", fontsize=10.1, color=DIM, ha="center")
+    ax.text(10.45, 1.20, "NF-κB / IκBα", fontsize=10.3, color=BODY, ha="center")
     reporters(ax, 10.45, 0.68, readouts_for("nfkb"), C_NF)
     arrow(ax, (2.9, 3.82), (3.7, 3.28), C_DIAL, rad=-0.14)
     arrow(ax, (2.9, 1.88), (3.7, 2.55), C_DIAL, rad=0.14)
-    arrow(ax, (6.3, 3.45), (8.9, 4.25), C_GZ, rad=0.14)
-    elabel(ax, 7.6, 4.05, "DNA damage → ψ", C_GZ, 17)
+    arrow(ax, (6.4, 3.82), (8.8, 4.05), C_GZ, rad=-0.30)
+    elabel(ax, 7.6, 4.35, "DNA damage → p53", C_GZ, 0)
+    arrow(ax, (8.8, 3.75), (6.4, 3.50), C_GZ, rad=-0.30)
+    elabel(ax, 7.6, 3.15, "p53 → CDKN1A", C_GZ, 0)
     arrow(ax, (6.3, 2.8), (8.9, 1.82), C_DP, rad=-0.11)
     elabel(ax, 7.6, 2.44, "mTOR → IKK", C_DP, -17)
     arrow(ax, (6.3, 2.3), (8.9, 1.32), C_NF, rad=-0.14)
@@ -292,7 +295,7 @@ def fig_trajectories(args):
             base,
             {"Genomic Instability": gi, "Deregulated Nutrient Sensing": dns},
         )
-        return Scheduler().run(
+        return Scheduler(auto_stiffness=True).run(
             comp,
             t_span=(0.0, 50.0),
             macro_dt=5.0,
@@ -860,7 +863,7 @@ def fig_before_after(args):
             validate=False,
             semantic_validation={"check_semantics": False},
         )
-        r = Scheduler().run(comp, (0.0, te), macro_dt=te, save_dt=sdt)
+        r = Scheduler(auto_stiffness=True).run(comp, (0.0, te), macro_dt=te, save_dt=sdt)
         return np.asarray(r.ts), r
 
     def solo_of(name, cname, te, sdt):
@@ -882,7 +885,7 @@ def fig_before_after(args):
             validate=False,
             semantic_validation={"check_semantics": False},
         )
-        r = Scheduler().run(
+        r = Scheduler(auto_stiffness=True).run(
             comp, (0.0, t_end), macro_dt=macro_dt, save_dt=save_dt
         )
         return np.asarray(r.ts), r
@@ -994,8 +997,66 @@ def fig_before_after(args):
     print(f"wrote before_after.png/.pdf -> {out}", flush=True)
 
 
+def fig_training(args):
+    """Loss (top) + gradient norm (bottom), stacked on a shared epoch axis.
+
+    Reads the persisted history from the latest run's ``summary.json`` — the
+    grad-norm panel is the end-to-end-differentiability evidence (backprop
+    flows through the composed stiff-ODE stack and decays to convergence)."""
+    import json
+
+    C_LOSS, C_GRAD, DIM = "#3a3f4a", "#de8f05", "#5b6b7d"
+    with open(OUT_CAL / "summary.json") as f:
+        s = json.load(f)
+    losses = np.asarray(s["loss_history"], dtype=float)
+    grads = np.asarray(s.get("grad_norm_history", []), dtype=float)
+    epochs = np.arange(1, len(losses) + 1)
+
+    fig, (axL, axG) = plt.subplots(
+        1, 2, figsize=(11.0, 4.2), gridspec_kw={"wspace": 0.22}
+    )
+    axL.plot(epochs, losses, color=C_LOSS, lw=2.0)
+    axL.set_yscale("log")
+    axL.set_ylabel("loss  (log2 FC MSE)")
+    axL.set_xlabel("epoch")
+    axL.set_title("Fit converges", fontsize=11, color=DIM, loc="left")
+
+    if grads.size:
+        axG.plot(epochs[: len(grads)], grads, color=C_GRAD, lw=2.0)
+        axG.set_yscale("log")
+        axG.set_title(
+            "Gradients propagate through the composite",
+            fontsize=11, color=DIM, loc="left",
+        )
+    else:
+        axG.text(
+            0.5, 0.5, "no grad_norm_history in summary.json\n(re-run the fit)",
+            ha="center", va="center", color=DIM, transform=axG.transAxes,
+        )
+    axG.set_ylabel("gradient norm")
+    axG.set_xlabel("epoch")
+
+    for ax in (axL, axG):
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.margins(x=0.01)
+
+    fig.suptitle(
+        "End-to-end differentiable calibration of the composite",
+        fontsize=13, fontweight="bold",
+    )
+    fig.tight_layout()
+    OUT_CAL.mkdir(parents=True, exist_ok=True)
+    for ext in ("png", "pdf"):
+        fig.savefig(
+            OUT_CAL / f"training_curves.{ext}", dpi=200,
+            bbox_inches="tight", facecolor="white",
+        )
+    print(f"wrote training_curves.png/.pdf -> {OUT_CAL}", flush=True)
+
+
 FIGURES = {
     "schematic": fig_schematic,
+    "training": fig_training,
     "trajectories": fig_trajectories,
     "reporter-levels": fig_reporter_levels,
     "concordance": fig_concordance,

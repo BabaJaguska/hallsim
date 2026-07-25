@@ -168,8 +168,12 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
             "DDIS": Condition(
                 "DDIS",
                 {
+                    # DDIS = control + genomic instability only. DNS matches
+                    # control (0.5): etoposide perturbs DNA damage, not nutrient
+                    # sensing directly — any mTOR change must emerge from the
+                    # damage→senescence dynamics, not an imposed severity.
                     "Genomic Instability": 1.0,
-                    "Deregulated Nutrient Sensing": 1.0,
+                    "Deregulated Nutrient Sensing": 0.5,
                 },
             ),
             # Etoposide + rapamycin: identical to DDIS (GI=1, DNS→mTOR at
@@ -201,8 +205,10 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
             "RAS_OIS": Condition(
                 "RAS_OIS",
                 {
+                    # Matches DDIS: genomic instability only, DNS at the control
+                    # baseline — a pure damage-driven generalization arm.
                     "Genomic Instability": 1.0,
-                    "Deregulated Nutrient Sensing": 1.0,
+                    "Deregulated Nutrient Sensing": 0.5,
                 },
             ),
         },
@@ -424,22 +430,13 @@ def plot_history(problem, history, path: Path) -> None:
 
     losses = np.asarray(history.losses)
     epochs = np.arange(1, len(losses) + 1)
-    best = int(np.argmin(losses))
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
 
     ax1.plot(epochs, losses, color="#2a7")
-    ax1.scatter(
-        [best + 1],
-        [losses[best]],
-        color="k",
-        zorder=5,
-        label=f"best {losses[best]:.4g} @ epoch {best + 1}",
-    )
     ax1.set_yscale("log")
     ax1.set_xlabel("epoch")
     ax1.set_ylabel("loss (log2FC MSE)")
     ax1.set_title("training loss")
-    ax1.legend()
 
     # Grad norm + effective LR — to see whether loss spikes track large
     # gradients (→ clip) or LR-schedule events (→ plateau scheduler).

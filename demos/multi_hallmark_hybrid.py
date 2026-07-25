@@ -142,50 +142,23 @@ def gz_rhs(u):
     return rhs
 
 
-def hopf_points(psi=1.0):
-    """The α_y Hopf bifurcations, located where the fixed point's Jacobian
-    complex-conjugate pair crosses Re=0 — from eigenvalues, not amplitude.
-
-    GZ06 has two: oscillation onsets at the lower one and dies at the upper
-    one, so the p53 pulse exists only between them.
-    """
+def hopf_analysis(psi=1.0):
+    """The α_y Hopf bifurcations of GZ06 as ``HopfPoint`` objects (location,
+    frequency, first Lyapunov coefficient / criticality) via
+    :mod:`hallsim.bifurcation`. Two supercritical Hopfs bound the oscillatory
+    window: the p53 pulse exists only between them."""
     import numpy as np
-    from scipy.optimize import fsolve
+    from hallsim.bifurcation import hopf_scan
 
-    grid = np.linspace(0.005, 2.0, 140)
+    field_of = lambda ay: (lambda y: gz_rhs((psi, ay))(0.0, y))  # noqa: E731
+    return hopf_scan(
+        field_of, np.linspace(0.005, 2.0, 140), x0_guess=[0.4, 0.4, 0.4]
+    )
 
-    def fixed_point(ay):
-        f = gz_rhs((psi, ay))
-        fn = lambda y: np.asarray(f(0.0, jnp.asarray(y)))  # noqa: E731
-        for g in ([0.4, 0.4, 0.4], [ay, ay, ay], [0.1, 0.1, 0.8]):
-            s, _, ier, _ = fsolve(fn, g, full_output=True)
-            if ier == 1 and np.all(np.isfinite(s)) and np.max(np.abs(s)) < 50:
-                return jnp.asarray(s)
-        return None
 
-    re = []
-    for ay in grid:
-        fp = fixed_point(ay)
-        if fp is None:
-            re.append(np.nan)
-            continue
-        jac = jax.jacfwd(lambda y: gz_rhs((psi, ay))(0.0, y))(fp)
-        ev = np.linalg.eigvals(np.asarray(jac))
-        cplx = ev[np.abs(ev.imag) > 1e-9]
-        re.append(
-            float(cplx[np.argmax(cplx.real)].real) if len(cplx) else np.nan
-        )
-    re = np.array(re)
-    hopfs = []
-    for i in range(1, len(grid)):
-        if (
-            np.isfinite(re[i - 1])
-            and np.isfinite(re[i])
-            and re[i - 1] * re[i] < 0
-        ):
-            a0, a1, r0, r1 = grid[i - 1], grid[i], re[i - 1], re[i]
-            hopfs.append(float(a0 - r0 * (a1 - a0) / (r1 - r0)))
-    return hopfs
+def hopf_points(psi=1.0):
+    """The α_y Hopf-bifurcation locations (floats)."""
+    return [h.param for h in hopf_analysis(psi)]
 
 
 def train_stages():
@@ -691,10 +664,140 @@ def write_provenance(prov):
     log.info("wrote provenance.json/.md")
 
 
+def _load_block():
+    """Deserialise the trained block from disk into a matching skeleton."""
+    skeleton = NeuralODEProcess(
+        fields=FIELDS,
+        input_fields=("psi", "alpha_y"),
+        field_defaults=IC,
+        width=TRAIN["width"],
+        depth=TRAIN["depth"],
+        timescale=3600.0,
+        key=jax.random.PRNGKey(1),
+    )
+    return eqx.tree_deserialise_leaves(
+        str(OUT / "gz06_neural_block.eqx"), skeleton
+    )
+
+
+def _load_flag():
+    with open(OUT / "provenance.json") as f:
+        return json.load(f)["flagship"]
+
+
+# ψ=1.0 (held out); α_y picks one regime on each side of the two Hopfs.
+COMBINED_TOP_CASES = [
+    (1.0, 0.011, "fixed point", "below lower Hopf"),
+    (1.0, 0.8, "limit cycle", ""),
+    (1.0, 1.2, "damped", "above upper Hopf"),
+]
+
+
+def combined_figure(block, flag):
+    """Single preprint figure: top row = surrogate reproduces GZ06's two
+    Hopf bifurcations (p53 time-domain); bottom row = hybrid composite
+    reproduces the mechanistic DDB2 readout."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update(
+        {"font.family": "sans-serif", "font.sans-serif": ["DejaVu Sans"]}
+    )
+    C_M, C_N = "#333333", "#d97706"
+    fig = plt.figure(figsize=(15, 9))
+    gs = fig.add_gridspec(2, 6, hspace=0.5, wspace=0.55)
+
+    top = [fig.add_subplot(gs[0, 2 * i : 2 * i + 2]) for i in range(3)]
+    for i, (ax, (psi, ay, regime, note)) in enumerate(
+        zip(top, COMBINED_TOP_CASES)
+    ):
+        tm, xm = _run_traj(_solo(_gz_with(psi, ay)))
+        tn, xn = _run_traj(neural_solo(block, psi, ay))
+        ax.plot(tm, xm, color=C_M, lw=1.9, label="mechanistic GZ06")
+        ax.plot(
+            tn, xn, color=C_N, lw=1.7, ls="--", label="NeuralODE surrogate"
+        )
+        title = rf"$\alpha_y$ = {ay:g}   {regime}"
+        if note:
+            title += f"\n({note})"
+        ax.set_title(title, fontsize=10.5)
+        ax.set_xlabel("time (days)")
+        if i == 0:
+            ax.set_ylabel("p53 (x)")
+            ax.legend(frameon=False, fontsize=8.5, loc="best")
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+
+    bot = [fig.add_subplot(gs[1, 0:3]), fig.add_subplot(gs[1, 3:6])]
+    for i, (ax, k) in enumerate(
+        zip(bot, sorted(flag, key=lambda z: float(z)))
+    ):
+        r = flag[k]
+        sev = r["severities"]
+        ax.plot(sev, r["mech"], "o-", color=C_M, label="mechanistic")
+        ax.plot(
+            sev, r["hybrid"], "s--", color=C_N, label="hybrid (NeuralODE)"
+        )
+        vals = list(r["mech"]) + list(r["hybrid"])
+        lo, hi = min(vals), max(vals)
+        if hi - lo < 0.06:
+            mid = 0.5 * (lo + hi)
+            ax.set_ylim(mid - 0.035, mid + 0.035)
+        else:
+            span = hi - lo
+            ax.set_ylim(lo - 0.25 * span, hi + 0.12 * span)
+        ax.set_xlabel("Genomic Instability severity")
+        if i == 0:
+            ax.set_ylabel("DDB2 readout (day 14)")
+        ax.set_title(rf"$\alpha_y$ = {float(k):g}", fontsize=10.5)
+        ax.legend(frameon=False, fontsize=8.5)
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+
+    fig.text(
+        0.5,
+        0.965,
+        "NeuralODE surrogate reproduces GZ06's two Hopf bifurcations "
+        r"(held-out $\psi$ = 1.0)",
+        ha="center",
+        fontsize=13.5,
+        fontweight="bold",
+    )
+    fig.text(
+        0.5,
+        0.455,
+        "Hybrid composite reproduces the mechanistic readout",
+        ha="center",
+        fontsize=13.5,
+        fontweight="bold",
+    )
+    for ext in ("png", "pdf"):
+        fig.savefig(
+            OUT / f"hybrid_combined.{ext}",
+            dpi=200,
+            bbox_inches="tight",
+            facecolor="white",
+        )
+    plt.close(fig)
+    log.info("wrote hybrid_combined.png/.pdf -> %s", OUT)
+
+
 def main():
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("mode", nargs="?", default="all", choices=("all", "combined"))
+    mode = ap.parse_args().mode
+
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("hallsim").setLevel(logging.INFO)
     OUT.mkdir(parents=True, exist_ok=True)
+
+    if mode == "combined":
+        combined_figure(_load_block(), _load_flag())
+        return
 
     deriv, shoot, _ = train_stages()
 
@@ -724,6 +827,7 @@ def main():
     fitted = _load_fitted_dp14()
     flag = flagship_results(best, fitted)
     flagship_figure(flag)
+    combined_figure(best, flag)
 
     prov = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),

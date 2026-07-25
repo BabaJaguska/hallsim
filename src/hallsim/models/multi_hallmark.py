@@ -203,6 +203,12 @@ RAPA_INTERVENTION_DAY = DDIS_ETOPOSIDE_DOSE_WINDOW[1]
 # from a nonzero basal floor (control) to GZ06_PSI_FULL (DDIS). The basal floor
 # is the fitted mechanism parameter, exposed as the ordinary `parameters.psi`
 # (the driver reads it as the Hill's lower bound).
+# Leaky-integral memory (days) for the oscillating reporters' RunningIntegrals.
+# Leaky (not flat) so the accumulator is bounded with a fixed point — the
+# composite equilibrates. τ≈2 d averages several p53 / NF-κB periods into a
+# smooth envelope; the constant cancels in each reporter's log2 fold-change.
+RUNNING_INTEGRAL_TAU = 2.0
+
 GZ06_PSI_NAME = "psi"
 GZ06_PSI_DEFAULT = 1.0  # full-damage reference (standalone screening)
 GZ06_PSI_BASAL_DEFAULT = 0.3  # control basal ψ; fitted in the composite
@@ -340,16 +346,16 @@ def build_multi_hallmark_composite(
         # oscillation amplitude grows with damage. Mdm2 (y) and IκBα-transcript
         # use power=1: their DC level ⟨·⟩ is already damage-responsive.
         "gz06_x_integral": RunningIntegral(
-            timescale=gz06.timescale, power=2.0
+            timescale=gz06.timescale, power=2.0, tau=RUNNING_INTEGRAL_TAU
         ),
         "gz06_y_integral": RunningIntegral(
-            timescale=gz06.timescale, power=1.0
+            timescale=gz06.timescale, power=1.0, tau=RUNNING_INTEGRAL_TAU
         ),
         # NFKBIA reads the IκBα *transcript* (nfkb/IkBat) directly, not a TF
         # activity, so power=1 (mean): its DC level is damage-responsive (no
         # mean-cancellation), unlike the p53 axis. power=2 over-predicts it.
         "nfkb_ikbat_integral": RunningIntegral(
-            timescale=nfkb.timescale, power=1.0
+            timescale=nfkb.timescale, power=1.0, tau=RUNNING_INTEGRAL_TAU
         ),
         # p53 → CDKN1A (p21): canonical p53 target (el-Deiry 1993; Shi 2021
         # Hill n=1.8). GZ06's group to read p53 live; Hill-gated flux

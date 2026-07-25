@@ -127,6 +127,16 @@ def save_outputs(
         "init_params": {k: float(v) for k, v in init.items()},
         "fitted_params": {k: float(v) for k, v in final.items()},
         "loss_history": [float(v) for v in history.losses],
+        "val_loss_history": [float(v) for v in history.val_losses],
+        "grad_norm_history": [float(v) for v in history.grad_norms],
+        "lr_history": [float(v) for v in history.lrs],
+        "lr_scale_history": [float(v) for v in history.lr_scales],
+        "param_history": [
+            {k: float(v) for k, v in dict(ph).items()}
+            for ph in history.param_history
+        ],
+        "best_loss": float(history.best_loss),
+        "stopped_epoch": history.stopped_epoch,
         "wall_time_s": float(history.wall_time_s),
         "conditions": {
             name: {

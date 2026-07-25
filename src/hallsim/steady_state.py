@@ -31,13 +31,18 @@ log = logging.getLogger(__name__)
 
 
 def accumulator_mask(composite, keys: list[str]) -> jnp.ndarray:
-    """Boolean mask over ``keys`` marking RunningIntegral outputs."""
+    """Boolean mask over ``keys`` marking *flat* RunningIntegral outputs.
+
+    Only flat (``tau=None``) integrals are unbounded and lack a fixed point, so
+    they are masked out of the Newton solve. A *leaky* integral settles to
+    ``A=τ·⟨sourceᵖ⟩`` — it has a fixed point and is solved like any state."""
     from hallsim.models.running_integral import RunningIntegral
 
     positions = [
         keys.index(composite.topology[name]["integral"])
         for name, proc in composite.processes.items()
         if isinstance(proc, RunningIntegral)
+        and proc.tau is None
         and composite.topology.get(name, {}).get("integral") in keys
     ]
     mask = jnp.zeros(len(keys), dtype=bool)
