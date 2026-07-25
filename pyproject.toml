@@ -24,7 +24,7 @@ dependencies    = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "black", "pre-commit", "flake8", "matplotlib"]
+dev = ["pytest", "black", "pre-commit", "flake8", "matplotlib", "seaborn"]
 
 [project.urls]
 Documentation = "https://github.com/BabaJaguska/HallSim#readme"
