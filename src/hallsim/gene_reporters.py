@@ -164,24 +164,26 @@ def leaky_mean():
     return summarize
 
 
-def _zerophase_ema(seq, a, odd=True):
-    """Reflection-padded forward-backward EMA: zero phase, unity DC gain, and
-    no boundary lift.
+def _zerophase_ema(seq, a, mirror=True):
+    """Reflection-padded forward-backward EMA: zero phase, unity DC gain, and a
+    bounded boundary (the even reflection never extrapolates past the data).
 
     ``a = exp(-dt/tau)`` is the per-step retention. The sequence is reflected by
     its own length at both ends before filtering so the boundary averages
-    against real data. ``odd`` (point-reflect through each endpoint) continues
-    the local trend — correct for a trending *level*. ``odd=False`` (mirror)
-    keeps a non-negative *amplitude* envelope from being extrapolated below
-    zero. Forward and backward passes cancel each other's phase.
+    against real data. ``mirror`` (default, even reflection) folds the signal
+    back on itself — the safe choice: it never extrapolates past the data, so
+    an oscillating or declining endpoint stays bounded. ``mirror=False``
+    (point-reflect through each endpoint) instead *continues the local trend*,
+    which blows up at an endpoint that is oscillating or turning over. Forward
+    and backward passes cancel each other's phase.
     """
     n = seq.shape[0]
-    if odd:
-        left = 2.0 * seq[0] - seq[1:][::-1]
-        right = 2.0 * seq[-1] - seq[:-1][::-1]
-    else:
+    if mirror:
         left = seq[1:][::-1]
         right = seq[:-1][::-1]
+    else:
+        left = 2.0 * seq[0] - seq[1:][::-1]
+        right = 2.0 * seq[-1] - seq[:-1][::-1]
     padded = jnp.concatenate([left, seq, right])
 
     def ema(s, init):
@@ -249,7 +251,7 @@ def zerophase_mean(tau: float):
     p53→CDKN1A edge. (Contrast DDB2/p53, which take RMS *because* the mean p53
     is damage-blind — psi cancels in the steady state — so the pulse amplitude,
     not the level, carries the signal.) Reflection-padded forward-backward EMA
-    (:func:`_zerophase_ema`): zero phase, unity DC, no boundary lift. Operates
+    (:func:`_zerophase_ema`): zero phase, unity DC, bounded ends. Operates
     on the raw trajectory directly — no RunningIntegral. Assumes uniform save
     spacing.
     """
@@ -279,6 +281,31 @@ def zerophase_rms_leaky(tau: float):
 
     def summarize(ts, y, query_times=None):
         return jnp.sqrt(jnp.clip(smooth(ts, y, query_times), 0.0, None))
+
+    return summarize
+
+
+def zerophase_rms_raw(tau: float):
+    """Lag-free RMS amplitude √⟨x²⟩ of a *raw* oscillating observable — no
+    integral state.
+
+    Squares the raw trajectory, low-passes ``x²`` with a forward-backward EMA
+    (zero-phase, so a query reads the amplitude *at* that time), and takes ``√``.
+    The state is just the raw species (bounded, equilibrates trivially, no
+    accumulator to grow or lag); this reads the p53 pulse amplitude — the
+    damage signal the mean is blind to — directly off the solved trajectory.
+    Requires the trajectory saved finely enough to resolve the oscillation
+    (``save_dt`` below the Nyquist for the pulse period); the mirror-padded
+    forward-backward EMA keeps the amplitude envelope from dipping negative at
+    the ends. ``tau`` is the smoothing memory, a few oscillation periods."""
+
+    def summarize(ts, y, query_times=None):
+        a = jnp.exp(-(ts[1] - ts[0]) / tau)
+        sm = _zerophase_ema(y**2, a)
+        rms = jnp.sqrt(jnp.clip(sm, 0.0, None))
+        if query_times is None:
+            return rms[-1]
+        return jnp.interp(jnp.atleast_1d(jnp.asarray(query_times)), ts, rms)
 
     return summarize
 
@@ -386,8 +413,12 @@ def oscillating_reporter(
     default ``power=2``) for rms/zerophase, ∫x (``power=1``) for mean.
     """
     valid = (
-        "rms", "mean", "leaky_rms", "leaky_mean",
-        "zerophase_rms", "zerophase_mean",
+        "rms",
+        "mean",
+        "leaky_rms",
+        "leaky_mean",
+        "zerophase_rms",
+        "zerophase_mean",
     )
     if readout not in valid:
         raise ValueError(f"readout must be one of {valid}, got {readout!r}")
@@ -537,55 +568,48 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         ),
         reference="Mammucari et al. 2007, Cell Metab 6:458–471",
     ),
-    oscillating_reporter(
-        observable="gz06/x_integral",
+    GeneReporter(
+        observable="gz06/x",
         gene_symbol="DDB2",
         sign=+1,
-        readout="zerophase_rms",  # lag-free √⟨x²⟩ from a leaky power=2 ∫
-        tau=2.0,
+        summary=zerophase_rms_raw(tau=0.75),
         description=(
             "Damage-specific DNA Binding Protein 2 — direct p53 "
-            "transcription target, mapped to GZ06's p53 (x). Read as the RMS "
-            "amplitude √⟨x²⟩ from a *leaky* power=2 RunningIntegral: under "
-            "GZ06's ψ-cancellation the mean ⟨x⟩ is damage-blind, while the "
-            "oscillation amplitude grows with damage. Leaky (bounded, "
-            "fixed-point) so the composite equilibrates; τ-memory envelope, no "
-            "window edge to alias the oscillation."
+            "transcription target, mapped to GZ06's p53 (x). Read as the "
+            "lag-free RMS amplitude √⟨x²⟩ of the raw p53 pulse (zero-phase over "
+            "x²): under GZ06's ψ-cancellation the mean ⟨x⟩ is damage-blind "
+            "while the oscillation amplitude grows with damage. Post-hoc on the "
+            "raw trajectory — no integral state to accumulate or lag."
         ),
         reference="Hwang et al. 1999, Nature 401:430–432",
     ),
-    oscillating_reporter(
-        observable="gz06/y_integral",
+    GeneReporter(
+        observable="gz06/y",
         gene_symbol="MDM2",
         sign=+1,
-        readout="zerophase_mean",  # lag-free ⟨y⟩ from a leaky power=1 ∫
-        tau=2.0,
+        summary=zerophase_mean(tau=0.75),
         description=(
             "MDM2 — the canonical p53 transcriptional target; GZ06's Mdm2 (y). "
             "Its time-mean encodes the damage signal directly (⟨y⟩ ∝ psi in "
             "the p53–Mdm2 steady state), so it is the cleanest damage-graded "
-            "p53-axis readout. Read as the DC level of a *leaky* power=1 "
-            "RunningIntegral (bounded, fixed-point, so the composite "
-            "equilibrates)."
+            "p53-axis readout. Read as the lag-free DC level (zero-phase mean) "
+            "of the raw Mdm2 trajectory."
         ),
         reference="Barak et al. 1993, EMBO J 12:461–468",
     ),
-    oscillating_reporter(
-        observable="nfkb/IkBat_integral",
+    GeneReporter(
+        observable="nfkb/IkBat",
         gene_symbol="NFKBIA",
         sign=+1,
-        readout="zerophase_mean",  # lag-free DC level of a leaky power=1 ∫
-        tau=2.0,
+        summary=zerophase_mean(tau=0.75),
         description=(
             "IκBα transcript — direct NF-κB target via the autoregulatory "
             "negative feedback loop. Maps to Ihekwaba 2004's IκBα mRNA "
-            "species (IkBat), which rises with NF-κB transcriptional "
-            "activity. Transcriptomic NFKBIA measures the transcript, not "
-            "the cytoplasmic protein (IkBa), whose abundance moves inversely "
-            "to activity through IKK-driven degradation. Read as the DC level "
-            "of a *leaky* power=1 RunningIntegral (bounded, fixed-point): "
-            "IkBat is a transcript, so its damage-responsive DC level is the "
-            "readout — not a second moment (that is for TF-activity proxies)."
+            "species (IkBat), which rises with NF-κB transcriptional activity. "
+            "Transcriptomic NFKBIA measures the transcript, not the cytoplasmic "
+            "protein (IkBa), whose abundance moves inversely to activity. Read "
+            "as the lag-free DC level (zero-phase mean) of the raw transcript — "
+            "no integral state."
         ),
         reference="Sun et al. 1993, Science 259:1912–1915",
     ),

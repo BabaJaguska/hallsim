@@ -51,14 +51,15 @@ class TestZerophaseMean:
             sm, want, atol=0.05
         )  # ripple gone, DC tracked, no lag
 
-    def test_reflection_beats_constant_pad_at_boundary(self):
-        # Reflection padding keeps the first smoothed point near y[0] for a
-        # signal rising slowly relative to tau, where a constant warm-start
-        # would lift it toward the interior.
+    def test_boundary_stays_within_signal_range(self):
+        # Even-reflection padding keeps the smoothed endpoints bounded within
+        # the data range (no extrapolation past it), unlike point-reflection
+        # which continues the local trend and can overshoot at a turning point.
         ts = jnp.linspace(0.0, 14.0, 280)
-        y = 1.0 - jnp.exp(-ts / 10.0)  # slow rise relative to tau=2
+        y = 1.0 - jnp.exp(-ts / 10.0)  # monotone rise
         sm = zerophase_mean(2.0)(ts, y, query_times=ts)
-        assert abs(float(sm[0]) - float(y[0])) < 0.05
+        assert float(y.min()) - 1e-6 <= float(sm[0]) <= float(y.max()) + 1e-6
+        assert float(y.min()) - 1e-6 <= float(sm[-1]) <= float(y.max()) + 1e-6
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -342,16 +343,13 @@ class TestMultiHallmarkReporters:
         assert len(genes) == len(set(genes))
 
     def test_derive_multi_hallmark_summaries(self):
+        # A monotone ramp on each reporter's own observable path — derive must
+        # produce one finite summary per reporter.
         n_time = 20
         ts = jnp.linspace(0.0, 25.0, n_time)
         traj = {
-            "dp14/CDKN1A": jnp.linspace(0, 10, n_time),
-            "gz06/x_integral": jnp.linspace(0, 1, n_time),
-            "gz06/y_integral": jnp.linspace(0, 1, n_time),
-            "dp14/FoxO3a": jnp.linspace(0, 5, n_time),
-            "nfkb/IkBat_integral": jnp.linspace(0, 2, n_time),
-            "dp14/Mito_mass_new": jnp.linspace(0, 3, n_time),
-            "dp14/mTORC1_pS2448": jnp.linspace(0, 4, n_time),
+            r.observable: jnp.linspace(0, 10, n_time)
+            for r in MULTI_HALLMARK_REPORTERS
         }
         out = derive_multi_hallmark_summaries(ts, traj)
         for r in MULTI_HALLMARK_REPORTERS:

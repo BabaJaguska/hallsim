@@ -1,14 +1,22 @@
 """Hallmark handles — high-level control interface for aging biology.
 
-A hallmark of aging (Lopez-Otin et al., 2023) is represented as a 0-1
-severity handle that modulates parameters across one or more Processes.
+A hallmark of aging (Lopez-Otin et al., 2023) is represented as a
+signed severity handle in [-1, 1] that modulates parameters across one
+or more Processes. Zero is homeostasis (the untreated / calibrated base);
+the sign selects direction, so a hallmark can be dialed toward impairment
+or toward a pharmacological correction of it.
 The abstraction targets all 12 hallmarks; :data:`HALLMARK_REGISTRY`
 maps 4 today — Stem Cell Exhaustion, Mitochondrial Dysfunction,
 Deregulated Nutrient Sensing, and Genomic Instability — and each new
 one is a single :class:`HallmarkHandle` entry away.
 
-    severity = 0.0  ->  healthy / optimal
-    severity = 1.0  ->  severely impaired
+    severity = -1.0  ->  full opposite perturbation (e.g. mTOR suppression)
+    severity =  0.0  ->  homeostasis / untreated control (native base)
+    severity = +1.0  ->  severely impaired
+
+Hallmarks with no meaningful "opposite" (Genomic Instability: there is no
+negative DNA damage) simply use the [0, 1] half; the neutral point is still
+0.
 
 Hallmark transforms are **multiplicative of the current calibrated
 base value**, not absolute. A transform receives ``(severity, base)``
@@ -75,13 +83,13 @@ class ParameterMapping:
     Two forms, resolved by :meth:`value`:
 
     - **Affine** (``floor`` set): ``value = base * (floor + slope * severity)``.
-      ``floor`` is the severity=0 multiple of ``base``, ``slope`` the gain per
-      unit severity. ``slope=None`` pins the map at severity=1
-      (``slope = 1 - floor``) — the form for a rate whose *untreated* level is
-      the fitted ``base`` and whose lower severities are a suppressed fraction
-      of it (e.g. mTOR under rapamycin). Most hallmarks scale up from the
-      control value instead: ``floor=1`` with an explicit ``slope``. ``floor``
-      may be a :class:`FittableCoeff` to calibrate it.
+      ``floor`` is the severity=0 (homeostasis) multiple of ``base`` — so a
+      modifier that leaves the base untouched at neutral uses ``floor=1``, and
+      an input that is off at neutral uses ``floor=0``. ``slope`` is the signed
+      gain per unit severity (positive dials toward +1, negative toward -1).
+      Both ``floor`` and ``slope`` may be a :class:`FittableCoeff` to calibrate
+      them. ``slope`` is required for an affine mapping — there is no default,
+      since the neutral point is fixed at severity=0 rather than at either end.
     - **Custom** (``transform`` set): ``value = transform(severity, base)``.
       For a severity *dial* that sets the value directly and ignores ``base``
       (``lambda h, base: h``).
@@ -116,6 +124,11 @@ class ParameterMapping:
         f = self.floor
         return f.init if isinstance(f, FittableCoeff) else f
 
+    @property
+    def slope_value(self):
+        s = self.slope
+        return s.init if isinstance(s, FittableCoeff) else s
+
     def value(self, severity, base):
         """Resolve the parameter value at ``severity`` given current ``base``."""
         if self.transform is not None:
@@ -125,9 +138,14 @@ class ParameterMapping:
                 f"ParameterMapping {self.process_name}.{self.param_name} "
                 "needs either an affine `floor` or a `transform`."
             )
-        floor = self.floor_value
-        slope = (1.0 - floor) if self.slope is None else self.slope
-        return base * (floor + slope * severity)
+        slope = self.slope_value
+        if slope is None:
+            raise ValueError(
+                f"ParameterMapping {self.process_name}.{self.param_name} "
+                "is affine but has no `slope`; the signed severity gain is "
+                "required (neutral is fixed at severity=0)."
+            )
+        return base * (self.floor_value + slope * severity)
 
 
 @dataclass
@@ -178,7 +196,7 @@ class HallmarkHandle:
         processes:
             ``{name: Process}`` from a Composite.
         severity:
-            Hallmark severity in [0, 1].
+            Hallmark severity in [-1, 1] (0 = homeostasis).
 
         Returns
         -------
@@ -375,29 +393,30 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
                 description="Glycolytic flux scales 1x→1.5x with nutrient dysregulation (ERiQ-based composites)",
             ),
             # DP14-based composites: scale the mTORC1 phosphorylation rate
-            # around the (fitted) untreated base. severity=1 → base (untreated
-            # DDIS), severity=0 → floor*base (rapamycin-suppressed residual;
-            # slope=None pins severity=1 at base). The floor is the residual
-            # mTOR fraction under rapamycin — a real biological quantity, fitted
-            # like GZ06's basal ψ rather than frozen. It sets the DDIS:control
-            # mTOR contrast the EIF4EBP1 reporter reads.
+            # around the (fitted) untreated base. severity=0 → base (untreated
+            # homeostasis), severity=-1 → (1-slope)*base (rapamycin-suppressed
+            # residual), severity=+1 → (1+slope)*base (hyperactivation). The
+            # slope is the mTOR suppression gain toward rapamycin — a real
+            # biological quantity, fitted like GZ06's basal ψ rather than
+            # frozen. It sets the DDIS:control mTOR contrast the EIF4EBP1
+            # reporter reads.
             ParameterMapping(
                 process_name="dp14",
                 param_name=(
                     "parameters." "mTORC1_S2448_phos_by_AA_n_Akt_pS473"
                 ),
-                floor=FittableCoeff(
-                    init=0.3,
+                floor=1.0,
+                slope=FittableCoeff(
+                    init=0.7,
                     clamp=(0.05, 0.95),
-                    prior=0.3,
+                    prior=0.7,
                     prior_sigma=0.3,
-                    description="mTOR residual fraction under rapamycin",
+                    description="mTOR suppression gain (severity=-1 → (1-gain)*base under rapamycin)",
                 ),
-                slope=None,
                 description=(
                     "mTORC1 S2448 phosphorylation rate (DP14): "
-                    "floor*base at severity=0 (rapa-suppressed), "
-                    "full base at severity=1 (untreated)"
+                    "base at severity=0 (untreated), "
+                    "(1-gain)*base at severity=-1 (rapa-suppressed)"
                 ),
             ),
         ],
@@ -429,23 +448,22 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
                 description="Damage production rate scales 1x→5x with instability (ERiQ-based composites)",
             ),
             # DP14-based composites: severity IS the exogenous-exposure
-            # level. severity maps directly onto DP14's `Irradiation`
-            # boundary input (0 = no exposure, 1 = full exposure) — an
-            # identity dial, not a scaled rate constant. The damage
-            # *potency* per unit exposure (`DNA_damaged_by_irradiation`) is
-            # a mechanism parameter Calibrator fits separately; severity
-            # never touches it. The exposure is delivered as a bounded dose
-            # window (`with_pulse_window`, default 2 days for etoposide);
-            # persistence past washout comes from the ROS→damage feedback,
-            # not a sustained input.
+            # level — an identity dial (0 = no exposure, 1 = full DDIS dose).
+            # It sets the amplitude of the forcing source (`forcing.drive_pulse`
+            # adds a PulseSource named "irradiation_pulse" driving DP14's
+            # Irradiation input over the dose window). The damage *potency* per
+            # unit exposure (`DNA_damaged_by_irradiation`) is a separate
+            # mechanism parameter Calibrator fits; severity never touches it.
+            # Skipped for composites without the pulse source (apply() ignores
+            # mappings whose process is absent).
             ParameterMapping(
-                process_name="dp14",
-                param_name="parameters.Irradiation",
+                process_name="irradiation_pulse",
+                param_name="amplitude",
                 transform=lambda h, base: h,
                 description=(
-                    "Exogenous-exposure level (DP14 Irradiation input): "
-                    "0 at severity=0 (no exposure), full at severity=1 "
-                    "(sustained DDIS exposure)"
+                    "Exogenous-exposure level (irradiation PulseSource "
+                    "amplitude): 0 at severity=0 (no exposure), full at "
+                    "severity=1 (full DDIS dose)"
                 ),
             ),
             # GZ06's psi is not mapped here — it is driven by DP14's

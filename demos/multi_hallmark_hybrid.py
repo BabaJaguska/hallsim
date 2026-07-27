@@ -70,7 +70,11 @@ OUT = ROOT / "outputs" / "multi_hallmark_hybrid"
 
 FIELDS = ("x", "y0", "y")
 IC = (0.0, 0.1, 0.8)  # GZ06 published initial x, y0, y
-ALPHA_Y_FIT = 1.597  # calibrated α_y (above the Hopf)
+# A representative α_y above the upper Hopf (~1.02): the sustained,
+# non-oscillatory p53 regime, paired with α_y=0.8 (pulsatile) to compare the
+# surrogate across the bifurcation. A chosen comparison point — NOT fitted; the
+# calibration freezes α_y (see multi_hallmark_calibrate.py).
+ALPHA_Y_SUSTAINED = 1.5
 TRAIN = dict(
     width=192,
     depth=3,
@@ -470,10 +474,7 @@ def _apply_dp14(dp14, fitted):
 def _ddb2_for_severity(comp_processes, severity):
     procs = apply_hallmarks(
         comp_processes,
-        {
-            "Genomic Instability": severity,
-            "Deregulated Nutrient Sensing": 0.5,
-        },
+        {"Genomic Instability": severity},
     )
     comp = Composite(
         procs,
@@ -515,7 +516,7 @@ def _procs_at(alpha_y, block, fitted):
 
 def flagship_results(block, fitted):
     out = {}
-    for alpha_y in (0.8, ALPHA_Y_FIT):
+    for alpha_y in (0.8, ALPHA_Y_SUSTAINED):
         mech_p, hyb_p = _procs_at(alpha_y, block, fitted)
         mech = [float(_ddb2_for_severity(mech_p, s)) for s in SEVERITIES]
         hyb = [float(_ddb2_for_severity(hyb_p, s)) for s in SEVERITIES]
@@ -737,9 +738,7 @@ def combined_figure(block, flag):
         r = flag[k]
         sev = r["severities"]
         ax.plot(sev, r["mech"], "o-", color=C_M, label="mechanistic")
-        ax.plot(
-            sev, r["hybrid"], "s--", color=C_N, label="hybrid (NeuralODE)"
-        )
+        ax.plot(sev, r["hybrid"], "s--", color=C_N, label="hybrid (NeuralODE)")
         vals = list(r["mech"]) + list(r["hybrid"])
         lo, hi = min(vals), max(vals)
         if hi - lo < 0.06:
@@ -788,7 +787,9 @@ def main():
     import argparse
 
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("mode", nargs="?", default="all", choices=("all", "combined"))
+    ap.add_argument(
+        "mode", nargs="?", default="all", choices=("all", "combined")
+    )
     mode = ap.parse_args().mode
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")

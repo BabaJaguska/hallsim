@@ -279,12 +279,14 @@ class SBMLProcess(ImportedODEProcess):
     # hallsim.sbml_events). Static metadata; expand into a composite with
     # ``hallsim.sbml_events.expand_events``. Empty for event-free models.
     _events: tuple = eqx.field(static=True, default=())
-    # Boundary inputs delivered as a bounded dose pulse:
-    # ``((input_name, t_start, t_end), ...)``. The input holds its
-    # ``parameters`` value while composite time ``t_start <= t < t_end``,
-    # else 0 — a dose-then-washout protocol (e.g. etoposide at [-2, 0],
-    # washout at day 0) instead of a sustained exposure.
-    _pulse_windows: tuple = eqx.field(static=True, default=())
+    # Boundary inputs driven from an INPUT port each step — the general
+    # port-coupling path (:meth:`with_input_driver`):
+    # ``((input_name, input_port), ...)``. A driven input takes the port's
+    # value, overriding its native SBML rule; wire the port via topology to a
+    # forcing source (:class:`hallsim.models.forcing.PulseSource`) or another
+    # model's state. Undriven inputs keep their native SBML drive, so a raw
+    # import reproduces the source model's own experiment.
+    _input_drivers: tuple = eqx.field(static=True, default=())
     # SBML constants delivered as a one-time step at a threshold time:
     # ``((param_name, t_step, value_before), ...)``. The constant holds
     # ``value_before`` while composite time ``t < t_step`` and its configured
@@ -323,14 +325,18 @@ class SBMLProcess(ImportedODEProcess):
         )
         return new
 
-    def with_pulse_window(
-        self, input_name: str, t_start: float, t_end: float
+    def with_input_driver(
+        self, input_name: str, input_port: str
     ) -> "SBMLProcess":
-        """Return a copy that delivers boundary input ``input_name`` as a
-        pulse: its ``parameters`` value while ``t_start <= t < t_end``, else
-        0. ``input_name`` must be a boundary input (in ``_w_names``). The
-        window is in composite time, so a dose at ``[-2, 0]`` needs the run
-        to start at (or before) ``-2``."""
+        """Return a copy that drives boundary input ``input_name`` from an
+        INPUT port ``input_port`` each step, overriding its native SBML rule.
+        This is the general port-coupling path for boundary inputs — the
+        ``w``-vector analogue of :meth:`with_param_input`. Wire ``input_port``
+        via topology to a forcing source
+        (:class:`hallsim.models.forcing.PulseSource`) or another model's
+        state; undriven inputs keep their native SBML drive. A prescribed dose
+        (pulse/ramp) is composed, not special-cased — see
+        :func:`hallsim.models.forcing.drive_pulse`."""
         if input_name not in self._w_names:
             raise KeyError(
                 f"{input_name!r} is not a boundary input on {self._name!r}; "
@@ -341,11 +347,35 @@ class SBMLProcess(ImportedODEProcess):
         new = copy.copy(self)
         object.__setattr__(
             new,
-            "_pulse_windows",
-            self._pulse_windows
-            + ((input_name, float(t_start), float(t_end)),),
+            "_input_drivers",
+            self._input_drivers + ((input_name, input_port),),
         )
         return new
+
+    def native_input_exposure(self, input_name, t_start, t_end, *, n=8000):
+        """``∫ native-drive dt`` for boundary input ``input_name`` over
+        composite time ``[t_start, t_end]`` — the exposure the model's driven
+        rates were calibrated to. A forcing source delivering a very different
+        integrated exposure runs the model off that calibration;
+        :func:`hallsim.models.forcing.drive_pulse` compares against this and
+        warns. Returns 0.0 if the input has no time-dependent assignment
+        rule."""
+        host = getattr(self._model, "modelstepfunc", self._model)
+        af = getattr(host, "assignmentfunc", None)
+        if af is None or t_end <= t_start:
+            return 0.0
+        widx = dict(zip(self._w_names, self._w_indexes))[input_name]
+        y0 = getattr(self._model, "y0", None)
+        y = (
+            jnp.asarray(y0)
+            if y0 is not None
+            else jnp.zeros(len(self._species_names))
+        )
+        ts = jnp.linspace(float(t_start), float(t_end), n)
+        native = jax.vmap(
+            lambda tt: af(y, self._w0, self._c, tt * self.time_scale)[widx]
+        )(ts)
+        return float(jnp.trapezoid(native, ts))
 
     def ports_schema(self):
         schema = {
@@ -363,6 +393,17 @@ class SBMLProcess(ImportedODEProcess):
             )
         }
         schema.update(self._driver_input_ports())
+        schema.update(
+            {
+                port: Port(
+                    role=PortRole.INPUT,
+                    default=0.0,
+                    units="dimensionless",
+                    description=f"drives boundary input {name!r}",
+                )
+                for name, port in self._input_drivers
+            }
+        )
         return schema
 
     def derivative(self, t, state):
@@ -453,29 +494,29 @@ class SBMLProcess(ImportedODEProcess):
         else:
             w = self._w0
 
-        # Boundary inputs (Irradiation, Insulin, …) are experimenter knobs:
-        # the current `parameters` value overrides whatever the model's own
-        # (often time-pulse) assignment rule computed, so a sustained
-        # severity-driven exposure wins over the source model's transient.
-        if self._w_indexes:
-            w_indexes = jnp.asarray(self._w_indexes)
-            windows = {n: (ts, te) for n, ts, te in self._pulse_windows}
-            w_values = jnp.stack(
-                [
-                    (
-                        self.parameters[n]
-                        * jnp.where(
-                            (t >= windows[n][0]) & (t < windows[n][1]),
-                            1.0,
-                            0.0,
-                        )
-                        if n in windows
-                        else jnp.asarray(self.parameters[n], dtype=float)
-                    )
-                    for n in self._w_names
-                ]
+        # Boundary inputs follow their native SBML drive — already evaluated
+        # into `w` above (Irradiation's 5-min pulse, Insulin's continuous
+        # stimulus, …). A driven input (with_input_driver) instead takes its
+        # INPUT-port value this step — the general override knob — so a
+        # prescribed dose is a wired forcing source, not a special case. Undriven
+        # inputs keep the imported drive, so a raw import reproduces the source
+        # model's own experiment.
+        if self._input_drivers:
+            name_to_widx = dict(zip(self._w_names, self._w_indexes))
+            drv_idx = jnp.asarray(
+                [name_to_widx[n] for n, _ in self._input_drivers]
             )
-            w = w.at[..., w_indexes].set(w_values)
+            drv_vals = jnp.stack(
+                [
+                    jnp.asarray(state[port], dtype=float)
+                    for _, port in self._input_drivers
+                ],
+                axis=-1,
+            )
+            if drv_vals.ndim > 1 and not w_batched:  # batched drive, scalar w
+                w = jnp.broadcast_to(w, drv_vals.shape[:-1] + w.shape)
+                w_batched = True
+            w = w.at[..., drv_idx].set(drv_vals)
 
         if is_batched:
             w_in = 0 if w_batched else None
@@ -685,8 +726,9 @@ def _extract_coupling_metadata(xml_path: str) -> dict:
     }
 
 
-def _extract_native_time_seconds(xml_path: str) -> float:
-    """Seconds-per-time-unit the model's rate constants are expressed in.
+def _extract_native_time_seconds(xml_path: str) -> tuple[float, bool]:
+    """Seconds-per-time-unit the model's rate constants are expressed in,
+    and whether the model actually *declared* it.
 
     SBML rate laws are written in a model-specific time unit. Composing
     models that disagree (DallePezze 2014 in days, Geva-Zatorsky 2006 in
@@ -695,28 +737,45 @@ def _extract_native_time_seconds(xml_path: str) -> float:
     conversion the composite uses to put every sub-model on one canonical
     clock (see :attr:`SBMLProcess.time_scale`).
 
+    Returns ``(seconds, declared)``. ``declared`` is ``False`` when the
+    model carries no usable time-unit annotation and the seconds value is
+    the SBML *default* fallback (``second`` → ``1.0``), not something the
+    modeller stated. That distinction matters: a per-minute model that
+    simply omits ``timeUnits`` (common) is indistinguishable by value from a
+    genuine seconds model, so reconciling it onto a shared axis is silently
+    60× wrong. Callers warn on ``declared is False``.
+
     Resolution order:
 
-    1. The model-level ``timeUnits`` attribute (SBML L3).
+    1. The model-level ``timeUnits`` attribute (SBML L3) naming a
+       ``<unitDefinition>`` → its scale, ``declared=True``.
     2. A ``<unitDefinition id="time">`` (the SBML L2 convention; this is
-       where DallePezze 2014's ``second × 86400`` lives).
-    3. The SBML default time unit, ``second`` → ``1.0``.
+       where DallePezze 2014's ``second × 86400`` lives) → ``declared=True``.
+    3. A base-unit ``timeUnits`` (e.g. ``second``, no unitDefinition) →
+       ``1.0``, ``declared=True``.
+    4. Otherwise (unset or ``dimensionless``) → ``(1.0, False)``: undeclared,
+       assumed seconds. ``(1.0, False)`` also on unparseable files.
 
     A time unit is a product of ``<unit>`` terms; for a well-formed time
     definition that is a single ``second`` term with a multiplier (and
-    optional power-of-ten scale). Returns ``1.0`` if the file cannot be
-    parsed.
+    optional power-of-ten scale).
     """
     import libsbml
 
     doc = libsbml.SBMLReader().readSBMLFromFile(str(xml_path))
     model = doc.getModel()
     if model is None:
-        return 1.0
+        return 1.0, False
 
-    unit_def = model.getUnitDefinition(model.getTimeUnits() or "time")
+    tu = model.getTimeUnits()  # "" when unset (L3); empty on L2 models
+    unit_def = model.getUnitDefinition(tu or "time")
     if unit_def is None:
-        return 1.0
+        # No <unitDefinition> resolved. A base-unit timeUnits ("second") is a
+        # real declaration (SBML's only base time unit); unset or dimensionless
+        # is not — treat as a guess so the caller can warn.
+        if tu and tu != "dimensionless":
+            return 1.0, True
+        return 1.0, False
 
     seconds = 1.0
     for k in range(unit_def.getNumUnits()):
@@ -724,7 +783,7 @@ def _extract_native_time_seconds(xml_path: str) -> float:
         seconds *= (
             u.getMultiplier() * 10.0 ** u.getScale()
         ) ** u.getExponent()
-    return float(seconds)
+    return float(seconds), True
 
 
 def _strip_events(sbml_path: str) -> str:
@@ -1054,7 +1113,19 @@ def process_from_sbml(
     coupling_meta = _extract_coupling_metadata(xml_path)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
 
-    native_time_seconds = _extract_native_time_seconds(xml_path)
+    native_time_seconds, native_time_declared = _extract_native_time_seconds(
+        xml_path
+    )
+    if not native_time_declared:
+        log.warning(
+            "%s: SBML declares no time unit; assuming native_time_seconds=1.0 "
+            "(seconds). If this model's rate laws are in minutes/hours/days its "
+            "clock is now a GUESS — reconciling it onto a shared canonical axis "
+            "will be silently 60x/3600x/86400x wrong. Set the source SBML's "
+            "timeUnits, or pass the true seconds-per-unit if you know it. "
+            "Check `proc.native_time_declared` before composing.",
+            name,
+        )
 
     log.info(f"Loaded {len(species_names)} species: {species_names}")
 
@@ -1132,6 +1203,7 @@ def process_from_sbml(
     object.__setattr__(proc, "_species_ontology", species_ontology)
     object.__setattr__(proc, "_coupling_meta", coupling_meta)
     object.__setattr__(proc, "native_time_seconds", native_time_seconds)
+    object.__setattr__(proc, "native_time_declared", native_time_declared)
     object.__setattr__(proc, "time_scale", 1.0)
     object.__setattr__(proc, "_model", model)
     object.__setattr__(proc, "_w0", w0)

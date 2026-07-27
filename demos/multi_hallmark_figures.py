@@ -247,7 +247,9 @@ def fig_schematic(args):
         ha="center",
     )
     ax.text(10.45, 1.46, "BIOMD230", fontsize=10.1, color=DIM, ha="center")
-    ax.text(10.45, 1.20, "NF-κB / IκBα", fontsize=10.3, color=BODY, ha="center")
+    ax.text(
+        10.45, 1.20, "NF-κB / IκBα", fontsize=10.3, color=BODY, ha="center"
+    )
     reporters(ax, 10.45, 0.68, readouts_for("nfkb"), C_NF)
     arrow(ax, (2.9, 3.82), (3.7, 3.28), C_DIAL, rad=-0.14)
     arrow(ax, (2.9, 1.88), (3.7, 2.55), C_DIAL, rad=0.14)
@@ -276,9 +278,9 @@ def fig_trajectories(args):
     from hallsim.models.multi_hallmark import build_multi_hallmark_composite
 
     arms = [
-        (0.0, 0.5, "ctrl", "tab:green"),
-        (1.0, 1.0, "DDIS", "tab:red"),
-        (1.0, 0.3, "DDIS+rapa", "tab:blue"),
+        (0.0, 0.0, "ctrl", "tab:green"),
+        (1.0, 0.0, "DDIS", "tab:red"),
+        (1.0, -1.0, "DDIS+rapa", "tab:blue"),
     ]
     from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
 
@@ -291,10 +293,10 @@ def fig_trajectories(args):
 
     def run(gi, dns):
         base = build_multi_hallmark_composite()
-        comp = with_hallmarks(
-            base,
-            {"Genomic Instability": gi, "Deregulated Nutrient Sensing": dns},
-        )
+        hallmarks = {"Genomic Instability": gi}
+        if dns != 0.0:
+            hallmarks["Deregulated Nutrient Sensing"] = dns
+        comp = with_hallmarks(base, hallmarks)
         return Scheduler(auto_stiffness=True).run(
             comp,
             t_span=(0.0, 50.0),
@@ -863,7 +865,9 @@ def fig_before_after(args):
             validate=False,
             semantic_validation={"check_semantics": False},
         )
-        r = Scheduler(auto_stiffness=True).run(comp, (0.0, te), macro_dt=te, save_dt=sdt)
+        r = Scheduler(auto_stiffness=True).run(
+            comp, (0.0, te), macro_dt=te, save_dt=sdt
+        )
         return np.asarray(r.ts), r
 
     def solo_of(name, cname, te, sdt):
@@ -1026,12 +1030,19 @@ def fig_training(args):
         axG.set_yscale("log")
         axG.set_title(
             "Gradients propagate through the composite",
-            fontsize=11, color=DIM, loc="left",
+            fontsize=11,
+            color=DIM,
+            loc="left",
         )
     else:
         axG.text(
-            0.5, 0.5, "no grad_norm_history in summary.json\n(re-run the fit)",
-            ha="center", va="center", color=DIM, transform=axG.transAxes,
+            0.5,
+            0.5,
+            "no grad_norm_history in summary.json\n(re-run the fit)",
+            ha="center",
+            va="center",
+            color=DIM,
+            transform=axG.transAxes,
         )
     axG.set_ylabel("gradient norm")
     axG.set_xlabel("epoch")
@@ -1042,14 +1053,17 @@ def fig_training(args):
 
     fig.suptitle(
         "End-to-end differentiable calibration of the composite",
-        fontsize=13, fontweight="bold",
+        fontsize=13,
+        fontweight="bold",
     )
     fig.tight_layout()
     OUT_CAL.mkdir(parents=True, exist_ok=True)
     for ext in ("png", "pdf"):
         fig.savefig(
-            OUT_CAL / f"training_curves.{ext}", dpi=200,
-            bbox_inches="tight", facecolor="white",
+            OUT_CAL / f"training_curves.{ext}",
+            dpi=200,
+            bbox_inches="tight",
+            facecolor="white",
         )
     print(f"wrote training_curves.png/.pdf -> {OUT_CAL}", flush=True)
 

@@ -141,7 +141,9 @@ SAMPLE_POSITION_GROUPS = {
 ARMS = ["DDIS_vs_ctrl", "RAPA_vs_ctrl", "RAS_vs_ctrl"]
 
 
-def build_problem(composite=None, reporters=None) -> CalibrationProblem:
+def build_problem(
+    composite=None, reporters=None, equilibrate: bool = True
+) -> CalibrationProblem:
     ds = GeneExpressionDataset.from_series_matrix(
         SERIES_MATRIX,
         PLATFORM,
@@ -152,7 +154,7 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
         composite=(
             composite
             if composite is not None
-            else build_multi_hallmark_composite(dose_window=None)
+            else build_multi_hallmark_composite()
         ),
         reporters=(
             reporters if reporters is not None else MULTI_HALLMARK_REPORTERS
@@ -160,32 +162,27 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
         conditions={
             "ctrl": Condition(
                 "ctrl",
-                {
-                    "Genomic Instability": 0.0,
-                    "Deregulated Nutrient Sensing": 0.5,
-                },
+                {"Genomic Instability": 0.0},
             ),
             "DDIS": Condition(
                 "DDIS",
-                {
-                    # DDIS = control + genomic instability only. DNS matches
-                    # control (0.5): etoposide perturbs DNA damage, not nutrient
-                    # sensing directly — any mTOR change must emerge from the
-                    # damage→senescence dynamics, not an imposed severity.
-                    "Genomic Instability": 1.0,
-                    "Deregulated Nutrient Sensing": 0.5,
-                },
+                # DDIS = control + genomic instability only; nutrient sensing is
+                # untouched (no DNS key = homeostasis). Etoposide perturbs DNA
+                # damage, not nutrient sensing directly — any mTOR change must
+                # emerge from the damage→senescence dynamics, not an imposed
+                # severity.
+                {"Genomic Instability": 1.0},
             ),
             # Etoposide + rapamycin: identical to DDIS (GI=1, DNS→mTOR at
-            # base) until rapamycin is added at washout (day 2), when the mTOR
-            # rate steps down to the DNS=0.3 rapamycin-suppressed level. The
+            # native base) until rapamycin is added at washout (day 2), when the
+            # mTOR rate steps down to the DNS=-1 rapamycin-suppressed level. The
             # severity sets that post-step level; the ParamStep supplies the
             # untreated pre-step level (the DDIS mTOR rate) and the switch time.
             "RAPA": Condition(
                 "RAPA",
                 {
                     "Genomic Instability": 1.0,
-                    "Deregulated Nutrient Sensing": 0.3,
+                    "Deregulated Nutrient Sensing": -1.0,
                 },
                 interventions=(
                     ParamStep(
@@ -204,12 +201,9 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
             # program calibrated on etoposide transfer to a different trigger?
             "RAS_OIS": Condition(
                 "RAS_OIS",
-                {
-                    # Matches DDIS: genomic instability only, DNS at the control
-                    # baseline — a pure damage-driven generalization arm.
-                    "Genomic Instability": 1.0,
-                    "Deregulated Nutrient Sensing": 0.5,
-                },
+                # Matches DDIS: genomic instability only, nutrient sensing
+                # untouched — a pure damage-driven generalization arm.
+                {"Genomic Instability": 1.0},
             ),
         },
         # Trajectory-native: each arm is a {day: Δlog2FC} time course. Model
@@ -244,7 +238,7 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
         # arbitrary initial condition (whose relaxation transient otherwise
         # dominates and flips the damage sign).
         normalization="baseline",
-        equilibrate=True,
+        equilibrate=equilibrate,
         equilibration_condition="ctrl",
         arm_pairs={
             "DDIS_vs_ctrl": ("DDIS", "ctrl"),
@@ -254,13 +248,15 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
         # Each fit param is read by ≥1 reporter and has a log-normal MAP prior.
         # See docs/coupling-edge-priors.md, docs/gz06-basal-p53.md.
         params={
+            # DNA damage per unit irradiation — DallePezze's fitted value, with
+            # a wide prior so the calibrator sets it from the damage-arm data.
             "etoposide_potency": ParameterRef(
                 "dp14",
                 "parameters.DNA_damaged_by_irradiation",
-                init=10.0,
-                clamp=(0.01, 10000.0),
-                prior=10.0,
-                prior_sigma=1.0,
+                init=9237.7,
+                clamp=(0.01, 20000.0),
+                prior=9237.7,
+                prior_sigma=9000.0,
             ),
             # ROS pair frozen — no ROS reporter (see diary).
             "CDKN1A_transcr": ParameterRef(
@@ -281,6 +277,18 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
                 prior=0.3,
                 prior_sigma=0.5,
             ),
+            # psi-bridge threshold: the DNA_damage level at which p53 fires.
+            # Started at the operating-point placement and fitted so the data
+            # sets it (CDKN1A pins potency; DDB2 then pins this); the wide prior
+            # lets it move, and identifiability reports if it's data-pinned.
+            "psi_K": ParameterRef(
+                "psi_bridge",
+                "K",
+                init=52.0,
+                clamp=(1.0, 5000.0),
+                prior=52.0,
+                prior_sigma=200.0,
+            ),
             "ikkbeta_to_nfkb": ParameterRef(
                 "ikkbeta_nfkb",
                 "k_act",
@@ -297,13 +305,16 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
                 prior=0.1,
                 prior_sigma=0.5,
             ),
-            # DNS→mTOR affine floor: mTOR residual fraction under rapamycin.
-            "dns_mtor_floor": HallmarkCoeffRef(
+            # DNS→mTOR affine slope: mTOR suppression gain toward rapamycin.
+            # At severity=-1 (rapamycin) mTOR = (1-gain)*base, so gain=0.7
+            # leaves a 30% residual — the one free parameter on this edge.
+            "dns_mtor_gain": HallmarkCoeffRef(
                 hallmark="Deregulated Nutrient Sensing",
                 param_name=f"parameters.{DP14_MTOR_PHOS_RATE_NAME}",
-                init=0.3,
+                coeff="slope",
+                init=0.7,
                 clamp=(0.05, 0.95),
-                prior=0.3,
+                prior=0.7,
                 prior_sigma=0.3,
             ),
             # p53 → CDKN1A edge (P53CDKN1AActivator.k_act) is fixed, not fitted.
@@ -313,13 +324,13 @@ def build_problem(composite=None, reporters=None) -> CalibrationProblem:
         prior_weight=0.03,
         t_end=14.0,
         macro_dt=3.5,
-        # Every reporter is grid-independent — the oscillator readouts route
-        # through RunningIntegral means/RMS (exact regardless of save spacing)
-        # and the rest are slow DP14 states. Verified: DDIS-d14 concordance is
-        # identical at n_save 29 vs 450 (max|Δ| 9e-5). So the loss uses a modest
-        # grid (fast under the reverse-mode adjoint); raw-state *plots* resample
-        # densely (``save_outputs(n_save_plot=…)``, above the Nyquist guardrail).
-        n_save=29,
+        # The oscillating reporters (DDB2/MDM2/NFKBIA) read raw p53 / Mdm2 /
+        # IκBα-transcript and take a zero-phase RMS/mean post-hoc, so the save
+        # grid must resolve the pulse: save_dt = 14/149 ≈ 0.094 d, under the
+        # ~0.145 d Nyquist for the ~0.29 d p53 period. Cost is memory (more save
+        # points), not solve time. Mirror-padded edges (odd=False) keep the
+        # endpoint query artifact-free — no margin needed.
+        n_save=150,
     )
 
 
@@ -744,9 +755,12 @@ def fig_oob_overview(
     n, ncol = len(genes), 3
     nrow = -(-n // ncol)
     qt = np.arange(0.1, problem.t_end + 1e-6, 0.1)
+    # RAS is held-out and shares DDIS's severities, so its model line just
+    # overplots DDIS — show RAS as data only (no trajectory).
+    line_arms = [a for a in _ARM_STYLE if a != "RAS_vs_ctrl"]
     lfc = {
         a: np.asarray(problem.model_lfc(params, a, jnp.asarray(qt)))
-        for a in _ARM_STYLE
+        for a in line_arms
     }
     fig, axes = plt.subplots(
         nrow, ncol, figsize=(11, 3.2 * nrow), sharex=True, squeeze=False
@@ -759,7 +773,8 @@ def fig_oob_overview(
         g = genes[i]
         ax.axhline(0, color="#e6e6e2", lw=1.2, zorder=0)
         for a, (col, lbl) in _ARM_STYLE.items():
-            ax.plot(qt, lfc[a][i], color=col, lw=1.7, label=lbl)
+            if a in lfc:  # RAS omitted: held-out, overplots DDIS
+                ax.plot(qt, lfc[a][i], color=col, lw=1.7, label=lbl)
             dts = sorted(problem.data[a])
             ax.plot(
                 [0.0] + list(dts),
@@ -930,7 +945,9 @@ def cmd_run(args) -> None:
         datefmt="%H:%M:%S",
     )
     logging.getLogger("hallsim").setLevel(logging.INFO)
-    problem = build_problem()
+    equilibrate = not getattr(args, "no_equilibrate", False)
+    problem = build_problem(equilibrate=equilibrate)
+    print(f"[run] equilibrate={equilibrate}", flush=True)
     init = problem.initial_params()
     out_dir = make_run_dir()
     print(f"[run] writing to {out_dir.relative_to(ROOT)}/", flush=True)
@@ -1009,13 +1026,14 @@ def cmd_run(args) -> None:
 
 
 # ── baseline: uncalibrated composite at the three arms ───────────────────
-_ARMS_3 = [(0.0, 0.5, "ctrl"), (1.0, 1.0, "DDIS"), (1.0, 0.3, "DDIS+rapa")]
+_ARMS_3 = [(0.0, 0.0, "ctrl"), (1.0, 0.0, "DDIS"), (1.0, -1.0, "DDIS+rapa")]
 
 
 def _run_arms(base, gi, dns, t_end=50.0, macro_dt=5.0):
-    comp = with_hallmarks(
-        base, {"Genomic Instability": gi, "Deregulated Nutrient Sensing": dns}
-    )
+    hallmarks = {"Genomic Instability": gi}
+    if dns != 0.0:
+        hallmarks["Deregulated Nutrient Sensing"] = dns
+    comp = with_hallmarks(base, hallmarks)
     return Scheduler().run(
         comp,
         t_span=(0.0, t_end),
@@ -1136,10 +1154,10 @@ def cmd_diagnose(args) -> None:
     for gi in [1.0, 0.5, 0.3, 0.0]:
         comp = with_hallmarks(
             base,
-            {"Genomic Instability": gi, "Deregulated Nutrient Sensing": 0.5},
+            {"Genomic Instability": gi, "Deregulated Nutrient Sensing": 0.0},
         )
         try_run(
-            f"GI={gi:>4.2f}, DNS=0.5 (single-group)",
+            f"GI={gi:>4.2f}, DNS=0.0 (single-group)",
             comp,
             macro_dt=50.0,
             groups={"all": list(comp.processes.keys())},
@@ -1271,6 +1289,14 @@ def main() -> None:
         action="store_true",
         dest="no_plateau",
         help="disable reduce-on-plateau LR schedule",
+    )
+    ap.add_argument(
+        "--no-equilibrate",
+        action="store_true",
+        dest="no_equilibrate",
+        help="start each arm from the model's young initial condition instead "
+        "of a Newton steady state (correct for one-way/progressive models like "
+        "DP14 senescence, which have no healthy fixed point)",
     )
     args = ap.parse_args()
     _COMMANDS[args.command](args)

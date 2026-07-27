@@ -225,7 +225,11 @@ def hopf_scan(
             continue
         ev = np.linalg.eigvals(np.asarray(jacobian(f, eqp)))
         cx = ev[np.abs(ev.imag) > _IMAG_TOL]
-        w = float(abs(cx[np.argmax(cx.real)].imag)) if len(cx) else float("nan")
+        w = (
+            float(abs(cx[np.argmax(cx.real)].imag))
+            if len(cx)
+            else float("nan")
+        )
         l1 = None
         if lyapunov:
             try:

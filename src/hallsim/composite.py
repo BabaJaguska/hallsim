@@ -295,6 +295,80 @@ class Composite(eqx.Module):
     # Build the combined ODE right-hand side
     # -----------------------------------------------------------------
 
+    def _assignment_pre(self, proc_names, keys, key_to_idx, canon):
+        """Dependency-ordered ``(proc, read_pairs, assign_pairs)`` for the
+        ASSIGNED (algebraic) ports of ``proc_names`` — the assignment-rule pass
+        shared by :meth:`build_rhs` and :meth:`materialize_assigned`."""
+        assign_procs = []
+        for proc_name in proc_names:
+            proc = self.processes[proc_name]
+            proc_topo = self.topology[proc_name]
+            schema = proc.ports_schema()
+            read_pairs = tuple(
+                (
+                    port,
+                    key_to_idx[sp],
+                    conversion_factor(canon.get(sp, ""), schema[port].units),
+                )
+                for port, sp in proc_topo.items()
+            )
+            assign_pairs = tuple(
+                (
+                    port,
+                    key_to_idx[proc_topo[port]],
+                    conversion_factor(p.units, canon.get(proc_topo[port], "")),
+                )
+                for port, p in schema.items()
+                if p.role == PortRole.ASSIGNED
+            )
+            if assign_pairs:
+                assign_procs.append((proc, read_pairs, assign_pairs))
+        # Dependency-order so an assignment reading a path another assigns runs
+        # after it (SBML/DAE assignment-rule semantics).
+        return _order_assignments(assign_procs)
+
+    @staticmethod
+    def _apply_assignments(assign_pre, t, y_vec):
+        """Inject each ASSIGNED path's algebraic value into ``y_vec`` (returns
+        a new array; JAX-functional). Shared by the RHS and materialization."""
+        for proc, read_pairs, assign_pairs in assign_pre:
+            view = {port: y_vec[..., idx] * rf for port, idx, rf in read_pairs}
+            raw = proc.assign(t, view)
+            for port, idx, wf in assign_pairs:
+                if port in raw:
+                    y_vec = y_vec.at[..., idx].set(raw[port] * wf)
+        return y_vec
+
+    def materialize_assigned(self, ts, ys, proc_names=None):
+        """Overwrite the ASSIGNED (algebraic) columns of a saved trajectory
+        ``ys`` with their true values, recomputed from each saved state.
+
+        Algebraic paths are injected only transiently inside the RHS (they are
+        not integrated), so a raw solve buffer would hold their stale *initial*
+        value. :meth:`hallsim.scheduler.Scheduler.run` applies this before
+        returning, so every SchedulerResult is already self-consistent.
+        ``ys`` follows the :class:`hallsim.scheduler.SchedulerResult` layout
+        ``(n_time, ..., n_vars)`` (time on axis 0, optional batch dims in the
+        middle, vars trailing) and is materialized batch-aware. Returns the same
+        shape. No-op when the composite has no ASSIGNED paths."""
+        import jax
+
+        if proc_names is None:
+            proc_names = list(self.continuous_processes().keys())
+        keys = self.store_keys()
+        key_to_idx = {k: i for i, k in enumerate(keys)}
+        canon = canonical_units(self.processes, self.topology)
+        assign_pre = self._assignment_pre(proc_names, keys, key_to_idx, canon)
+        if not assign_pre:
+            return ys
+        # vmap over TIME (axis 0, per SchedulerResult); _apply_assignments
+        # indexes vars on the trailing axis so any batch dims ride through.
+        return jax.vmap(
+            lambda t, y: self._apply_assignments(assign_pre, t, y),
+            in_axes=(0, 0),
+            out_axes=0,
+        )(jnp.asarray(ts), ys)
+
     def build_rhs(self, proc_names: list[str] | None = None):
         """Return a JAX-compatible flat ``f(t, y_vec, args=None) -> dy_vec``.
 
@@ -336,7 +410,6 @@ class Composite(eqx.Module):
         # path's canonical, in which case contributions are reconciled so
         # writers with compatible-but-different units sum correctly.
         pre = []  # derivative contributors: (proc, read_pairs, write_pairs)
-        assign_procs = []  # (proc, read_pairs, assign_pairs)
         for proc_name in proc_names:
             proc = self.processes[proc_name]
             proc_topo = self.topology[proc_name]
@@ -358,22 +431,9 @@ class Composite(eqx.Module):
                 for port, p in schema.items()
                 if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
             )
-            assign_pairs = tuple(
-                (
-                    port,
-                    key_to_idx[proc_topo[port]],
-                    conversion_factor(p.units, canon.get(proc_topo[port], "")),
-                )
-                for port, p in schema.items()
-                if p.role == PortRole.ASSIGNED
-            )
             if write_pairs:
                 pre.append((proc, read_pairs, write_pairs))
-            if assign_pairs:
-                assign_procs.append((proc, read_pairs, assign_pairs))
-        # Dependency-order the algebraic assignments so any that reads a path
-        # another assigns runs after it (SBML/DAE assignment-rule semantics).
-        assign_pre = _order_assignments(assign_procs)
+        assign_pre = self._assignment_pre(proc_names, keys, key_to_idx, canon)
 
         def rhs(t, y_vec, args=None):
             # Trailing-axis convention: y_vec is (..., n_vars). Scalars
@@ -382,15 +442,10 @@ class Composite(eqx.Module):
             # accum follows y_vec's shape so the scatter stays aligned.
             # Assignment pass first: compute algebraic (ASSIGNED) paths from
             # the current state and inject them, so the derivative pass reads
-            # the fresh value. Algebraic paths are not integrated (dy stays 0).
-            for proc, read_pairs, assign_pairs in assign_pre:
-                view = {
-                    port: y_vec[..., idx] * rf for port, idx, rf in read_pairs
-                }
-                raw = proc.assign(t, view)
-                for port, idx, wf in assign_pairs:
-                    if port in raw:
-                        y_vec = y_vec.at[..., idx].set(raw[port] * wf)
+            # the fresh value. Algebraic paths are not integrated (dy stays 0),
+            # so the SAVED trajectory holds their stale initial value — call
+            # :meth:`materialize_assigned` on a solve result to read them.
+            y_vec = self._apply_assignments(assign_pre, t, y_vec)
             accum = jnp.zeros_like(y_vec)
             for proc, read_pairs, write_pairs in pre:
                 view = {

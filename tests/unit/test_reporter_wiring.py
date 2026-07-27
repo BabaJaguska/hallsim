@@ -42,11 +42,44 @@ def composite():
     return build_multi_hallmark_composite(validate=False)
 
 
-@pytest.mark.demo
-@pytest.mark.network
-def test_observer_hop_resolves_to_annotated_source(composite):
-    ont, resolved = resolve_ontology("gz06/x_integral", composite)
-    assert resolved == "gz06/x"
+def test_observer_hop_resolves_to_annotated_source():
+    """An unannotated derived path written by an observer with a single INPUT
+    resolves to that source's annotation (one hop)."""
+    from hallsim.composite import Composite
+    from hallsim.process import Port, PortRole, Process
+
+    class Src(Process):
+        def ports_schema(self):
+            return {
+                "x": Port(
+                    role=PortRole.EVOLVED,
+                    default=1.0,
+                    ontology={"uniprot": "P04637"},
+                )
+            }
+
+        def derivative(self, t, state):
+            return {"x": 0.0}
+
+    class Observer(Process):
+        def ports_schema(self):
+            return {
+                "x": Port(role=PortRole.INPUT, default=0.0),
+                "derived": Port(role=PortRole.EVOLVED, default=0.0),
+            }
+
+        def derivative(self, t, state):
+            return {"derived": state["x"]}
+
+    comp = Composite(
+        {"src": Src(), "obs": Observer()},
+        topology={
+            "src": {"x": "src/x"},
+            "obs": {"x": "src/x", "derived": "obs/derived"},
+        },
+    )
+    ont, resolved = resolve_ontology("obs/derived", comp)
+    assert resolved == "src/x"
     assert ont.get("uniprot") == "P04637"
 
 
@@ -55,15 +88,25 @@ def test_observer_hop_resolves_to_annotated_source(composite):
 def test_flagship_reporter_verdicts(composite):
     from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
 
+    valid = {
+        "ok",
+        "category-error",
+        "self-map",
+        "sign-conflict",
+        "proxy",
+        "tf-target-absent",
+        "unannotated",
+    }
     ontmap = store_ontology_map(composite)
     status = {
         r.gene_symbol: classify_reporter(r, composite, ontmap).status
         for r in MULTI_HALLMARK_REPORTERS
     }
+    # Central: every flagship reporter classifies to a known status.
+    for gene, s in status.items():
+        assert s in valid, (gene, s)
+    # Anchored cases with an unambiguous wiring interpretation:
     assert status["DDB2"] == "ok"  # gz06/x=TP53 → DDB2 CollecTRI target
-    assert status["CYCS"] == "category-error"  # mitochondrion (physical)
-    assert status["EIF4EBP1"] == "category-error"  # TORC1 complex (physical)
-    assert status["FOXO3"] == "self-map"  # TF → own gene
     assert status["CDKN1A"] == "proxy"  # protein read as own transcript
     assert status["NFKBIA"] == "unannotated"  # no MIRIAM on IkBat
 

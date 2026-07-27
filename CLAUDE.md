@@ -208,3 +208,5 @@ shared `t` and the result is meaningless — screen for it.
 - Using a diffrax solve directly bypassing the scheduler is -5 points. If you are tempted to take that route, ask yourself why and what would make the scheduler more appealing to you - then go implement that scheduler improvement.
 - If possible, figures and other outputs should not hard-code anything. Assume things will be changing, so parametrize the functions.
 - Chill with comments.
+- Remember to equillibrate. But maybe not if the model doesn't envision it? Read the original literature, I don't know.
+- We are batch-native. Don't skip the batch dimension for random reasons.

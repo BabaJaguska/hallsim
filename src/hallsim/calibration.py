@@ -674,7 +674,7 @@ class ParameterRef:
 class HallmarkCoeffRef:
     """Declarative pointer to a fittable coefficient of a hallmark mapping.
 
-    Points at the affine ``floor`` of the
+    Points at an affine coefficient (``floor`` or ``slope``) of the
     :class:`hallsim.hallmarks.ParameterMapping` identified by
     ``(hallmark, param_name)``. The Calibrator fits it exactly like a
     :class:`ParameterRef` (same ``init`` / ``clamp`` / ``prior`` /
@@ -682,12 +682,12 @@ class HallmarkCoeffRef:
     overrides the coefficient in a per-evaluation hallmark registry — so the
     severity map ``base * (floor + slope * h)`` calibrates end to end. This is
     the home for a coefficient that has no SBML-parameter host (the mTOR
-    rapamycin-floor fraction, say): it lives on the hallmark edge, not a
+    rapamycin suppression gain, say): it lives on the hallmark edge, not a
     process, so it rides the registry rather than ``eqx.tree_at``.
 
     Attributes mirror :class:`ParameterRef`; ``hallmark`` + ``param_name``
-    together select the mapping, and ``coeff`` names which coefficient
-    (only ``"floor"`` today).
+    together select the mapping, and ``coeff`` names which affine coefficient
+    to fit (``"floor"`` or ``"slope"``).
     """
 
     hallmark: str
@@ -968,10 +968,12 @@ class CalibrationProblem:
                     f"{cref.param_name!r}, which no mapping in that hallmark "
                     "declares."
                 )
-            if cref.coeff != "floor" or any(m.floor is None for m in hits):
+            if cref.coeff not in ("floor", "slope") or any(
+                getattr(m, cref.coeff) is None for m in hits
+            ):
                 raise ValueError(
                     f"params[{cname!r}] coeff={cref.coeff!r} is not a "
-                    f"fittable affine floor on {cref.hallmark!r}."
+                    f"fittable affine floor/slope on {cref.hallmark!r}."
                     f"{cref.param_name!r}."
                 )
         if offenders:
@@ -1151,25 +1153,26 @@ class CalibrationProblem:
         return new
 
     def _registry(self, param_values: dict):
-        """The hallmark registry for this evaluation, with each fitted floor
-        (:class:`HallmarkCoeffRef`) overridden by its current value from
-        ``param_values``. Returns the base registry unchanged when no
-        coefficients are fitted, so the affine floor stays at its ``init``."""
+        """The hallmark registry for this evaluation, with each fitted affine
+        coefficient (:class:`HallmarkCoeffRef`, ``floor`` or ``slope``)
+        overridden by its current value from ``param_values``. Returns the base
+        registry unchanged when no coefficients are fitted, so the affine
+        coefficients stay at their ``init``."""
         if not self._coeffs:
             return self._base_registry
-        floors: dict[str, dict[str, Any]] = {}
+        overrides: dict[str, dict[str, dict[str, Any]]] = {}
         for name, cref in self._coeffs.items():
-            floors.setdefault(cref.hallmark, {})[cref.param_name] = (
-                param_values[name]
-            )
+            overrides.setdefault(cref.hallmark, {}).setdefault(
+                cref.param_name, {}
+            )[cref.coeff] = param_values[name]
         reg = dict(self._base_registry)
-        for hname, by_param in floors.items():
+        for hname, by_param in overrides.items():
             handle = reg[hname]
             reg[hname] = dc_replace(
                 handle,
                 mappings=[
                     (
-                        dc_replace(m, floor=by_param[m.param_name])
+                        dc_replace(m, **by_param[m.param_name])
                         if m.param_name in by_param
                         else m
                     )
@@ -1281,11 +1284,6 @@ class CalibrationProblem:
             y0=y0,
             save_dt=save_dt,
             adjoint=adjoint,
-            # Reporter readouts are grid-independent (RunningIntegral summaries
-            # + slow states), so the modest loss grid is exact; the Nyquist
-            # guardrail targets raw fast-oscillator readouts this loss has none
-            # of. Raw plots resample densely via save_outputs.
-            warn_save_resolution=False,
         )
         # res.ys is (n_save, ..., n_vars). Trailing-axis convention.
         trajs = jnp.stack([res.ys[..., idx] for idx in self._reporter_indices])
@@ -1379,7 +1377,9 @@ class CalibrationProblem:
         """
         cond, base = self.arm_pairs[arm]
         ts_c, trajs_c = run_for(cond)
-        arm_readout = self._reporter_summaries(ts_c, trajs_c, qt)  # (n_rep, n_t)
+        arm_readout = self._reporter_summaries(
+            ts_c, trajs_c, qt
+        )  # (n_rep, n_t)
         if self.normalization == "baseline":
             if baseline is not None:
                 ref_readout = jnp.broadcast_to(baseline, arm_readout.shape)
@@ -1398,7 +1398,9 @@ class CalibrationProblem:
         """One arm's sign-aligned model log2 fold-change at ``qt``. Shared by
         :meth:`data_loss` and :meth:`model_lfc` so figures plot exactly what
         the loss fits."""
-        arm_readout, ref_readout = self._arm_reference(run_for, arm, qt, baseline)
+        arm_readout, ref_readout = self._arm_reference(
+            run_for, arm, qt, baseline
+        )
         return self._log2_fold_change(arm_readout, ref_readout)
 
     def model_lfc(
@@ -1628,7 +1630,9 @@ class CalibrationProblem:
             qt = self._arm_query_times[arm]
             # Vectorized read: (n_rep, n_t) in one interp per condition, then
             # slice per timepoint. Same normalization as the loss.
-            arm_readout, ref_readout = self._arm_reference(run_for, arm, qt, baseline)
+            arm_readout, ref_readout = self._arm_reference(
+                run_for, arm, qt, baseline
+            )
             lfc = jnp.log2(jnp.maximum(arm_readout, eps)) - jnp.log2(
                 jnp.maximum(ref_readout, eps)
             )  # (n_rep, n_t), unsigned; compute_concordance applies the sign
@@ -1653,6 +1657,7 @@ class CalibrationProblem:
         self,
         param_values: dict,
         n_save: int | None = None,
+        antialias: bool = True,
     ) -> dict:
         """Run each condition once at ``param_values``; return
         ``{cond_name: SchedulerResult}`` (full state, all species). Uses the
@@ -1676,6 +1681,7 @@ class CalibrationProblem:
                 macro_dt=self.macro_dt,
                 y0=y0,
                 save_dt=save_dt,
+                antialias=antialias,
             )
         return results
 
@@ -1698,7 +1704,11 @@ class CalibrationProblem:
         loss uses."""
         import numpy as np
 
-        sims = self.simulate_all_conditions(param_values, n_save=n_save)
+        # Operating ranges read slow states (min/mean/max); no reason to pay the
+        # oscillator-grade fine grid the auto-reducer would impose.
+        sims = self.simulate_all_conditions(
+            param_values, n_save=n_save, antialias=False
+        )
         out: dict = {}
         for cond, res in sims.items():
             row: dict = {}
@@ -1711,3 +1721,36 @@ class CalibrationProblem:
                     )
             out[cond] = row
         return out
+
+    def suggest_hill_gate(
+        self,
+        param_values: dict,
+        source_path: str,
+        off_conditions: list[str],
+        on_conditions: list[str],
+        *,
+        off_stat: str = "hi",
+        on_stat: str = "mean",
+        off_occupancy: float = 0.1,
+        n_save: int = 200,
+    ):
+        """Deterministically suggest a Hill gate's ``(K, n)`` for a coupling
+        edge driven by ``source_path``, from the *measured* operating point.
+
+        Runs the faithful simulation (:meth:`operating_ranges`), takes the
+        ``off_stat`` (default ``hi``, the ceiling) across ``off_conditions`` as
+        the level the gate must stay closed at, and the ``on_stat`` (default
+        ``mean``) across ``on_conditions`` as the level it should open at, then
+        applies :func:`hallsim.models.hill_edge.place_hill_gate`. Returns a
+        :class:`hallsim.models.hill_edge.HillGateSuggestion` — ``ok=False`` with
+        an explanatory ``note`` when the arms' operating ranges overlap or are
+        too close for a clean gate. Deterministic: same params → same suggestion.
+        """
+        from hallsim.models.hill_edge import place_hill_gate
+
+        rng = self.operating_ranges(param_values, [source_path], n_save=n_save)
+        off = max(
+            getattr(rng[c][source_path], off_stat) for c in off_conditions
+        )
+        on = max(getattr(rng[c][source_path], on_stat) for c in on_conditions)
+        return place_hill_gate(off, on, off_occupancy=off_occupancy)

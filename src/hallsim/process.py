@@ -285,6 +285,14 @@ class Process(eqx.Module):
         """
         return {}
 
+    def discontinuity_times(self) -> tuple[float, ...]:
+        """Times (composite clock) where this process's contribution jumps —
+        a forcing pulse's on/off edges, a timed step. The Scheduler feeds them
+        to the solver as ``jump_ts`` so it steps exactly onto each, resolving
+        the discontinuity without adaptive step-rejection churn (and giving
+        clean gradients across it). Default: none (smooth process)."""
+        return ()
+
     # --- Interface: DISCRETE -------------------------------------------------
 
     def update(

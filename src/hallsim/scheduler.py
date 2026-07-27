@@ -119,6 +119,11 @@ class SchedulerResult:
     and downstream JAX-native code without a Python-side dict of arrays
     in the middle.
 
+    ``ys``/``keys`` carry the complete composite state — every store path,
+    including materialized algebraic (ASSIGNED) ports — at every save point,
+    from every ``run`` path. Address any path via ``keys`` / :meth:`get`.
+    Enforced by ``test_multiscale.py::test_result_carries_full_state``.
+
     Attributes
     ----------
     ts:
@@ -428,6 +433,7 @@ class Scheduler:
         # is reused under later grad/jvp/vmap tracing, where the Jacobian
         # eigenvalues would be tracers.
         self._integrator_cache: dict[Any, dict[str, GroupIntegrator]] = {}
+        self._omega_cache: dict[Any, list] = {}  # antialias spectrum cache
         self._warned_save_res = False
         # Adjoint method used by every diffeqsolve in this run.
         # Default (None) → diffrax picks RecursiveCheckpointAdjoint, which
@@ -438,6 +444,7 @@ class Scheduler:
         self.throw = throw
         self.max_steps = max_steps
         self.dt0 = dt0
+        self._jump_ts = None  # per-run forcing/step discontinuity times
         self.manual_groups = groups
         self.coupling_mode = coupling_mode
         self.coupling_interp_points = coupling_interp_points
@@ -460,7 +467,7 @@ class Scheduler:
         y0: jnp.ndarray | None = None,
         save_dt: float | None = None,
         adjoint: dfx.AbstractAdjoint | None = None,
-        warn_save_resolution: bool = True,
+        antialias: bool = True,
     ) -> SchedulerResult:
         """Run the composite with multi-rate scheduling.
 
@@ -484,21 +491,25 @@ class Scheduler:
             values via
             ``y0.at[composite.store_keys().index("path")].set(...)``.
         save_dt:
-            Save interval for trajectory output.  If ``None``, saves at
-            every macro step.  If larger than ``macro_dt``, saves less
-            frequently.
+            Requested output density — the interval at which the trajectory is
+            saved (decoupled from ``macro_dt`` via dense output, so it costs
+            memory, not ODE steps). ``None`` lets the Scheduler suggest a grid:
+            ``_DEFAULT_SAVE_SAMPLES`` points across the span, then refined for
+            aliasing (see ``antialias``). Pass a value to request your own
+            density.
         adjoint:
             Per-run override of the differentiation method. ``None`` uses
             the constructor's ``adjoint``. Pass ``dfx.ForwardMode()`` for
             forward-mode calibration without changing scheduler identity,
             so one Scheduler instance (and its stiffness cache) serves
             both the eager evaluate pass and the differentiated loss.
-        warn_save_resolution:
-            Emit a once-only Nyquist warning when ``save_dt`` undersamples
-            the fastest oscillation (see :meth:`_check_save_resolution`). Set
-            ``False`` for a run whose readouts are provably grid-independent
-            (e.g. a burn-in read only through a ``RunningIntegral``), so the
-            deliberately coarse grid does not raise a false alarm.
+        antialias:
+            Nyquist guardrail: refine the save grid *finer* if the requested
+            (or default) ``save_dt`` would undersample the fastest oscillation
+            and alias a raw oscillating readout (see :meth:`_resolve_save_dt`).
+            It only ever makes the grid finer, never coarser — orthogonal to
+            ``save_dt``, which sets the density you want. Adds no state. Set
+            ``False`` to take the grid verbatim (e.g. a speed-sensitive sweep).
 
         Returns
         -------
@@ -506,6 +517,9 @@ class Scheduler:
         """
         t0, t1 = t_span
         adjoint = adjoint if adjoint is not None else self.adjoint
+        # Forcing/step discontinuities the solver should land on exactly
+        # (jump_ts) rather than resolve by adaptive step-rejection.
+        self._jump_ts = self._collect_jump_ts(composite, t0, t1)
 
         # Flat state layout — pinned for the whole run. y0 is a tensor in
         # trailing-axis convention; for batched-population runs it has
@@ -576,10 +590,25 @@ class Scheduler:
         integrators = self._resolve_integrators(
             composite, groups, state, t0, macro_dt
         )
-        if warn_save_resolution:
-            self._check_save_resolution(
-                integrators, save_dt if save_dt is not None else macro_dt
+        # Nyquist guardrail: reduce save_dt so a raw oscillating state read off
+        # the saved grid doesn't alias (the grid is decoupled from macro_dt via
+        # dense output, so this is memory, not extra ODE steps). No accumulator,
+        # no added state — just a faithful sampling of the real observable.
+        requested_save_dt = (
+            save_dt
+            if save_dt is not None
+            else (t1 - t0) / max(1, self._DEFAULT_SAVE_SAMPLES - 1)
+        )
+        save_dt = (
+            self._resolve_save_dt(
+                self._group_omegas(
+                    composite, groups, integrators, state, t0, macro_dt
+                ),
+                requested_save_dt,
             )
+            if antialias
+            else requested_save_dt
+        )
 
         # ─── Fast path: single continuous group, no events, no
         # discrete, no adaptive macro_dt ───────────────────────────────
@@ -614,12 +643,18 @@ class Scheduler:
                 dt0=min(self.dt0, t1 - t0),
                 y0=state,
                 saveat=dfx.SaveAt(ts=save_ts),
-                stepsize_controller=integ.controller,
+                stepsize_controller=self._controller_with_jumps(
+                    integ.controller
+                ),
                 adjoint=adjoint,
                 max_steps=self.max_steps,
                 throw=False,
             )
             ys = self._guard_result(sol.ys, sol.result, gname, integ, keys)
+            # ASSIGNED (algebraic) ports aren't integrated, so their saved
+            # columns are stale — fill them from each saved state so the result
+            # is self-consistent (no reader ever sees a stale algebraic value).
+            ys = composite.materialize_assigned(sol.ts, ys)
             stats = {
                 gname: {
                     "num_macro_steps": 1,
@@ -926,6 +961,8 @@ class Scheduler:
         # n_vars) for batched runs; the trailing axis matches `keys`.
         ts = jnp.array(trajectory_ts)
         ys = jnp.stack(trajectory_snapshots)
+        # Fill ASSIGNED (algebraic) columns from each saved state (see fast path).
+        ys = composite.materialize_assigned(ts, ys)
 
         return SchedulerResult(
             ts=ts, ys=ys, keys=keys, events=events, stats=stats
@@ -1054,7 +1091,9 @@ class Scheduler:
                 dt0=jnp.minimum(dt0hi, t_b - t_a),
                 y0=st,
                 saveat=dfx.SaveAt(ts=grid),
-                stepsize_controller=integrators[g].controller,
+                stepsize_controller=self._controller_with_jumps(
+                    integrators[g].controller
+                ),
                 adjoint=adjoint,
                 max_steps=self.max_steps,
                 throw=False,
@@ -1184,6 +1223,8 @@ class Scheduler:
             }
             for gi, (g, _) in enumerate(group_rhs)
         }
+        # Fill ASSIGNED (algebraic) columns from each saved state (see run()).
+        ys = composite.materialize_assigned(ts, ys)
         return SchedulerResult(ts=ts, ys=ys, keys=keys, events=[], stats=stats)
 
     @staticmethod
@@ -1219,52 +1260,114 @@ class Scheduler:
         n = int(round(span / save_step)) + 1
         return jnp.linspace(t0, t1, n)
 
-    def _check_save_resolution(
-        self, integrators: dict[str, GroupIntegrator], save_dt: float
-    ) -> None:
-        """Warn (once) if the save grid undersamples the fastest oscillation.
+    #: samples per oscillation period the auto-reducer targets (well under the
+    #: Nyquist limit of 2, so a raw amplitude/RMS readout is faithful).
+    _SAVE_SAMPLES_PER_PERIOD = 10.0
+    # Default output density when the caller passes no ``save_dt`` — points
+    # across the span, before the antialias refinement.
+    _DEFAULT_SAVE_SAMPLES = 201
+
+    def _collect_jump_ts(self, composite, t0, t1):
+        """Sorted interior discontinuity times declared by the composite's
+        processes (``Process.discontinuity_times``) within ``(t0, t1)`` — the
+        on/off edges of forcing pulses, timed steps. Returns a ``jnp`` array
+        for :class:`diffrax.ClipStepSizeController`, or ``None`` if there are
+        none. The integration endpoints are already landed on, so they are
+        excluded."""
+        times = {
+            float(t)
+            for proc in composite.processes.values()
+            for t in proc.discontinuity_times()
+            if t0 < float(t) < t1
+        }
+        return jnp.asarray(sorted(times)) if times else None
+
+    def _controller_with_jumps(self, controller):
+        """Wrap a step-size controller so it steps exactly onto this run's
+        ``jump_ts`` (forcing/step discontinuities); pass-through when there
+        are none."""
+        if self._jump_ts is None:
+            return controller
+        return dfx.ClipStepSizeController(controller, jump_ts=self._jump_ts)
+
+    def _group_omegas(
+        self, composite, groups, integrators, state, t0, macro_dt
+    ):
+        """Per-group ``max|Im λ|`` (oscillation frequency) for the Nyquist
+        guard. Reuses the stiffness verdict's spectrum when the auto-solver
+        computed one; otherwise measures it eagerly (once, cached) so the
+        anti-alias guard works regardless of the solver-routing choice. Empty
+        under tracing (grad/jvp) with no concrete Jacobian — call ``warm_up``
+        first, as the calibration path does."""
+        omegas = [
+            gi.info.max_abs_im
+            for gi in integrators.values()
+            if gi.info is not None
+        ]
+        if omegas:
+            return omegas
+        if isinstance(state, jax.core.Tracer):
+            return []
+        sig = self._integrator_signature(groups, state, macro_dt)
+        if sig in self._omega_cache:
+            return self._omega_cache[sig]
+        from hallsim.stiffness import analyze_groups
+
+        try:
+            report = analyze_groups(
+                composite,
+                y0=state,
+                groups=groups,
+                t0=t0,
+                dt=macro_dt,
+                max_explicit_substeps=self.max_explicit_substeps,
+            )
+            omegas = [v.max_abs_im for v in report.values()]
+        except (RuntimeError, np.linalg.LinAlgError):
+            omegas = []
+        self._omega_cache[sig] = omegas
+        return omegas
+
+    def _resolve_save_dt(self, omegas, save_dt: float) -> float:
+        """Return a Nyquist-safe ``save_dt`` for raw-state readouts.
 
         A group whose Jacobian carries an imaginary part ``max|Im λ| = ω``
-        (run-time units) oscillates with period ``T = 2π/ω``. Sampling the
-        raw trajectory at ``save_dt > T/2`` violates Nyquist — the oscillation
-        aliases, and any readout of a *raw* oscillating state (an amplitude,
-        an endpoint, a plain mean of saved points) is corrupted. This is the
-        Nyquist theorem, not a tuned threshold. Phase-insensitive readouts
-        routed through a :class:`~hallsim.models.running_integral.RunningIntegral`
-        are grid-independent and unaffected — the recommended fix, alongside
-        simply saving finer (``save_dt`` is decoupled from ``macro_dt`` via
-        dense output, so it costs no extra ODE steps).
-
-        Fires only when the Jacobian spectrum is available (the
-        ``auto_stiffness`` path, after ``warm_up``); a manual-solver run
-        carries no spectrum to check against.
+        (run-time units) oscillates with period ``T = 2π/ω``. Sampling a *raw*
+        oscillating state at ``save_dt > T/2`` violates Nyquist — the oscillation
+        aliases and any readout of it (amplitude, endpoint, mean of saved points)
+        is corrupted. This is the Nyquist theorem, not a tuned threshold. When
+        the requested ``save_dt`` undersamples the fastest oscillation this
+        reduces it to ``T / _SAVE_SAMPLES_PER_PERIOD``; ``save_dt`` is decoupled
+        from ``macro_dt`` via dense output, so the finer grid costs memory, not
+        ODE steps. Returns ``save_dt`` unchanged when it is already fine, or when
+        no oscillation spectrum is available.
         """
-        if not save_dt or self._warned_save_res:
-            return
+        if not save_dt:
+            return save_dt
         import math
 
-        offenders = []
-        for g, gi in integrators.items():
-            omega = getattr(gi.info, "max_abs_im", 0.0) if gi.info else 0.0
+        worst = None
+        for omega in omegas:
             if omega > 0.0:
                 period = 2.0 * math.pi / omega
-                if save_dt > 0.5 * period:
-                    offenders.append((g, period))
-        if offenders:
-            self._warned_save_res = True
-            worst = min(p for _, p in offenders)
-            log.warning(
-                "save_dt=%.4g undersamples the fastest oscillation "
-                "(period %.4g, group(s) %s) below Nyquist — raw-state "
-                "readouts on this grid alias. Save finer (save_dt < %.4g, "
-                "~%d+ samples/period) or read oscillators through a "
-                "RunningIntegral (grid-independent).",
-                save_dt,
-                worst,
-                ", ".join(g for g, _ in offenders),
-                0.5 * worst,
-                10,
-            )
+                worst = period if worst is None else min(worst, period)
+        if worst is None:
+            return save_dt
+        safe = worst / self._SAVE_SAMPLES_PER_PERIOD
+        if save_dt > safe:
+            if not self._warned_save_res:
+                self._warned_save_res = True
+                log.info(
+                    "auto-reduced save_dt %.4g -> %.4g (fastest oscillation "
+                    "period %.4g; ~%d samples/period so raw-state readouts "
+                    "don't alias)",
+                    save_dt,
+                    safe,
+                    worst,
+                    int(self._SAVE_SAMPLES_PER_PERIOD),
+                )
+            return safe
+        return save_dt
 
     def _resolve_integrators(
         self,
@@ -1444,7 +1547,7 @@ class Scheduler:
             dt0=jnp.minimum(dt0_base, t1 - t0),
             y0=state_vec,
             saveat=dfx.SaveAt(t1=True),
-            stepsize_controller=integ.controller,
+            stepsize_controller=self._controller_with_jumps(integ.controller),
             adjoint=adjoint,
             max_steps=self.max_steps,
             throw=False,
@@ -1645,7 +1748,7 @@ class Scheduler:
             dt0=jnp.minimum(dt0_base, t1 - t0),
             y0=state_vec,
             saveat=dfx.SaveAt(ts=grid),
-            stepsize_controller=integ.controller,
+            stepsize_controller=self._controller_with_jumps(integ.controller),
             adjoint=adjoint,
             max_steps=self.max_steps,
             throw=False,

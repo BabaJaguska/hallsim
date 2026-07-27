@@ -73,25 +73,19 @@ severity matrix::
     from hallsim.models.multi_hallmark import build_multi_hallmark_composite
 
     comp = build_multi_hallmark_composite()
-    # Untreated DDIS: full exogenous damage, full nutrient dysregulation
-    ddis = apply_hallmarks(comp.processes, {
-        "Genomic Instability": 1.0,
-        "Deregulated Nutrient Sensing": 1.0,
-    })
-    # DDIS + rapamycin
+    # Untreated DDIS: full exogenous damage; nutrient sensing untouched
+    ddis = apply_hallmarks(comp.processes, {"Genomic Instability": 1.0})
+    # DDIS + rapamycin: mTORC1 suppressed (negative severity)
     rapa = apply_hallmarks(comp.processes, {
         "Genomic Instability": 1.0,
-        "Deregulated Nutrient Sensing": 0.3,
+        "Deregulated Nutrient Sensing": -1.0,
     })
     # Healthy control: no exogenous damage source
-    ctrl = apply_hallmarks(comp.processes, {
-        "Genomic Instability": 0.0,
-        "Deregulated Nutrient Sensing": 0.5,
-    })
+    ctrl = apply_hallmarks(comp.processes, {"Genomic Instability": 0.0})
 
-For **Deregulated Nutrient Sensing**, severity 0.0 corresponds to
-suppressed mTORC1 (rapamycin-rescued) and severity 1.0 to full
-dysregulation; the mapping targets DP14's
+For **Deregulated Nutrient Sensing**, severity 0.0 is homeostasis
+(native mTORC1), severity -1.0 is rapamycin-suppressed mTORC1, and
+severity +1.0 is hyperactivation; the mapping targets DP14's
 ``mTORC1_S2448_phos_by_AA_n_Akt_pS473`` rate constant.
 
 For **Genomic Instability**, severity 0.0 corresponds to no exogenous
@@ -108,9 +102,9 @@ compares against transcriptomic data):
 - CDKN1A → ``dp14/CDKN1A`` (direct state)
 - EIF4EBP1 → ``dp14/mTORC1_pS2448`` (kinase-level proxy)
 - CYCS → ``dp14/Mito_mass_new`` (biogenesis proxy)
-- DDB2 → ``gz06/x_integral`` (trailing mean of p53; DDB2 is a direct p53 target)
-- MDM2 → ``gz06/y_integral`` (trailing mean of Mdm2; ⟨y⟩∝ψ, the damage-graded
-  canonical p53 target)
+- DDB2 → ``gz06/x`` (raw p53; lag-free RMS amplitude √⟨x²⟩ read post-hoc — DDB2
+  is a direct p53 target, and the pulse amplitude carries the damage signal)
+- MDM2 → ``gz06/y`` (raw Mdm2; ⟨y⟩∝ψ, the damage-graded canonical p53 target)
 - NFKBIA → ``nfkb/IkBat`` (IκBα transcript). Transcriptomic NFKBIA
   measures the IκBα *transcript*, an NF-κB target that rises *with*
   activity — not the cytoplasmic IκBα *protein* (``nfkb/IkBa``), whose
@@ -125,8 +119,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from hallsim.composite import Composite
+from hallsim.models.forcing import drive_pulse
 from hallsim.models.hill_edge import HillActivationEdge, HillSignalEdge
-from hallsim.models.running_integral import RunningIntegral
 from hallsim.sbml_import import process_from_sbml
 
 _MODELS_DIR = Path(__file__).parent.parent.parent.parent / "models"
@@ -203,21 +197,16 @@ RAPA_INTERVENTION_DAY = DDIS_ETOPOSIDE_DOSE_WINDOW[1]
 # from a nonzero basal floor (control) to GZ06_PSI_FULL (DDIS). The basal floor
 # is the fitted mechanism parameter, exposed as the ordinary `parameters.psi`
 # (the driver reads it as the Hill's lower bound).
-# Leaky-integral memory (days) for the oscillating reporters' RunningIntegrals.
-# Leaky (not flat) so the accumulator is bounded with a fixed point — the
-# composite equilibrates. τ≈2 d averages several p53 / NF-κB periods into a
-# smooth envelope; the constant cancels in each reporter's log2 fold-change.
-RUNNING_INTEGRAL_TAU = 2.0
-
 GZ06_PSI_NAME = "psi"
 GZ06_PSI_DEFAULT = 1.0  # full-damage reference (standalone screening)
 GZ06_PSI_BASAL_DEFAULT = 0.3  # control basal ψ; fitted in the composite
 GZ06_PSI_FULL = 1.0  # saturated ψ at full DDIS (the driver's `hi`)
-# Hill gate mapping DP14 DNA_damage → GZ06 psi. K=19 sits below the DDIS
-# damage operating point so the damaged arms lift ψ well into the Hill's
-# responsive band (DDB2's p53-amplitude readout tracks it) while control
-# stays near basal. n=2 matches the damage→IKK edge. See docs/gz06-basal-p53.md.
-GZ06_PSI_DRIVE_K = 19.0
+# Hill gate mapping DP14 DNA_damage → GZ06 psi. K sits at the damage operating
+# point that separates control from DDIS (placed via
+# hallsim.calibration.suggest_hill_gate) and is fitted in the composite so the
+# data — not a hand-set threshold — decides where p53 fires; n=2 matches the
+# damage→IKK edge. See docs/gz06-basal-p53.md.
+GZ06_PSI_DRIVE_K = 52.0
 GZ06_PSI_DRIVE_N = 2.0
 
 # Canonical clock for the composite: one t_span unit = one day. DP14
@@ -269,15 +258,16 @@ def build_multi_hallmark_composite(
         .reconciled_to(CANONICAL_TIME_SECONDS)
         .with_param_input(GZ06_PSI_NAME, "psi_in")
     )
+    dp14 = process_from_sbml(
+        str(DP14_SBML_PATH),
+        name="dp14",
+        parameters={
+            DP14_MTOR_PHOS_RATE_NAME: DP14_MTOR_PHOS_RATE_DEFAULT,
+            DP14_IRRADIATION_RATE_NAME: DP14_IRRADIATION_RATE_DEFAULT,
+        },
+    ).reconciled_to(CANONICAL_TIME_SECONDS)
     processes: dict = {
-        "dp14": process_from_sbml(
-            str(DP14_SBML_PATH),
-            name="dp14",
-            parameters={
-                DP14_MTOR_PHOS_RATE_NAME: DP14_MTOR_PHOS_RATE_DEFAULT,
-                DP14_IRRADIATION_RATE_NAME: DP14_IRRADIATION_RATE_DEFAULT,
-            },
-        ).reconciled_to(CANONICAL_TIME_SECONDS),
+        "dp14": dp14,
         "nfkb": nfkb,
         "gz06": gz06,
         # DNA damage → ψ: GZ06's p53 damage-input, assigned as an algebraic
@@ -339,24 +329,10 @@ def build_multi_hallmark_composite(
             reference="Karin & Ben-Neriah 2000",
             description="IKKβ → IKK edge (DallePezze 2014 → Ihekwaba 2004).",
         ),
-        # ∫ observers for the oscillating reporters (read in the source's group
-        # so the integral sees the oscillation), differenced to a grid-
-        # independent readout. p53 (x) uses power=2 → ∫x² feeds DDB2's RMS
-        # amplitude √⟨x²⟩: GZ06's ψ-cancellation makes ⟨x⟩ damage-blind, but the
-        # oscillation amplitude grows with damage. Mdm2 (y) and IκBα-transcript
-        # use power=1: their DC level ⟨·⟩ is already damage-responsive.
-        "gz06_x_integral": RunningIntegral(
-            timescale=gz06.timescale, power=2.0, tau=RUNNING_INTEGRAL_TAU
-        ),
-        "gz06_y_integral": RunningIntegral(
-            timescale=gz06.timescale, power=1.0, tau=RUNNING_INTEGRAL_TAU
-        ),
-        # NFKBIA reads the IκBα *transcript* (nfkb/IkBat) directly, not a TF
-        # activity, so power=1 (mean): its DC level is damage-responsive (no
-        # mean-cancellation), unlike the p53 axis. power=2 over-predicts it.
-        "nfkb_ikbat_integral": RunningIntegral(
-            timescale=nfkb.timescale, power=1.0, tau=RUNNING_INTEGRAL_TAU
-        ),
+        # The oscillating reporters (DDB2, MDM2, NFKBIA) read their raw species
+        # directly and summarize post-hoc (zero-phase RMS / mean over the
+        # finely-saved trajectory) — no integral observers, so nothing
+        # accumulates, lags, or stiffens the solve.
         # p53 → CDKN1A (p21): canonical p53 target (el-Deiry 1993; Shi 2021
         # Hill n=1.8). GZ06's group to read p53 live; Hill-gated flux
         # integrated by DP14's CDKN1A turnover.
@@ -375,10 +351,6 @@ def build_multi_hallmark_composite(
             description="p53 → CDKN1A (p21) edge (Geva-Zatorsky 2006 → DallePezze).",
         ),
     }
-    if dose_window is not None:
-        processes["dp14"] = processes["dp14"].with_pulse_window(
-            DP14_IRRADIATION_INPUT_NAME, *dose_window
-        )
     # SBML processes carry no topology entries (each auto-prefixes to its own
     # ``<name>/`` namespace); only these edges cross namespaces.
     topology: dict = {
@@ -396,21 +368,25 @@ def build_multi_hallmark_composite(
             "source": "dp14/IKKbeta",
             "target": "nfkb/IKK",
         },
-        "gz06_x_integral": {
-            "source": "gz06/x",
-            "integral": "gz06/x_integral",
-        },
-        "gz06_y_integral": {
-            "source": "gz06/y",
-            "integral": "gz06/y_integral",
-        },
-        "nfkb_ikbat_integral": {
-            "source": "nfkb/IkBat",
-            "integral": "nfkb/IkBat_integral",
-        },
         # p53 → CDKN1A: read GZ06 p53, add transcription flux to DP14's p21.
         "p53_cdkn1a": {"source": "gz06/x", "target": "dp14/CDKN1A"},
     }
+    # Etoposide exposure: a PulseSource ("irradiation_pulse") drives DP14's
+    # Irradiation input over the dose window — composed from the general
+    # port-coupling path, not a special-cased pulse. Its amplitude is the
+    # Genomic Instability exposure level (set per condition via the hallmark).
+    if dose_window is not None:
+        drive_pulse(
+            processes,
+            topology,
+            target="dp14",
+            input_name=DP14_IRRADIATION_INPUT_NAME,
+            t_start=dose_window[0],
+            t_end=dose_window[1],
+            amplitude=1.0,
+            source_name="irradiation_pulse",
+            hallmark="Genomic Instability",
+        )
     return Composite(
         processes=processes,
         topology=topology,

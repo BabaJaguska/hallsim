@@ -59,7 +59,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-cells", type=int, default=256)
     ap.add_argument("--gi", type=float, default=0.5)
-    ap.add_argument("--dns", type=float, default=0.5)
+    ap.add_argument("--dns", type=float, default=0.0)
     ap.add_argument("--param-cv", type=float, default=0.30)
     ap.add_argument("--ic-cv", type=float, default=0.10)
     ap.add_argument("--t-end", type=float, default=60.0)

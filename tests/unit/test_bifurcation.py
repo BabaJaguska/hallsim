@@ -87,6 +87,8 @@ def test_hopf_scan_no_false_positive_when_no_crossing():
     # mu stays negative -> stable focus throughout, no Hopf.
     params = np.linspace(-0.5, -0.1, 21)
     assert (
-        hopf_scan(lambda m: _normal_form(m, -1.0), params, x0_guess=[0.02, 0.0])
+        hopf_scan(
+            lambda m: _normal_form(m, -1.0), params, x0_guess=[0.02, 0.0]
+        )
         == []
     )

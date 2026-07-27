@@ -19,6 +19,9 @@ spurious feedback cycle.
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
+
 import equinox as eqx
 import jax.numpy as jnp
 
@@ -97,7 +100,11 @@ class HillSignalEdge(Process):
         0.3, description="signal floor at source→0; fit against the reporter."
     )
     hi: float = eqx.field(static=True, default=1.0)
-    K: float = eqx.field(static=True, default=1.0)
+    K: float = calibratable(
+        1.0,
+        description="source threshold; place at the operating point "
+        "(hallsim.calibration.suggest_hill_gate) or fit against the readout.",
+    )
     n: float = eqx.field(static=True, default=2.0)
 
     source_ontology: dict | None = eqx.field(static=True, default=None)
@@ -128,3 +135,81 @@ class HillSignalEdge(Process):
             state["source"], jnp.asarray(self.K), jnp.asarray(self.n)
         )
         return {"signal": self.basal + (self.hi - self.basal) * gate}
+
+
+@dataclass
+class HillGateSuggestion:
+    """Deterministically-placed Hill ``(K, n)`` for a gate that should be
+    ~closed at ``off_level`` and ~open at ``on_level`` (see
+    :func:`place_hill_gate`). ``ok`` is False when the levels overlap or are too
+    close for a clean gate — read ``note`` for why."""
+
+    K: float
+    n: float
+    off_level: float
+    on_level: float
+    off_occupancy: float
+    on_occupancy: float
+    ok: bool
+    note: str
+
+
+def _occ(x, K, n):
+    return x**n / (K**n + x**n)
+
+
+def place_hill_gate(
+    off_level, on_level, *, off_occupancy: float = 0.1, n_max: float = 8.0
+) -> HillGateSuggestion:
+    """Deterministic Hill ``(K, n)`` from a source's off/on operating levels.
+
+    Places ``K`` at the geometric mean ``sqrt(off*on)`` — the operating midpoint —
+    and picks the smallest ``n`` making the gate at most ``off_occupancy`` open at
+    ``off_level`` (so it is ``1 - off_occupancy`` open at ``on_level``, by the
+    symmetry of the Hill about ``K``). Flags (``ok=False``) when ``on <= off``
+    (ranges overlap — no monotone gate separates them) or when the required ``n``
+    exceeds ``n_max`` (levels too close for a clean gate). Pure arithmetic on
+    measured operating points — no fitting, no heuristics beyond the stated rule;
+    pair with :meth:`hallsim.calibration.CalibrationProblem.suggest_hill_gate`
+    which supplies the levels from :meth:`operating_ranges`."""
+    off = float(off_level)
+    on = float(on_level)
+    if off <= 0.0 or on <= 0.0:
+        return HillGateSuggestion(
+            max(on, 1e-9),
+            2.0,
+            off,
+            on,
+            float("nan"),
+            float("nan"),
+            False,
+            "non-positive operating level; cannot place a Hill gate",
+        )
+    K = math.sqrt(off * on)
+    if on <= off:
+        return HillGateSuggestion(
+            K,
+            2.0,
+            off,
+            on,
+            _occ(off, K, 2.0),
+            _occ(on, K, 2.0),
+            False,
+            f"off ({off:.3g}) >= on ({on:.3g}): operating ranges overlap — "
+            "no monotone Hill gate separates the arms at these parameters",
+        )
+    r = on / off
+    need = math.log((1.0 - off_occupancy) / off_occupancy) / (
+        0.5 * math.log(r)
+    )
+    n = max(2.0, math.ceil(need))
+    ok = n <= n_max
+    note = (
+        "ok"
+        if ok
+        else f"needs n={n:.0f} (>{n_max:.0f}); off/on separation r={r:.2f} "
+        "is too small for a clean gate — the driver barely distinguishes the arms"
+    )
+    return HillGateSuggestion(
+        K, float(n), off, on, _occ(off, K, n), _occ(on, K, n), ok, note
+    )

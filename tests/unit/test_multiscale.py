@@ -1256,15 +1256,16 @@ def _osc_composite():
     )
 
 
-def test_nyquist_guardrail_warns_on_coarse_grid(caplog):
-    """save_dt above period/2 (Nyquist) warns once; the message names the
-    aliasing and points at RunningIntegral / finer saves."""
+def test_nyquist_guardrail_reduces_on_coarse_grid(caplog):
+    """save_dt above period/2 (Nyquist) is auto-reduced (once, logged) so a raw
+    oscillating state read off the grid does not alias — no accumulator added.
+    """
     import logging
 
     comp = _osc_composite()
     s = Scheduler(auto_stiffness=True)
-    with caplog.at_level(logging.WARNING, logger="hallsim.scheduler"):
-        s.run(
+    with caplog.at_level(logging.INFO, logger="hallsim.scheduler"):
+        res = s.run(
             comp,
             t_span=(0.0, 1.0),
             macro_dt=0.5,
@@ -1272,11 +1273,14 @@ def test_nyquist_guardrail_warns_on_coarse_grid(caplog):
             save_dt=0.2,  # > period/2 (≈0.157) → below Nyquist; divides t_span
         )
     assert s._warned_save_res
-    assert any("undersamples" in r.message for r in caplog.records)
+    assert any("auto-reduced" in r.message for r in caplog.records)
+    # grid is actually finer than requested (more than the ~5 points 0.2 gives)
+    assert len(res.ts) > int(1.0 / 0.2) + 1
 
 
 def test_nyquist_guardrail_silent_on_fine_grid():
-    """A Nyquist-satisfying grid (save_dt < period/2) does not warn."""
+    """A grid already at ~10 samples/period (save_dt < period/10) is left as-is —
+    no reduction. period ≈ 0.314, so period/10 ≈ 0.0314."""
     comp = _osc_composite()
     s = Scheduler(auto_stiffness=True)
     s.run(
@@ -1284,25 +1288,26 @@ def test_nyquist_guardrail_silent_on_fine_grid():
         t_span=(0.0, 1.0),
         macro_dt=0.5,
         y0=comp.initial_state_vec(),
-        save_dt=0.1,  # < period/2 (≈0.157) → resolves the oscillation
+        save_dt=0.02,  # < period/10 → already fine for a raw amplitude readout
     )
     assert not s._warned_save_res
 
 
 def test_nyquist_guardrail_opt_out():
-    """warn_save_resolution=False suppresses the check even on a coarse grid —
-    for runs whose readouts are grid-independent (RunningIntegral-based)."""
+    """antialias=False takes the requested grid verbatim (no reduction)."""
     comp = _osc_composite()
     s = Scheduler(auto_stiffness=True)
-    s.run(
+    res = s.run(
         comp,
         t_span=(0.0, 1.0),
         macro_dt=0.5,
         y0=comp.initial_state_vec(),
         save_dt=0.2,
-        warn_save_resolution=False,
+        antialias=False,
     )
     assert not s._warned_save_res
+    # grid left as requested (~1.0/0.2 points), not refined
+    assert len(res.ts) <= int(1.0 / 0.2) + 2
 
 
 def test_save_grid_never_overshoots_t1():
@@ -1314,3 +1319,77 @@ def test_save_grid_never_overshoots_t1():
         assert float(ts[0]) == t0
         assert float(ts[-1]) == pytest.approx(t1)
         assert float(jnp.max(ts)) <= t1 + 1e-9
+
+
+class AlgebraicDouble(Process):
+    """ASSIGNED (algebraic) port z := 2*x — no integration; materialized
+    post-solve. Present to lock the algebraic-port path of the full-state
+    guarantee (the historical stale-ASSIGNED footgun)."""
+
+    kind: ProcessKind = ProcessKind.CONTINUOUS
+    timescale: float | None = None
+
+    def ports_schema(self):
+        return {
+            "z": Port(role=PortRole.ASSIGNED, default=0.0, units="uM"),
+            "x": Port(role=PortRole.INPUT, default=0.0, units="uM"),
+        }
+
+    def assign(self, t, state):
+        return {"z": 2.0 * state["x"]}
+
+
+@pytest.mark.parametrize(
+    "name,processes,topology",
+    [
+        # fast path — single continuous group
+        (
+            "fast",
+            {"prod": ConstantProduction(), "alg": AlgebraicDouble()},
+            {"prod": {"x": "pool/x"}, "alg": {"x": "pool/x", "z": "pool/z"}},
+        ),
+        # scan-continuous path — two groups, timescales 1000x apart
+        (
+            "multiscale",
+            {
+                "decay": SimpleDecay(),
+                "grow": SlowGrowth(),
+                "alg": AlgebraicDouble(),
+            },
+            {
+                "decay": {"x": "a/x"},
+                "grow": {"y": "b/y"},
+                "alg": {"x": "a/x", "z": "a/z"},
+            },
+        ),
+        # macro path — a DISCRETE process forces per-macro-step stepping
+        (
+            "with_discrete",
+            {
+                "prod": ConstantProduction(),
+                "div": DivisionCheck(),
+                "alg": AlgebraicDouble(),
+            },
+            {
+                "prod": {"x": "pool/x"},
+                "div": {"cell_count": "pool/n", "damage": "pool/x"},
+                "alg": {"x": "pool/x", "z": "pool/z"},
+            },
+        ),
+    ],
+)
+def test_result_carries_full_state(name, processes, topology):
+    """SchedulerResult.ys/keys carry EVERY store path — including the
+    materialized ASSIGNED port — from every run path. No return site emits a
+    subset; if one ever does, this fails. This is the framework-level
+    enforcement of the full-state guarantee (see SchedulerResult docstring)."""
+    comp = Composite(processes=processes, topology=topology)
+    res = Scheduler().run(comp, t_span=(0.0, 3.0), macro_dt=1.0, save_dt=0.5)
+
+    assert set(res.keys) == comp.store_paths()
+    assert res.ys.shape[-1] == len(comp.store_paths())
+    # algebraic port present and correctly materialized (z == 2*x), not stale 0
+    zpath = "pool/z" if "pool/z" in res else "a/z"
+    xpath = "pool/x" if "pool/z" in res else "a/x"
+    assert zpath in res
+    assert jnp.allclose(res.get(zpath), 2.0 * res.get(xpath), atol=1e-4)

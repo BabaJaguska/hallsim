@@ -46,6 +46,11 @@ class ImportedODEProcess(Process):
     """
 
     native_time_seconds: float = 1.0
+    # Did the source actually declare its time unit, or is native_time_seconds
+    # a fallback guess (SBML default = seconds)? False means the clock is
+    # unverified: reconciling / composing it onto a shared axis can be silently
+    # 60×/3600×/86400× wrong. Set at import; True for hand-built processes.
+    native_time_declared: bool = eqx.field(static=True, default=True)
     time_scale: float = 1.0
     parameters: dict[str, float] = None  # type: ignore[assignment]
     _param_names: tuple[str, ...] = ()
@@ -139,6 +144,7 @@ class ImportedODEProcess(Process):
     def metadata(self):
         base = super().metadata()
         base["native_time_seconds"] = self.native_time_seconds
+        base["native_time_declared"] = self.native_time_declared
         base["time_scale"] = self.time_scale
         base["n_parameters"] = len(self._param_names)
         return base
