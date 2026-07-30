@@ -208,10 +208,16 @@ def hopf_scan(
     re = np.asarray(re)
 
     out: list[HopfPoint] = []
+    # Sign of Re(leading pair), with exact 0 on the + side. A crossing that
+    # lands exactly on a grid node (Re == 0, e.g. a Hopf at mu=0 sampled
+    # on-node — platform-dependent whether the fixed-point solve rounds to
+    # exactly 0) then still registers as a sign change, rather than being
+    # skipped by a `re[i-1]*re[i] >= 0` product test that treats 0 as no-cross.
+    side = np.where(re >= 0.0, 1.0, -1.0)
     for i in range(1, len(params)):
         if not (np.isfinite(re[i - 1]) and np.isfinite(re[i])):
             continue
-        if re[i - 1] * re[i] >= 0:
+        if side[i - 1] == side[i]:
             continue
         seed = xs[i - 1] if xs[i - 1] is not None else guess
         pc = float(params[i])

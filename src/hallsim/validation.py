@@ -250,6 +250,26 @@ class UnitChecker:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def _path_identity(writers: list[_PortEntry]) -> dict[str, str]:
+    """Annotation the path's writers agree on, per namespace. Namespaces
+    where they disagree are dropped — those are the conflicts the checker
+    is there to report."""
+    merged: dict[str, str] = {}
+    conflicted: set[str] = set()
+    for e in writers:
+        for ns, value in (e.port.ontology or {}).items():
+            if merged.setdefault(ns, value) != value:
+                conflicted.add(ns)
+    return {ns: v for ns, v in merged.items() if ns not in conflicted}
+
+
+def _inherits_identity(port: Port) -> bool:
+    """A pure source (EVOLVED, ``reads_value=False``) injects flux into a
+    path it never reads — a coupling edge. It has no entity of its own to
+    conflict with, so it takes the path's identity."""
+    return port.role is PortRole.EVOLVED and not port.reads_value
+
+
 class SemanticChecker:
     """Validates that ports wired to the same store path refer to the same
     biological entity, using ontology annotations.
@@ -257,6 +277,9 @@ class SemanticChecker:
     - ERROR: conflicting ontology IDs on shared store path.
     - WARNING: partial annotation (one port has ontology, another doesn't).
     - INFO: no annotations on shared path (unverifiable).
+
+    Unannotated pure-source ports inherit the path's agreed annotation
+    instead of triggering the partial-annotation warning.
     """
 
     def check(
@@ -272,7 +295,15 @@ class SemanticChecker:
             if len(writers) < 2:
                 continue
 
-            onts = [(e, e.port.ontology or {}) for e in writers]
+            inherited = _path_identity(writers)
+            onts = [
+                (
+                    e,
+                    e.port.ontology
+                    or (inherited if _inherits_identity(e.port) else {}),
+                )
+                for e in writers
+            ]
 
             for i, (e1, ont1) in enumerate(onts):
                 for e2, ont2 in onts[i + 1 :]:

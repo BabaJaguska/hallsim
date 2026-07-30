@@ -278,6 +278,76 @@ class TestSemanticChecker:
         infos = [r for r in results if r.level == Severity.INFO]
         assert any("no ontology" in i.message.lower() for i in infos)
 
+    def test_pure_source_inherits_target_ontology(self):
+        """An unannotated coupling edge (EVOLVED, reads_value=False) takes
+        the path's annotation — no partial-annotation warning."""
+
+        class Edge(Process):
+            k: float = 0.1
+
+            def ports_schema(self):
+                return {
+                    "target": Port(
+                        role=PortRole.EVOLVED,
+                        default=0.0,
+                        units="uM",
+                        reads_value=False,
+                    )
+                }
+
+            def derivative(self, t, state):
+                return {"target": jnp.asarray(self.k)}
+
+        procs = {"a": ROSProducerMicromolar(), "edge": Edge()}
+        topo = {"a": {"ros": "pool/ros"}, "edge": {"target": "pool/ros"}}
+        results = SemanticChecker().check(procs, topo)
+        assert not [r for r in results if r.level != Severity.INFO]
+
+    def test_pure_source_does_not_mask_conflict(self):
+        """Inheritance is per-namespace and only over agreeing writers —
+        a real conflict between two annotated writers still errors."""
+
+        class Edge(Process):
+            k: float = 0.1
+
+            def ports_schema(self):
+                return {
+                    "target": Port(
+                        role=PortRole.EVOLVED,
+                        default=0.0,
+                        units="uM",
+                        reads_value=False,
+                    )
+                }
+
+            def derivative(self, t, state):
+                return {"target": jnp.asarray(self.k)}
+
+        procs = {
+            "a": ROSProducerMicromolar(),
+            "b": SuperoxideProducer(),
+            "edge": Edge(),
+        }
+        topo = {
+            "a": {"ros": "pool/ros"},
+            "b": {"ros": "pool/ros"},
+            "edge": {"target": "pool/ros"},
+        }
+        results = SemanticChecker().check(procs, topo)
+        assert [r for r in results if r.level == Severity.ERROR]
+
+    def test_reading_writer_still_warns(self):
+        """A plain (value-reading) unannotated writer is a distinct entity
+        claim — it keeps warning."""
+        procs = {"a": ROSProducerMicromolar(), "b": BareProducer()}
+        topo = {"a": {"ros": "pool/x"}, "b": {"x": "pool/x"}}
+        results = SemanticChecker().check(procs, topo)
+        assert any(
+            "partial" in r.message.lower()
+            for r in results
+            if r.level == Severity.WARNING
+        )
+
     def test_noncomparable_namespaces(self):
         """Both annotated but in disjoint namespaces (chebi vs go) → INFO,
         not a false 'partial / has none' warning."""
