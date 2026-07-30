@@ -12,6 +12,9 @@ Covers:
 
 from __future__ import annotations
 
+import logging
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
@@ -807,6 +810,88 @@ class TestSchedulerBasic:
         assert isinstance(result.events, list)
         assert "pool/x" in result
         assert len(result.ts) == len(result.get("pool/x"))
+
+
+class TestSolveStatus:
+    """``result.ok`` and the SOLVE FAILED report, scalar and batched."""
+
+    def _composite(self):
+        return Composite(
+            processes={"decay": SimpleDecay(rate=0.1)},
+            topology={"decay": {"x": "pool/x"}},
+        )
+
+    def test_ok_true_on_success(self):
+        result = Scheduler().run(
+            self._composite(), t_span=(0.0, 10.0), macro_dt=1.0
+        )
+        assert bool(result.ok)
+
+    def test_ok_false_on_failure(self):
+        result = Scheduler(max_steps=4, throw=False).run(
+            self._composite(), t_span=(0.0, 10.0), macro_dt=10.0
+        )
+        assert not bool(result.ok)
+
+    def test_ok_is_per_member_under_vmap(self):
+        """A batch where one member fails: ok carries the batch axis."""
+        comp = self._composite()
+        sched = Scheduler(max_steps=64, throw=False)
+
+        def run(rate):
+            c = eqx.tree_at(lambda c: c.processes["decay"].rate, comp, rate)
+            return sched.run(c, t_span=(0.0, 10.0), macro_dt=10.0).ok
+
+        ok = jax.jit(jax.vmap(run))(jnp.array([0.1, jnp.nan, 0.1]))
+        assert [bool(v) for v in ok] == [True, False, True]
+
+    def test_successful_batch_reports_nothing(self, caplog):
+        """Under vmap the lax.cond degrades to a select and both branches run —
+        a batch that solved must not log SOLVE FAILED."""
+        comp = self._composite()
+        sched = Scheduler()
+
+        def run(rate):
+            c = eqx.tree_at(lambda c: c.processes["decay"].rate, comp, rate)
+            return sched.run(c, t_span=(0.0, 10.0), macro_dt=1.0).get("pool/x")
+
+        with caplog.at_level(logging.ERROR, logger="hallsim.scheduler"):
+            ys = jax.jit(jax.vmap(run))(jnp.array([0.1, 0.2, 0.3]))
+        assert jnp.isfinite(ys).all()
+        assert "SOLVE FAILED" not in caplog.text
+
+    def test_diagnosis_is_carried_as_data(self):
+        """The worst-state summary survives jit/vmap, where an in-graph debug
+        callback's output would be dropped."""
+        comp = self._composite()
+        sched = Scheduler(max_steps=64, throw=False)
+
+        def run(rate):
+            c = eqx.tree_at(lambda c: c.processes["decay"].rate, comp, rate)
+            out = sched.run(c, t_span=(0.0, 10.0), macro_dt=10.0)
+            d = out.stats["diagnosis"]
+            return d["worst_state_index"], d["any_nonfinite"], out.ok
+
+        idx, nonfinite, ok = jax.jit(jax.vmap(run))(
+            jnp.array([0.1, jnp.nan, 0.1])
+        )
+        result = sched.run(comp, t_span=(0.0, 10.0), macro_dt=10.0)
+        assert result.keys[int(idx[0])] == "pool/x"
+        assert [bool(v) for v in nonfinite] == [False, True, False]
+        assert [bool(v) for v in ok] == [True, False, True]
+
+    def test_batched_matches_solo(self):
+        comp = self._composite()
+        sched = Scheduler()
+
+        def run(rate):
+            c = eqx.tree_at(lambda c: c.processes["decay"].rate, comp, rate)
+            return sched.run(c, t_span=(0.0, 10.0), macro_dt=1.0).get("pool/x")
+
+        rates = jnp.array([0.1, 0.2, 0.3])
+        batched = jax.jit(jax.vmap(run))(rates)
+        solo = jnp.stack([run(r) for r in rates])
+        assert jnp.allclose(batched, solo, atol=1e-10)
 
 
 class TestSchedulerInitValidation:

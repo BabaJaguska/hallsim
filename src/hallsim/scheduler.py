@@ -72,6 +72,39 @@ from hallsim.stiffness import (
 _TIME_EPS: float = 1e-12
 
 
+def _worst_state(ys: jnp.ndarray):
+    """``(index, magnitude, any_nonfinite)`` for the largest ``|state|`` in a
+    trajectory, non-finite entries ranking above everything.
+
+    Reduces every leading axis and keeps the trailing state axis, so it works
+    on a final vector or a full trajectory; under ``vmap`` it sees one member
+    and the batch axis is carried by JAX.
+    """
+    absy = jnp.abs(ys)
+    per_state = jnp.max(
+        jnp.where(jnp.isfinite(absy), absy, jnp.inf),
+        axis=tuple(range(absy.ndim - 1)),
+    )
+    idx = jnp.argmax(per_state)
+    return idx, per_state[idx], jnp.any(~jnp.isfinite(ys))
+
+
+def _attach_diagnosis(stats: dict, ys: jnp.ndarray) -> dict:
+    """Add the composite-wide worst-state summary to ``stats`` as traced data.
+
+    Costs one argmax over the saved trajectory and no host round-trip, so a
+    jitted or vmapped run keeps the diagnosis that an in-graph debug callback
+    could not deliver. ``worst_state_index`` indexes ``SchedulerResult.keys``.
+    """
+    idx, mag, nonfinite = _worst_state(ys)
+    stats["diagnosis"] = {
+        "worst_state_index": idx,
+        "worst_magnitude": mag,
+        "any_nonfinite": nonfinite,
+    }
+    return stats
+
+
 @dataclass
 class EventRecord:
     """Log entry for a fired event."""
@@ -141,7 +174,10 @@ class SchedulerResult:
     events:
         Log of fired events.
     stats:
-        Per-group solver statistics.
+        Per-group solver statistics, plus a ``"diagnosis"`` entry — the
+        composite-wide worst state (``worst_state_index`` into :attr:`keys`,
+        ``worst_magnitude``, ``any_nonfinite``) as traced, batch-carrying
+        arrays. Pair with :attr:`ok` to diagnose a jitted or vmapped run.
     """
 
     ts: jnp.ndarray
@@ -157,6 +193,29 @@ class SchedulerResult:
         for batched runs.
         """
         return self.ys[..., self.keys.index(key)]
+
+    @property
+    def ok(self) -> jnp.ndarray:
+        """Did every group solve? Traced boolean — under ``vmap`` it carries
+        the batch axis, so a population run reports success per member.
+
+        The queryable form of the ``RESULTS`` codes in :attr:`stats`; with
+        ``Scheduler(throw=False)`` this is the check to branch on instead of
+        reading the logged report.
+        """
+        codes = [
+            st["result"]
+            for st in self.stats.values()
+            if isinstance(st, dict) and "result" in st
+        ]
+        if not codes:
+            return jnp.asarray(True)
+        return jnp.all(
+            jnp.stack(
+                [jnp.asarray(c == dfx.RESULTS.successful) for c in codes]
+            ),
+            axis=0,
+        )
 
     def __contains__(self, key: str) -> bool:
         return key in self.keys
@@ -672,7 +731,7 @@ class Scheduler:
                 ys=ys,
                 keys=keys,
                 events=[],
-                stats=stats,
+                stats=_attach_diagnosis(stats, ys),
             )
 
         # ─── Scan path: continuous-only, frozen, fixed macro_dt ────────
@@ -965,7 +1024,8 @@ class Scheduler:
         ys = composite.materialize_assigned(ts, ys)
 
         return SchedulerResult(
-            ts=ts, ys=ys, keys=keys, events=events, stats=stats
+            ts=ts, ys=ys, keys=keys, events=events,
+            stats=_attach_diagnosis(stats, ys),
         )
 
     def _effective_coupling(
@@ -1225,7 +1285,10 @@ class Scheduler:
         }
         # Fill ASSIGNED (algebraic) columns from each saved state (see run()).
         ys = composite.materialize_assigned(ts, ys)
-        return SchedulerResult(ts=ts, ys=ys, keys=keys, events=[], stats=stats)
+        return SchedulerResult(
+            ts=ts, ys=ys, keys=keys, events=[],
+            stats=_attach_diagnosis(stats, ys),
+        )
 
     @staticmethod
     def _integrator_signature(groups, state, macro_dt):
@@ -1619,38 +1682,39 @@ class Scheduler:
         return final_vec, last_dt, diag
 
     def _guard_result(self, value, result, group_name: str, integ, keys=None):
-        """On a failed solve (when ``self.throw``) emit a self-diagnosing
-        report, then re-raise.
+        """On a failed solve (when ``self.throw``) raise a labelled error, and
+        name the failure kind + worst state when the values are concrete.
 
-        ``eqx.error_if`` bakes the check into ``value`` so it fires both
-        eagerly and under JIT/grad; with ``throw=False`` it is a no-op and the
-        ``RESULTS`` code reaches stats instead. The report is a runtime callback
-        gated by ``lax.cond`` on the failure path (no per-solve overhead on
-        success), so a crash names the failure *kind* (max_steps vs stiff/Newton
-        divergence) and the worst state — no re-run needed to diagnose.
+        ``eqx.error_if`` bakes the check into ``value``, so the *raise* fires
+        eagerly and under JIT/grad alike; with ``throw=False`` it is a no-op and
+        the ``RESULTS`` code reaches stats instead.
+
+        The *report* is plain Python on the eager path only — no in-graph
+        callback. A ``lax.cond``-gated callback cannot pay for itself here:
+        under ``vmap`` the cond degrades to a select, so the callback executes
+        once per batch member (~0.2 ms host round-trip each) whether or not
+        anything failed, and under ``jit`` its output is dropped anyway because
+        the ``error_if`` raise wins the race. Traced runs get the diagnosis as
+        data instead — :attr:`SchedulerResult.ok` and ``stats["diagnosis"]``.
         """
         if not self.throw:
             return value
         solver = type(integ.solver).__name__
         stiff = bool(integ.stiff)
         failed = result != dfx.RESULTS.successful
-        is_maxsteps = result == dfx.RESULTS.max_steps_reached
 
-        def _report(is_ms, ys):
-            ys = np.asarray(ys)
-            per = np.abs(ys).reshape(-1, ys.shape[-1])
-            finite = np.isfinite(per)
-            score = np.where(finite, per, np.inf).max(axis=0)
-            widx = int(np.argmax(score)) if score.size else -1
+        if not isinstance(failed, jax.core.Tracer) and bool(failed):
+            idx, mag, nonfinite = _worst_state(value)
+            i = int(idx)
             wname = (
-                keys[widx]
-                if (keys is not None and 0 <= widx < len(keys))
-                else f"state#{widx}"
+                keys[i]
+                if (keys is not None and 0 <= i < len(keys))
+                else f"state#{i}"
             )
             kind = (
                 "max_steps_reached — the stiff solve ran out of steps; raise "
                 "Scheduler(max_steps=…) or reduce the group's stiffness"
-                if bool(is_ms)
+                if bool(result == dfx.RESULTS.max_steps_reached)
                 else "stiff/implicit-Newton divergence — the state got too "
                 "stiff for the implicit step (a fast mode; find the parameter "
                 "driving it)"
@@ -1663,19 +1727,14 @@ class Scheduler:
                 stiff,
                 kind,
                 wname,
-                float(score[widx]) if widx >= 0 else float("nan"),
-                bool((~finite).any()),
+                float(mag),
+                bool(nonfinite),
             )
 
-        jax.lax.cond(
-            failed,
-            lambda: jax.debug.callback(_report, is_maxsteps, value),
-            lambda: None,
-        )
         reason = (
             f"Scheduler: group {group_name!r} did not solve (solver={solver}, "
-            f"stiff={stiff}) — see the SOLVE FAILED report logged above for the "
-            f"RESULTS kind and worst state."
+            f"stiff={stiff}) — inspect result.ok / result.stats['diagnosis'] "
+            f"(run with throw=False) for the RESULTS kind and worst state."
         )
         return eqx.error_if(value, failed, reason)
 
