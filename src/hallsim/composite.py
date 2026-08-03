@@ -143,6 +143,71 @@ def _order_assignments(assign_procs: list) -> list:
     return order
 
 
+def _port_view(y_vec, read_pairs):
+    """The ``{port_name: value}`` dict a Process's ``derivative``/``assign``
+    consumes, gathered from the flat state and converted to port units."""
+    return {port: y_vec[..., idx] * rf for port, idx, rf in read_pairs}
+
+
+def _apply_assignments(assign_pre, t, y_vec):
+    """Inject each ASSIGNED path's algebraic value into ``y_vec`` (returns a
+    new array; JAX-functional). Shared by the RHS and materialization."""
+    for proc, read_pairs, assign_pairs in assign_pre:
+        raw = proc.assign(t, _port_view(y_vec, read_pairs))
+        for port, idx, wf in assign_pairs:
+            if port in raw:
+                y_vec = y_vec.at[..., idx].set(raw[port] * wf)
+    return y_vec
+
+
+class _FlatRHS(eqx.Module):
+    """Flat-state RHS as a pytree rather than a closure.
+
+    A closure inside ``ODETerm`` is a static leaf, so a fresh one per
+    :meth:`Composite.build_rhs` hashes differently and every solve misses the
+    JIT cache. As a Module the index maps are static and the Processes are
+    children, so repeated builds share a treedef and reuse the compiled solve.
+    """
+
+    procs: tuple
+    assign_procs: tuple
+    read_maps: tuple = eqx.field(static=True, default=())
+    write_maps: tuple = eqx.field(static=True, default=())
+    assign_read_maps: tuple = eqx.field(static=True, default=())
+    assign_write_maps: tuple = eqx.field(static=True, default=())
+
+    def __call__(self, t, y_vec, args=None):
+        # Trailing-axis convention: y_vec is (..., n_vars) — (n,) unbatched,
+        # (batch, n) for a population run. accum follows y_vec's shape so the
+        # scatter stays aligned. Assignments run first so the derivative pass
+        # reads fresh algebraic values; they are not integrated, so a saved
+        # trajectory needs Composite.materialize_assigned to read them.
+        y_vec = _apply_assignments(
+            zip(
+                self.assign_procs,
+                self.assign_read_maps,
+                self.assign_write_maps,
+            ),
+            t,
+            y_vec,
+        )
+        accum = jnp.zeros_like(y_vec)
+        for proc, read_pairs, write_pairs in zip(
+            self.procs, self.read_maps, self.write_maps
+        ):
+            raw = proc.derivative(t, _port_view(y_vec, read_pairs))
+            out = [
+                (idx, raw[port] * wf)
+                for port, idx, wf in write_pairs
+                if port in raw
+            ]
+            if out:
+                idxs = jnp.array([i for i, _ in out])
+                vals = jnp.stack([v for _, v in out], axis=-1)
+                accum = accum.at[..., idxs].add(vals)
+        return accum
+
+
 class Composite(eqx.Module):
     """A wired bundle of Processes sharing a flat state store.
 
@@ -327,17 +392,7 @@ class Composite(eqx.Module):
         # after it (SBML/DAE assignment-rule semantics).
         return _order_assignments(assign_procs)
 
-    @staticmethod
-    def _apply_assignments(assign_pre, t, y_vec):
-        """Inject each ASSIGNED path's algebraic value into ``y_vec`` (returns
-        a new array; JAX-functional). Shared by the RHS and materialization."""
-        for proc, read_pairs, assign_pairs in assign_pre:
-            view = {port: y_vec[..., idx] * rf for port, idx, rf in read_pairs}
-            raw = proc.assign(t, view)
-            for port, idx, wf in assign_pairs:
-                if port in raw:
-                    y_vec = y_vec.at[..., idx].set(raw[port] * wf)
-        return y_vec
+    _apply_assignments = staticmethod(_apply_assignments)
 
     def materialize_assigned(self, ts, ys, proc_names=None):
         """Overwrite the ASSIGNED (algebraic) columns of a saved trajectory
@@ -435,39 +490,17 @@ class Composite(eqx.Module):
                 pre.append((proc, read_pairs, write_pairs))
         assign_pre = self._assignment_pre(proc_names, keys, key_to_idx, canon)
 
-        def rhs(t, y_vec, args=None):
-            # Trailing-axis convention: y_vec is (..., n_vars). Scalars
-            # for unbatched runs (shape (n,)); (batch, n) for batched
-            # population runs through Scheduler.run with a batched y0.
-            # accum follows y_vec's shape so the scatter stays aligned.
-            # Assignment pass first: compute algebraic (ASSIGNED) paths from
-            # the current state and inject them, so the derivative pass reads
-            # the fresh value. Algebraic paths are not integrated (dy stays 0),
-            # so the SAVED trajectory holds their stale initial value — call
-            # :meth:`materialize_assigned` on a solve result to read them.
-            y_vec = self._apply_assignments(assign_pre, t, y_vec)
-            accum = jnp.zeros_like(y_vec)
-            for proc, read_pairs, write_pairs in pre:
-                view = {
-                    port: y_vec[..., idx] * rf for port, idx, rf in read_pairs
-                }
-                raw = proc.derivative(t, view)
-                out = [
-                    (idx, raw[port] * wf)
-                    for port, idx, wf in write_pairs
-                    if port in raw
-                ]
-                if out:
-                    idxs = jnp.array([i for i, _ in out])
-                    # Stack derivative values along the trailing axis to
-                    # match accum's layout. For scalar derivatives this
-                    # is shape (n_writes,); for batched (batch,) per-port
-                    # derivatives this is (batch, n_writes).
-                    vals = jnp.stack([v for _, v in out], axis=-1)
-                    accum = accum.at[..., idxs].add(vals)
-            return accum
-
-        return rhs, keys
+        return (
+            _FlatRHS(
+                procs=tuple(p for p, _, _ in pre),
+                read_maps=tuple(r for _, r, _ in pre),
+                write_maps=tuple(w for _, _, w in pre),
+                assign_procs=tuple(p for p, _, _ in assign_pre),
+                assign_read_maps=tuple(r for _, r, _ in assign_pre),
+                assign_write_maps=tuple(a for _, _, a in assign_pre),
+            ),
+            keys,
+        )
 
     def evolved_indices(
         self,

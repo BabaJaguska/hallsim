@@ -137,6 +137,8 @@ Chill with comments.Chill with comments.Chill with comments.Chill with comments.
 - Seek to understand why composites fail to converge, rather than brute forcing different solvers
 - Don't pull models from memory/training. Search BioModels API or other objective sources for what you need instead.
 - Readme is other user facing. Do not write stuff that is just useful to developers there, such as "This is out of scope for preprint". Cringe. Don't embarrass me.
+- **Never leak my local environment into public-facing text.** No local venv names (`.venv_hallsim/bin/python`), no absolute paths (`/Users/...`), no machine-specific dirs — not in the README, not in demo docstrings (they surface in `--help`), not in docs/ or error messages. Public invocations use the installed entry point (`simulate <command>`) or plain `python demos/x.py`. My local venv belongs in CLAUDE.md and nowhere else.
+- **We have a click CLI — use it.** `simulate` (`hallsim.cli:simulate`, registered in pyproject) is the user-facing surface. A capability worth showing a user gets a `simulate` command, and that is what the README and docs quote. Don't document `python demos/x.py` as the way in when the CLI covers it, and don't add a demo entry point without asking whether it belongs on the CLI. When a demo grows subcommands, the CLI exposes them too rather than drifting behind.
 - Preserve JIT-ability wherver possible. Choose data types and design patterns accordingly.
 
 ## Model intake protocol — READ BEFORE TRUSTING A COMPOSITE
@@ -198,6 +200,7 @@ shared `t` and the result is meaningless — screen for it.
 - Honesty alone is not a virtue. Prefacing a bad result with "an honest finding" does not rescue it. In fact, I hate the word "honest", chill with it. "Truthful" is the same, don't hunt for synonyms, drop the idea that HONEST is a value in itself. It is not. When you say honest, I know things are bad. Stop saying it. If it's bad, it's bad. You are using honest as a euphimism and it is going on my nerves.
 - Test neural networks and other models on held out data, not just training data, don't be a noob.
 - "Honest" is a banned word now.
+- "Hand waving" (and "hand-wavy", "hand-wave", any form of it) is a banned syntagm too. Same reason as "honest": it is a way of gesturing at rigour instead of having it. Don't announce that you are *not* hand waving, and don't accuse a result of it — either measure the thing and report the number, or say plainly what you did not check.
 - Dude, you need to cd into the project before running the scripts.
 - Python loops are looked down upon with disdain. Please vectorize if possible, even if it's just 3 rows, we are trying to make this as general and as scalable as possible.
 - If we are debugging, we are debugging together. I want to see the output graphs, tables, figures that you are basing your decisions on. Not your scratchpad. 

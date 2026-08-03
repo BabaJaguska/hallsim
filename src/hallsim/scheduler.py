@@ -47,6 +47,7 @@ import diffrax as dfx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jax.interpreters import ad
 import numpy as np
 import optimistix as optx
 
@@ -73,12 +74,11 @@ _TIME_EPS: float = 1e-12
 
 
 def _worst_state(ys: jnp.ndarray):
-    """``(index, magnitude, any_nonfinite)`` for the largest ``|state|`` in a
-    trajectory, non-finite entries ranking above everything.
+    """``(index, magnitude, any_nonfinite)`` for the largest ``|state|``,
+    non-finite ranking above everything.
 
-    Reduces every leading axis and keeps the trailing state axis, so it works
-    on a final vector or a full trajectory; under ``vmap`` it sees one member
-    and the batch axis is carried by JAX.
+    Reduces every leading axis and keeps the trailing state axis, so it takes a
+    final vector or a whole trajectory, batched or not.
     """
     absy = jnp.abs(ys)
     per_state = jnp.max(
@@ -90,11 +90,9 @@ def _worst_state(ys: jnp.ndarray):
 
 
 def _attach_diagnosis(stats: dict, ys: jnp.ndarray) -> dict:
-    """Add the composite-wide worst-state summary to ``stats`` as traced data.
-
-    Costs one argmax over the saved trajectory and no host round-trip, so a
-    jitted or vmapped run keeps the diagnosis that an in-graph debug callback
-    could not deliver. ``worst_state_index`` indexes ``SchedulerResult.keys``.
+    """Add the composite-wide worst-state summary to ``stats`` as traced data,
+    so a jitted or vmapped run can still be diagnosed. One argmax, no host
+    round-trip; ``worst_state_index`` indexes ``SchedulerResult.keys``.
     """
     idx, mag, nonfinite = _worst_state(ys)
     stats["diagnosis"] = {
@@ -196,12 +194,8 @@ class SchedulerResult:
 
     @property
     def ok(self) -> jnp.ndarray:
-        """Did every group solve? Traced boolean — under ``vmap`` it carries
-        the batch axis, so a population run reports success per member.
-
-        The queryable form of the ``RESULTS`` codes in :attr:`stats`; with
-        ``Scheduler(throw=False)`` this is the check to branch on instead of
-        reading the logged report.
+        """Did every group solve? Traced boolean, carrying the batch axis under
+        ``vmap`` — with ``Scheduler(throw=False)``, the thing to branch on.
         """
         codes = [
             st["result"]
@@ -291,31 +285,40 @@ class Scheduler:
     Parameters
     ----------
     solver:
-        Diffrax solver instance applied to every group, with the scalar
-        controller. Default ``None`` uses ``explicit_solver`` (``Tsit5()``)
-        — the right choice for SBML biochemical systems in float64, where
-        the explicit solver is both correct and fastest (implicit's cheaper
-        step count is eaten by Newton cost). For a genuinely stiff group,
-        either pin a stiff ``solver`` (e.g. ``Scheduler(solver=dfx.Kvaerno5())``)
-        or set ``auto_stiffness=True`` to route per group.
+        Pin one Diffrax solver for every group, with the scalar controller.
+        Pinning also turns per-group routing off (see ``auto_stiffness``),
+        so ``Scheduler(solver=dfx.Kvaerno5())`` means exactly that solver
+        everywhere. Default ``None`` leaves the choice to routing.
     auto_stiffness:
-        Opt into **per-group solver routing** (default ``False``). When
-        ``True``, each continuous group's local Jacobian spectrum is
-        measured once (eagerly) via :func:`hallsim.stiffness.analyze_groups`;
-        stiff groups get ``implicit_solver`` (A-stable) with a
-        magnitude-scaled vector ``atol`` while the rest keep
-        ``explicit_solver`` with the scalar controller. Off by default
-        because in float64 the explicit solver handles the example
-        composites and wins on wall-clock; turn it on for a composite that
-        mixes a stiff dissipative subsystem with cheap signaling cascades
-        and you'd rather not pick solvers by hand. Mutually exclusive with
-        a pinned ``solver``.
+        **Per-group solver routing**, on by default. Each continuous group's
+        local Jacobian spectrum is measured once (eagerly) via
+        :func:`hallsim.stiffness.analyze_groups`; stiff groups get
+        ``implicit_solver`` (A-stable) with a magnitude-scaled vector
+        ``atol`` while the rest keep ``explicit_solver`` with the scalar
+        controller. The vector ``atol`` is the load-bearing half — on a
+        curated stiff import (DallePezze 2014) routing takes the solve from
+        ~215k explicit steps to ~114, while pinning the implicit solver by
+        hand without it still needs ~3k. On a non-stiff composite the
+        analyzer keeps the explicit solver, so routing costs one eager
+        Jacobian and nothing else.
+
+        Pinning ``solver`` wins over routing: it switches routing off and
+        warns, so a pinned solver always means that solver everywhere.
+        Set ``False`` to switch routing off without pinning anything.
+
+        Routing needs a concrete Jacobian. A run traced (grad/jvp/vmap)
+        with a cold cache has tracer eigenvalues and cannot be measured, so
+        it warns and falls back to ``explicit_solver``. Call :meth:`warm_up`
+        once eagerly to resolve the verdict outside the trace and get
+        routing under autodiff (:class:`hallsim.calibration.CalibrationProblem`
+        does this for you).
     explicit_solver, implicit_solver:
         The two solvers ``auto_stiffness`` routing chooses between. Defaults
         ``Tsit5()`` (explicit) and ``Kvaerno5()`` (implicit, A-stable — the
         diffrax analogue of CVODE's stiff BDF, stable on stiff forward
-        sensitivities). ``explicit_solver`` is also the default ``solver``;
-        ``implicit_solver`` is unused unless ``auto_stiffness=True``.
+        sensitivities). ``explicit_solver`` is also the fallback whenever
+        routing is unavailable; ``implicit_solver`` is unused when routing
+        is off.
     max_explicit_substeps:
         Stiffness threshold forwarded to the analyzer: a group is stiff
         when its fastest decay rate × ``macro_dt`` (stability-limited
@@ -422,7 +425,7 @@ class Scheduler:
         dt0: float = DEFAULT_DT0,
         explicit_solver: dfx.AbstractSolver | None = None,
         implicit_solver: dfx.AbstractSolver | None = None,
-        auto_stiffness: bool = False,
+        auto_stiffness: bool = True,
         atol_scale: float = DEFAULT_ATOL_SCALE,
         max_explicit_substeps: float = DEFAULT_MAX_EXPLICIT_SUBSTEPS,
         groups: dict[str, list[str]] | None = None,
@@ -461,17 +464,20 @@ class Scheduler:
                 "(O(macro_dt^p) splitting error), or splitting='strang' "
                 "with coupling_mode='frozen' (O(macro_dt^2))."
             )
-        # Solver selection. Default: the explicit solver (`explicit_solver`,
-        # Tsit5) for every group with the scalar controller. `auto_stiffness`
-        # opts into per-group routing — the analyzer measures each group's
-        # Jacobian spectrum and sends stiff groups to `implicit_solver` with
-        # a magnitude-scaled vector atol. Pinning `solver` uses that one
-        # solver for every group.
+        # Solver selection. Routing is on by default; a pinned `solver` wins
+        # over it — "this solver, everywhere" is unambiguous, so honour it
+        # and say out loud that routing is off rather than silently ignoring
+        # one of the two arguments.
         if auto_stiffness and solver is not None:
-            raise ValueError(
-                "auto_stiffness=True selects a solver per group; do not also "
-                "pin solver=. Pass one or the other."
+            log.warning(
+                "solver=%s is pinned, so per-group stiffness routing is off "
+                "and every group uses it. Drop solver= to let the Scheduler "
+                "route stiff groups to %s with a magnitude-scaled vector "
+                "atol.",
+                type(solver).__name__,
+                type(implicit_solver or dfx.Kvaerno5()).__name__,
             )
+            auto_stiffness = False
         self.auto_solver = auto_stiffness
         self.explicit_solver = explicit_solver or dfx.Tsit5()
         # Default stiff solver is Kvaerno5 with a **Newton** root finder.
@@ -500,6 +506,7 @@ class Scheduler:
         # stiff/oscillatory composites, pass dfx.BacksolveAdjoint() for
         # near-forward-cost backward passes.
         self.adjoint = adjoint or dfx.RecursiveCheckpointAdjoint()
+        self._adjoint_explicit = adjoint is not None
         self.throw = throw
         self.max_steps = max_steps
         self.dt0 = dt0
@@ -575,7 +582,11 @@ class Scheduler:
         :class:`SchedulerResult`
         """
         t0, t1 = t_span
-        adjoint = adjoint if adjoint is not None else self.adjoint
+        adjoint = (
+            adjoint
+            if adjoint is not None
+            else self._resolve_adjoint(composite, y0)
+        )
         # Forcing/step discontinuities the solver should land on exactly
         # (jump_ts) rather than resolve by adaptive step-rejection.
         self._jump_ts = self._collect_jump_ts(composite, t0, t1)
@@ -1024,7 +1035,10 @@ class Scheduler:
         ys = composite.materialize_assigned(ts, ys)
 
         return SchedulerResult(
-            ts=ts, ys=ys, keys=keys, events=events,
+            ts=ts,
+            ys=ys,
+            keys=keys,
+            events=events,
             stats=_attach_diagnosis(stats, ys),
         )
 
@@ -1286,7 +1300,10 @@ class Scheduler:
         # Fill ASSIGNED (algebraic) columns from each saved state (see run()).
         ys = composite.materialize_assigned(ts, ys)
         return SchedulerResult(
-            ts=ts, ys=ys, keys=keys, events=[],
+            ts=ts,
+            ys=ys,
+            keys=keys,
+            events=[],
             stats=_attach_diagnosis(stats, ys),
         )
 
@@ -1352,6 +1369,26 @@ class Scheduler:
         if self._jump_ts is None:
             return controller
         return dfx.ClipStepSizeController(controller, jump_ts=self._jump_ts)
+
+    def _resolve_adjoint(self, composite, y0):
+        """``dfx.ForwardMode()`` when this run is being forward-differentiated,
+        else the configured adjoint; an explicit one always wins.
+
+        The default ``RecursiveCheckpointAdjoint`` is a ``custom_vjp``, so
+        ``jax.jvp``/``jacfwd`` through it raises "can't apply forward-mode
+        autodiff (jvp) to a custom_vjp function" — an error naming neither the
+        solve nor the fix. A ``JVPTracer`` among the leaves is the tell.
+        """
+        if self._adjoint_explicit:
+            return self.adjoint
+        leaves = jax.tree_util.tree_leaves((composite, y0))
+        if any(isinstance(leaf, ad.JVPTracer) for leaf in leaves):
+            log.debug(
+                "Forward-mode trace detected; using dfx.ForwardMode() "
+                "(the default adjoint is a custom_vjp and cannot be jvp'd)."
+            )
+            return dfx.ForwardMode()
+        return self.adjoint
 
     def _group_omegas(
         self, composite, groups, integrators, state, t0, macro_dt
@@ -1442,19 +1479,19 @@ class Scheduler:
     ) -> dict[str, GroupIntegrator]:
         """Pick a solver + step-size controller for each group.
 
-        Manual mode (``auto_stiffness=False``, the default): every group
-        uses ``self.solver`` with the scalar controller. Auto mode
-        (``auto_stiffness=True``): each group's local Jacobian spectrum is
-        measured once via
-        :func:`hallsim.stiffness.analyze_groups`; stiff groups get the
-        implicit solver and a magnitude-scaled vector ``atol``, the rest
-        the explicit solver and the scalar controller.
+        Routing mode (the default): each group's local Jacobian spectrum is
+        measured once via :func:`hallsim.stiffness.analyze_groups`; stiff
+        groups get the implicit solver and a magnitude-scaled vector
+        ``atol``, the rest the explicit solver and the scalar controller.
+        Pinned mode (``solver=`` or ``auto_stiffness=False``): every group
+        uses ``self.solver`` with the scalar controller.
 
         The result is cached by structural signature so the analysis runs
-        once, eagerly. Under grad/jvp/vmap the Jacobian eigenvalues would
-        be tracers — so a traced call with a cold cache raises, directing
-        the caller to :meth:`warm_up` first (the calibration path does
-        this automatically).
+        once, eagerly. Under grad/jvp/vmap the Jacobian eigenvalues would be
+        tracers, so a traced call with a cold cache cannot route and warns
+        its way down to the explicit solver; :meth:`warm_up` run once
+        eagerly resolves the verdict outside the trace (the calibration path
+        does this automatically).
         """
         sig = self._integrator_signature(groups, state, macro_dt)
         cached = self._integrator_cache.get(sig)
@@ -1479,9 +1516,7 @@ class Scheduler:
 
         # Stiffness analysis needs a concrete Jacobian. Under tracing
         # (grad/jvp/vmap) with no warmed cache the eigenvalues are tracers
-        # and it cannot be measured — this raises (below) rather than
-        # silently falling back to the explicit solver, which would give
-        # wrong (NaN) sensitivities on stiff groups. warm_up() first.
+        # and it cannot be measured — see the `report is None` branch below.
         state_traced = isinstance(state, jax.core.Tracer)
         try:
             report = (
@@ -1513,16 +1548,23 @@ class Scheduler:
             return integ
 
         if report is None:
-            raise RuntimeError(
-                "Scheduler(auto_stiffness=True): cannot measure group "
-                "stiffness under tracing (grad/jvp/vmap) with a cold cache "
-                "— the Jacobian eigenvalues are tracers. Call warm_up(y0) "
-                "once eagerly before differentiating so the per-group "
-                "implicit/explicit verdict is cached "
-                "(CalibrationProblem.fit does this for you). Falling back "
-                "to the explicit solver here would give wrong (NaN) "
-                "sensitivities on stiff groups."
+            # Cold cache under tracing: the eigenvalues are tracers, so the
+            # verdict cannot be measured. Degrade loudly — a stiff group on
+            # an explicit solver can give NaN sensitivities while the primal
+            # stays finite, and that failure is only debuggable if the
+            # fallback announced itself. Deliberately NOT cached, so a later
+            # eager call still gets to measure and route.
+            log.warning(
+                "cannot measure group stiffness under tracing (grad/jvp/vmap) "
+                "with a cold cache; falling back to the explicit solver %s "
+                "for all groups. A stiff group solved this way can return NaN "
+                "sensitivities even where the trajectory is finite — call "
+                "warm_up(y0) once eagerly before differentiating so the "
+                "per-group verdict is resolved outside the trace "
+                "(CalibrationProblem.fit does this for you).",
+                type(self.explicit_solver).__name__,
             )
+            return _all_explicit()
         # Vector atol for stiff groups: loosen absolute tolerance on
         # large-magnitude states (which would otherwise force
         # stability-tiny steps) while keeping a tight floor near zero.
@@ -1682,20 +1724,16 @@ class Scheduler:
         return final_vec, last_dt, diag
 
     def _guard_result(self, value, result, group_name: str, integ, keys=None):
-        """On a failed solve (when ``self.throw``) raise a labelled error, and
-        name the failure kind + worst state when the values are concrete.
+        """On a failed solve (when ``self.throw``) raise a labelled error,
+        naming the failure kind and worst state when the values are concrete.
 
-        ``eqx.error_if`` bakes the check into ``value``, so the *raise* fires
-        eagerly and under JIT/grad alike; with ``throw=False`` it is a no-op and
-        the ``RESULTS`` code reaches stats instead.
-
-        The *report* is plain Python on the eager path only — no in-graph
-        callback. A ``lax.cond``-gated callback cannot pay for itself here:
-        under ``vmap`` the cond degrades to a select, so the callback executes
-        once per batch member (~0.2 ms host round-trip each) whether or not
-        anything failed, and under ``jit`` its output is dropped anyway because
-        the ``error_if`` raise wins the race. Traced runs get the diagnosis as
-        data instead — :attr:`SchedulerResult.ok` and ``stats["diagnosis"]``.
+        ``eqx.error_if`` bakes the check into ``value``, so the raise fires
+        eagerly and under JIT/grad alike; ``throw=False`` sends the ``RESULTS``
+        code to stats instead. The report is plain Python on the eager path —
+        an in-graph callback cannot pay for itself, since ``vmap`` turns the
+        gating ``lax.cond`` into a select and fires it once per batch member
+        regardless. Traced runs read :attr:`SchedulerResult.ok` and
+        ``stats["diagnosis"]``.
         """
         if not self.throw:
             return value

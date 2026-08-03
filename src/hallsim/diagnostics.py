@@ -309,6 +309,8 @@ def screen_process(
             max_steps,
             sched_kwargs,
         )
+    except TypeError:  # bad sched_kwargs, not an unintegrable model
+        raise
     except Exception as exc:  # max_steps / non-finite blow the solve up
         native = _sbmltoodejax_native_finite(proc, t_end, n_save)
         suspect = native is not None and native[1]

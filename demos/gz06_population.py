@@ -19,7 +19,7 @@ The whole sweep runs through ``eqx.tree_at`` + ``jax.vmap`` over a single
 fully differentiable.
 
 Run:
-    .venv_hallsim/bin/python demos/gz06_population.py --n-cells 1000
+    python demos/gz06_population.py --n-cells 1000
 """
 
 from __future__ import annotations

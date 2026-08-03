@@ -74,14 +74,28 @@ print(result.get("pool/x").shape)
 
 Parameters are JAX arrays, so you can `jax.grad` through an entire simulation.
 For the real, multi-model, calibrated version see
-**[docs/calibration.md](docs/calibration.md)** and the runnable
-[`demos/multi_hallmark_calibrate.py`](demos/multi_hallmark_calibrate.py).
+**[docs/calibration.md](docs/calibration.md)**, and run it with
+`simulate multi-hallmark calibrate`.
 
 ### Demos & tests
 
+Three published SBML models stitched into one composite, scored against
+transcriptomics, then fit:
+
 ```bash
-simulate compose | compose-kick | multiscale | validate-demo | info
-.venv_hallsim/bin/python demos/multiscale_coupling_demo.py
+simulate multi-hallmark run        # score it out of the box, no fitting
+simulate multi-hallmark calibrate  # fit, then evaluate on held-out arms
+simulate multi-hallmark sweep      # two-hallmark severity sweep
+simulate stiffness                 # per-group stiffness verdict + solver routing
+```
+
+Smaller pieces, end to end:
+
+```bash
+simulate compose        # a minimal two-process composite
+simulate compose-kick   # the same, with a mid-run perturbation
+simulate multiscale     # continuous + discrete + event processes on one clock
+simulate info           # what the architecture exposes
 make test
 ```
 

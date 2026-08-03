@@ -1042,14 +1042,10 @@ class CalibrationProblem:
         self.t_end = t_end
         self.macro_dt = macro_dt
         self.n_save = n_save
-        # Tuning defaults to the auto-stiffness picker: explicit-solver
-        # sensitivities NaN on stiff groups (p53–Mdm2, NF-κB) though the
-        # primal stays finite. Caller's scheduler_kwargs wins if given.
-        self.scheduler_kwargs = (
-            {"auto_stiffness": True}
-            if scheduler_kwargs is None
-            else scheduler_kwargs
-        )
+        # Stiffness routing is a Scheduler default, and `warm_up` below
+        # resolves it eagerly — explicit-solver sensitivities NaN on stiff
+        # groups (p53–Mdm2, NF-κB) though the primal stays finite.
+        self.scheduler_kwargs = scheduler_kwargs or {}
 
         # Precompute store-path → trailing-axis index for fast lookup.
         self._store_idx = {k: i for i, k in enumerate(composite.store_keys())}

@@ -14,7 +14,7 @@ p53 arm desynchronises through the composite for the same reason it does
 standalone -- ``alpha_y`` sets the period (see ``docs/gz06-population.md``).
 
 Run:
-    .venv_hallsim/bin/python demos/composite_population.py --n-cells 256
+    python demos/composite_population.py --n-cells 256
 """
 
 from __future__ import annotations

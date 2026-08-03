@@ -5,7 +5,7 @@ plots p53 and Mdm2 over time — the undamped, out-of-phase pulses (period
 ~5.5 h) that are the model's signature. Shown at the basal and full-damage
 psi the flagship interpolates between.
 
-    .venv_hallsim/bin/python demos/gz06_oscillator.py
+    python demos/gz06_oscillator.py
 """
 
 from __future__ import annotations

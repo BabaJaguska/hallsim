@@ -173,6 +173,10 @@ def compose_kick(t1, kick_time, kick_ros):
     topology["kick"] = {"ros": "cytoplasm/ROS"}
 
     composite = Composite(processes, topology, semantic_validation=False)
+    click.echo(
+        f"Solving {len(processes)} processes over t=[0, {t1}] "
+        f"(the first run compiles; a few seconds)..."
+    )
     result = Scheduler().run(
         composite, t_span=(0.0, t1), macro_dt=1.0, save_dt=1.0
     )
@@ -428,7 +432,7 @@ def multiscale(t1, macro_dt):
     help="Solve interval the stability-substep budget is measured against.",
 )
 def stiffness(macro_dt):
-    """Report the per-group stiffness verdict of the flagship composite.
+    """Report the per-group stiffness verdict of the multi-hallmark composite.
 
     Linearizes each auto-group at its initial state, measures the
     Jacobian spectrum, and shows which solver class the Scheduler would
@@ -452,7 +456,12 @@ def stiffness(macro_dt):
     )
 
 
-@simulate.command("calibrate")
+@simulate.command("multi-hallmark")
+@click.argument(
+    "command",
+    type=click.Choice(["run", "calibrate", "sweep"]),
+    default="run",
+)
 @click.option(
     "--lr",
     type=float,
@@ -463,9 +472,10 @@ def stiffness(macro_dt):
     "--steps", type=int, default=None, help="fit steps (default 150)"
 )
 @click.option(
-    "--cosine",
+    "--no-cosine",
+    "no_cosine",
     is_flag=True,
-    help="cosine-decay the LR over the run (replaces plateau)",
+    help="constant LR + reduce-on-plateau instead of cosine decay",
 )
 @click.option(
     "--grad-clip",
@@ -480,26 +490,43 @@ def stiffness(macro_dt):
     is_flag=True,
     help="disable reduce-on-plateau LR schedule",
 )
-def calibrate(lr, steps, cosine, grad_clip, no_plateau):
-    """Fit the multi-hallmark composite (DP14+GZ06+Ihekwaba) to GSE248823 and
-    write the OOB + post-fit concordance figures."""
+@click.option(
+    "--equilibrate",
+    is_flag=True,
+    help="Newton-solve the whole composite to a fixed point and share it as "
+    "t=0 (off by default: DP14 senescence is progressive and has none)",
+)
+def multi_hallmark(
+    command, lr, steps, no_cosine, grad_clip, no_plateau, equilibrate
+):
+    """The multi-hallmark composite (DallePezze 2014 + Geva-Zatorsky 2006 +
+    Ihekwaba 2004) scored against GSE248823.
+
+    \b
+      run        score the composite out of the box, no fitting (default)
+      calibrate  fit the mechanism parameters, evaluate on held-out arms
+      sweep      two-hallmark severity sweep
+    """
     import sys
     from pathlib import Path
     from types import SimpleNamespace
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos"))
-    from multi_hallmark_calibrate import cmd_calibrate
+    from multi_hallmark_calibrate import _COMMANDS
 
-    cmd_calibrate(
-        SimpleNamespace(
-            command="calibrate",
-            lr=lr,
-            steps=steps,
-            cosine=cosine,
-            grad_clip=grad_clip,
-            no_plateau=no_plateau,
-        )
+    # Fitting is the out-of-the-box run continued: cmd_run scores every arm,
+    # then fits when args.calibrate is set, reusing that score as the baseline.
+    args = SimpleNamespace(
+        command=command,
+        calibrate=command == "calibrate",
+        lr=lr,
+        steps=steps,
+        cosine=not no_cosine,
+        grad_clip=grad_clip,
+        no_plateau=no_plateau,
+        equilibrate=equilibrate,
     )
+    _COMMANDS["run" if command == "calibrate" else command](args)
 
 
 @simulate.command("info")

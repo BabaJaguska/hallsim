@@ -812,6 +812,9 @@ def _strip_events(sbml_path: str) -> str:
     return out_path
 
 
+_GENERATED_MODELS: dict = {}
+
+
 def _load_local_sbml(sbml_path: str):
     """Load a local SBML XML file via sbmltoodejax.
 
@@ -819,8 +822,34 @@ def _load_local_sbml(sbml_path: str):
     is the same approach load_biomodel uses internally, just with a
     local file instead of a BioModels API download.
 
+    Codegen output is cached per source file (path + mtime + size), because
+    each generated module defines a *new* model class: importing the same SBML
+    twice would otherwise produce two pytree node types for one model, and no
+    compiled solve could be reused across them.
+
     Returns (model, y0, w0, c) matching load_biomodel's signature.
     """
+    import os
+
+    try:
+        st = os.stat(sbml_path)
+        key = (os.path.abspath(sbml_path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and key in _GENERATED_MODELS:
+        model_cls, y0, w0, c = _GENERATED_MODELS[key]
+        return model_cls(), y0, w0, c
+
+    model_cls, y0, w0, c = _generate_model_module(sbml_path)
+    if key is not None:
+        _GENERATED_MODELS[key] = (model_cls, y0, w0, c)
+    return model_cls(), y0, w0, c
+
+
+def _generate_model_module(sbml_path: str):
+    """Run sbmltoodejax codegen and import the result, returning
+    ``(model_cls, y0, w0, c)``. Patches the generated source on the way in —
+    see the inline notes for each."""
     import importlib.util
     import os
     import tempfile
@@ -904,7 +933,7 @@ def _load_local_sbml(sbml_path: str):
                 f"Generated SBML module has neither ModelSpec nor ModelStep. "
                 f"Available: {[a for a in dir(mod) if not a.startswith('_')]}"
             )
-        return model_cls(), mod.y0, mod.w0, mod.c
+        return model_cls, mod.y0, mod.w0, mod.c
     finally:
         os.unlink(tmp_py)
 
@@ -1020,6 +1049,135 @@ def _detect_inert_sinks(xml_path: str) -> set[str]:
     return sinks
 
 
+def _resolve_source(model_id, name):
+    """``(xml_path, name)`` for a local file path or a BioModels ID."""
+    import os
+
+    if isinstance(model_id, str) and os.path.isfile(model_id):
+        name = name or os.path.splitext(os.path.basename(model_id))[0]
+        log.info(f"Loading local SBML file '{model_id}' as '{name}'...")
+        return model_id, name
+    name = name or f"biomodel_{model_id}"
+    log.info(f"Fetching BioModels #{model_id} as '{name}'...")
+    return _download_biomodel_to_cache(model_id), name
+
+
+def _ordered_species(model) -> tuple[str, ...]:
+    """Species names in state-vector order, from the model's ``y_indexes``.
+
+    sbmltoodejax versions differ: ModelSpec exposes it on ``modelstepfunc``,
+    ModelStep directly on the model.
+    """
+    if hasattr(model, "modelstepfunc") and hasattr(
+        model.modelstepfunc, "y_indexes"
+    ):
+        y_indexes = model.modelstepfunc.y_indexes
+    elif hasattr(model, "y_indexes"):
+        y_indexes = model.y_indexes
+    else:
+        raise AttributeError(
+            f"Cannot find y_indexes on model ({type(model).__name__}). "
+            f"Available attrs: {[a for a in dir(model) if not a.startswith('_')]}"
+        )
+    return tuple(n for n, _ in sorted(y_indexes.items(), key=lambda x: x[1]))
+
+
+def _index_maps(model):
+    """``(c_indexes, w_indexes)`` — the model's constant and boundary maps."""
+    host = getattr(model, "modelstepfunc", model)
+    c_indexes = getattr(host, "c_indexes", None) or getattr(
+        model, "c_indexes", None
+    )
+    w_indexes = (
+        getattr(host, "w_indexes", None)
+        or getattr(model, "w_indexes", None)
+        or {}
+    )
+    return c_indexes, w_indexes
+
+
+def _settable_surface(xml_path, c, w0, c_indexes, w_indexes):
+    """Every SBML constant at its published default, plus boundary-input
+    species (Irradiation, Insulin, …) at theirs — the whole surface addressable
+    by calibration targets and hallmark substitution, uncurated.
+
+    Boundary inputs live in the ``w`` vector but are surfaced through the same
+    dict and routed at derivative time. Returns ``(params_dict, param_names,
+    param_indexes, w_names, w_index_tuple, boundary_inputs)``.
+    """
+    if c_indexes is None:
+        params_dict, param_names, param_indexes = {}, (), ()
+    else:
+        params_dict = {n: float(c[i]) for n, i in c_indexes.items()}
+        param_names = tuple(c_indexes.keys())
+        param_indexes = tuple(c_indexes[n] for n in param_names)
+
+    boundary_inputs = _collect_boundary_inputs(xml_path) & set(w_indexes)
+    params_dict.update({n: float(w0[w_indexes[n]]) for n in boundary_inputs})
+    w_names = tuple(sorted(boundary_inputs))
+    return (
+        params_dict,
+        param_names,
+        param_indexes,
+        w_names,
+        tuple(w_indexes[n] for n in w_names),
+        boundary_inputs,
+    )
+
+
+def _frozen_sink_indices(xml_path, species_names, name) -> tuple[int, ...]:
+    """Indices of inert sinks — written by degradation, read by nothing.
+    Frozen so they don't accumulate and ruin the state scaling."""
+    inert = _detect_inert_sinks(xml_path)
+    frozen = tuple(i for i, n in enumerate(species_names) if n in inert)
+    if frozen:
+        log.warning(
+            "%s: inert sink species %s are written but read by nothing; "
+            "freezing them (treated as boundary). Consider marking "
+            "boundaryCondition=true in the source SBML.",
+            name,
+            [species_names[i] for i in frozen],
+        )
+    return frozen
+
+
+def _apply_parameter_overrides(
+    params_dict, parameters, c_indexes, boundary_inputs
+):
+    """Overwrite defaults with caller-supplied values, validated against the
+    combined settable surface (constants + boundary inputs)."""
+    if not parameters:
+        return
+    settable = set(c_indexes or ()) | boundary_inputs
+    missing = [p for p in parameters if p not in settable]
+    if missing:
+        raise KeyError(
+            f"parameters {missing} not found in SBML constants or "
+            f"boundary inputs. Available constants: "
+            f"{sorted(c_indexes or ())}; boundary inputs: "
+            f"{sorted(boundary_inputs)}"
+        )
+    for n, v in parameters.items():
+        params_dict[n] = float(v)
+
+
+def _native_clock(xml_path, name):
+    """``(seconds_per_native_unit, declared)``, warning loudly when undeclared —
+    an assumed clock is silently 60x/3600x/86400x wrong once reconciled."""
+    seconds, declared = _extract_native_time_seconds(xml_path)
+    if not declared:
+        log.warning(
+            "%s: SBML declares no time unit; assuming native_time_seconds=1.0 "
+            "(seconds). If this model's rate laws are in minutes/hours/days its "
+            "clock is now a GUESS — reconciling it onto a shared canonical axis "
+            "will be silently 60x/3600x/86400x wrong. Set the source SBML's "
+            "timeUnits, or pass the true seconds-per-unit if you know it. "
+            "Check `proc.native_time_declared` before composing.",
+            name,
+        )
+    return seconds, declared
+
+
 def process_from_sbml(
     model_id: int | str,
     name: str | None = None,
@@ -1070,41 +1228,14 @@ def process_from_sbml(
             "Install it with: pip install sbmltoodejax"
         )
 
-    import os
-
-    is_local_file = isinstance(model_id, str) and os.path.isfile(model_id)
-
-    if is_local_file:
-        name = name or os.path.splitext(os.path.basename(model_id))[0]
-        log.info(f"Loading local SBML file '{model_id}' as '{name}'...")
-        xml_path = model_id
-    else:
-        name = name or f"biomodel_{model_id}"
-        log.info(f"Fetching BioModels #{model_id} as '{name}'...")
-        xml_path = _download_biomodel_to_cache(model_id)
+    xml_path, name = _resolve_source(model_id, name)
 
     # Single import path: both local files and downloaded BioModels go
     # through _load_local_sbml so the pre-check and the generated-module
     # patches (namespace alias, eqx.static_field) apply uniformly.
     model, y0, w0, c = _load_local_sbml(xml_path)
-
-    # Extract species names from the model's index mapping
-    # sbmltoodejax versions differ: ModelSpec uses model.modelstepfunc.y_indexes,
-    # ModelStep puts y_indexes directly on the model
-    if hasattr(model, "modelstepfunc") and hasattr(
-        model.modelstepfunc, "y_indexes"
-    ):
-        y_indexes = model.modelstepfunc.y_indexes
-    elif hasattr(model, "y_indexes"):
-        y_indexes = model.y_indexes
-    else:
-        raise AttributeError(
-            f"Cannot find y_indexes on model ({type(model).__name__}). "
-            f"Available attrs: {[a for a in dir(model) if not a.startswith('_')]}"
-        )
-    # y_indexes maps species_name -> index; sort by index to get ordered names
-    species_ordered = sorted(y_indexes.items(), key=lambda x: x[1])
-    species_names = tuple(name for name, _ in species_ordered)
+    species_names = _ordered_species(model)
+    log.info(f"Loaded {len(species_names)} species: {species_names}")
 
     # MIRIAM annotations on each species → Port.ontology, so the
     # composability analyzer can detect shared biology across imported
@@ -1113,116 +1244,20 @@ def process_from_sbml(
     coupling_meta = _extract_coupling_metadata(xml_path)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
 
-    native_time_seconds, native_time_declared = _extract_native_time_seconds(
-        xml_path
-    )
-    if not native_time_declared:
-        log.warning(
-            "%s: SBML declares no time unit; assuming native_time_seconds=1.0 "
-            "(seconds). If this model's rate laws are in minutes/hours/days its "
-            "clock is now a GUESS — reconciling it onto a shared canonical axis "
-            "will be silently 60x/3600x/86400x wrong. Set the source SBML's "
-            "timeUnits, or pass the true seconds-per-unit if you know it. "
-            "Check `proc.native_time_declared` before composing.",
-            name,
-        )
+    native_time_seconds, native_time_declared = _native_clock(xml_path, name)
 
-    log.info(f"Loaded {len(species_names)} species: {species_names}")
-
-    # Resolve any name-indexed accesses against the model's c_indexes.
-    c_indexes = getattr(
-        getattr(model, "modelstepfunc", model), "c_indexes", None
-    ) or getattr(model, "c_indexes", None)
-    w_indexes_map = (
-        getattr(getattr(model, "modelstepfunc", model), "w_indexes", None)
-        or getattr(model, "w_indexes", None)
-        or {}
-    )
-
-    # Auto-populate `parameters` with every SBML constant at its published
-    # default. This exposes the full mechanism surface for
-    # Composite.calibration_targets / hallmark substitution / Calibrator
-    # fitting without per-composite hand-curation.
-    if c_indexes is None:
-        params_dict = {}
-        param_names = ()
-        param_indexes = ()
-    else:
-        params_dict = {n: float(c[i]) for n, i in c_indexes.items()}
-        param_names = tuple(c_indexes.keys())
-        param_indexes = tuple(c_indexes[n] for n in param_names)
-
-    # Boundary-input species (Irradiation, Insulin, …) are the model's
-    # experimental input ports. Surface them through the same `parameters`
-    # dict as constants, routed into the `w` vector at derivative time.
-    boundary_inputs = _collect_boundary_inputs(xml_path) & set(w_indexes_map)
-    params_dict.update(
-        {n: float(w0[w_indexes_map[n]]) for n in boundary_inputs}
-    )
-    w_names = tuple(sorted(boundary_inputs))
-    w_index_tuple = tuple(w_indexes_map[n] for n in w_names)
-
-    # Inert sink species (written by degradation, read by nothing) are
-    # frozen so they don't accumulate and ruin the state scaling.
-    inert_sinks = _detect_inert_sinks(xml_path)
-    frozen_indices = tuple(
-        i for i, n in enumerate(species_names) if n in inert_sinks
-    )
-    if frozen_indices:
-        log.warning(
-            "%s: inert sink species %s are written but read by nothing; "
-            "freezing them (treated as boundary). Consider marking "
-            "boundaryCondition=true in the source SBML.",
-            name,
-            [species_names[i] for i in frozen_indices],
-        )
-
-    # Apply user overrides against the combined settable surface
-    # (constants + boundary inputs).
-    if parameters:
-        settable = set(c_indexes or ()) | boundary_inputs
-        missing = [p for p in parameters if p not in settable]
-        if missing:
-            raise KeyError(
-                f"parameters {missing} not found in SBML constants or "
-                f"boundary inputs. Available constants: "
-                f"{sorted(c_indexes or ())}; boundary inputs: "
-                f"{sorted(boundary_inputs)}"
-            )
-        for n, v in parameters.items():
-            params_dict[n] = float(v)
-
-    proc = object.__new__(SBMLProcess)
-    # Set fields directly (bypassing __init__ since this is a dynamic construction)
-    object.__setattr__(proc, "_species_names", species_names)
-    object.__setattr__(
-        proc,
-        "_species_y0",
-        tuple(float(y0[i]) for i in range(len(species_names))),
-    )
-    object.__setattr__(proc, "_species_ontology", species_ontology)
-    object.__setattr__(proc, "_coupling_meta", coupling_meta)
-    object.__setattr__(proc, "native_time_seconds", native_time_seconds)
-    object.__setattr__(proc, "native_time_declared", native_time_declared)
-    object.__setattr__(proc, "time_scale", 1.0)
-    object.__setattr__(proc, "_model", model)
-    object.__setattr__(proc, "_w0", w0)
-    object.__setattr__(proc, "_c", c)
-    object.__setattr__(proc, "_name", name)
-    object.__setattr__(proc, "parameters", params_dict)
-    object.__setattr__(proc, "_param_names", param_names)
-    object.__setattr__(proc, "_param_indexes", param_indexes)
-    object.__setattr__(proc, "_w_names", w_names)
-    object.__setattr__(proc, "_w_indexes", w_index_tuple)
-    object.__setattr__(proc, "_frozen_indices", frozen_indices)
-    # Default the scheduler timescale to the model's native time unit (a
-    # day-scale model has day-scale dynamics) so auto_groups clusters
-    # mixed-rate composites correctly. Never None for SBML processes, so
-    # reconciled_to / tree_at can replace it without None-leaf ambiguity.
-    object.__setattr__(
-        proc,
-        "timescale",
-        float(timescale) if timescale is not None else native_time_seconds,
+    c_indexes, w_indexes_map = _index_maps(model)
+    (
+        params_dict,
+        param_names,
+        param_indexes,
+        w_names,
+        w_index_tuple,
+        boundary_inputs,
+    ) = _settable_surface(xml_path, c, w0, c_indexes, w_indexes_map)
+    frozen_indices = _frozen_sink_indices(xml_path, species_names, name)
+    _apply_parameter_overrides(
+        params_dict, parameters, c_indexes, boundary_inputs
     )
 
     # Translate SBML <event> elements (stripped from the ODE core above)
@@ -1233,7 +1268,37 @@ def process_from_sbml(
     events = translate_events(
         _preprocess_sbml(xml_path), species_names, params_dict, name
     )
-    object.__setattr__(proc, "_events", tuple(events))
+    # Through __init__, never object.__new__ + setattr: JAX rebuilds this pytree
+    # at every jit/partition boundary, and a field-by-field instance does not
+    # match what tree_unflatten produces — its structure shifts on the
+    # round-trip and eqx.partition rejects it.
+    proc = SBMLProcess(
+        _species_names=species_names,
+        _species_y0=tuple(float(y0[i]) for i in range(len(species_names))),
+        _species_ontology=species_ontology,
+        _coupling_meta=coupling_meta,
+        native_time_seconds=native_time_seconds,
+        native_time_declared=native_time_declared,
+        time_scale=1.0,
+        _model=model,
+        _w0=w0,
+        _c=c,
+        _name=name,
+        parameters=params_dict,
+        _param_names=param_names,
+        _param_indexes=param_indexes,
+        _w_names=w_names,
+        _w_indexes=w_index_tuple,
+        _frozen_indices=frozen_indices,
+        # Default the scheduler timescale to the model's native time unit (a
+        # day-scale model has day-scale dynamics) so auto_groups clusters
+        # mixed-rate composites correctly. Never None for SBML processes, so
+        # reconciled_to / tree_at can replace it without None-leaf ambiguity.
+        timescale=(
+            float(timescale) if timescale is not None else native_time_seconds
+        ),
+        _events=tuple(events),
+    )
     if events:
         log.info(
             "%s: imported %d SBML event(s); compose with "

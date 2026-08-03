@@ -21,7 +21,7 @@ slow dynamics depend on fast state. This makes splitting error visible.
 
 Usage:
     cd /path/to/HallSim
-    .venv_hallsim/bin/python demos/multiscale_coupling_demo.py
+    python demos/multiscale_coupling_demo.py
 """
 
 from __future__ import annotations

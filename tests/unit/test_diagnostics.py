@@ -71,6 +71,24 @@ def test_check_tunability_opt_out_skips_gradient():
     assert report.tunes is None
 
 
+def test_bad_scheduler_kwarg_raises_instead_of_flagging_the_model():
+    """A caller error must not come back as a verdict about the model.
+
+    ``screen_process`` takes ``**sched_kwargs``; passing an unknown one
+    (e.g. ``scheduler_kwargs=``) used to surface as EXPLODING +
+    FRAMEWORK-SUSPECT, indistinguishable from a model that won't integrate.
+    """
+    gz = process_from_sbml(
+        str(GZ06_SBML_PATH),
+        name="gz06",
+        parameters={GZ06_PSI_NAME: GZ06_PSI_DEFAULT},
+    )
+    with pytest.raises(TypeError, match="scheduler_kwargs"):
+        screen_process(
+            gz, t_end=10.0, scheduler_kwargs={"auto_stiffness": False}
+        )
+
+
 def test_dead_sink_rejected_as_coupling_source():
     """A produced-but-never-consumed, read-by-nothing species (the importer
     freezes it) must be rejected: coupling from it feeds a frozen constant /

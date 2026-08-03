@@ -204,8 +204,11 @@ one `value_and_grad` (≈ one solve's cost) fed to the optimizer.
   the forward trajectory is finite. The Scheduler auto-detects stiffness per
   timescale group and routes stiff groups to an A-stable implicit solver
   (`Kvaerno5` + Newton); Diffrax differentiates through the Newton root-find
-  too (an implicit-function-theorem VJP). `CalibrationProblem` enables this
-  routing by default (`auto_stiffness=True`).
+  too (an implicit-function-theorem VJP). The Scheduler routes by default,
+  and `CalibrationProblem` warms it on concrete parameters before
+  differentiating — routing needs a concrete Jacobian, so a cold trace would
+  otherwise fall back to the explicit solver (loudly) and hand back NaN
+  sensitivities on exactly the stiff groups that matter.
 - **End-to-end float64.** Adaptive error control at `rtol=1e-6` needs the
   state *and* the RHS in double precision; a single hardcoded `float32`
   silently caps precision and makes the implicit solver reject most steps.

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 
+import diffrax as dfx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -810,6 +811,42 @@ class TestSchedulerBasic:
         assert isinstance(result.events, list)
         assert "pool/x" in result
         assert len(result.ts) == len(result.get("pool/x"))
+
+
+class TestAdjointSelection:
+    """Forward-mode differentiation through Scheduler.run must work with the
+    default Scheduler — diffrax's default adjoint is a custom_vjp and cannot
+    be jvp'd, so the Scheduler picks ForwardMode when it sees a JVP trace."""
+
+    def _loss(self, sched, rate):
+        comp = Composite(
+            processes={"prod": ConstantProduction(), "decay": SimpleDecay()},
+            topology={"prod": {"x": "pool/x"}, "decay": {"x": "pool/x"}},
+        )
+        c = eqx.tree_at(lambda c: c.processes["prod"].rate, comp, rate)
+        return sched.run(c, t_span=(0.0, 10.0), macro_dt=10.0).get("pool/x")[
+            -1
+        ]
+
+    def test_jvp_works_with_default_scheduler(self):
+        sched = Scheduler()
+        value, tangent = jax.jvp(
+            lambda r: self._loss(sched, r), (1.0,), (1.0,)
+        )
+        assert jnp.isfinite(value) and jnp.isfinite(tangent)
+        assert abs(float(tangent)) > 0.0
+
+    def test_forward_and_reverse_agree(self):
+        sched = Scheduler()
+        _, tangent = jax.jvp(lambda r: self._loss(sched, r), (1.0,), (1.0,))
+        grad = jax.grad(lambda r: self._loss(sched, r))(1.0)
+        assert jnp.allclose(tangent, grad, rtol=1e-6)
+
+    def test_explicit_adjoint_is_not_overridden(self):
+        """Asking for an adjoint means getting it, including its limits."""
+        sched = Scheduler(adjoint=dfx.RecursiveCheckpointAdjoint())
+        with pytest.raises(TypeError, match="custom_vjp"):
+            jax.jvp(lambda r: self._loss(sched, r), (1.0,), (1.0,))
 
 
 class TestSolveStatus:

@@ -27,7 +27,7 @@ Writes to ``outputs/multi_hallmark_hybrid/``:
   stages' recovery numbers, flagship tables, gradients, and motivation.
 - ``gz06_neural_block.eqx`` — the trained block.
 
-    .venv_hallsim/bin/python demos/multi_hallmark_hybrid.py
+    python demos/multi_hallmark_hybrid.py
 """
 
 from __future__ import annotations

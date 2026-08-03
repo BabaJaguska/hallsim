@@ -1,20 +1,19 @@
-"""Calibrate the multi-hallmark flagship composite against GSE248823.
+"""Calibrate the multi-hallmark composite against GSE248823.
 
-THE end-to-end calibration demo. Three published SBML models (DallePezze
+The end-to-end calibration demo. Three published SBML models (DallePezze
 2014 + Geva-Zatorsky 2006 + Ihekwaba 2004), stitched by literature-grounded
 coupling edges, fit against etoposide-DDIS ± rapamycin transcriptomics.
 
-The default ``run`` command evaluates the composite out-of-the-box against
-every arm and writes the OOB concordance table + trajectory figures — no
-fitting. Add ``--calibrate`` to continue into the fit: it reuses that same
-OOB evaluation as the pre-fit baseline, fits the mechanism parameters (one
-per reporter axis, plus the two NF-κB IKK edge strengths and GZ06's basal-p53
-ψ) on the DDIS-vs-control arm, evaluates concordance on the held-out
-rapamycin arm with a magnitude-aware log2 fold-change loss, and writes the
-before/after comparison figures.
+``run`` evaluates the composite out-of-the-box against every arm and writes
+the OOB concordance table + trajectory figures — no fitting. ``--calibrate``
+continues into the fit: it reuses that OOB evaluation as the pre-fit baseline,
+fits the mechanism parameters (one per reporter axis, plus the two NF-κB IKK
+edge strengths and GZ06's basal-p53 ψ) on the DDIS-vs-control arm, evaluates
+concordance on the held-out rapamycin arm with a magnitude-aware log2
+fold-change loss, and writes the before/after comparison figures.
 
-    .venv_hallsim/bin/python demos/multi_hallmark_calibrate.py           # OOB
-    .venv_hallsim/bin/python demos/multi_hallmark_calibrate.py --calibrate
+    simulate multi-hallmark run
+    simulate multi-hallmark calibrate
 
 Needs the GSE248823 matrix under data/FibroblastsDNA_dmg_Rapamycin/; the
 SBML models download from BioModels on first import and cache locally.
@@ -24,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import time
 from pathlib import Path
 
 import jax
@@ -46,21 +44,15 @@ from hallsim.calibration import (  # noqa: E402
     ParameterRef,
 )
 from hallsim.calibration_report import save_outputs  # noqa: E402
-from hallsim.composite import single_process_composite  # noqa: E402
 from hallsim.hallmarks import with_hallmarks  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
-from hallsim.sbml_import import process_from_sbml  # noqa: E402
 from hallsim.gene_reporters import (  # noqa: E402
     MULTI_HALLMARK_REPORTERS,
     GeneExpressionDataset,
 )
 from hallsim.models.multi_hallmark import (  # noqa: E402
     build_multi_hallmark_composite,
-    DP14_SBML_PATH,
-    DP14_IRRADIATION_RATE_NAME,
-    DP14_IRRADIATION_RATE_DEFAULT,
     DP14_MTOR_PHOS_RATE_NAME,
-    DP14_MTOR_PHOS_RATE_DEFAULT,
     RAPA_INTERVENTION_DAY,
     DDIS_ETOPOSIDE_DOSE_WINDOW,
 )
@@ -142,7 +134,7 @@ ARMS = ["DDIS_vs_ctrl", "RAPA_vs_ctrl", "RAS_vs_ctrl"]
 
 
 def build_problem(
-    composite=None, reporters=None, equilibrate: bool = True
+    composite=None, reporters=None, equilibrate: bool = False
 ) -> CalibrationProblem:
     ds = GeneExpressionDataset.from_series_matrix(
         SERIES_MATRIX,
@@ -945,7 +937,7 @@ def cmd_run(args) -> None:
         datefmt="%H:%M:%S",
     )
     logging.getLogger("hallsim").setLevel(logging.INFO)
-    equilibrate = not getattr(args, "no_equilibrate", False)
+    equilibrate = getattr(args, "equilibrate", False)
     problem = build_problem(equilibrate=equilibrate)
     print(f"[run] equilibrate={equilibrate}", flush=True)
     init = problem.initial_params()
@@ -1043,43 +1035,6 @@ def _run_arms(base, gi, dns, t_end=50.0, macro_dt=5.0):
     )
 
 
-def cmd_baseline(args) -> None:
-    """Uncalibrated composite: terminal readouts per arm (measures overload)."""
-    base = build_multi_hallmark_composite()
-    keys = [
-        "dp14/DNA_damage",
-        "dp14/CDKN1A",
-        "dp14/mTORC1_pS2448",
-        "nfkb/IkBat",
-        "gz06/x",
-        "gz06/y",
-    ]
-    hdr = f"{'GI':>4} {'DNS':>4} | " + " ".join(
-        f"{k.split('/')[-1]:>13}" for k in keys
-    )
-    print("Multi-hallmark composite, uncalibrated.\n" + hdr)
-    print("-" * len(hdr))
-    for gi, dns, label in _ARMS_3:
-        t0 = time.time()
-        try:
-            res = _run_arms(base, gi, dns)
-        except Exception as e:  # noqa: BLE001
-            print(
-                f"{gi:>4.2f} {dns:>4.2f} | FAIL -> {type(e).__name__}  "
-                f"# {label}"
-            )
-            continue
-        vals = [
-            float(res.get(k)[-1]) if res.get(k) is not None else float("nan")
-            for k in keys
-        ]
-        print(
-            f"{gi:>4.2f} {dns:>4.2f} | "
-            + " ".join(f"{v:>13.4g}" for v in vals)
-            + f"  ({time.time()-t0:.1f}s)  # {label}"
-        )
-
-
 def cmd_sweep(args) -> None:
     """Two-hallmark severity sweep — readouts gene-reporter validation uses."""
     base = build_multi_hallmark_composite()
@@ -1109,146 +1064,9 @@ def cmd_sweep(args) -> None:
         )
 
 
-def cmd_diagnose(args) -> None:
-    """Bracket a convergence failure: DP14 alone at GI=0/1, then the whole
-    composite forced into one Diffrax solve (isolates coupling vs splitting).
-    """
-
-    def try_run(label, comp, macro_dt=5.0, groups=None):
-        sched = Scheduler(groups=groups) if groups else Scheduler()
-        t0 = time.time()
-        try:
-            res = sched.run(
-                comp,
-                t_span=(0.0, 50.0),
-                macro_dt=macro_dt,
-                y0=comp.initial_state_vec(),
-                save_dt=macro_dt,
-            )
-            print(
-                f"  OK  ({time.time()-t0:5.1f}s) {label:<40} "
-                f"DNA_damage[end]={float(res.get('dp14/DNA_damage')[-1]):.4g}"
-            )
-        except Exception as e:  # noqa: BLE001
-            print(
-                f"  FAIL ({time.time()-t0:5.1f}s) {label:<40} "
-                f"-> {type(e).__name__}"
-            )
-
-    for sev, tag in [(DP14_IRRADIATION_RATE_DEFAULT, "GI=1"), (0.0, "GI=0")]:
-        print(f"\n=== DP14 alone (no GZ06, no coupling), {tag} ===")
-        proc = process_from_sbml(
-            str(DP14_SBML_PATH),
-            name="dp14",
-            parameters={
-                DP14_MTOR_PHOS_RATE_NAME: DP14_MTOR_PHOS_RATE_DEFAULT,
-                DP14_IRRADIATION_RATE_NAME: sev,
-            },
-        )
-        try_run(
-            f"DP14 alone, {tag}", single_process_composite(proc, name="dp14")
-        )
-
-    print("\n=== Single-group sweep (whole composite, no operator split) ===")
-    base = build_multi_hallmark_composite()
-    for gi in [1.0, 0.5, 0.3, 0.0]:
-        comp = with_hallmarks(
-            base,
-            {"Genomic Instability": gi, "Deregulated Nutrient Sensing": 0.0},
-        )
-        try_run(
-            f"GI={gi:>4.2f}, DNS=0.0 (single-group)",
-            comp,
-            macro_dt=50.0,
-            groups={"all": list(comp.processes.keys())},
-        )
-
-
-def cmd_earlystop(args) -> None:
-    """Train on DDIS, early-stop on the held-out RAS validation arm; plot the
-    train-vs-val curves (RAS U-curve ⇒ early stop helps, else it's a no-op)."""
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="%(asctime)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    logging.getLogger("hallsim").setLevel(logging.INFO)
-    val_arm, test_arm, fit_arm = "RAS_vs_ctrl", "RAPA_vs_ctrl", "DDIS_vs_ctrl"
-    problem = build_problem()
-    print(
-        "[1/2] fitting (train=DDIS, early-stop on RAS, patience 15) ...",
-        flush=True,
-    )
-    history = problem.fit(
-        steps=150,
-        mode="reverse",
-        learning_rate=0.03,
-        reduce_on_plateau=True,
-        plateau_patience=5,
-        early_stop_patience=15,
-        validation_arms=[val_arm],
-        verbose=True,
-    )
-    val, train = np.array(history.val_losses), np.array(history.losses)
-    best_e = int(np.argmin(val))
-    print(
-        f"\nran {len(val)} epochs; stopped={history.stopped_epoch}; "
-        f"best RAS-val @ {best_e} ({val[best_e]:.4g}); "
-        f"final {val[-1]:.4g}",
-        flush=True,
-    )
-    ev = problem.evaluate(history.final_params)
-    for label, arm in [
-        ("FIT DDIS", fit_arm),
-        ("TEST RAPA", test_arm),
-        ("VAL RAS", val_arm),
-    ]:
-        print(f"\n--- {label} ({arm}) ---")
-        for t in sorted(ev[arm]):
-            print(f"  @t{t}: {ev[arm][t]}", flush=True)
-    out = ROOT / "outputs" / "multi_hallmark_earlystop"
-    out.mkdir(parents=True, exist_ok=True)
-    x = np.arange(len(val))
-    fig, ax = plt.subplots(figsize=(8.2, 5.0))
-    ax.plot(x, train, color="#2563eb", lw=2.0, label="train — DDIS (+prior)")
-    ax.plot(x, val, color="#d97706", lw=2.0, label="validation — RAS")
-    ax.axvline(best_e, color="#d97706", ls="--", lw=1.2, alpha=0.7)
-    ax.scatter(
-        [best_e],
-        [val[best_e]],
-        color="#d97706",
-        zorder=6,
-        label=f"RAS-val min @ {best_e}",
-    )
-    ax.set_yscale("log")
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("loss")
-    ax.set_title("Train (DDIS) vs validation (RAS)")
-    ax.legend(frameon=False)
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    fig.savefig(
-        out / "train_vs_val.png",
-        dpi=200,
-        bbox_inches="tight",
-        facecolor="white",
-    )
-    np.savez(
-        out / "curves.npz",
-        train=train,
-        val=val,
-        best_e=best_e,
-        stopped=history.stopped_epoch or len(val),
-    )
-    print(f"\nwrote {out.relative_to(ROOT)}/train_vs_val.png", flush=True)
-
-
 _COMMANDS = {
     "run": cmd_run,
-    "baseline": cmd_baseline,
     "sweep": cmd_sweep,
-    "diagnose-convergence": cmd_diagnose,
-    "earlystop": cmd_earlystop,
 }
 
 
@@ -1291,12 +1109,11 @@ def main() -> None:
         help="disable reduce-on-plateau LR schedule",
     )
     ap.add_argument(
-        "--no-equilibrate",
+        "--equilibrate",
         action="store_true",
-        dest="no_equilibrate",
-        help="start each arm from the model's young initial condition instead "
-        "of a Newton steady state (correct for one-way/progressive models like "
-        "DP14 senescence, which have no healthy fixed point)",
+        help="Newton-solve the whole composite to a fixed point and share it "
+        "as t=0. Off by default: this composite is mixed, and DP14 senescence "
+        "is progressive with no healthy fixed point to solve for",
     )
     args = ap.parse_args()
     _COMMANDS[args.command](args)

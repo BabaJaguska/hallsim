@@ -39,6 +39,25 @@ import equinox as eqx
 import jax.numpy as jnp
 
 
+def _as_traced(value):
+    """``value`` with its floats as JAX arrays, or ``None`` if nothing to do.
+
+    Handles a bare float and floats one level inside a dict/tuple/list —
+    enough for a parameter dict or a per-source tuple of rate constants.
+    """
+    if type(value) is float:
+        return jnp.asarray(value)
+    if type(value) is dict and any(type(v) is float for v in value.values()):
+        return {
+            k: jnp.asarray(v) if type(v) is float else v
+            for k, v in value.items()
+        }
+    if type(value) in (tuple, list) and any(type(v) is float for v in value):
+        items = [jnp.asarray(v) if type(v) is float else v for v in value]
+        return type(value)(items)
+    return None
+
+
 def calibratable(
     default,
     *,
@@ -241,6 +260,31 @@ class Process(eqx.Module):
     hallmark = None
     reference = None
     description = None
+
+    # The Scheduler reads these in plain Python — to cluster processes into
+    # timescale groups and to space discrete updates — never inside the traced
+    # computation. They decide structure, not dynamics, so they stay scalars.
+    _PYTHON_FIELDS = frozenset({"timescale", "dt_step"})
+
+    def __check_init__(self):
+        """Coerce float parameters to JAX arrays, including inside dict/tuple
+        fields (an imported model's ``parameters`` dict is the reason).
+
+        A Python float is a *static* leaf to ``eqx.filter_jit``, so its value
+        bakes into the compiled solve and every distinct value recompiles. As
+        arrays they are traced: one executable serves every value.
+        ``__check_init__``, not ``__post_init__`` — equinox always runs it (even
+        with a hand-written ``__init__``) and skips it on ``tree_unflatten``.
+
+        Ints are left alone: in a container they are indices, not parameters.
+        """
+        for f in dataclasses.fields(self):
+            if f.metadata.get("static") or f.name in self._PYTHON_FIELDS:
+                continue
+            value = getattr(self, f.name, None)
+            coerced = _as_traced(value)
+            if coerced is not None:
+                object.__setattr__(self, f.name, coerced)
 
     # --- Interface: CONTINUOUS -----------------------------------------------
 
