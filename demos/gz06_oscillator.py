@@ -10,7 +10,6 @@ psi the flagship interpolates between.
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import jax
 
@@ -22,6 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from hallsim.composite import Composite  # noqa: E402
+from hallsim.models.sbml import sbml_source  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.sbml_import import process_from_sbml  # noqa: E402
 
@@ -29,11 +29,8 @@ plt.rcParams.update(
     {"font.family": "monospace", "font.monospace": ["DejaVu Sans Mono"]}
 )
 
-GZ = str(
-    Path(__file__).resolve().parent.parent
-    / "models"
-    / "zatorsky2006"
-    / "zatorsky2006_BIOMD0000000157.xml"
+GZ = sbml_source(
+    "zatorsky2006", "zatorsky2006_BIOMD0000000157.xml", "BIOMD0000000157"
 )
 C_P53 = "#6d28d9"  # violet
 C_MDM2 = "#b45309"  # amber

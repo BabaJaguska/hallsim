@@ -1,37 +1,21 @@
 """Scheduler — multi-rate orchestrator for heterogeneous process composites.
 
-For composites that mix continuous, discrete, and event-driven processes
-at different timescales.
-
-Architecture::
-
-    Scheduler
-      |
-      macro_dt (communication interval)
-      |
-    +------------------+------------------+------------------+
-    | Continuous groups | Discrete procs   | Event procs      |
-    | (Diffrax ODE)    | (called at       | (conditions      |
-    | per group        |  their dt_step)  |  checked at sync)|
-    +------------------+------------------+------------------+
+Continuous groups (Diffrax, one solve per timescale group), discrete
+processes (fired at their ``dt_step``), and event processes (conditions
+checked at sync points) advance on a shared ``macro_dt`` communication
+interval.
 
 State is a flat ``jnp.ndarray`` indexed by ``sorted(composite.store_paths())``.
-Continuous group solves feed it straight to Diffrax; discrete/event
-handlers precompute read/write index arrays once at run-start and apply
-batched scatter updates.  Dict shape only appears at the API boundary
-(``y0`` in, ``ys`` out) and inside ``Process.derivative/update/handler``
-calls where the per-process port view is a small dict of named ports.
-
-Scheduling concepts borrow from Vivarium's Engine (Agmon et al., 2022)
-and Ptolemy II's Directors (UC Berkeley).  Implemented natively on JAX
-for GPU acceleration and differentiability within continuous groups.
+Dict shape appears only at the API boundary and inside
+``Process.derivative/update/handler``. Scheduling concepts borrow from
+Vivarium's Engine (Agmon et al., 2022) and Ptolemy II's Directors.
 
 Example
 -------
 >>> scheduler = Scheduler()
 >>> result = scheduler.run(composite, t_span=(0.0, 1000.0), macro_dt=1.0)
 >>> result.ts      # macro step times
->>> result.ys      # (n_time, ..., n_vars) state tensor; per-path via .get(key)
+>>> result.ys      # (n_time, ..., n_vars); per-path via .get(key)
 >>> result.events  # fired event log
 """
 
@@ -75,11 +59,8 @@ _TIME_EPS: float = 1e-12
 
 def _worst_state(ys: jnp.ndarray):
     """``(index, magnitude, any_nonfinite)`` for the largest ``|state|``,
-    non-finite ranking above everything.
-
-    Reduces every leading axis and keeps the trailing state axis, so it takes a
-    final vector or a whole trajectory, batched or not.
-    """
+    non-finite ranking above everything. Reduces every leading axis, so it
+    takes a final vector or a whole trajectory, batched or not."""
     absy = jnp.abs(ys)
     per_state = jnp.max(
         jnp.where(jnp.isfinite(absy), absy, jnp.inf),
@@ -90,10 +71,9 @@ def _worst_state(ys: jnp.ndarray):
 
 
 def _attach_diagnosis(stats: dict, ys: jnp.ndarray) -> dict:
-    """Add the composite-wide worst-state summary to ``stats`` as traced data,
-    so a jitted or vmapped run can still be diagnosed. One argmax, no host
-    round-trip; ``worst_state_index`` indexes ``SchedulerResult.keys``.
-    """
+    """Composite-wide worst-state summary as traced data, so a jitted or
+    vmapped run stays diagnosable. ``worst_state_index`` indexes
+    ``SchedulerResult.keys``."""
     idx, mag, nonfinite = _worst_state(ys)
     stats["diagnosis"] = {
         "worst_state_index": idx,
@@ -114,26 +94,11 @@ class EventRecord:
 
 @dataclass
 class GroupIntegrator:
-    """Resolved per-group solver + step-size controller.
-
-    One of these is produced for each continuous group by
-    :meth:`Scheduler._resolve_integrators` and used for that group's
-    ``diffeqsolve``. The split is automatic: stiff groups get an implicit
-    (A-stable) solver and a magnitude-scaled vector ``atol``; the rest
-    keep the cheaper explicit solver and the scalar controller.
-
-    Attributes
-    ----------
-    solver:
-        Diffrax solver for this group.
-    controller:
-        Step-size controller for this group.
-    stiff:
-        Whether stiffness analysis flagged this group.
-    info:
-        The :class:`~hallsim.stiffness.GroupStiffness` verdict (``None``
-        in manual-solver mode, where no analysis runs).
-    """
+    """Resolved per-group solver + step-size controller, from
+    :meth:`Scheduler._resolve_integrators`. Stiff groups get an implicit
+    (A-stable) solver and a magnitude-scaled vector ``atol``; the rest keep
+    the cheaper explicit solver and the scalar controller. ``info`` is the
+    stiffness verdict (``None`` in manual-solver mode, where none runs)."""
 
     solver: dfx.AbstractSolver
     controller: dfx.AbstractStepSizeController
@@ -143,40 +108,16 @@ class GroupIntegrator:
 
 @dataclass
 class SchedulerResult:
-    """JAX-native container for scheduler output.
+    """JAX-native scheduler output. ``ys`` is the raw stacked tensor (Diffrax's
+    ``sol.ys`` convention), so it composes with ``vmap``/``grad`` without a
+    Python-side dict of arrays in the middle.
 
-    ``ys`` is the raw stacked tensor — same convention as Diffrax's
-    ``sol.ys`` — so it composes cleanly with ``jax.vmap``, ``jax.grad``,
-    and downstream JAX-native code without a Python-side dict of arrays
-    in the middle.
-
-    ``ys``/``keys`` carry the complete composite state — every store path,
-    including materialized algebraic (ASSIGNED) ports — at every save point,
-    from every ``run`` path. Address any path via ``keys`` / :meth:`get`.
-    Enforced by ``test_multiscale.py::test_result_carries_full_state``.
-
-    Attributes
-    ----------
-    ts:
-        Macro step time points, shape ``(n_time,)``.
-    ys:
-        State trajectory tensor, shape ``(n_time, ..., n_vars)``.
-        For scalar runs this is ``(n_time, n_vars)``; for batched runs
-        (population studies, parameter sweeps via batched y0) this is
-        ``(n_time, batch, n_vars)``. The trailing axis matches
-        ``Composite.flatten/unflatten`` — index it via ``keys``.
-    keys:
-        Store paths in trailing-axis order — the inverse map for ``ys``.
-        Use ``result.get("eriq/p53_activity")`` for ergonomic per-path
-        access.
-    events:
-        Log of fired events.
-    stats:
-        Per-group solver statistics, plus a ``"diagnosis"`` entry — the
-        composite-wide worst state (``worst_state_index`` into :attr:`keys`,
-        ``worst_magnitude``, ``any_nonfinite``) as traced, batch-carrying
-        arrays. Pair with :attr:`ok` to diagnose a jitted or vmapped run.
-    """
+    ``ts`` is ``(n_time,)``; ``ys`` is ``(n_time, n_vars)`` or
+    ``(n_time, batch, n_vars)``, trailing axis indexed by ``keys`` (every
+    store path, including materialized ASSIGNED ports). ``stats`` carries
+    per-group solver statistics plus a ``"diagnosis"`` entry as traced,
+    batch-carrying arrays — pair with :attr:`ok` to diagnose a jitted or
+    vmapped run."""
 
     ts: jnp.ndarray
     ys: jnp.ndarray
@@ -185,18 +126,14 @@ class SchedulerResult:
     stats: dict[str, Any] = field(default_factory=dict)
 
     def get(self, key: str) -> jnp.ndarray:
-        """Per-path trajectory: ``ys[..., keys.index(key)]``.
-
-        Returns shape ``(n_time,)`` for scalar runs, ``(n_time, batch)``
-        for batched runs.
-        """
+        """Per-path trajectory — ``(n_time,)``, or ``(n_time, batch)``
+        batched."""
         return self.ys[..., self.keys.index(key)]
 
     @property
     def ok(self) -> jnp.ndarray:
-        """Did every group solve? Traced boolean, carrying the batch axis under
-        ``vmap`` — with ``Scheduler(throw=False)``, the thing to branch on.
-        """
+        """Did every group solve? Traced boolean carrying the batch axis under
+        ``vmap`` — with ``throw=False``, the thing to branch on."""
         codes = [
             st["result"]
             for st in self.stats.values()
@@ -218,11 +155,9 @@ class SchedulerResult:
 def _build_proc_index_maps(
     proc, proc_topo: dict[str, str], key_to_idx: dict[str, int]
 ) -> tuple[tuple, tuple]:
-    """Precompute (read_pairs, write_pairs) for a discrete/event process.
-
-    ``read_pairs``  = ((port_name, store_idx), ...) — gather port view from state.
-    ``write_pairs`` = ((port_name, store_idx), ...) — scatter LATCHED writes.
-    """
+    """``(read_pairs, write_pairs)`` for a discrete/event process — gather the
+    port view from state, scatter LATCHED writes back. Each is
+    ``((port_name, store_idx), ...)``."""
     read_pairs = tuple(
         (port, key_to_idx[sp]) for port, sp in proc_topo.items()
     )
@@ -256,14 +191,10 @@ def _apply_delta(
 def _interp_uniform(
     t: jnp.ndarray, t0: jnp.ndarray, t1: jnp.ndarray, ys: jnp.ndarray
 ) -> jnp.ndarray:
-    """Linear interpolation along axis 0 of a uniform sample at scalar ``t``.
-
-    ``ys`` has shape ``(K, ...)`` sampled at ``K`` equally spaced times over
-    ``[t0, t1]``. Fixed ``K`` (static) keeps the coupling representation a
-    constant shape, so the interpolated multi-rate loop compiles under
-    ``lax.scan`` — unlike a solver-native dense interpolant, whose size is
-    the adaptive step count and varies per macro step.
-    """
+    """Linear interpolation along axis 0 of a uniform ``(K, ...)`` sample over
+    ``[t0, t1]``, at scalar ``t``. Static ``K`` keeps the coupling
+    representation a constant shape so the loop compiles under ``lax.scan``,
+    unlike a dense interpolant sized by the adaptive step count."""
     k = ys.shape[0]
     pos = jnp.clip((t - t0) / (t1 - t0) * (k - 1), 0.0, k - 1.0)
     i0 = jnp.minimum(jnp.floor(pos).astype(jnp.int32), k - 2)
@@ -274,146 +205,80 @@ def _interp_uniform(
 class Scheduler:
     """Multi-rate orchestrator for composites with mixed process kinds.
 
-    Uses Lie operator splitting for continuous groups: groups are solved
-    sequentially, each seeing the updated state from the previous group.
-
-    For single-group composites with no events / discrete / adaptive_dt /
-    Strang / interpolated coupling, takes a fast path that issues one
-    ``dfx.diffeqsolve`` over the whole ``t_span`` — no per-macro-step
-    restarts.
+    Continuous groups are solved sequentially by Lie operator splitting, each
+    seeing the previous group's updated state. Single-group composites with no
+    events / discrete / adaptive_dt / Strang / interpolated coupling take a
+    fast path: one ``dfx.diffeqsolve`` over the whole ``t_span``.
 
     Parameters
     ----------
     solver:
-        Pin one Diffrax solver for every group, with the scalar controller.
-        Pinning also turns per-group routing off (see ``auto_stiffness``),
-        so ``Scheduler(solver=dfx.Kvaerno5())`` means exactly that solver
-        everywhere. Default ``None`` leaves the choice to routing.
+        Pin one Diffrax solver for every group. Pinning switches per-group
+        routing off (and warns), so it always means that solver everywhere.
+        ``None`` (default) leaves the choice to ``auto_stiffness``.
     auto_stiffness:
-        **Per-group solver routing**, on by default. Each continuous group's
-        local Jacobian spectrum is measured once (eagerly) via
+        Per-group solver routing, on by default. Each group's local Jacobian
+        spectrum is measured once eagerly via
         :func:`hallsim.stiffness.analyze_groups`; stiff groups get
-        ``implicit_solver`` (A-stable) with a magnitude-scaled vector
-        ``atol`` while the rest keep ``explicit_solver`` with the scalar
-        controller. The vector ``atol`` is the load-bearing half — on a
-        curated stiff import (DallePezze 2014) routing takes the solve from
-        ~215k explicit steps to ~114, while pinning the implicit solver by
-        hand without it still needs ~3k. On a non-stiff composite the
-        analyzer keeps the explicit solver, so routing costs one eager
-        Jacobian and nothing else.
-
-        Pinning ``solver`` wins over routing: it switches routing off and
-        warns, so a pinned solver always means that solver everywhere.
-        Set ``False`` to switch routing off without pinning anything.
-
-        Routing needs a concrete Jacobian. A run traced (grad/jvp/vmap)
-        with a cold cache has tracer eigenvalues and cannot be measured, so
-        it warns and falls back to ``explicit_solver``. Call :meth:`warm_up`
-        once eagerly to resolve the verdict outside the trace and get
-        routing under autodiff (:class:`hallsim.calibration.CalibrationProblem`
-        does this for you).
+        ``implicit_solver`` with a magnitude-scaled vector ``atol``, the rest
+        keep ``explicit_solver`` and the scalar controller. Routing needs a
+        concrete Jacobian — under grad/jvp/vmap with a cold cache it warns and
+        falls back to ``explicit_solver``, so call :meth:`warm_up` once
+        eagerly first (``CalibrationProblem`` does this for you).
     explicit_solver, implicit_solver:
-        The two solvers ``auto_stiffness`` routing chooses between. Defaults
-        ``Tsit5()`` (explicit) and ``Kvaerno5()`` (implicit, A-stable — the
-        diffrax analogue of CVODE's stiff BDF, stable on stiff forward
-        sensitivities). ``explicit_solver`` is also the fallback whenever
-        routing is unavailable; ``implicit_solver`` is unused when routing
-        is off.
+        The two solvers routing chooses between. Default ``Tsit5()`` and
+        ``Kvaerno5()`` with an ``optx.Newton`` root finder — diffrax's default
+        ``VeryChord`` needs ~18x more steps on real biochemical RHSs
+        (see docs/benchmarks.md). ``explicit_solver`` is also the fallback
+        whenever routing is unavailable.
     max_explicit_substeps:
-        Stiffness threshold forwarded to the analyzer: a group is stiff
-        when its fastest decay rate × ``macro_dt`` (stability-limited
-        substeps per solve interval) exceeds this. Default 100 — a wide
-        margin between mildly-multiscale-but-slow systems (ERiQ, ~3–26)
-        and genuinely stiff ones (~1e4+).
+        Stiffness threshold: a group is stiff when its fastest decay rate ×
+        ``macro_dt`` exceeds this. Default 100.
     rtol, atol:
-        Relative and absolute tolerances for adaptive stepping. Default
-        ``rtol=1e-6, atol=1e-9``. Oscillatory subsystems (p53–Mdm2,
-        NF-κB, cell cycle) need accuracy-limited stepping: an explicit
-        solver at loose tolerance injects energy and a bounded
-        oscillation spirals out ("numerical anti-damping"). The
-        Geva-Zatorsky 2006 p53 oscillator, for instance, diverges to
-        ~300× its amplitude at ``rtol=1e-4`` and is bounded from
-        ``rtol=1e-5`` down. ``1e-6`` keeps a safety margin past that
-        threshold. For stiff groups ``atol`` is the *floor* of a vector
-        tolerance ``max(atol, atol_scale·|y0|)`` so a state at 1e6 isn't
-        held to 1e-9 absolute (which would force stability-tiny steps)
-        while a state at 1e-4 still gets a tight tolerance.
+        Adaptive-stepping tolerances, default ``1e-6`` / ``1e-9``. Oscillatory
+        biology is accuracy-limited; loosening this without screening every
+        oscillator risks numerical anti-damping (see CLAUDE.md). For stiff
+        groups ``atol`` is the *floor* of a vector tolerance
+        ``max(atol, atol_scale·|y0|)``.
     atol_scale:
-        Relative coefficient of the stiff-group vector ``atol`` (default
-        ``1e-6``). Per state, ``atol_i = max(atol, atol_scale·|y0_i|)``.
+        Relative coefficient of the stiff-group vector ``atol`` (default 1e-6).
     max_steps:
         Safety limit on solver steps per macro step.
     dt0:
-        Initial step size for adaptive controller.
+        Initial step size for the adaptive controller.
     groups:
-        Manual group assignment ``{group_name: [proc_name, ...]}``.
-        If ``None``, uses ``composite.auto_groups()``.
+        Manual group assignment ``{group_name: [proc_name, ...]}``. ``None``
+        uses ``composite.auto_groups()``.
     coupling_mode:
         How inter-group state is communicated during Lie splitting.
 
-        - ``"auto"`` (default): pick per run — ``"interpolated"`` when the
-          composite has a forward cross-group edge (an earlier group's
-          variables read by a later group), else ``"frozen"``. Interpolated
-          only improves accuracy on such an edge, so this pays for it only
-          when it helps.
-        - ``"frozen"``: each group sees the previous group's final state —
-          standard Lie splitting.
-        - ``"interpolated"``: each group reads a fixed-size sample
-          (``coupling_interp_points`` points) of the previous group's
-          trajectory, linearly interpolated at the current time ``t``, so
-          it "feels" the previous group's trajectory within the macro step
-          instead of a frozen snapshot. Fixed sample size keeps the loop
-          compilable under ``lax.scan``.
-
-          Inspired by dense-output multirate methods (cf. SUNDIALS,
-          continuous-output Runge-Kutta).
-
-          Requires ``splitting="lie"``. With ``splitting="strang"``, the
-          reverse pass needs interpolants over a half-step that have
-          not been produced yet, so the constructor rejects that combo.
+        - ``"auto"`` (default): ``"interpolated"`` when the composite has a
+          forward cross-group edge, else ``"frozen"`` — so the extra cost is
+          paid only where it buys accuracy.
+        - ``"frozen"``: each group sees the previous group's final state.
+        - ``"interpolated"``: each group reads a fixed-size
+          (``coupling_interp_points``) sample of the previous group's
+          trajectory, interpolated at ``t``, so it feels that trajectory
+          within the macro step. Fixed sample size keeps the loop
+          ``lax.scan``-compilable. Requires ``splitting="lie"``.
     splitting:
-        Operator splitting scheme for continuous groups.
-
-        - ``"lie"`` (default): groups solved sequentially in one pass.
-          First-order accurate: error ~ O(macro_dt).
-        - ``"strang"``: symmetric splitting — groups solved for dt/2
-          in forward order, then dt/2 in reverse order.  Cancels the
-          leading-order commutator error, giving O(macro_dt²) accuracy.
-          Independently recommended by gyrokinetics (Boris push), FSI
-          (predictor-corrector), and variational integrators (VPRK).
-          See ``docs/crossgen-suggestions.md``, Strang splitting.
+        ``"lie"`` (default, O(macro_dt)) or ``"strang"`` (symmetric
+        half-steps, O(macro_dt²)).
     adaptive_dt:
-        Enable PLL-inspired adaptive ``macro_dt`` sizing.  After each
-        macro step, the relative coupling residual is measured.  If it
-        exceeds ``adaptive_dt_rho_max`` the step is shrunk; if it stays
-        below ``adaptive_dt_rho_min`` for ``adaptive_dt_grow_wait``
-        consecutive steps, the step is grown.  See
-        ``docs/crossgen-suggestions.md``, suggestion #2.
-    adaptive_dt_rho_max:
-        Relative residual threshold for shrinking (default 0.5).
-    adaptive_dt_rho_min:
-        Relative residual threshold for growing (default 0.01).
-    adaptive_dt_grow_wait:
-        Consecutive low-residual steps before growing (default 3).
-    adaptive_dt_factor:
-        Multiplicative factor for shrink/grow (default 2.0).
-    adaptive_dt_min:
-        Minimum allowed ``macro_dt``.  Default: ``macro_dt / 64``.
-    adaptive_dt_max:
-        Maximum allowed ``macro_dt``.  Default: ``macro_dt * 4``.
+        PLL-inspired adaptive ``macro_dt`` sizing off the coupling residual:
+        shrink above ``adaptive_dt_rho_max``, grow after
+        ``adaptive_dt_grow_wait`` steps below ``adaptive_dt_rho_min``, by
+        ``adaptive_dt_factor``, bounded by ``adaptive_dt_min`` / ``_max``
+        (default ``macro_dt/64`` and ``macro_dt*4``).
     throw:
-        If ``True`` (default), a group whose ``diffeqsolve`` does not
-        return ``RESULTS.successful`` raises a clear error naming the
-        group, its solver, and the failure reason (via ``eqx.error_if``,
-        so it works under JIT/grad too). If ``False``, the run continues
-        and the per-group ``RESULTS`` code is recorded in
-        ``result.stats[group]['result']`` for inspection — the
-        transparent path for diagnosing a non-converging composite.
+        If ``True`` (default), a group that does not return
+        ``RESULTS.successful`` raises a labelled error via ``eqx.error_if``
+        (works under JIT/grad). ``False`` records the code in
+        ``result.stats[group]['result']`` instead — the path for diagnosing a
+        non-converging composite.
     progress:
-        If ``True``, show a tqdm progress bar over macro steps. Default
-        ``False`` because the Python-side ``pbar.update(1)`` is a side
-        effect that interferes with ``jax.vmap`` over batched runs (e.g.
-        population studies, parameter sweeps).
+        tqdm bar over macro steps. Default ``False``: the Python-side update
+        is a side effect that interferes with ``vmap`` over batched runs.
     """
 
     def __init__(
@@ -499,6 +364,9 @@ class Scheduler:
         # eigenvalues would be tracers.
         self._integrator_cache: dict[Any, dict[str, GroupIntegrator]] = {}
         self._omega_cache: dict[Any, list] = {}  # antialias spectrum cache
+        # Compiled continuous cores by structure. Not an optimization: an
+        # unjitted run re-traces its scan of N diffeqsolve bodies every call.
+        self._core_cache: dict[Any, Any] = {}
         self._warned_save_res = False
         # Adjoint method used by every diffeqsolve in this run.
         # Default (None) → diffrax picks RecursiveCheckpointAdjoint, which
@@ -540,42 +408,31 @@ class Scheduler:
         Parameters
         ----------
         composite:
-            Wired bundle of processes (may include continuous, discrete,
-            and event processes).
+            Wired bundle of processes.
         t_span:
-            ``(t0, t1)`` — start and end times.
+            ``(t0, t1)``.
         macro_dt:
-            Communication interval (initial value if ``adaptive_dt``
-            is enabled).  At each macro step:
-            1. Continuous groups are solved independently.
-            2. Discrete processes fire if due.
-            3. Event conditions are checked.
+            Communication interval (initial value under ``adaptive_dt``). Each
+            macro step solves the continuous groups, fires any due discrete
+            processes, then checks event conditions.
         y0:
-            Initial state tensor of shape ``(n_vars,)`` (or
-            ``(batch, n_vars)`` for batched-population runs). If
-            ``None``, uses ``composite.initial_state_vec()``. Override
-            values via
-            ``y0.at[composite.store_keys().index("path")].set(...)``.
+            Initial state ``(n_vars,)``, or ``(batch, n_vars)`` for a
+            population run. ``None`` uses ``composite.initial_state_vec()``.
         save_dt:
-            Requested output density — the interval at which the trajectory is
-            saved (decoupled from ``macro_dt`` via dense output, so it costs
-            memory, not ODE steps). ``None`` lets the Scheduler suggest a grid:
-            ``_DEFAULT_SAVE_SAMPLES`` points across the span, then refined for
-            aliasing (see ``antialias``). Pass a value to request your own
-            density.
+            Output density, decoupled from ``macro_dt`` via dense output — it
+            costs memory, not ODE steps. ``None`` uses
+            ``_DEFAULT_SAVE_SAMPLES`` points across the span, refined for
+            aliasing (see ``antialias``).
         adjoint:
-            Per-run override of the differentiation method. ``None`` uses
-            the constructor's ``adjoint``. Pass ``dfx.ForwardMode()`` for
-            forward-mode calibration without changing scheduler identity,
-            so one Scheduler instance (and its stiffness cache) serves
-            both the eager evaluate pass and the differentiated loss.
+            Per-run override of the differentiation method. ``None`` uses the
+            constructor's. Pass ``dfx.ForwardMode()`` for forward-mode
+            calibration without changing scheduler identity, so one instance
+            (and its stiffness cache) serves both the eager evaluate pass and
+            the differentiated loss.
         antialias:
-            Nyquist guardrail: refine the save grid *finer* if the requested
-            (or default) ``save_dt`` would undersample the fastest oscillation
-            and alias a raw oscillating readout (see :meth:`_resolve_save_dt`).
-            It only ever makes the grid finer, never coarser — orthogonal to
-            ``save_dt``, which sets the density you want. Adds no state. Set
-            ``False`` to take the grid verbatim (e.g. a speed-sensitive sweep).
+            Nyquist guardrail: refine the save grid finer (never coarser) if
+            ``save_dt`` would undersample the fastest oscillation and alias a
+            raw readout. ``False`` takes the grid verbatim.
 
         Returns
         -------
@@ -587,14 +444,12 @@ class Scheduler:
             if adjoint is not None
             else self._resolve_adjoint(composite, y0)
         )
-        # Forcing/step discontinuities the solver should land on exactly
-        # (jump_ts) rather than resolve by adaptive step-rejection.
+        # Discontinuities the solver should land on exactly rather than
+        # resolve by adaptive step-rejection.
         self._jump_ts = self._collect_jump_ts(composite, t0, t1)
 
-        # Flat state layout — pinned for the whole run. y0 is a tensor in
-        # trailing-axis convention; for batched-population runs it has
-        # shape (batch, n_vars), and the rest of the run propagates that
-        # batch axis through every group's Diffrax solve.
+        # Flat state layout, pinned for the whole run. Batched y0 is
+        # (batch, n_vars); the batch axis rides through every group's solve.
         keys = composite.store_keys()
         state = (
             composite.initial_state_vec(keys)
@@ -603,18 +458,12 @@ class Scheduler:
         )
         key_to_idx = {k: i for i, k in enumerate(keys)}
 
-        # Resolve groups
         groups = self.manual_groups or composite.auto_groups()
         discrete_procs = composite.discrete_processes()
         event_procs = composite.event_processes()
 
-        # Reject batched y0 against features that rely on Python-side
-        # branching (event firing, discrete delta scatter, adaptive_dt
-        # residual reduction). These paths use ``bool()`` / ``float()``
-        # on traced JAX arrays which would either crash under ``vmap`` or
-        # silently collapse the batch axis. The Scheduler's batched-y0
-        # support is the continuous-only path (fast path or
-        # multi-group Lie/Strang).
+        # These paths branch on Python bool()/float() of the state, which
+        # would crash under vmap or silently collapse the batch axis.
         is_batched = state.ndim > 1
         if is_batched:
             blockers = []
@@ -647,23 +496,10 @@ class Scheduler:
             if continuous:
                 groups = {"default": list(continuous.keys())}
 
-        # Resolve coupling once groups are known. "auto" (the default)
-        # picks interpolated only when a forward cross-group edge exists;
-        # otherwise frozen. Explicit modes pass through.
         coupling = self._effective_coupling(composite, groups, keys)
-
-        # Resolve the per-group solver + step-size controller. In auto
-        # mode this measures each group's Jacobian spectrum once (eagerly)
-        # and routes stiff groups to the implicit solver + scaled vector
-        # atol; the verdict is cached by structure so later traced runs
-        # reuse it.
         integrators = self._resolve_integrators(
             composite, groups, state, t0, macro_dt
         )
-        # Nyquist guardrail: reduce save_dt so a raw oscillating state read off
-        # the saved grid doesn't alias (the grid is decoupled from macro_dt via
-        # dense output, so this is memory, not extra ODE steps). No accumulator,
-        # no added state — just a faithful sampling of the real observable.
         requested_save_dt = (
             save_dt
             if save_dt is not None
@@ -680,13 +516,8 @@ class Scheduler:
             else requested_save_dt
         )
 
-        # ─── Fast path: single continuous group, no events, no
-        # discrete, no adaptive macro_dt ───────────────────────────────
-        # Skip the macro-step loop entirely. One ``diffeqsolve`` over
-        # the full t_span lets Diffrax's adaptive stepper find the right
-        # step sizes once instead of restarting on every macro step.
-        # Strang/interpolated only matter for multi-group splitting, so
-        # this path also requires the default Lie/frozen settings.
+        # Fast path: one diffeqsolve over the full span, so the adaptive
+        # stepper sizes its steps once instead of restarting per macro step.
         fast_path_eligible = (
             len(groups) == 1
             and not discrete_procs
@@ -695,66 +526,10 @@ class Scheduler:
             and self.splitting == "lie"
             and coupling == "frozen"
         )
-        if fast_path_eligible:
-            (gname,) = groups.keys()
-            (proc_names,) = groups.values()
-            integ = integrators[gname]
-            rhs_fn, _ = composite.build_rhs(proc_names)
-            save_step = save_dt if save_dt is not None else macro_dt
-            # Fixed-length save grid on [t0, t1] inclusive via linspace: pins
-            # both endpoints exactly (never a SaveAt time past t1, which would
-            # make diffeqsolve raise) and stays jit-safe (count is a Python int).
-            save_ts = self._save_grid(t0, t1, save_step)
-            sol = dfx.diffeqsolve(
-                dfx.ODETerm(rhs_fn),
-                integ.solver,
-                t0=t0,
-                t1=t1,
-                dt0=min(self.dt0, t1 - t0),
-                y0=state,
-                saveat=dfx.SaveAt(ts=save_ts),
-                stepsize_controller=self._controller_with_jumps(
-                    integ.controller
-                ),
-                adjoint=adjoint,
-                max_steps=self.max_steps,
-                throw=False,
-            )
-            ys = self._guard_result(sol.ys, sol.result, gname, integ, keys)
-            # ASSIGNED (algebraic) ports aren't integrated, so their saved
-            # columns are stale — fill them from each saved state so the result
-            # is self-consistent (no reader ever sees a stale algebraic value).
-            ys = composite.materialize_assigned(sol.ts, ys)
-            stats = {
-                gname: {
-                    "num_macro_steps": 1,
-                    "num_solver_steps": sol.stats.get("num_steps"),
-                    "num_rejected_steps": sol.stats.get(
-                        "num_rejected_steps", 0
-                    ),
-                    "result": sol.result,
-                    "solver": type(integ.solver).__name__,
-                    "stiff": integ.stiff,
-                }
-            }
-            return SchedulerResult(
-                ts=sol.ts,
-                ys=ys,
-                keys=keys,
-                events=[],
-                stats=_attach_diagnosis(stats, ys),
-            )
-
-        # ─── Scan path: continuous-only, frozen, fixed macro_dt ────────
-        # Multiple groups (or a single group under Strang) with no
-        # discrete/event processes and no adaptive macro_dt: the macro
-        # loop has a statically-known step count, so express it as one
-        # ``lax.scan`` — the whole multi-group run compiles to a single
-        # executable (bounded compile, reverse-mode memory flat in
-        # macro-step count). ``adaptive_dt`` (data-dependent step count)
-        # and debug logging keep the eager loop; both frozen and
-        # interpolated coupling scan (interpolated threads a fixed-size
-        # ``coupling_interp_points`` sample between groups).
+        # Scan path: a statically-known macro-step count, so the whole
+        # multi-group run is one lax.scan — bounded compile, reverse-mode
+        # memory flat in macro-step count. adaptive_dt (data-dependent step
+        # count) and debug logging fall through to the eager loop.
         scan_eligible = (
             not discrete_procs
             and not event_procs
@@ -762,12 +537,11 @@ class Scheduler:
             and coupling in ("frozen", "interpolated")
             and not self.debug
         )
-        if scan_eligible:
-            return self._run_scan_continuous(
+        if fast_path_eligible or scan_eligible:
+            core = self._continuous_core(
                 composite,
                 groups,
                 integrators,
-                state,
                 keys,
                 t0,
                 t1,
@@ -775,13 +549,28 @@ class Scheduler:
                 save_dt,
                 adjoint,
                 coupling,
+                fast=fast_path_eligible,
+                state=state,
+            )
+            ts, ys, dyn = core(composite, state)
+            stats = {
+                g: {
+                    **dyn[g],
+                    "solver": type(integrators[g].solver).__name__,
+                    "stiff": integrators[g].stiff,
+                }
+                for g in groups
+            }
+            return SchedulerResult(
+                ts=ts,
+                ys=ys,
+                keys=keys,
+                events=[],
+                stats=_attach_diagnosis(stats, ys),
             )
 
-        # Pre-build group flat RHS functions (each returns (fn, keys);
-        # all keys are identical so we discard the per-group copy) and
-        # the indices each group writes derivatives to (used by
-        # interpolated coupling to splice prev-group state into the
-        # next group's RHS input).
+        # Per-group RHS, plus the indices each group writes — interpolated
+        # coupling splices the previous group's state at those positions.
         group_rhs: dict[str, Any] = {}
         group_write_idxs: dict[str, jnp.ndarray] = {}
         for gname, proc_names in groups.items():
@@ -791,7 +580,6 @@ class Scheduler:
                 proc_names, keys
             )
 
-        # Precompute per-process index maps for discrete/event handlers.
         discrete_idxs = {
             name: _build_proc_index_maps(
                 proc, composite.topology[name], key_to_idx
@@ -805,21 +593,16 @@ class Scheduler:
             for name, proc in event_procs.items()
         }
 
-        # Event tracking: was_active[proc_name] -> bool
         was_active: dict[str, bool] = {n: False for n in event_procs}
 
-        # Trajectory recording — list of flat vectors, unflattened at end.
         save_dt = save_dt or macro_dt
         trajectory_ts: list[float] = [t0]
         trajectory_snapshots: list[jnp.ndarray] = [state]
         last_save_t = t0
-
-        # Event log
         events: list[EventRecord] = []
 
-        # Per-group stats — carries the resolved solver, stiffness verdict,
-        # and the latest diffeqsolve RESULTS code so a non-converging
-        # composite is inspectable through the API (throw=False).
+        # Carries the latest RESULTS code so a non-converging composite stays
+        # inspectable through the API under throw=False.
         stats: dict[str, Any] = {
             gname: {
                 "num_macro_steps": 0,
@@ -839,7 +622,6 @@ class Scheduler:
             st["num_rejected_steps"] = st["num_rejected_steps"] + n_rej
             st["result"] = result
 
-        # Adaptive macro_dt state
         current_macro_dt = macro_dt
         if self.adaptive_dt:
             dt_min = self.adaptive_dt_min or macro_dt / 64.0
@@ -864,23 +646,15 @@ class Scheduler:
             except ImportError:
                 pbar = None
 
-        # Per-group dt0 hint, threaded across macro steps. After each
-        # group's diffeqsolve, we record the average step size as the
-        # next call's starting hint — so the adaptive controller doesn't
-        # restart from self.dt0=1e-3 every macro step, paying repeated
-        # warm-up cost. First call falls back to self.dt0.
+        # Each group's settled step size warm-starts the next macro step, so
+        # the controller doesn't restart from self.dt0 every time.
         group_dt0_hint: dict[str, float] = {}
 
         t = t0
         while t < t1 - _TIME_EPS:
             t_next = min(t + current_macro_dt, t1)
-
-            # Snapshot state before splitting (for residual check).
-            # Flat state is an immutable jnp.ndarray, so a reference
-            # alias is a safe "copy".
             state_before = state if self.adaptive_dt else None
 
-            # 1. Solve continuous groups
             if self.splitting == "strang" and len(group_rhs) > 1:
                 t_mid = t + (t_next - t) / 2.0
                 items = list(group_rhs.items())
@@ -914,8 +688,7 @@ class Scheduler:
                     group_dt0_hint[gname] = last_dt
                     stats[gname]["num_macro_steps"] += 1
                     _record(gname, diag)
-            else:
-                # Lie splitting: sequential, one pass
+            else:  # Lie: sequential, one pass
                 prev_interpolant = None
                 prev_idxs: jnp.ndarray | None = None
                 for gname, rhs_fn in group_rhs.items():
@@ -952,7 +725,6 @@ class Scheduler:
                         _record(gname, diag)
                     stats[gname]["num_macro_steps"] += 1
 
-            # Adaptive macro_dt: measure coupling residual and adjust
             if self.adaptive_dt:
                 num = float(jnp.sum((state - state_before) ** 2))
                 den = float(jnp.sum(state_before**2)) + 1e-30
@@ -982,7 +754,6 @@ class Scheduler:
                     stats["adaptive_dt"]["max_dt"], current_macro_dt
                 )
 
-            # 2. Fire discrete processes that are due
             for proc_name, proc in discrete_procs.items():
                 if self._is_due(t, t_next, proc.dt_step):
                     read_pairs, write_pairs = discrete_idxs[proc_name]
@@ -990,7 +761,6 @@ class Scheduler:
                     delta = proc.update(t_next, view)
                     state = _apply_delta(state, delta, write_pairs)
 
-            # 3. Check event conditions
             for proc_name, proc in event_procs.items():
                 read_pairs, write_pairs = event_idxs[proc_name]
                 view = {p: state[i] for p, i in read_pairs}
@@ -998,7 +768,6 @@ class Scheduler:
                 if cond and not was_active[proc_name]:
                     delta = proc.handler(t_next, view)
                     state = _apply_delta(state, delta, write_pairs)
-                    # Record fired delta keyed by store path for the log.
                     routed = {
                         keys[idx]: delta[port]
                         for port, idx in write_pairs
@@ -1017,7 +786,6 @@ class Scheduler:
             if pbar is not None:
                 pbar.update(1)
 
-            # Save snapshot if due
             if t - last_save_t >= save_dt - _TIME_EPS or t >= t1 - _TIME_EPS:
                 trajectory_ts.append(t)
                 trajectory_snapshots.append(state)
@@ -1026,12 +794,8 @@ class Scheduler:
         if pbar is not None:
             pbar.close()
 
-        # Assemble result — stack flat snapshots, ship the raw tensor.
-        # Shape is (n_time, n_vars) for scalar runs and (n_time, batch,
-        # n_vars) for batched runs; the trailing axis matches `keys`.
         ts = jnp.array(trajectory_ts)
         ys = jnp.stack(trajectory_snapshots)
-        # Fill ASSIGNED (algebraic) columns from each saved state (see fast path).
         ys = composite.materialize_assigned(ts, ys)
 
         return SchedulerResult(
@@ -1042,32 +806,148 @@ class Scheduler:
             stats=_attach_diagnosis(stats, ys),
         )
 
+    def _continuous_core(
+        self,
+        composite,
+        groups,
+        integrators,
+        keys,
+        t0,
+        t1,
+        macro_dt,
+        save_dt,
+        adjoint,
+        coupling,
+        *,
+        fast,
+        state,
+    ):
+        """Compiled ``(composite, y0) -> (ts, ys, per_group_stats)`` for the
+        continuous paths, cached by structure.
+
+        The caller resolves groups, coupling, integrators and the save grid
+        eagerly — stiffness routing needs a concrete Jacobian — and this
+        captures them, so only ``composite`` (its parameter arrays) and ``y0``
+        cross the trace boundary. Without the cache each call rebuilds a jaxpr
+        containing one ``diffeqsolve`` per group per macro step, which costs
+        hundreds of ms while reporting zero recompiles.
+        """
+        sig = (
+            tuple(sorted((g, tuple(sorted(p))) for g, p in groups.items())),
+            coupling,
+            self.splitting,
+            bool(fast),
+            float(t0),
+            float(t1),
+            float(macro_dt),
+            None if save_dt is None else float(save_dt),
+            type(adjoint).__name__,
+            tuple(
+                type(integrators[g].solver).__name__ for g in sorted(groups)
+            ),
+            tuple(bool(integrators[g].stiff) for g in sorted(groups)),
+            tuple(state.shape),
+            str(state.dtype),
+            (
+                None
+                if self._jump_ts is None
+                else tuple(float(t) for t in self._jump_ts)
+            ),
+        )
+        cached = self._core_cache.get(sig)
+        if cached is not None:
+            return cached
+
+        if fast:
+            (gname,) = groups
+            (proc_names,) = groups.values()
+            integ = integrators[gname]
+            save_ts = self._save_grid(
+                t0, t1, save_dt if save_dt is not None else macro_dt
+            )
+
+            def core(comp, y0):
+                rhs_fn, _ = comp.build_rhs(proc_names)
+                sol = dfx.diffeqsolve(
+                    dfx.ODETerm(rhs_fn),
+                    integ.solver,
+                    t0=t0,
+                    t1=t1,
+                    dt0=min(self.dt0, t1 - t0),
+                    y0=y0,
+                    saveat=dfx.SaveAt(ts=save_ts),
+                    stepsize_controller=self._controller_with_jumps(
+                        integ.controller
+                    ),
+                    adjoint=adjoint,
+                    max_steps=self.max_steps,
+                    throw=False,
+                )
+                ys = self._guard_result(sol.ys, sol.result, gname, integ, keys)
+                # ASSIGNED ports aren't integrated, so their saved columns
+                # hold a stale initial value until recomputed per saved state.
+                ys = comp.materialize_assigned(sol.ts, ys)
+                return (
+                    sol.ts,
+                    ys,
+                    {
+                        gname: {
+                            "num_macro_steps": 1,
+                            "num_solver_steps": sol.stats.get("num_steps"),
+                            "num_rejected_steps": sol.stats.get(
+                                "num_rejected_steps", 0
+                            ),
+                            "result": sol.result,
+                        }
+                    },
+                )
+
+        else:
+
+            def core(comp, y0):
+                return self._run_scan_continuous(
+                    comp,
+                    groups,
+                    integrators,
+                    y0,
+                    keys,
+                    t0,
+                    t1,
+                    macro_dt,
+                    save_dt,
+                    adjoint,
+                    coupling,
+                )
+
+        fn = eqx.filter_jit(core)
+        # Only cache a core built eagerly. Built under an outer trace it can
+        # close over that trace's tracers, which would escape it on reuse.
+        if not any(
+            isinstance(leaf, jax.core.Tracer)
+            for leaf in jax.tree_util.tree_leaves((composite, state))
+        ):
+            self._core_cache[sig] = fn
+        return fn
+
     def _effective_coupling(
         self,
         composite: Composite,
         groups: dict[str, list[str]],
         keys: list[str],
     ) -> str:
-        """Resolve ``coupling_mode="auto"`` to ``"frozen"`` or
-        ``"interpolated"`` for this run.
+        """Resolve ``coupling_mode="auto"`` for this run.
 
-        Interpolated coupling only improves accuracy on a **forward**
-        cross-group edge — a group written earlier in the solve order whose
-        variables a later group reads (the later group then sees that
-        trajectory evolving via the sample instead of frozen). If no such
-        edge exists, interpolated does identical work to frozen at higher
-        cost, so ``auto`` picks frozen. Strang and single-group runs always
-        resolve to frozen. Explicit ``"frozen"``/``"interpolated"`` pass
-        through unchanged.
+        Interpolated only improves accuracy on a *forward* cross-group edge —
+        an earlier group's variables read by a later one. Without such an edge
+        it does identical work at higher cost, so auto picks frozen (as do
+        Strang and single-group runs). Explicit modes pass through.
         """
         if self.coupling_mode != "auto":
             return self.coupling_mode
         if self.splitting == "strang" or len(groups) < 2:
             return "frozen"
-        # Static structure only — no jnp — so this stays concrete when run()
-        # is traced under jax.jit/vmap (population studies). A group writes a
-        # path via its EVOLVED ports; it reads every path any of its ports
-        # is wired to.
+        # Static structure only (no jnp), so this stays concrete when run()
+        # is traced.
         key_to_idx = {k: i for i, k in enumerate(keys)}
         items = list(groups.items())
         writes: list[set[int]] = []
@@ -1106,17 +986,15 @@ class Scheduler:
         save_dt: float | None,
         adjoint: dfx.AbstractAdjoint,
         coupling: str = "frozen",
-    ) -> SchedulerResult:
-        """Continuous-only multi-group run as a single ``lax.scan``.
+    ):
+        """Continuous-only multi-group run as a single ``lax.scan``, returning
+        ``(ts, ys, per_group_stats)``.
 
-        One fixed-length scan over ``macro_dt`` communication windows;
-        each window solves every group in turn (Lie) or forward-then-
-        reversed (Strang) via :meth:`_group_step`, threading each group's
-        settled step size as the next window's warm-start. The whole
-        multi-group trajectory compiles to one executable, so compile time
-        and reverse-mode memory no longer scale with the macro-step count.
-        Handles both frozen and interpolated coupling at a fixed
-        ``macro_dt`` (guaranteed by the caller's ``scan_eligible`` gate).
+        One fixed-length scan over ``macro_dt`` windows; each solves every
+        group in turn (Lie) or forward-then-reversed (Strang), threading each
+        group's settled step size as the next window's warm-start. The whole
+        trajectory compiles to one executable, so compile time and
+        reverse-mode memory don't scale with the macro-step count.
         """
         group_rhs = [
             (g, composite.build_rhs(procs)[0]) for g, procs in groups.items()
@@ -1131,13 +1009,10 @@ class Scheduler:
         n_macro = int(round((t1 - t0) / macro_dt))
         t_starts = t0 + macro_dt * jnp.arange(n_macro)
 
-        # Save each group at ``n_save`` equally-spaced times over the macro
-        # window (endpoints included, so the sample doubles as interpolated
-        # coupling's fixed-size representation). Output resolution is set by
-        # save_dt, INDEPENDENT of the coupling cadence macro_dt: dropping the
-        # left endpoint per window (it repeats the previous window's end)
-        # gives ``n_out`` fresh points, so fast intra-group dynamics are
-        # resolved without shrinking macro_dt. Strang keeps endpoints only.
+        # n_save equally-spaced times per macro window, endpoints included so
+        # the sample doubles as interpolated coupling's representation.
+        # Dropping the left endpoint (it repeats the previous window's end)
+        # decouples output resolution from the coupling cadence.
         if strang or not save_dt or save_dt >= macro_dt:
             base_out = 1
         else:
@@ -1265,9 +1140,7 @@ class Scheduler:
             jax.lax.scan(body, init, t_starts)
         )
 
-        # Assemble the dense trajectory: y0, then each window's n_out fresh
-        # samples. ys_stack is (n_macro, n_out, n_vars); flatten the window
-        # axis into time. save_dt coarser than macro_dt (n_out==1) subsamples.
+        # y0, then each window's n_out fresh samples; flatten window into time.
         step_len = jnp.minimum(t_starts + macro_dt, t1) - t_starts
         out_frac = jnp.asarray([1.0]) if strang else save_frac[1:]
         sub_ts = t_starts[:, None] + out_frac[None, :] * step_len[:, None]
@@ -1292,31 +1165,16 @@ class Scheduler:
                 "num_solver_steps": steps_tot[gi],
                 "num_rejected_steps": rej_tot[gi],
                 "result": res_final[gi],
-                "solver": type(integrators[g].solver).__name__,
-                "stiff": integrators[g].stiff,
             }
             for gi, (g, _) in enumerate(group_rhs)
         }
-        # Fill ASSIGNED (algebraic) columns from each saved state (see run()).
-        ys = composite.materialize_assigned(ts, ys)
-        return SchedulerResult(
-            ts=ts,
-            ys=ys,
-            keys=keys,
-            events=[],
-            stats=_attach_diagnosis(stats, ys),
-        )
+        return ts, composite.materialize_assigned(ts, ys), stats
 
     @staticmethod
     def _integrator_signature(groups, state, macro_dt):
-        """Structural key for the integrator cache.
-
-        Depends only on group→process structure, state width, and
-        ``macro_dt`` (which sets the stiffness threshold) — never on
-        state *values*. So the eager resolution (concrete params) is
-        reused under later traced runs of the same composite, even across
-        conditions whose ``y0`` differ slightly.
-        """
+        """Structural key for the integrator cache: group→process structure,
+        state width, and ``macro_dt``, never state *values* — so the eager
+        resolution is reused under later traced runs of the same composite."""
         gstruct = tuple(
             sorted((g, tuple(sorted(procs))) for g, procs in groups.items())
         )
@@ -1326,19 +1184,19 @@ class Scheduler:
     def _save_grid(t0: float, t1: float, save_step: float) -> jnp.ndarray:
         """Save times spanning ``[t0, t1]`` inclusive, ~``save_step`` apart.
 
-        The systematic rule so a save grid never errors: pick the point *count*
-        ``round((t1−t0)/save_step)+1`` and place them with ``jnp.linspace``,
-        which pins both endpoints exactly and never overshoots ``t1`` — a
-        ``SaveAt`` time past ``t1`` makes ``diffeqsolve`` raise. ``save_step``
-        need not divide ``(t1−t0)``; linspace fits the count to the span, so the
-        realized spacing is ``(t1−t0)/(n−1)`` (≈ ``save_step``). JIT-safe:
-        ``t0``/``t1``/``save_step`` are concrete floats, so ``n`` is a Python
-        int (static output shape)."""
+        Picks the point *count* and places them with ``linspace``, which pins
+        both endpoints and never overshoots ``t1`` — a ``SaveAt`` time past
+        ``t1`` makes ``diffeqsolve`` raise. ``save_step`` need not divide the
+        span. ``n`` is a Python int, so the output shape is static.
+
+        Returns **numpy**, not ``jnp``: the grid is a constant captured by the
+        compiled core, and a ``jnp`` array built while an outer trace is live
+        would be a tracer that escapes it."""
         span = t1 - t0
         if not save_step or save_step <= 0.0 or save_step >= span:
-            return jnp.asarray([t0, t1], dtype=float)
+            return np.asarray([t0, t1], dtype=float)
         n = int(round(span / save_step)) + 1
-        return jnp.linspace(t0, t1, n)
+        return np.linspace(t0, t1, n)
 
     #: samples per oscillation period the auto-reducer targets (well under the
     #: Nyquist limit of 2, so a raw amplitude/RMS readout is faithful).
@@ -1348,19 +1206,18 @@ class Scheduler:
     _DEFAULT_SAVE_SAMPLES = 201
 
     def _collect_jump_ts(self, composite, t0, t1):
-        """Sorted interior discontinuity times declared by the composite's
-        processes (``Process.discontinuity_times``) within ``(t0, t1)`` — the
-        on/off edges of forcing pulses, timed steps. Returns a ``jnp`` array
-        for :class:`diffrax.ClipStepSizeController`, or ``None`` if there are
-        none. The integration endpoints are already landed on, so they are
-        excluded."""
+        """Sorted interior discontinuity times from ``Process.discontinuity_times``
+        within ``(t0, t1)`` — forcing-pulse edges, timed steps — for
+        :class:`diffrax.ClipStepSizeController`, or ``None``. Endpoints are
+        excluded; the solver already lands on them. Numpy for the same reason
+        as :meth:`_save_grid`."""
         times = {
             float(t)
             for proc in composite.processes.values()
             for t in proc.discontinuity_times()
             if t0 < float(t) < t1
         }
-        return jnp.asarray(sorted(times)) if times else None
+        return np.asarray(sorted(times)) if times else None
 
     def _controller_with_jumps(self, controller):
         """Wrap a step-size controller so it steps exactly onto this run's
@@ -1375,9 +1232,8 @@ class Scheduler:
         else the configured adjoint; an explicit one always wins.
 
         The default ``RecursiveCheckpointAdjoint`` is a ``custom_vjp``, so
-        ``jax.jvp``/``jacfwd`` through it raises "can't apply forward-mode
-        autodiff (jvp) to a custom_vjp function" — an error naming neither the
-        solve nor the fix. A ``JVPTracer`` among the leaves is the tell.
+        ``jvp``/``jacfwd`` through it raises an error naming neither the solve
+        nor the fix. A ``JVPTracer`` among the leaves is the tell.
         """
         if self._adjoint_explicit:
             return self.adjoint
@@ -1393,12 +1249,10 @@ class Scheduler:
     def _group_omegas(
         self, composite, groups, integrators, state, t0, macro_dt
     ):
-        """Per-group ``max|Im λ|`` (oscillation frequency) for the Nyquist
-        guard. Reuses the stiffness verdict's spectrum when the auto-solver
-        computed one; otherwise measures it eagerly (once, cached) so the
-        anti-alias guard works regardless of the solver-routing choice. Empty
-        under tracing (grad/jvp) with no concrete Jacobian — call ``warm_up``
-        first, as the calibration path does."""
+        """Per-group ``max|Im λ|`` for the Nyquist guard. Reuses the stiffness
+        verdict's spectrum when routing computed one, else measures it eagerly
+        (cached). Empty under tracing with no concrete Jacobian — call
+        ``warm_up`` first."""
         omegas = [
             gi.info.max_abs_im
             for gi in integrators.values()
@@ -1431,16 +1285,11 @@ class Scheduler:
     def _resolve_save_dt(self, omegas, save_dt: float) -> float:
         """Return a Nyquist-safe ``save_dt`` for raw-state readouts.
 
-        A group whose Jacobian carries an imaginary part ``max|Im λ| = ω``
-        (run-time units) oscillates with period ``T = 2π/ω``. Sampling a *raw*
-        oscillating state at ``save_dt > T/2`` violates Nyquist — the oscillation
-        aliases and any readout of it (amplitude, endpoint, mean of saved points)
-        is corrupted. This is the Nyquist theorem, not a tuned threshold. When
-        the requested ``save_dt`` undersamples the fastest oscillation this
-        reduces it to ``T / _SAVE_SAMPLES_PER_PERIOD``; ``save_dt`` is decoupled
-        from ``macro_dt`` via dense output, so the finer grid costs memory, not
-        ODE steps. Returns ``save_dt`` unchanged when it is already fine, or when
-        no oscillation spectrum is available.
+        A group with ``max|Im λ| = ω`` oscillates with period ``T = 2π/ω``;
+        sampling it at ``save_dt > T/2`` aliases, corrupting any readout of it.
+        Undersampling is reduced to ``T / _SAVE_SAMPLES_PER_PERIOD`` — dense
+        output decouples the grid from ``macro_dt``, so this costs memory, not
+        ODE steps. Unchanged when already fine or no spectrum is available.
         """
         if not save_dt:
             return save_dt
@@ -1479,19 +1328,15 @@ class Scheduler:
     ) -> dict[str, GroupIntegrator]:
         """Pick a solver + step-size controller for each group.
 
-        Routing mode (the default): each group's local Jacobian spectrum is
-        measured once via :func:`hallsim.stiffness.analyze_groups`; stiff
-        groups get the implicit solver and a magnitude-scaled vector
-        ``atol``, the rest the explicit solver and the scalar controller.
-        Pinned mode (``solver=`` or ``auto_stiffness=False``): every group
-        uses ``self.solver`` with the scalar controller.
+        Routing (default): stiff groups get the implicit solver and a
+        magnitude-scaled vector ``atol``, the rest the explicit solver and the
+        scalar controller. Pinned (``solver=`` or ``auto_stiffness=False``):
+        every group uses ``self.solver``.
 
-        The result is cached by structural signature so the analysis runs
-        once, eagerly. Under grad/jvp/vmap the Jacobian eigenvalues would be
-        tracers, so a traced call with a cold cache cannot route and warns
-        its way down to the explicit solver; :meth:`warm_up` run once
-        eagerly resolves the verdict outside the trace (the calibration path
-        does this automatically).
+        Cached by structural signature so the analysis runs once, eagerly.
+        Under grad/jvp/vmap the eigenvalues are tracers, so a traced call with
+        a cold cache warns its way down to the explicit solver — run
+        :meth:`warm_up` first to resolve the verdict outside the trace.
         """
         sig = self._integrator_signature(groups, state, macro_dt)
         cached = self._integrator_cache.get(sig)
@@ -1514,9 +1359,6 @@ class Scheduler:
                 for g in groups
             }
 
-        # Stiffness analysis needs a concrete Jacobian. Under tracing
-        # (grad/jvp/vmap) with no warmed cache the eigenvalues are tracers
-        # and it cannot be measured — see the `report is None` branch below.
         state_traced = isinstance(state, jax.core.Tracer)
         try:
             report = (
@@ -1532,13 +1374,10 @@ class Scheduler:
                 )
             )
         except RuntimeError:
-            # analyze_groups hit JAX tracers in the RHS (params under
-            # differentiation) — same cold-trace situation.
-            report = None
+            report = None  # tracers in the RHS — same cold-trace situation
         except np.linalg.LinAlgError:
-            # Eigenvalue solve didn't converge (degenerate/non-finite
-            # Jacobian). Fall back to explicit and cache it — this is a
-            # deterministic property of the composite, not a trace artifact.
+            # A deterministic property of the composite, not a trace artifact,
+            # so this verdict is safe to cache.
             log.warning(
                 "stiffness analysis failed to converge; using the explicit "
                 "solver for all groups"
@@ -1548,12 +1387,7 @@ class Scheduler:
             return integ
 
         if report is None:
-            # Cold cache under tracing: the eigenvalues are tracers, so the
-            # verdict cannot be measured. Degrade loudly — a stiff group on
-            # an explicit solver can give NaN sensitivities while the primal
-            # stays finite, and that failure is only debuggable if the
-            # fallback announced itself. Deliberately NOT cached, so a later
-            # eager call still gets to measure and route.
+            # Not cached, so a later eager call still gets to measure and route.
             log.warning(
                 "cannot measure group stiffness under tracing (grad/jvp/vmap) "
                 "with a cold cache; falling back to the explicit solver %s "
@@ -1565,9 +1399,8 @@ class Scheduler:
                 type(self.explicit_solver).__name__,
             )
             return _all_explicit()
-        # Vector atol for stiff groups: loosen absolute tolerance on
-        # large-magnitude states (which would otherwise force
-        # stability-tiny steps) while keeping a tight floor near zero.
+        # Loosen atol on large-magnitude states, which would otherwise force
+        # stability-tiny steps, while keeping a tight floor near zero.
         atol_vec = jnp.maximum(self.atol, self.atol_scale * jnp.abs(state))
         integ: dict[str, GroupIntegrator] = {}
         for g, verdict in report.items():
@@ -1633,17 +1466,14 @@ class Scheduler:
     ):
         """Trace-safe single-group ``diffeqsolve`` over ``[t0, t1]``.
 
-        No Python-side guards or logging — ``t0``/``t1`` may be tracers,
-        so this is the core used inside ``lax.scan`` by the continuous
-        scan path as well as by the eager :meth:`_solve_group`. Returns
+        No Python-side guards or logging — ``t0``/``t1`` may be tracers, so
+        this is the core used both inside ``lax.scan`` and by the eager
+        :meth:`_solve_group`. Returns
         ``(final_vec, last_dt, result, num_steps, num_rejected)``.
         """
-        # Prior macro-step's average dt as a warm-start hint, clamped to
-        # the remaining interval.
         dt0_base = dt0_hint if dt0_hint is not None else self.dt0
-        # throw=False so a failed solve returns its RESULTS code instead
-        # of crashing opaquely; _guard_result re-raises a labelled error
-        # when self.throw, else the code is surfaced in stats.
+        # throw=False so a failed solve returns its RESULTS code rather than
+        # crashing opaquely; _guard_result decides what to do with it.
         sol = dfx.diffeqsolve(
             dfx.ODETerm(rhs_fn),
             integ.solver,
@@ -1660,9 +1490,8 @@ class Scheduler:
         final_vec = self._guard_result(
             sol.ys[-1], sol.result, group_name, integ
         )
-        # "What step size did the controller settle at?" — average over
-        # the macro interval, a robust proxy that doesn't depend on
-        # Diffrax's internal controller_state API.
+        # Average step over the interval — the settled step size, without
+        # depending on Diffrax's internal controller_state API.
         last_dt = (t1 - t0) / jnp.maximum(sol.stats["num_steps"], 1)
         return (
             final_vec,
@@ -1685,14 +1514,9 @@ class Scheduler:
         dt0_hint: float | None = None,
     ) -> tuple[jnp.ndarray, float]:
         """Eager single-group solve — :meth:`_group_step` plus the
-        empty-interval guard and optional debug logging.
-
-        Returns ``(final_state_vec, last_dt_estimate, diag)`` where
-        ``diag`` is a ``(result, num_steps, num_rejected)`` triple
-        recorded into stats. ``last_dt_estimate`` feeds the next
-        macro-step's ``dt0_hint`` so the controller doesn't restart from
-        ``self.dt0`` every macro step.
-        """
+        empty-interval guard and optional debug logging. Returns
+        ``(final_state_vec, last_dt, diag)``, ``diag`` being the
+        ``(result, num_steps, num_rejected)`` triple recorded into stats."""
         if t1 <= t0:
             return (
                 state_vec,
@@ -1724,16 +1548,15 @@ class Scheduler:
         return final_vec, last_dt, diag
 
     def _guard_result(self, value, result, group_name: str, integ, keys=None):
-        """On a failed solve (when ``self.throw``) raise a labelled error,
-        naming the failure kind and worst state when the values are concrete.
+        """On a failed solve (when ``self.throw``) raise a labelled error
+        naming the failure kind and worst state.
 
         ``eqx.error_if`` bakes the check into ``value``, so the raise fires
         eagerly and under JIT/grad alike; ``throw=False`` sends the ``RESULTS``
-        code to stats instead. The report is plain Python on the eager path —
-        an in-graph callback cannot pay for itself, since ``vmap`` turns the
-        gating ``lax.cond`` into a select and fires it once per batch member
-        regardless. Traced runs read :attr:`SchedulerResult.ok` and
-        ``stats["diagnosis"]``.
+        code to stats instead. The detailed report is eager-path only — an
+        in-graph callback cannot pay for itself, since ``vmap`` turns the
+        gating ``lax.cond`` into a select that fires once per batch member
+        regardless. Traced runs read :attr:`SchedulerResult.ok`.
         """
         if not self.throw:
             return value
@@ -1789,26 +1612,17 @@ class Scheduler:
         adjoint: dfx.AbstractAdjoint,
         dt0_hint: float | None = None,
     ) -> tuple[jnp.ndarray, Any, float, tuple]:
-        """Solve one group, sampling its trajectory at a fixed grid so the
-        next group can splice in the previous group's evolving variables.
+        """Solve one group, sampling its trajectory on a fixed grid so the next
+        group can splice in this group's evolving variables.
 
-        When ``prev_interpolant`` (a ``(t0, t1, ys)`` fixed-size sample) is
-        provided, this group's RHS sees the previous group's evolved
-        variables at the current solver time ``t`` — linearly interpolated
-        over that sample — while keeping its own evolving ``y`` for
-        everything else. This is fixed-sample Lie splitting: the next group
-        "feels" the previous group's continuous trajectory inside the macro
-        step, not just a frozen snapshot. The sample size is static
-        (``coupling_interp_points``), so the same routine runs in the eager
-        loop and, for the common case, inside the compiled ``lax.scan``.
+        Given ``prev_interpolant`` (a ``(t0, t1, ys)`` fixed-size sample), this
+        group's RHS sees the previous group's evolved variables interpolated at
+        the current solver time, keeping its own ``y`` for everything else — so
+        it feels that trajectory inside the macro step rather than a frozen
+        snapshot. The static sample size lets the same routine run eagerly and
+        inside the compiled ``lax.scan``.
 
-        Returns
-        -------
-        (final_state_vec, sample, last_dt, diag)
-            The updated flat state, this group's ``(t0, t1, ys)`` sample
-            (for passing to the next group), the average step size over the
-            interval (warm-start hint for the next macro step), and the
-            ``(result, num_steps, num_rejected)`` diagnostics triple.
+        Returns ``(final_state_vec, sample, last_dt, diag)``.
         """
         k = self.coupling_interp_points
         grid = t0 + jnp.linspace(0.0, 1.0, k) * (t1 - t0)
@@ -1874,7 +1688,6 @@ class Scheduler:
         # Number of complete periods at t and t_next
         n_before = int(t / dt_step)
         n_after = int(t_next / dt_step)
-        # Also handle exact alignment
-        if t_next % dt_step < _TIME_EPS:
+        if t_next % dt_step < _TIME_EPS:  # exact alignment
             n_after = int(round(t_next / dt_step))
         return n_after > n_before

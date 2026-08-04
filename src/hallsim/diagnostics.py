@@ -1,54 +1,37 @@
 """Pre-flight stability screening for composed models.
 
-A composite is only as trustworthy as its parts, and the most dangerous
-failures are silent: a model that *looks* like it ran but produced
-numerical garbage. Before importing a new model, composing it, or
-believing any composite output, screen each constituent **on its own**.
+A composite is only as trustworthy as its parts, and the dangerous failures are
+silent: a model that *looks* like it ran but produced numerical garbage. Screen
+each constituent on its own for three modes:
 
-The three failure modes to screen for:
+- **exploding** — unbounded growth / NaN. Often numerical rather than
+  biological: an explicit solver at loose tolerance pumps energy into an
+  oscillator until it diverges (Geva-Zatorsky 2006 p53 does this at
+  ``rtol=1e-4``, and is bounded at ``1e-5``).
+- **vanishing** — every state collapses to ~0; the subsystem contributes
+  nothing.
+- **tolerance-sensitive** — the load-bearing check. If the trajectory changes
+  materially between a loose and a tight tolerance, the result is
+  solver-dependent and is not yet a result.
 
-- **exploding** — unbounded growth / NaN / Inf. Often a *numerical*
-  artifact, not biology: an explicit solver at loose tolerance pumps
-  energy into an oscillator until it diverges. The Geva-Zatorsky 2006
-  p53 oscillator does exactly this at ``rtol=1e-4`` and is bounded by
-  ``rtol=1e-5``.
-- **vanishing** — every state collapses to ~0; the subsystem has lost
-  its dynamics and contributes nothing.
-- **tolerance-sensitive** — the load-bearing check: the trajectory
-  changes materially between a loose and a tight solver tolerance. If
-  the answer depends on the tolerance, it is solver-dependent and not
-  yet a result. A bounded, non-vanishing, tolerance-*insensitive*
-  trajectory is one you can trust.
+Each model runs on its **native clock** over a window in its own time unit — a
+few characteristic times, not the composite's full horizon. Solver steps are
+capped so a pathological model fails fast rather than hanging.
 
-Screening runs each model on its **native clock** (independent of any
-composite-level time reconciliation) over a bounded window you choose in
-the model's native time unit — a few of its own characteristic times,
-*not* the composite's full horizon (integrating a fast oscillator over a
-slow horizon is the pathological case the Scheduler grouping exists to
-avoid; don't reproduce it in a sanity check). Solver steps are capped so
-a pathological model fails fast and is flagged rather than hanging.
+Use :func:`screen_process` for a single model and :func:`screen_composite`
+before trusting a composite; ``demos/subsystem_diagnostics.py`` is the visual
+version.
 
-Use :func:`screen_process` when bringing a single model in, and
-:func:`screen_composite` (pass a per-model window dict) before trusting a
-composite. The companion ``demos/subsystem_diagnostics.py`` is the visual
-version — it plots each subsystem solo.
-
-**Is it the model or is it us?** When the screen flags an SBML-imported
-model as exploding/unintegrable, the screen runs a second, independent
-integration with **sbmltoodejax's own** stepper (the generated
-``ModelStep``, which bakes the upstream odeint + its generation-time
-tolerances) and reports the verdict via ``ScreenReport.framework_suspect``.
-A model that HallSim fails but sbmltoodejax integrates bounded-and-finite
-is a *framework* problem (solver config, atol scale, timescale grouping),
-not a bad model — the decisive check that separates the two failure modes
-in one shot.
+**Is it the model or is it us?** When an SBML import is flagged, the screen
+re-integrates it with sbmltoodejax's own stepper and reports via
+``ScreenReport.framework_suspect``. Bounded there but failing here means the
+problem is solver config, atol scale, or timescale grouping — not the model.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-import diffrax as dfx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -62,9 +45,15 @@ from hallsim.scheduler import Scheduler
 class ScreenReport:
     """Verdict from screening one process solo.
 
-    ``ok`` is True only when none of the three flags fire. The flags are
+    ``ok`` is True only when none of the failure flags fire. They are
     advisory — some models legitimately grow or decay — but every flag
     is something to understand before trusting the subsystem.
+
+    ``undriven`` is the exception: it reports that the process only moves
+    when something drives its INPUT ports (a coupling edge, a clamp, a
+    param-input), so the flags were measured under a probe drive rather
+    than at the port defaults. It describes the screen, not a defect, and
+    does not gate ``ok``.
     """
 
     name: str
@@ -77,6 +66,7 @@ class ScreenReport:
     framework_suspect: bool = False
     tunes: bool | None = None
     negative: bool = False
+    undriven: bool = False
 
     @property
     def ok(self) -> bool:
@@ -96,6 +86,8 @@ class ScreenReport:
             flags.append("EXPLODING")
         if self.vanishing:
             flags.append("VANISHING")
+        if self.undriven:
+            flags.append("UNDRIVEN")
         if self.tolerance_sensitive:
             flags.append("TOLERANCE-SENSITIVE")
         if self.negative:
@@ -104,7 +96,7 @@ class ScreenReport:
             flags.append("NON-TUNABLE")
         if self.framework_suspect:
             flags.append("FRAMEWORK-SUSPECT")
-        verdict = "ok" if self.ok else " + ".join(flags)
+        verdict = " + ".join(flags) if flags else "ok"
         return (
             f"{self.name:>14}: {verdict:<38} "
             f"max|y|={self.max_abs:.3g}  tol-rel-diff={self.tol_rel_diff:.3g}"
@@ -126,211 +118,61 @@ def _on_native_clock(process):
     return process
 
 
-def _solo_run(process, t_end, rtol, atol, n_save, max_steps, sched_kwargs):
+def _solo_run(
+    process, t_end, rtol, atol, n_save, max_steps, sched_kwargs, probe=None
+):
     comp = single_process_composite(process)
+    y0 = comp.initial_state_vec()
+    if probe is not None:
+        y0 = y0.at[comp.unfed_input_indices()].set(probe)
     res = Scheduler(
         rtol=rtol, atol=atol, max_steps=max_steps, **sched_kwargs
     ).run(
         comp,
         t_span=(0.0, t_end),
         macro_dt=t_end,
-        y0=comp.initial_state_vec(),
+        y0=y0,
         save_dt=t_end / n_save,
     )
-    return np.asarray(jnp.stack([res.get(k) for k in res.keys], axis=-1))
+    ys = np.asarray(jnp.stack([res.get(k) for k in res.keys], axis=-1))
+    if probe is None:
+        return ys
+    # The probed paths are held constants, not dynamics — judging the run on
+    # them would let the probe value itself pass for a live trajectory.
+    return np.delete(
+        ys, np.asarray(comp.unfed_input_indices(list(res.keys))), axis=-1
+    )
 
 
-def _sbmltoodejax_native_finite(process, t_end: float, n_steps: int):
-    """Integrate an SBML-imported process with sbmltoodejax's own stepper.
-
-    Rolls the generated ``ModelStep`` (which wraps the upstream odeint at
-    its generation-time tolerances) forward over ``[0, t_end]`` on the
-    model's native clock — the independent reference for the "is it the
-    model or is it us?" check. Returns ``(max_abs, finite)``, or ``None``
-    for a non-SBML process (no native reference exists) or if the native
-    run itself errors.
-    """
-    model = getattr(process, "_model", None)
-    if model is None or not hasattr(process, "_species_y0"):
-        return None
-    try:
-        y0 = jnp.asarray(process._species_y0)
-        c0 = process._c
-        dt = t_end / n_steps
-
-        def step(carry, _):
-            y, w, c, t = carry
-            y, w, c, t = model(y, w, c, t, dt)
-            return (y, w, c, t), y
-
-        _, ys = jax.lax.scan(
-            step, (y0, process._w0, c0, 0.0), None, length=n_steps
-        )
-        ys = np.asarray(ys)
-    except Exception:
-        return None
-    finite = bool(np.all(np.isfinite(ys)))
-    max_abs = float(np.nanmax(np.abs(ys))) if ys.size else 0.0
-    return max_abs, finite
+def _has_unfed_inputs(process) -> bool:
+    return single_process_composite(process).unfed_input_indices().size > 0
 
 
-def _tunes(process, t_end: float, n_probe: int = 2, sched_kwargs=None):
-    """Forward-mode gradient finiteness — the 'tunes' half of the rule.
-
-    The constituents-first rule requires each model both *runs* and
-    *tunes*: a finite forward-mode gradient of a state summary w.r.t. one
-    of its parameters. This probes up to ``n_probe`` of the process's
-    ``calibratable_params`` with ``jax.jvp`` through ``Scheduler.run``
-    (the same ForwardMode path calibration uses). A model whose explicit
-    forward sensitivities overflow (stiff) is retried on the implicit
-    solver — that is how it would actually be calibrated.
-
-    Returns ``(tunes, needs_implicit)``: ``tunes`` True if some path gives
-    finite gradients, False if neither does, ``needs_implicit`` True when
-    only the implicit solver works. Returns ``(None, False)`` when the
-    process exposes no calibratable parameters.
-    """
-    from hallsim.calibration import _substitute_param
-
-    sched_kwargs = sched_kwargs or {}
-    probes = process.calibratable_params()[:n_probe]
-    if not probes:
-        return None, False
-
-    def all_finite(sched):
-        for cp in probes:
-
-            def loss(val, field=cp.field):
-                proc = _substitute_param(process, field, val)
-                comp = single_process_composite(proc)
-                res = sched.run(
-                    comp,
-                    t_span=(0.0, t_end),
-                    macro_dt=t_end,
-                    y0=comp.initial_state_vec(),
-                    adjoint=dfx.ForwardMode(),
-                )
-                return jnp.sum(res.ys[-1])
-
-            try:
-                _, tangent = jax.jvp(loss, (cp.default,), (1.0,))
-            except Exception:
-                return False
-            if not bool(jnp.isfinite(tangent)):
-                return False
-        return True
-
-    if all_finite(Scheduler(**sched_kwargs)):
-        return True, False
-
-    # warm_up runs eagerly outside the jvp trace so the stiffness verdict is
-    # cached before tracing (analysis can't read tracer Jacobians).
-    s_imp = Scheduler(auto_stiffness=True)
-    try:
-        s_imp.warm_up(
-            single_process_composite(process),
-            t_span=(0.0, t_end),
-            macro_dt=t_end,
-        )
-    except Exception:
-        return False, False
-    if all_finite(s_imp):
-        return True, True
-    return False, False
+def _and(detail: str, clause: str) -> str:
+    return (detail + "; " if detail else "") + clause
 
 
-def screen_process(
-    process,
-    t_end: float,
-    *,
-    rtol_loose: float = 1e-3,
-    rtol_tight: float = 1e-7,
-    tol_rel_threshold: float = 0.05,
-    growth_threshold: float = 1e3,
-    n_save: int = 400,
-    max_steps: int = DEFAULT_MAX_STEPS,
-    check_tunability: bool = True,
-    **sched_kwargs,
-) -> ScreenReport:
-    """Screen one process solo over ``[0, t_end]`` native time units.
+@dataclass
+class _Verdict:
+    """Flags read off one loose/tight pair of solo trajectories."""
 
-    ``t_end`` is in the model's **native** time unit — pick a few of its
-    own characteristic times (e.g. ~30000 for a second-scale NF-κB
-    oscillator, ~100 for an hour-scale p53 oscillator, ~50 for a
-    day-scale senescence model). The process is run on its native clock
-    regardless of any composite reconciliation.
+    exploding: bool
+    vanishing: bool
+    tolerance_sensitive: bool
+    negative: bool
+    peak: float
+    tol_rel_diff: float
+    detail: str
 
-    Flags ``exploding`` (non-finite, or peak > ``growth_threshold`` ×
-    initial scale and still rising), ``vanishing`` (all states end within
-    1e-9 of zero), ``tolerance_sensitive`` (loose vs tight tolerance
-    differ by more than ``tol_rel_threshold``, peak-normalised), and
-    ``negative`` (a state that started non-negative dipped materially below
-    zero — a concentration/activity that went out of domain). A solver
-    that exceeds ``max_steps`` is reported as exploding/unintegrable.
 
-    When an SBML-imported process is flagged exploding/unintegrable, a
-    second integration with sbmltoodejax's own stepper decides whether the
-    model is at fault: a bounded, finite native run sets
-    ``framework_suspect`` (the failure is HallSim's, not the model's).
-
-    With ``check_tunability`` (default), also verifies the *tunes* half of
-    the constituents-first rule — a finite forward-mode gradient through
-    ``Scheduler.run`` — setting ``tunes`` (``False`` makes the report not
-    ``ok``; a model that tunes only on the implicit solver is noted in
-    ``detail``).
-
-    ``sched_kwargs`` are forwarded to the :class:`Scheduler` (e.g.
-    ``solver=dfx.Kvaerno5()`` or ``auto_stiffness=True``) so the screen runs
-    under the *same* solver configuration production will — required to screen
-    a stiff model, which the default explicit solver would flag as exploding.
-    """
-    proc = _on_native_clock(process)
-    name = getattr(proc, "_name", type(proc).__name__)
-
-    try:
-        # atol is held at the production default across both runs so the
-        # loose-vs-tight comparison isolates rtol sensitivity (and the
-        # screen integrates exactly what the Scheduler does in production).
-        y_tight = _solo_run(
-            proc,
-            t_end,
-            rtol_tight,
-            DEFAULT_ATOL,
-            n_save,
-            max_steps,
-            sched_kwargs,
-        )
-        y_loose = _solo_run(
-            proc,
-            t_end,
-            rtol_loose,
-            DEFAULT_ATOL,
-            n_save,
-            max_steps,
-            sched_kwargs,
-        )
-    except TypeError:  # bad sched_kwargs, not an unintegrable model
-        raise
-    except Exception as exc:  # max_steps / non-finite blow the solve up
-        native = _sbmltoodejax_native_finite(proc, t_end, n_save)
-        suspect = native is not None and native[1]
-        detail = f"solver failed: {type(exc).__name__}"
-        if suspect:
-            detail += (
-                f"; sbmltoodejax integrates it bounded (max|y|={native[0]:.3g})"
-                " — framework issue, not the model"
-            )
-        return ScreenReport(
-            name=name,
-            exploding=True,
-            vanishing=False,
-            tolerance_sensitive=True,
-            max_abs=float("inf"),
-            tol_rel_diff=float("inf"),
-            detail=detail,
-            framework_suspect=suspect,
-        )
-
+def _verdict(
+    y_tight,
+    y_loose,
+    growth_threshold,
+    tol_rel_threshold,
+    rtol_loose,
+    rtol_tight,
+) -> _Verdict:
     finite = bool(np.all(np.isfinite(y_tight)))
     peak = float(np.nanmax(np.abs(y_tight))) if y_tight.size else 0.0
     init_scale = max(float(np.max(np.abs(y_tight[0]))) if finite else 0.0, 1.0)
@@ -382,37 +224,276 @@ def screen_process(
     elif negative:
         detail = "a non-negative state went materially negative"
 
-    framework_suspect = False
-    if exploding:
+    return _Verdict(
+        exploding=exploding,
+        vanishing=vanishing,
+        tolerance_sensitive=tolerance_sensitive,
+        negative=negative,
+        peak=peak,
+        tol_rel_diff=tol_rel_diff,
+        detail=detail,
+    )
+
+
+def _sbmltoodejax_native_finite(process, t_end: float, n_steps: int):
+    """Integrate an SBML-imported process with sbmltoodejax's own stepper.
+
+    Rolls the generated ``ModelStep`` (which wraps the upstream odeint at
+    its generation-time tolerances) forward over ``[0, t_end]`` on the
+    model's native clock — the independent reference for the "is it the
+    model or is it us?" check. Returns ``(max_abs, finite)``, or ``None``
+    for a non-SBML process (no native reference exists) or if the native
+    run itself errors.
+    """
+    model = getattr(process, "_model", None)
+    if model is None or not hasattr(process, "_species_y0"):
+        return None
+    try:
+        y0 = jnp.asarray(process._species_y0)
+        c0 = process._c
+        dt = t_end / n_steps
+
+        def step(carry, _):
+            y, w, c, t = carry
+            y, w, c, t = model(y, w, c, t, dt)
+            return (y, w, c, t), y
+
+        _, ys = jax.lax.scan(
+            step, (y0, process._w0, c0, 0.0), None, length=n_steps
+        )
+        ys = np.asarray(ys)
+    except Exception:
+        return None
+    finite = bool(np.all(np.isfinite(ys)))
+    max_abs = float(np.nanmax(np.abs(ys))) if ys.size else 0.0
+    return max_abs, finite
+
+
+def _tunes(
+    process, t_end: float, n_probe: int = 2, sched_kwargs=None, probe=None
+):
+    """Forward-mode gradient finiteness — the 'tunes' half of the rule.
+
+    The constituents-first rule requires each model both *runs* and
+    *tunes*: a finite forward-mode gradient of a state summary w.r.t. one
+    of its parameters. This probes up to ``n_probe`` of the process's
+    ``calibratable_params`` with ``jax.jvp`` through ``Scheduler.run``
+    (the same ForwardMode path calibration uses). A model whose explicit
+    forward sensitivities overflow (stiff) is retried on the implicit
+    solver — that is how it would actually be calibrated.
+
+    Returns ``(tunes, needs_implicit)``: ``tunes`` True if some path gives
+    finite gradients, False if neither does, ``needs_implicit`` True when
+    only the implicit solver works. Returns ``(None, False)`` when the
+    process exposes no calibratable parameters.
+    """
+    from hallsim.calibration import _substitute_param
+
+    sched_kwargs = sched_kwargs or {}
+    probes = process.calibratable_params()[:n_probe]
+    if not probes:
+        return None, False
+
+    def all_finite(sched):
+        for cp in probes:
+
+            def loss(val, field=cp.field):
+                proc = _substitute_param(process, field, val)
+                comp = single_process_composite(proc)
+                y0 = comp.initial_state_vec()
+                if probe is not None:
+                    y0 = y0.at[comp.unfed_input_indices()].set(probe)
+                res = sched.run(
+                    comp,
+                    t_span=(0.0, t_end),
+                    macro_dt=t_end,
+                    y0=y0,
+                )
+                return jnp.sum(res.ys[-1])
+
+            try:
+                _, tangent = jax.jvp(loss, (cp.default,), (1.0,))
+            except Exception:
+                return False
+            if not bool(jnp.isfinite(tangent)):
+                return False
+        return True
+
+    if all_finite(Scheduler(**sched_kwargs)):
+        return True, False
+
+    # warm_up runs eagerly outside the jvp trace so the stiffness verdict is
+    # cached before tracing (analysis can't read tracer Jacobians).
+    s_imp = Scheduler(auto_stiffness=True)
+    try:
+        s_imp.warm_up(
+            single_process_composite(process),
+            t_span=(0.0, t_end),
+            macro_dt=t_end,
+        )
+    except Exception:
+        return False, False
+    if all_finite(s_imp):
+        return True, True
+    return False, False
+
+
+def screen_process(
+    process,
+    t_end: float,
+    *,
+    rtol_loose: float = 1e-3,
+    rtol_tight: float = 1e-7,
+    tol_rel_threshold: float = 0.05,
+    growth_threshold: float = 1e3,
+    n_save: int = 400,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    check_tunability: bool = True,
+    input_probe: float = 1.0,
+    **sched_kwargs,
+) -> ScreenReport:
+    """Screen one process solo over ``[0, t_end]`` **native** time units — a
+    few of the model's own characteristic times (~30000 for a second-scale
+    NF-κB oscillator, ~50 for a day-scale senescence model), on its native
+    clock regardless of composite reconciliation.
+
+    Flags ``exploding`` (non-finite, or peak > ``growth_threshold`` × initial
+    scale and still rising), ``vanishing`` (all states end within 1e-9 of
+    zero), ``tolerance_sensitive`` (loose vs tight differ by more than
+    ``tol_rel_threshold``, peak-normalised), and ``negative`` (a non-negative
+    state dipped out of domain). Exceeding ``max_steps`` reads as exploding.
+
+    An SBML import flagged exploding is re-integrated with sbmltoodejax's own
+    stepper; bounded there sets ``framework_suspect``. A component that only
+    moves when driven would read as ``vanishing``, so it is re-screened with
+    unfed INPUT paths held at ``input_probe`` — if that wakes it the report is
+    ``undriven`` (not a defect) and every flag describes the driven run.
+
+    ``check_tunability`` (default) also verifies the *tunes* half of the
+    constituents-first rule via a finite forward-mode gradient through
+    ``Scheduler.run``.
+
+    ``sched_kwargs`` reach the :class:`Scheduler`, so the screen runs under the
+    same solver configuration production will — required for a stiff model,
+    which the default explicit solver would flag as exploding.
+    """
+    proc = _on_native_clock(process)
+    name = getattr(proc, "_name", type(proc).__name__)
+
+    def tight_and_loose(probe=None):
+        # atol is held at the production default across both runs so the
+        # loose-vs-tight comparison isolates rtol sensitivity (and the
+        # screen integrates exactly what the Scheduler does in production).
+        return tuple(
+            _solo_run(
+                proc,
+                t_end,
+                rtol,
+                DEFAULT_ATOL,
+                n_save,
+                max_steps,
+                sched_kwargs,
+                probe,
+            )
+            for rtol in (rtol_tight, rtol_loose)
+        )
+
+    try:
+        y_tight, y_loose = tight_and_loose()
+    except TypeError:  # bad sched_kwargs, not an unintegrable model
+        raise
+    except Exception as exc:  # max_steps / non-finite blow the solve up
         native = _sbmltoodejax_native_finite(proc, t_end, n_save)
-        if native is not None and native[1]:
-            framework_suspect = True
+        suspect = native is not None and native[1]
+        detail = f"solver failed: {type(exc).__name__}"
+        if suspect:
             detail += (
                 f"; sbmltoodejax integrates it bounded (max|y|={native[0]:.3g})"
                 " — framework issue, not the model"
             )
+        return ScreenReport(
+            name=name,
+            exploding=True,
+            vanishing=False,
+            tolerance_sensitive=True,
+            max_abs=float("inf"),
+            tol_rel_diff=float("inf"),
+            detail=detail,
+            framework_suspect=suspect,
+        )
+
+    v = _verdict(
+        y_tight,
+        y_loose,
+        growth_threshold,
+        tol_rel_threshold,
+        rtol_loose,
+        rtol_tight,
+    )
+
+    # A component that only moves when driven (coupling edge, clamp,
+    # param-input) sits flat at its port defaults, which reads as VANISHING.
+    # Re-screen it under a probe drive: if it comes alive it was undriven,
+    # and the flags now describe a live trajectory instead of a flat zero.
+    undriven = False
+    if v.vanishing and _has_unfed_inputs(proc):
+        try:
+            v_driven = _verdict(
+                *tight_and_loose(input_probe),
+                growth_threshold,
+                tol_rel_threshold,
+                rtol_loose,
+                rtol_tight,
+            )
+        except Exception:
+            v_driven = None
+        if v_driven is not None and not v_driven.vanishing:
+            undriven, v = True, v_driven
+            v.detail = _and(
+                v.detail,
+                "flat at port defaults; screened with unfed INPUTs held "
+                f"at {input_probe:g}",
+            )
+
+    framework_suspect = False
+    if v.exploding:
+        native = _sbmltoodejax_native_finite(proc, t_end, n_save)
+        if native is not None and native[1]:
+            framework_suspect = True
+            v.detail = _and(
+                v.detail,
+                f"sbmltoodejax integrates it bounded (max|y|={native[0]:.3g})"
+                " — framework issue, not the model",
+            )
 
     tunes = None
-    if check_tunability and not exploding:
-        tunes, needs_implicit = _tunes(proc, t_end, sched_kwargs=sched_kwargs)
+    if check_tunability and not v.exploding:
+        tunes, needs_implicit = _tunes(
+            proc,
+            t_end,
+            sched_kwargs=sched_kwargs,
+            probe=input_probe if undriven else None,
+        )
         if tunes is False:
-            detail = (detail + "; " if detail else "") + "non-finite gradient"
+            v.detail = _and(v.detail, "non-finite gradient")
         elif needs_implicit:
-            detail = (detail + "; " if detail else "") + (
-                "tunes only under the implicit solver (auto_stiffness=True)"
+            v.detail = _and(
+                v.detail,
+                "tunes only under the implicit solver (auto_stiffness=True)",
             )
 
     return ScreenReport(
         name=name,
-        exploding=exploding,
-        vanishing=vanishing,
-        tolerance_sensitive=tolerance_sensitive,
-        max_abs=peak,
-        tol_rel_diff=tol_rel_diff,
-        detail=detail,
+        exploding=v.exploding,
+        vanishing=v.vanishing,
+        tolerance_sensitive=v.tolerance_sensitive,
+        max_abs=v.peak,
+        tol_rel_diff=v.tol_rel_diff,
+        detail=v.detail,
         framework_suspect=framework_suspect,
         tunes=tunes,
-        negative=negative,
+        negative=v.negative,
+        undriven=undriven,
     )
 
 

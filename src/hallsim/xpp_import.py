@@ -37,6 +37,7 @@ import logging
 import re
 from typing import Any
 
+import equinox as eqx
 import jax.numpy as jnp
 
 from hallsim.imported import ImportedODEProcess
@@ -458,20 +459,22 @@ class XPPProcess(ImportedODEProcess):
 
     _param_label = "XPP parameter"
 
-    _state_names: tuple[str, ...] = ()
-    _state_y0: tuple[float, ...] = ()
-    _ode_py: tuple[str, ...] = ()
-    _inter_names: tuple[str, ...] = ()
-    _inter_py: tuple[str, ...] = ()
-    _func_names: tuple[str, ...] = ()
-    _func_args: tuple[tuple[str, ...], ...] = ()
-    _func_py: tuple[str, ...] = ()
-    _aux_names: tuple[str, ...] = ()
-    _aux_py: tuple[str, ...] = ()
-    # native_time_seconds / time_scale / parameters / _param_names / _name
-    # are inherited from ImportedODEProcess. XPP files carry no unit
-    # metadata, so native_time_seconds is supplied at import (default 1.0 =
-    # the model runs on its own clock).
+    # Parsed model structure — names, source text, port defaults. Static, so
+    # ports_schema() stays concrete under a trace.
+    _state_names: tuple[str, ...] = eqx.field(static=True, default=())
+    _state_y0: tuple[float, ...] = eqx.field(static=True, default=())
+    _ode_py: tuple[str, ...] = eqx.field(static=True, default=())
+    _inter_names: tuple[str, ...] = eqx.field(static=True, default=())
+    _inter_py: tuple[str, ...] = eqx.field(static=True, default=())
+    _func_names: tuple[str, ...] = eqx.field(static=True, default=())
+    _func_args: tuple[tuple[str, ...], ...] = eqx.field(
+        static=True, default=()
+    )
+    _func_py: tuple[str, ...] = eqx.field(static=True, default=())
+    _aux_names: tuple[str, ...] = eqx.field(static=True, default=())
+    _aux_py: tuple[str, ...] = eqx.field(static=True, default=())
+    # XPP files carry no unit metadata, so native_time_seconds is supplied at
+    # import (default 1.0 = the model runs on its own clock).
 
     def ports_schema(self):
         schema = {

@@ -1,0 +1,20 @@
+repos:
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+        args: [--line-length=79]
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.1.1
+    hooks:
+      - id: flake8
+        args: [--ignore=E501,E402,W504,W503,E226,E203]
+
+  - repo: local
+    hooks:
+      - id: prose-ratio
+        name: prose ratio
+        entry: python scripts/check_prose_ratio.py src/hallsim
+        language: system
+        pass_filenames: false

@@ -1,33 +1,12 @@
-"""KickEvent — one-shot perturbation of state variables at a fixed time.
+"""KickEvent — "at time T, add delta D to store path P", as a Process.
 
-A generic EVENT Process for "at time T, add delta D to store path P".
+A kick is a one-shot mutation, not a derivative contribution, so it rides the
+EVENT/LATCHED path rather than EVOLVED. That lets it share a store path with
+the CONTINUOUS process that owns the derivative: the latter advances the state
+between sync points, the kick scatter-adds at the one where it fires. There is
+no separate "run with perturbation" code path — compose it and run.
 
-Kicks are first-class composable Processes that the Scheduler dispatches
-at sync points — just like any other event in the system. There is no
-separate "run with perturbation" code path: compose a ``KickEvent`` into
-the composite, wire its ports to the kicked store paths, and run.
-
-Why this pattern
-----------------
-A kick is *not* a derivative contribution; it's a one-shot mutation of
-the state. The framework correctly distinguishes these two semantics:
-
-- CONTINUOUS processes own *derivatives* via EVOLVED/EXCLUSIVE ports.
-- EVENT processes apply *deltas* via LATCHED ports when their
-  ``condition`` becomes true.
-
-A LATCHED-output EVENT can coexist on the same store path as a
-CONTINUOUS EVOLVED/EXCLUSIVE writer — the CONTINUOUS process advances
-the state via its derivative between sync points, and the EVENT
-scatter-adds its delta at the sync point where the trigger fires.
-
-Usage
------
->>> from hallsim.models.kick_event import KickEvent
->>> from hallsim.scheduler import Scheduler
 >>> kick = KickEvent(kick_time=10.0, deltas={"x": 5.0})
->>> # Compose with whatever continuous processes own "x"; topology
->>> # routes kick's "x" port to the same store path.
 >>> result = Scheduler().run(comp, t_span=(0.0, 20.0), macro_dt=1.0)
 """
 
@@ -46,26 +25,14 @@ class KickEvent(Process):
     Parameters
     ----------
     kick_time:
-        Simulation time at which the kick fires. The first sync point
-        with ``t >= kick_time`` triggers the False→True transition.
+        The kick fires at the first sync point with ``t >= kick_time``.
     deltas:
-        Mapping from port name to additive delta. Each port name is
-        wired in topology to the store path being kicked. Values may
-        be Python floats or JAX arrays; arrays must broadcast against
-        the store path's value shape (relevant for batched runs).
+        ``{port_name: delta}``, each port wired in topology to the store path
+        being kicked. Arrays must broadcast against that path's shape.
     units:
-        Optional mapping from port name to unit string for that kick
-        target. A kick's units must match the target store path's
-        units to be physically meaningful — pass them here so the
-        semantic validator can verify compatibility with whichever
-        CONTINUOUS process owns that path. Keys not present default
-        to ``""`` (unspecified → validator emits a warning when the
-        kicked path has units declared elsewhere).
-
-    Notes
-    -----
-    The handler returns the same delta on every invocation, but the
-    Scheduler's False→True trigger guard fires it exactly once.
+        ``{port_name: unit}`` so the semantic validator can check the kick
+        against whatever CONTINUOUS process owns the path. Missing keys are
+        unspecified, which warns if the path declares units elsewhere.
     """
 
     kind: ProcessKind = ProcessKind.EVENT
@@ -74,10 +41,6 @@ class KickEvent(Process):
     units: Mapping[str, str] = None  # type: ignore[assignment]
 
     def ports_schema(self):
-        # All kick targets are LATCHED — that's the role EVENT processes
-        # use to apply scatter-add deltas. Other processes' EVOLVED /
-        # EXCLUSIVE ports may share these store paths (post topology
-        # validator relaxation in store.py).
         units_map = self.units or {}
         return {
             name: Port(
@@ -93,9 +56,7 @@ class KickEvent(Process):
         return t >= self.kick_time
 
     def handler(self, t, state):
-        # Return the configured deltas. The Scheduler's False→True
-        # tracking ensures this fires exactly once at the first sync
-        # point where condition becomes true.
+        # Same delta every call; the Scheduler's False→True guard fires it once.
         return {
             name: jnp.asarray(value)
             for name, value in (self.deltas or {}).items()

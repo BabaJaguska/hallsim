@@ -67,19 +67,11 @@ def sensitivity_jacobian(problem, params: dict | None = None):
         [jnp.log10(jnp.asarray(float(params[n]))) for n in names]
     )
     fn = _prediction_fn(problem, params, names)
-    # Force the forward-mode (ForwardMode) solver adjoint for the Jacobian:
-    # a reverse-mode fit leaves the problem on a custom_vjp adjoint that
-    # jacfwd cannot differentiate. Restore the fit's mode afterwards.
-    prev_mode = getattr(problem, "_fit_mode", None)
-    problem._fit_mode = "forward"
-    try:
-        # Eager warm-up: the first prediction populates the problem's cached
-        # conservation laws (a concrete-only equilibration diagnostic that
-        # traces badly), so jacfwd reuses them instead of re-deriving.
-        fn(theta0)
-        jac = jax.jacfwd(fn)(theta0)
-    finally:
-        problem._fit_mode = prev_mode
+    # Eager warm-up: the first prediction populates the problem's cached
+    # conservation laws (a concrete-only equilibration diagnostic that traces
+    # badly), so jacfwd reuses them instead of re-deriving.
+    fn(theta0)
+    jac = jax.jacfwd(fn)(theta0)
     return np.asarray(jac, dtype=float), names
 
 

@@ -1,50 +1,18 @@
 """Differentiable calibration of HallSim composites.
 
-Two layers:
+Two layers: :class:`Calibrator` is the optimization loop over a user-supplied
+``loss_fn(params) -> scalar`` (autodiff mode, optax setup, clamping, history);
+:class:`CalibrationProblem` wires a composite, experimental conditions,
+gene-reporter Δ_data and fittable parameters into one declarative object that
+builds that loss and scores held-out arms.
 
-- :class:`Calibrator` — the low-level optimization loop. Takes a
-  user-supplied ``loss_fn(params) -> scalar`` and a parameter pytree;
-  handles autodiff mode, optax setup, clamping, history logging.
+Pick the autodiff mode by parameter count: ``"forward"`` costs
+``(1 + n_params) × forward`` and suits ``n_params`` ≤ ~10 (most mechanism
+calibration); ``"reverse"`` is one VJP and wins for many parameters
+(NeuralODE weights).
 
-- :class:`CalibrationProblem` (+ :class:`Condition`, :class:`ParameterRef`) —
-  the high-level framework. Wires a composite, a set of experimental
-  conditions (hallmark severity profiles), gene-reporter Δ_data, and a
-  set of fittable mechanism parameters into one declarative object
-  that builds the loss function for you and runs concordance on
-  arbitrary held-out arms. Reuse this for any composite + dataset.
+::
 
-Choose the autodiff mode by parameter count, not by habit:
-
-- **Forward-mode** (``mode="forward"``): cost is ``(1 + n_params) × forward``.
-  Best when ``n_params`` is small (≤ ~10). Required when differentiating
-  through Diffrax solves where you'd otherwise hit recursive-checkpoint
-  step-budget issues. Wires ``dfx.ForwardMode()`` into the diffeqsolve
-  adjoint automatically.
-
-- **Reverse-mode** (``mode="reverse"``): standard ``jax.value_and_grad``.
-  Best when ``n_params`` is large (e.g. NeuralODE weights). Uses
-  Diffrax's default ``RecursiveCheckpointAdjoint``.
-
-For most mechanism-parameter calibration (a handful of hallmark knobs,
-rate constants), forward-mode is the right call.
-
-Low-level usage::
-
-    from hallsim.calibration import Calibrator
-
-    def loss_fn(params):
-        composite = build_my_composite(**params)
-        result = Scheduler(adjoint=...).run(composite, ...)
-        return compute_loss_against_data(result)
-
-    cal = Calibrator(loss_fn=loss_fn, init_params={...}, mode="forward")
-    history = cal.fit(steps=50)
-
-High-level usage::
-
-    from hallsim.calibration import (
-        CalibrationProblem, Condition, ParameterRef,
-    )
     problem = CalibrationProblem(
         composite=my_composite,
         reporters=MULTI_HALLMARK_REPORTERS,
@@ -52,7 +20,6 @@ High-level usage::
         data={"DDIS_vs_ctrl": ds.delta(...)},
         params={"rate": ParameterRef("dp14", "parameters.k", init=1.0)},
         fit_arms=["DDIS_vs_ctrl"],
-        held_out_arms=[],
     )
     history = problem.fit(steps=40)
     results = problem.evaluate(history.final_params)
@@ -66,7 +33,6 @@ from dataclasses import dataclass, field, replace as dc_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
-import diffrax as dfx
 import equinox as eqx
 import jax
 import jax.flatten_util  # noqa: F401  # for ravel_pytree
@@ -152,25 +118,20 @@ class Calibrator:
     Parameters
     ----------
     loss_fn:
-        Scalar-valued, JAX-traceable function of the parameter pytree.
-        Must return a single scalar (use ``jnp.sum``/``jnp.mean`` to
-        reduce vector outputs). The simulator runs inside this function.
+        Scalar-valued, JAX-traceable function of the parameter pytree; the
+        simulator runs inside it.
     init_params:
-        Initial parameter pytree. Leaves are scalars or ``jnp.ndarray``.
-        For a flat dict ``{"alpha": 0.05, "k": 0.1}``, leaves are
-        scalars; for vector-valued params, use ``jnp.asarray([...])``.
+        Initial parameter pytree, leaves scalar or ``jnp.ndarray``.
     clamps:
-        Optional ``{leaf_name: (lo, hi)}`` for per-leaf box-clamping
-        after each optimizer step. Use ``None`` (the default) to skip.
-        Only top-level dict keys are inspected — nested pytrees not
-        currently clamped.
+        Optional ``{leaf_name: (lo, hi)}`` box applied after each step. Only
+        top-level dict keys are inspected — nested pytrees aren't clamped.
     mode:
         ``"forward"`` (default) or ``"reverse"``. See module docstring.
     optimizer:
-        Pass a custom ``optax.GradientTransformation`` to override the
-        default ``optax.adam(learning_rate)``.
+        Custom ``optax.GradientTransformation``, overriding the default
+        ``optax.adam(learning_rate)``.
     learning_rate:
-        Used only if ``optimizer`` is None.
+        Used only when ``optimizer`` is None.
     verbose:
         Print per-step loss every ``log_every`` steps.
     log_every:
@@ -508,35 +469,27 @@ class Calibrator:
 
 @dataclass(frozen=True)
 class CalibratableParam:
-    """A mechanism parameter exposed by a Process as fittable.
+    """A mechanism parameter a Process exposes as fittable.
 
-    Returned by ``Process.calibratable_params`` (one per scalar the
-    Process considers a reasonable calibration target) and aggregated
-    by :meth:`Composite.calibration_targets`. Convert to a
-    :class:`ParameterRef` by passing it through ``ParameterRef.from_target``.
+    Returned by ``Process.calibratable_params`` and aggregated by
+    :meth:`Composite.calibration_targets`.
 
     Attributes
     ----------
     process_name:
-        Set by the Composite-level aggregator (default empty here so
-        Processes can return self-contained descriptions; aggregator
-        fills in the namespace).
+        Filled in by the Composite-level aggregator, so Processes can return
+        self-contained descriptions.
     field:
-        Same dotted convention as :class:`ParameterRef` /
-        :class:`hallsim.hallmarks.ParameterMapping.param_name` —
-        either a plain attribute or ``"parameters.<key>"``.
+        Plain attribute or ``"parameters.<key>"``, as in :class:`ParameterRef`.
     default:
-        The Process's current value at this field — typically the
-        published rate constant from the source paper / SBML file.
+        The Process's current value — typically the published rate constant.
     clamp:
-        ``(lo, hi)`` suggested box for Calibrator. Defaults to a
-        two-order-of-magnitude span around the default value
-        (``(default/100, default*100)``) when not supplied by the
-        Process — wider span is harmless because Calibrator's step
-        size is what controls actual exploration.
+        Suggested ``(lo, hi)`` box; defaults to two orders of magnitude around
+        ``default``. A wide span is harmless — Calibrator's step size is what
+        controls exploration.
     description:
-        What the parameter biologically represents, ideally with the
-        source paper. Surfaced in ``simulate info`` and listings.
+        What the parameter represents, ideally with its source paper. Surfaced
+        in ``simulate info``.
     """
 
     process_name: str
@@ -597,25 +550,14 @@ class ParamStep:
 
 @dataclass(frozen=True)
 class Condition:
-    """A named experimental arm — a hallmark severity profile.
+    """A named experimental arm — one setup (untreated DDIS, control,
+    rapamycin rescue) expressed as the severities each hallmark is applied at,
+    reused across calibration iterations.
 
-    A ``Condition`` represents one experimental setup (untreated DDIS,
-    control, rapamycin rescue, etc.) by the severities at which each
-    hallmark is applied. The same ``Condition`` is reused across
-    iterations of a calibration loop.
-
-    Attributes
-    ----------
-    name:
-        Human-readable label, e.g. ``"DDIS"``.
-    hallmarks:
-        ``{hallmark_name: severity}`` passed to :func:`apply_hallmarks`.
-    interventions:
-        Timed :class:`ParamStep` interventions applied after the hallmark
-        severities — for a pharmacological effect that starts partway through
-        the trajectory rather than a severity held for its whole duration.
-    description:
-        Optional notes for the report.
+    ``hallmarks`` is ``{hallmark_name: severity}`` for :func:`apply_hallmarks`.
+    ``interventions`` are timed :class:`ParamStep` effects applied *after* the
+    severities — a drug that starts partway through the trajectory rather than
+    a severity held for its whole duration.
     """
 
     name: str
@@ -628,37 +570,26 @@ class Condition:
 class ParameterRef:
     """Declarative pointer to a fittable parameter inside a composite.
 
-    The ``field`` follows the same dotted convention as
-    :attr:`hallsim.hallmarks.ParameterMapping.param_name`:
-
-    - Plain attribute: ``field="alpha"`` targets ``proc.alpha``.
-    - Dotted: ``field="parameters.<key>"`` targets a single
-      entry inside an SBMLProcess's parameters dict.
-
-    Calibrator substitutes ``init`` (or the latest iterate) into this
-    location via ``eqx.tree_at`` before each loss evaluation.
+    ``field`` follows the dotted convention of
+    :attr:`hallsim.hallmarks.ParameterMapping.param_name`: ``"alpha"`` targets
+    ``proc.alpha``, ``"parameters.<key>"`` a single entry in an SBMLProcess's
+    parameters dict. Calibrator substitutes the current iterate there via
+    ``eqx.tree_at`` before each loss evaluation.
 
     Attributes
     ----------
-    process_name:
-        Key into ``composite.processes``.
-    field:
-        Attribute name or dotted path (see above).
-    init:
-        Initial value for the optimizer.
-    clamp:
-        Optional ``(lo, hi)`` box-clamp applied after each step.
+    process_name, field:
+        Where to substitute — a key into ``composite.processes``, and the
+        attribute or dotted path on it.
+    init, clamp:
+        Optimizer start, and an optional ``(lo, hi)`` box applied each step.
     prior:
-        Optional log-normal prior *center* for a MAP penalty (see
-        :class:`CalibrationProblem`). ``None`` → this parameter is not
-        regularized. Set it to the literature / derived value the fit
-        should stay near; with few data points this keeps an
-        under-constrained parameter from running to an unphysical rail.
+        Log-normal prior *center* for a MAP penalty; ``None`` leaves the
+        parameter unregularized. Set it to the literature value the fit should
+        stay near — with few data points this keeps an under-constrained
+        parameter off an unphysical rail.
     prior_sigma:
-        Prior width in **log10** units (0.5 ≈ a factor of ~3, 1.0 ≈ one
-        order of magnitude). Only used when ``prior`` is set.
-    description:
-        Optional notes.
+        Prior width in **log10** units (0.5 ≈ a factor of 3).
     """
 
     process_name: str
@@ -757,84 +688,56 @@ def gaussian_nll(
 class CalibrationProblem:
     """Wire a composite + conditions + data + params into a calibration.
 
-    Encapsulates the standard pattern for fitting mechanism parameters
-    against gene-reporter Δ_data with one or more experimental arms.
-    Each Δ_arm is a ``(condition, baseline)`` pair; for each arm in
-    ``fit_arms``, the loss is the MSE between the model's sign-aligned
-    log2 fold-change ``sign·log2(cond/base)`` and the measured log2
-    fold-change on the reporters — commensurable units, so every
-    reporter contributes its O(1) fold-change regardless of the
-    observable's absolute scale. Held-out arms are evaluated in
-    :meth:`evaluate` but not included in the fit.
+    Each arm is a ``(condition, baseline)`` pair; for every arm in
+    ``fit_arms`` the loss compares the model's sign-aligned log2 fold-change
+    ``sign·log2(cond/base)`` against the measured one on the reporters —
+    commensurable units, so every reporter contributes its O(1) fold-change
+    regardless of the observable's absolute scale. Held-out arms are scored in
+    :meth:`evaluate` but excluded from the fit.
 
     Parameters
     ----------
     composite:
-        The base composite (its ``processes`` dict gets per-iteration
-        substitution; topology is reused unchanged).
+        Base composite; its ``processes`` get per-iteration substitution,
+        topology is reused unchanged.
     reporters:
-        List of :class:`GeneReporter` instances. Each reporter's
-        ``observable`` is a store path; each reporter's ``summary``
-        collapses the per-path trajectory to a scalar.
+        :class:`GeneReporter` instances — each maps a store path
+        (``observable``) through a ``summary`` to a scalar.
     conditions:
-        ``{arm_name: Condition}``. Severities applied to the
-        per-iteration substituted processes.
+        ``{arm_name: Condition}`` — severities applied per iteration.
     data:
-        Trajectory-native Δ_data: ``{arm_pair_name: {timepoint: pd.Series}}``,
-        each Series indexed by gene symbol (a measured log2 fold-change at
-        that timepoint, in the model's time units). A plain
-        ``{arm_pair_name: pd.Series}`` is accepted as the degenerate
-        single-timepoint case and normalized to ``{t_end: series}`` — so an
-        endpoint fit needs no timepoint bookkeeping. The loss sums one MSE
-        term per (arm, timepoint); the model fits the fold-change
-        *trajectory*, not just the endpoint. The per-arm-pair name (e.g.
-        ``"DDIS_vs_ctrl"``) is what ``fit_arms`` / ``held_out_arms`` select.
+        ``{arm_pair_name: {timepoint: pd.Series}}``, each Series indexed by
+        gene symbol with a measured log2 fold-change. A plain Series is
+        accepted as the single-timepoint case. The loss sums one term per
+        (arm, timepoint), so the model fits the fold-change *trajectory*.
     arm_pairs:
-        ``{arm_pair_name: (condition_name, baseline_name)}``. Names
-        must be keys in ``conditions``.
+        ``{arm_pair_name: (condition_name, baseline_name)}``.
     params:
-        ``{param_name: ParameterRef}``. Each is fit independently.
-    fit_arms:
-        Subset of ``arm_pairs`` keys included in the loss.
-    held_out_arms:
-        Subset of ``arm_pairs`` keys excluded from the loss but
-        evaluated in ``evaluate`` for held-out concordance.
+        ``{param_name: ParameterRef | HallmarkCoeffRef}``.
+    fit_arms, held_out_arms:
+        Subsets of ``arm_pairs`` included in / excluded from the loss.
     normalization:
-        What each reporter value is compared against in the loss.
-        ``"baseline"`` (default) — the arm's own t=0, i.e. the model
-        reproduces X_t/X_0 fold-change-from-day-0 (supply ``data`` as
-        log2(X_t/X_0)). ``"paired"`` — the paired baseline condition at
-        matched t, a cross-arm contrast (``data`` = log2(X_cond,t/X_base,t)).
-        ``"raw"`` — no reference; the loss fits sign·log2(reporter) directly,
-        for a target that is an absolute (log) value rather than a comparison.
+        What each reporter is compared against. ``"baseline"`` (default) — the
+        arm's own t=0 (supply ``data`` as log2(X_t/X_0)); ``"paired"`` — the
+        paired baseline at matched t; ``"raw"`` — no reference.
     equilibrate:
-        If ``True``, every arm starts from the shared **pre-perturbation
-        fixed point** rather than ``Composite.initial_state_vec()`` — so a
-        within-arm fold-change is measured against the biological baseline
-        (healthy cells before treatment), not the arbitrary initial condition's
-        relaxation transient. The ``equilibration_condition`` is solved to its
-        steady state by Newton (:func:`hallsim.steady_state.steady_state`),
-        exact and differentiable in the fitted params (see :meth:`_equilibrate`).
+        Start every arm from the shared pre-perturbation fixed point rather
+        than ``initial_state_vec()``, so a fold-change is measured against the
+        biological baseline instead of an arbitrary relaxation transient.
+        Solved by Newton — exact and differentiable in the fitted params.
     equilibration_condition:
-        Name of the condition whose fixed point is the shared baseline (e.g. an
-        untreated control — autonomous, with any timed input off). Required when
-        ``equilibrate=True``.
+        Which condition's fixed point is that baseline (an autonomous one,
+        timed inputs off). Required when ``equilibrate=True``.
     likelihood:
-        ``(model, data, weight) -> scalar`` NLL over one arm's
-        ``(n_reporter, n_timepoint)`` block. Defaults to
-        :func:`gaussian_nll` (weighted MSE) — the right choice when the
-        residual on the log-ratio is Gaussian (microarray, log-CPM). Swap
-        for a count-native likelihood otherwise.
+        ``(model, data, weight) -> scalar`` over one arm's
+        ``(n_reporter, n_timepoint)`` block. Default :func:`gaussian_nll`.
     weights:
-        Optional per-reporter precision, same ``{arm: {t: series}}`` shape
-        as ``data`` (e.g. ``1/dataset.variance(cond, base)`` or DESeq2 SEs).
-        Absent → unit weights, so ``gaussian_nll`` reduces to plain MSE.
+        Per-reporter precision, same shape as ``data``. Absent → unit weights,
+        so ``gaussian_nll`` reduces to plain MSE.
     t_end, macro_dt, scheduler_kwargs:
         Forwarded to ``Scheduler.run``.
     n_save:
-        Number of save points retained for trajectory summaries
-        (``save_dt = (t_end - 0) / (n_save - 1)``). The trailing
-        portion is what each reporter's ``summary`` operates on.
+        Save points retained for trajectory summaries.
     """
 
     def __init__(
@@ -901,18 +804,10 @@ class CalibrationProblem:
                     f"(have {sorted(composite.processes.keys())})"
                 )
 
-        # Guard rail: protect severity *dials*, not the magnitudes they
-        # scale. A hallmark transform is `value = transform(severity, base)`
-        # where `base` is the parameter's current value. If the transform
-        # depends on `base` (e.g. `base * f(severity)`), fitting that
-        # parameter calibrates the magnitude full severity maps to —
-        # legitimate, and severity keeps its 0→1 meaning. If the transform
-        # *ignores* `base` (severity replaces the value — the parameter IS
-        # the experimenter's dial, e.g. an exposure level set directly to
-        # the severity), fitting it is degenerate: severity would overwrite
-        # the fitted value. Block only that case. The test probes each
-        # transform with two distinct bases — no hardcoded parameter names,
-        # so it generalises to any hallmark.
+        # Block fitting a severity *dial* (a transform that ignores `base`, so
+        # severity would overwrite the fitted value) but allow fitting the
+        # magnitude a dial scales. Probed with two distinct bases rather than
+        # by name, so it generalises to any hallmark.
         reg = (
             HALLMARK_REGISTRY
             if hallmark_registry is None
@@ -1053,17 +948,10 @@ class CalibrationProblem:
         self._reporter_indices = tuple(
             self._store_idx[r.observable] for r in reporters
         )
-        # Precompute per-arm query-time and Δ_data matrices once (static).
-        # The timepoint axis is *vectorized*, not looped: each summary reads
-        # all query times in one interp, so the traced loss is O(n_reporters)
-        # per arm regardless of timepoint count — 2 or 200 timepoints trace
-        # to the same graph size (only the array length differs). A Python
-        # loop here would unroll under JIT into O(n_reporters × n_timepoints)
-        # nodes and blow up compile time.
-        # The loss is a negative log-likelihood of Δ_data given the model's
-        # Δ_sim. Default is a weighted Gaussian (weight = per-reporter
-        # precision); with unit weights it is the plain masked MSE. Swap in a
-        # different likelihood (e.g. count-based) via `likelihood`.
+        # Per-arm query-time and Δ_data matrices, precomputed once. The
+        # timepoint axis is vectorized, not looped: 2 or 200 timepoints trace
+        # to the same graph size. A Python loop would unroll under JIT into
+        # O(n_reporters × n_timepoints) nodes.
         self.likelihood = (
             likelihood if likelihood is not None else gaussian_nll
         )
@@ -1118,10 +1006,6 @@ class CalibrationProblem:
 
         self._scheduler = Scheduler(**self.scheduler_kwargs)
         self._warmed_up = False
-        # Autodiff direction the loss is currently being differentiated in;
-        # set by fit(), read by _simulate_condition to pick the matching
-        # diffeqsolve adjoint. evaluate() runs eagerly (no autodiff).
-        self._fit_mode = "forward"
 
     # ── Internal: per-condition simulation ────────────────────────
 
@@ -1331,10 +1215,6 @@ class CalibrationProblem:
 
         return run_for, y0, baseline
 
-    def _loss_adjoint(self):
-        """ForwardMode under a forward-mode fit, else the Scheduler default."""
-        return dfx.ForwardMode() if self._fit_mode == "forward" else None
-
     def simulate_reporters(
         self, param_values: dict, cond_name: str, query_times=None
     ):
@@ -1406,9 +1286,7 @@ class CalibrationProblem:
         ``query_times`` — the exact quantity :meth:`data_loss` fits, so a
         trajectory figure never drifts from the loss. Returns ``(n_rep, n_t)``.
         """
-        run_for, _, baseline = self._run_condition_set(
-            param_values, adjoint=self._loss_adjoint()
-        )
+        run_for, _, baseline = self._run_condition_set(param_values)
         return self._arm_lfc(
             run_for, arm, jnp.atleast_1d(jnp.asarray(query_times)), baseline
         )
@@ -1427,9 +1305,7 @@ class CalibrationProblem:
         # read at each arm's measured timepoints — so a condition that is
         # both a condition and a baseline in different arm_pairs still runs
         # once, and every timepoint reuses the same solve.
-        run_for, _, baseline = self._run_condition_set(
-            param_values, adjoint=self._loss_adjoint()
-        )
+        run_for, _, baseline = self._run_condition_set(param_values)
 
         # One arm loss = mean squared error over the whole (reporter ×
         # timepoint) block: the model fits the *trajectory* of the log2
@@ -1554,7 +1430,6 @@ class CalibrationProblem:
             for k, p in self._all_refs.items()
             if p.clamp is not None
         }
-        self._fit_mode = mode
         # Measure stiffness with concrete params before the loss goes
         # under autodiff — the per-group solver verdict can't be computed
         # from tracers.

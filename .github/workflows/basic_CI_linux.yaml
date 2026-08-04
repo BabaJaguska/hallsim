@@ -24,11 +24,14 @@ jobs:
       - name: Install dependencies
         run: make install-dev
 
-      - name: Run formatter
-        run: make format
+      - name: Check formatting
+        run: black --check --line-length 79 src/ tests/ demos/
 
       - name: Lint code
         run: make lint
+
+      - name: Check prose ratio
+        run: python scripts/check_prose_ratio.py src/hallsim
 
       - name: Run tests
         run: make test

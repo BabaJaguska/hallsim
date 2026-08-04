@@ -7,24 +7,38 @@ name            = "hallsim"
 version         = "0.1.0"
 description     = "HallSim: cell-agent simulator of Hallmarks of Aging"
 readme          = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies    = [
   "numpy",
   "scipy",
   "pandas",
   "click",
-  "jax",
-  "diffrax",
-  "optax",
-  "equinox",
+  "jax>=0.7,<0.8",
+  "diffrax>=0.7,<0.8",
+  "equinox>=0.13,<0.14",
+  "optax>=0.2",
+  "optimistix",
   "pint",
   "networkx",
   "sbmltoodejax",
   "tqdm",
+  "matplotlib",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "black", "pre-commit", "flake8", "matplotlib"]
+dev = ["pytest", "black", "pre-commit", "flake8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hallsim = [
+  "py.typed",
+  "models/sbml/**/*.xml",
+  "models/sbml/**/*.md",
+  "reference/**/*.tsv",
+  "reference/**/*.md",
+]
 
 [project.urls]
 Documentation = "https://github.com/BabaJaguska/HallSim#readme"

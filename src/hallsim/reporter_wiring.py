@@ -25,6 +25,7 @@ active state) — is flagged low-confidence, never silently asserted.
 from __future__ import annotations
 
 import os
+import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -35,16 +36,30 @@ import pandas as pd
 
 from hallsim.process import PortRole
 
+log = logging.getLogger(__name__)
+
 
 def _data_dir() -> Path:
-    """Reference-table root; overridable via ``HALLSIM_DATA_DIR`` (tests point
-    it at bundled subset fixtures)."""
+    """Vendored reference-table root, or ``HALLSIM_DATA_DIR`` when set."""
     env = os.environ.get("HALLSIM_DATA_DIR")
-    return (
-        Path(env)
-        if env
-        else Path(__file__).resolve().parent.parent.parent / "data"
-    )
+    return Path(env) if env else Path(__file__).resolve().parent / "reference"
+
+
+def _read_table(*parts: str, **kwargs):
+    """A vendored reference table, or ``None`` if absent — reporter wiring
+    warns by default, so a stripped install loses the cross-check, not the
+    run."""
+    path = _data_dir().joinpath(*parts)
+    try:
+        return pd.read_csv(path, **kwargs)
+    except (FileNotFoundError, NotADirectoryError):
+        log.warning(
+            "reference table %s not found; the checks that need it are "
+            "skipped. Regenerate with scripts/build_reference_tables.py or "
+            "point HALLSIM_DATA_DIR at a copy.",
+            path,
+        )
+        return None
 
 
 _PHOSPHO = re.compile(r"_p[STY]\d")
@@ -64,16 +79,16 @@ class ObservableKind(Enum):
 
 @lru_cache(maxsize=1)
 def _go_aspect() -> dict[str, str]:
-    df = pd.read_csv(_data_dir() / "ontology" / "go_aspect.tsv", sep="\t")
-    return dict(zip(df.go_id, df.aspect))
+    df = _read_table("ontology", "go_aspect.tsv", sep="\t")
+    return {} if df is None else dict(zip(df.go_id, df.aspect))
 
 
 @lru_cache(maxsize=1)
 def _uniprot_symbol() -> dict[str, tuple[str, str]]:
     """UniProt accession → (gene symbol, NCBI taxon id)."""
-    df = pd.read_csv(
-        _data_dir() / "ontology" / "uniprot_symbol.tsv", sep="\t", dtype=str
-    )
+    df = _read_table("ontology", "uniprot_symbol.tsv", sep="\t", dtype=str)
+    if df is None:
+        return {}
     return {
         a: (s, t)
         for a, s, t in zip(df.uniprot, df.symbol, df.taxon)
@@ -84,20 +99,18 @@ def _uniprot_symbol() -> dict[str, tuple[str, str]]:
 @lru_cache(maxsize=1)
 def _orthologs() -> dict[str, str]:
     """Mouse gene symbol → human ortholog symbol (MGI)."""
-    df = pd.read_csv(
-        _data_dir() / "ontology" / "ortholog_mouse_human.tsv",
-        sep="\t",
-        dtype=str,
+    df = _read_table(
+        "ontology", "ortholog_mouse_human.tsv", sep="\t", dtype=str
     )
-    return dict(zip(df.mouse_symbol, df.human_symbol))
+    return {} if df is None else dict(zip(df.mouse_symbol, df.human_symbol))
 
 
 @lru_cache(maxsize=1)
 def _collectri() -> tuple[frozenset, dict, dict]:
     """(TF symbols, {(tf, target): sign}, {target: {tf: sign}})."""
-    df = pd.read_csv(
-        _data_dir() / "collectri" / "collectri_human.tsv", sep="\t"
-    )
+    df = _read_table("collectri", "collectri_human.tsv", sep="\t")
+    if df is None:
+        return frozenset(), {}, {}
     edges = {
         (t, g): int(w) for t, g, w in zip(df.source, df.target, df.weight)
     }

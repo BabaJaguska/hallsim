@@ -1,24 +1,11 @@
 """Process — the fundamental building block of composable simulations.
 
-A Process is an Equinox module that computes time derivatives for a subset
-of state variables.  It declares typed *ports* — named connection points
-with roles (input, evolved, exclusive, latched) — and implements a
-``derivative`` method that receives only the port values it declared.
+An Equinox module owning the derivatives of a subset of state variables. It
+declares typed *ports* — named connection points with roles — and implements
+``derivative`` (CONTINUOUS), ``update`` (DISCRETE), or ``condition`` +
+``handler`` (EVENT), receiving only the ports it declared. Parameters are JAX
+arrays, so a Process differentiates, JIT-compiles, and vmaps.
 
-Three process kinds are supported:
-
-- **CONTINUOUS** (default): computes ``derivative(t, state) -> dy/dt``.
-- **DISCRETE**: computes ``update(t, state) -> delta_state``, called at
-  fixed intervals specified by ``dt_step``.
-- **EVENT**: declares a ``condition(t, state) -> bool`` and a
-  ``handler(t, state) -> delta_state``, fired when condition crosses
-  from False to True.
-
-Because Process is an Equinox module, its parameters are JAX arrays by
-default and can be differentiated, JIT-compiled, and vmapped.
-
-Example
--------
 >>> class Decay(Process):
 ...     rate: float = 0.1
 ...
@@ -41,10 +28,8 @@ import jax.numpy as jnp
 
 def _as_traced(value):
     """``value`` with its floats as JAX arrays, or ``None`` if nothing to do.
-
-    Handles a bare float and floats one level inside a dict/tuple/list —
-    enough for a parameter dict or a per-source tuple of rate constants.
-    """
+    Reaches one level into a dict/tuple/list — enough for a parameter dict or a
+    per-source tuple of rate constants."""
     if type(value) is float:
         return jnp.asarray(value)
     if type(value) is dict and any(type(v) is float for v in value.values()):
@@ -64,22 +49,14 @@ def calibratable(
     clamp: "tuple[float, float] | None" = None,
     description: str = "",
 ):
-    """Declare a Process field as a fittable mechanism parameter.
+    """Declare a Process field as a fittable mechanism parameter::
 
-    Use in place of a plain default at the field-declaration site::
+        k_act: float = calibratable(0.02, description="edge strength")
+        K_mtor: float = 4.0  # measurement-grounded — stays fixed
 
-        class MyEdge(Process):
-            k_act: float = calibratable(
-                0.02, description="edge strength; fit vs the NFKBIA reporter"
-            )
-            K_mtor: float = 4.0  # measurement-grounded — stays fixed
-
-    Every field marked this way is discovered automatically by
-    :meth:`Process.calibratable_params` and surfaced through
-    :meth:`hallsim.composite.Composite.calibration_targets`. Fields left
-    as plain defaults stay out of the calibration surface. ``clamp``
-    defaults to a two-order-of-magnitude box around the current value
-    (see :func:`hallsim.calibration.default_clamp`).
+    Marked fields surface through :meth:`Composite.calibration_targets`; plain
+    defaults stay out of the calibration surface. ``clamp`` defaults to two
+    orders of magnitude around the current value.
     """
     return eqx.field(
         default=default,
@@ -97,20 +74,10 @@ def calibratable(
 
 
 class ProcessKind(enum.Enum):
-    """What kind of update rule a process uses.
-
-    CONTINUOUS
-        Computes ``derivative(t, state) -> dy/dt``.  Solved by an ODE
-        integrator (Diffrax).  This is the default.
-
-    DISCRETE
-        Computes ``update(t, state) -> delta_state``.  Called at fixed
-        intervals specified by ``dt_step``.  Returns an additive delta.
-
-    EVENT
-        Declares ``condition(t, state) -> bool`` and
-        ``handler(t, state) -> delta_state``.  The handler fires once
-        when the condition crosses from False to True.  Returns a delta.
+    """What kind of update rule a process uses: CONTINUOUS (the default)
+    implements ``derivative(t, state) -> dy/dt``, solved by Diffrax; DISCRETE
+    implements ``update(t, state) -> delta`` every ``dt_step``; EVENT pairs
+    ``condition`` with a ``handler`` that fires once on a False→True crossing.
     """
 
     CONTINUOUS = "continuous"
@@ -119,33 +86,18 @@ class ProcessKind(enum.Enum):
 
 
 class PortRole(enum.Enum):
-    """How a port participates in the simulation.
+    """How a port participates. Write semantics are validated at composition
+    time.
 
-    INPUT
-        Read-only.  The process reads this value but does not contribute
-        a derivative.  Must be provided by another process's evolved/exclusive
-        port or by the initial state.
+    INPUT read-only, no derivative. EVOLVED contributes a derivative, and
+    several processes writing one path sum. EXCLUSIVE is sole owner of that
+    derivative; a second writer raises. LATCHED is written only by
+    DISCRETE/EVENT processes and read as constant within a macro step.
 
-    EVOLVED
-        This process contributes a derivative for this variable.  Multiple
-        processes may write derivatives to the same store path — their
-        contributions are summed (additive composition).
-
-    EXCLUSIVE
-        This process is the sole owner of this variable's derivative.
-        No other process may contribute.  Validated at composition time.
-
-    LATCHED
-        Written by discrete or event processes.  Continuous processes may
-        read a LATCHED value but treat it as constant within a macro step.
-        Only discrete/event processes may write to a LATCHED port.
-
-    ASSIGNED
-        Algebraic output: the process *computes* this path's value each step
-        from its inputs (via ``assign``), rather than integrating a
-        derivative — a cross-process assignment rule. Evaluated before the
-        derivative pass so integrated processes read the fresh value. Sole
-        owner of the path (like EXCLUSIVE); the path is not integrated.
+    ASSIGNED is an algebraic output: the process *computes* the path's value
+    each step via ``assign`` instead of integrating it — a cross-process
+    assignment rule, evaluated before the derivative pass so integrated
+    processes read the fresh value. Sole owner, like EXCLUSIVE.
     """
 
     INPUT = "input"
@@ -161,29 +113,16 @@ class PortRole(enum.Enum):
 
 
 class Port:
-    """Describes a single named connection point on a Process.
+    """A single named connection point on a Process.
 
-    Parameters
-    ----------
-    role:
-        How this port participates (see :class:`PortRole`).
-    default:
-        Default initial value (scalar or array).  Used when building
-        the initial store if no other process provides a value.
-    units:
-        Physical units string, e.g. ``"uM"`` or ``"dimensionless"``.
-    description:
-        Human-readable description for metadata / LLM consumption.
-    ontology:
-        Optional ontology annotation, e.g. ``{"GO": "GO:0006915"}``.
-    reads_value:
-        For an EVOLVED port only: whether the additive contribution
-        depends on the path's *current* value. Default True (the general
-        case — the graph analyzer then treats the port as both writer and
-        reader). Set False for a **pure source** — a contribution that
-        depends only on the process's other inputs, not on the path it
-        writes (e.g. a Hill-gated cross-model edge, or a running integral)
-        — so the analyzer doesn't infer a spurious feedback cycle.
+    ``role`` is a :class:`PortRole`; ``default`` seeds the initial store when
+    no other process provides a value; ``units`` (``"uM"``) and ``ontology``
+    (``{"GO": "GO:0006915"}``) feed the validator and LLM-assisted composition.
+
+    ``reads_value`` applies to EVOLVED ports only: set it False for a **pure
+    source**, one whose contribution depends on the process's other inputs
+    rather than the path it writes (a Hill-gated cross-model edge, a running
+    integral), so the graph analyzer doesn't infer a spurious cycle.
     """
 
     __slots__ = (
@@ -226,57 +165,36 @@ class Port:
 class Process(eqx.Module):
     """Abstract base for composable biological processes.
 
-    Subclasses must implement:
-    - ``ports_schema()`` — declare named ports.
-
-    Depending on ``kind``:
-    - CONTINUOUS: implement ``derivative(t, state)`` — compute dy/dt.
-    - DISCRETE: implement ``update(t, state)`` — compute delta at intervals.
-    - EVENT: implement ``condition(t, state)`` and ``handler(t, state)``.
-
-    Optionally override:
-    - ``metadata()`` — structured info for LLM-assisted composition.
-
-    Attributes
-    ----------
-    kind:
-        Process kind (class-level). Default: ``ProcessKind.CONTINUOUS``.
-    timescale:
-        Characteristic timescale in seconds (class-level, optional).
-        Used by the Scheduler to auto-group continuous processes.
-        Processes within ~100x of each other share a group.
-    dt_step:
-        For DISCRETE processes: interval between update calls (seconds).
+    Subclasses implement ``ports_schema()`` plus whatever their ``kind``
+    requires (see :class:`ProcessKind`), and may override ``metadata()`` for
+    LLM-assisted composition. ``timescale`` (seconds) is what the Scheduler
+    groups on — processes within ~100x share a solve; ``dt_step`` spaces a
+    DISCRETE process's updates.
     """
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
     timescale: float | None = None
     dt_step: float | None = None
 
-    # Declarative metadata, folded into metadata() when set. Override as
-    # plain class attributes (a per-class constant) or, for a process whose
-    # value varies per instance, as a static eqx.field. Not dataclass fields
-    # here, so they add nothing to the JAX-traced pytree by default.
+    # Folded into metadata() when set. Plain class attributes, not fields, so
+    # they add nothing to the traced pytree.
     hallmark = None
     reference = None
     description = None
 
-    # The Scheduler reads these in plain Python — to cluster processes into
-    # timescale groups and to space discrete updates — never inside the traced
-    # computation. They decide structure, not dynamics, so they stay scalars.
+    # Read by the Scheduler in plain Python (grouping, update spacing), never
+    # inside the traced computation — structure, not dynamics.
     _PYTHON_FIELDS = frozenset({"timescale", "dt_step"})
 
     def __check_init__(self):
-        """Coerce float parameters to JAX arrays, including inside dict/tuple
-        fields (an imported model's ``parameters`` dict is the reason).
+        """Coerce float parameters to JAX arrays, dict and tuple fields
+        included (an imported model's ``parameters`` dict is the reason).
 
         A Python float is a *static* leaf to ``eqx.filter_jit``, so its value
-        bakes into the compiled solve and every distinct value recompiles. As
-        arrays they are traced: one executable serves every value.
-        ``__check_init__``, not ``__post_init__`` — equinox always runs it (even
-        with a hand-written ``__init__``) and skips it on ``tree_unflatten``.
-
-        Ints are left alone: in a container they are indices, not parameters.
+        bakes into the compiled solve and every distinct value recompiles; as
+        arrays, one executable serves them all. Ints stay put — in a container
+        they are indices. ``__check_init__``, not ``__post_init__``: equinox
+        always runs it and skips it on ``tree_unflatten``.
         """
         for f in dataclasses.fields(self):
             if f.metadata.get("static") or f.name in self._PYTHON_FIELDS:
@@ -289,29 +207,18 @@ class Process(eqx.Module):
     # --- Interface: CONTINUOUS -----------------------------------------------
 
     def ports_schema(self) -> dict[str, Port]:
-        """Return a dict of ``{port_name: Port(...)}``.
-
-        Every port this process reads or writes must be declared here.
-        """
+        """``{port_name: Port(...)}`` — every port this process reads or
+        writes must be declared here."""
         raise NotImplementedError
 
     def derivative(
         self, t: float, state: dict[str, jnp.ndarray]
     ) -> dict[str, jnp.ndarray]:
-        """Compute time derivatives (CONTINUOUS processes).
+        """Time derivatives (CONTINUOUS processes).
 
-        Parameters
-        ----------
-        t:
-            Current simulation time.
-        state:
-            Dict mapping port names -> current values (only ports declared
-            in ``ports_schema`` are provided).
-
-        Returns
-        -------
-        Dict mapping port names -> dy/dt values.  Only evolved and exclusive
-        ports should appear in the output.
+        ``state`` maps port name → current value, restricted to the ports
+        declared in ``ports_schema``. Returns port name → dy/dt; only EVOLVED
+        and EXCLUSIVE ports may appear.
         """
         raise NotImplementedError
 
@@ -320,21 +227,16 @@ class Process(eqx.Module):
     def assign(
         self, t: float, state: dict[str, jnp.ndarray]
     ) -> dict[str, jnp.ndarray]:
-        """Compute algebraic ASSIGNED port *values* from the current state.
-
-        Evaluated before the derivative pass each step, in dependency order,
-        so integrated processes read the fresh value. Returns ``{port: value}``
-        for the process's ASSIGNED ports (a value, not a derivative). Default:
-        no assignments.
-        """
+        """``{port: value}`` for this process's ASSIGNED ports — a value, not a
+        derivative. Evaluated in dependency order before each derivative pass,
+        so integrated processes read the fresh result."""
         return {}
 
     def discontinuity_times(self) -> tuple[float, ...]:
-        """Times (composite clock) where this process's contribution jumps —
-        a forcing pulse's on/off edges, a timed step. The Scheduler feeds them
-        to the solver as ``jump_ts`` so it steps exactly onto each, resolving
-        the discontinuity without adaptive step-rejection churn (and giving
-        clean gradients across it). Default: none (smooth process)."""
+        """Composite-clock times where this process's contribution jumps — a
+        forcing pulse's edges, a timed step. The Scheduler passes them as
+        ``jump_ts`` so the solver lands on each exactly, instead of resolving
+        it by step rejection, which also keeps the gradient clean across it."""
         return ()
 
     # --- Interface: DISCRETE -------------------------------------------------
@@ -342,69 +244,32 @@ class Process(eqx.Module):
     def update(
         self, t: float, state: dict[str, jnp.ndarray]
     ) -> dict[str, jnp.ndarray]:
-        """Compute a state delta (DISCRETE processes).
-
-        Called every ``dt_step`` seconds by the Scheduler.  Returns an
-        additive delta: ``new_state = old_state + delta``.
-
-        Parameters
-        ----------
-        t:
-            Current simulation time.
-        state:
-            Dict mapping port names -> current values.
-
-        Returns
-        -------
-        Dict mapping port names -> delta values to add.
-        """
+        """State delta (DISCRETE processes), called every ``dt_step`` seconds.
+        Additive: ``new_state = old_state + delta``."""
         raise NotImplementedError
 
     # --- Interface: EVENT ----------------------------------------------------
 
     def condition(self, t: float, state: dict[str, jnp.ndarray]) -> bool:
-        """Event trigger condition (EVENT processes).
-
-        Returns ``True`` when the event should fire.  The Scheduler
-        tracks the previous value and only fires the handler on a
-        False -> True transition.
-        """
+        """Event trigger (EVENT processes). The Scheduler tracks the previous
+        value and fires :meth:`handler` only on a False→True transition."""
         raise NotImplementedError
 
     def handler(
         self, t: float, state: dict[str, jnp.ndarray]
     ) -> dict[str, jnp.ndarray]:
-        """Event handler (EVENT processes).
-
-        Called once when ``condition`` crosses from False to True.
-        Returns an additive delta.
-        """
+        """Additive delta applied once when ``condition`` becomes True."""
         raise NotImplementedError
 
     # --- Metadata ------------------------------------------------------------
 
     def calibratable_params(self) -> list:
-        """Mechanism parameters this Process exposes as fittable.
+        """Mechanism parameters this Process exposes as fittable — every field
+        declared with :func:`calibratable`, at its current value.
 
-        Returns a list of :class:`hallsim.calibration.CalibratableParam`
-        descriptors with ``process_name=""`` (the Composite-level
-        aggregator fills in the namespace) and ``field`` either a plain
-        attribute name or ``"parameters.<key>"``.
-
-        Discovery is generic: every field declared with
-        :func:`calibratable` is surfaced automatically, with its current
-        value as the default and a two-order-of-magnitude clamp unless
-        the field supplied its own. A Process exposes a rate constant by
-        declaring it ``k: float = calibratable(...)`` instead of a plain
-        default — no per-Process enumeration body. Subclasses with a
-        non-field parameter surface (e.g. ``SBMLProcess``'s constants
-        dict) override and extend ``super().calibratable_params()``.
-
-        :class:`Composite.calibration_targets` subtracts hallmark-
-        controlled parameters from the listing before returning to
-        callers, so it's safe for a Process to expose a parameter
-        that's *also* a hallmark target — the discovery API hides it
-        from default Calibrator wiring unless explicitly requested.
+        Subclasses with a non-field parameter surface (``SBMLProcess``'s
+        constants dict) extend this. Safe to expose a hallmark target too:
+        :meth:`Composite.calibration_targets` subtracts those.
         """
         from hallsim.calibration import CalibratableParam, default_clamp
 
@@ -426,10 +291,7 @@ class Process(eqx.Module):
 
     def metadata(self) -> dict[str, Any]:
         """Structured metadata for discovery and LLM-assisted composition.
-
-        Override to provide pathway IDs, GO terms, species descriptions,
-        SBML annotations, coupling documentation, etc.
-        """
+        Override to add pathway IDs, GO terms, SBML annotations, etc."""
         meta = {
             "name": type(self).__name__,
             "kind": self.kind.value,
@@ -454,19 +316,13 @@ class Process(eqx.Module):
         return meta
 
     def coupling_structure(self) -> dict | None:
-        """The process's own equation structure, for the coupling-wiring check.
+        """Equation structure for :mod:`hallsim.coupling_wiring`:
+        ``param_constant``, ``param_sbo``, ``variables`` (dynamic quantity
+        ids), ``rules`` (the algebraic dependency graph), ``boundary``.
 
-        Returns a dict with ``param_constant`` (``{name: bool}``),
-        ``param_sbo`` (``{name: int}``), ``variables`` (ids of dynamic
-        quantities — states, rule/aux targets, non-constant params),
-        ``rules`` (``[(target, frozenset(deps)), …]`` — the algebraic
-        dependency graph), and ``boundary`` (ids held constant / as inputs).
-
-        Returns ``None`` for an *opaque* process (a hand-coded or neural
-        process with no declared rule graph); the structural coupling check
-        is then skipped for it. Format importers (SBML, XPP) override this so
-        the checker is format-agnostic. See :mod:`hallsim.coupling_wiring`.
-        """
+        ``None`` for an *opaque* process — a hand-coded or neural one with no
+        declared rule graph — which skips the structural check. Format
+        importers override it, so the checker stays format-agnostic."""
         return None
 
     # --- Helpers -------------------------------------------------------------

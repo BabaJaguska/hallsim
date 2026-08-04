@@ -9,6 +9,9 @@ docs/diary.md
 /outputs/
 /one_off_scripts/
 /scratchpad/
+# Scratch/diagnostic demos: _-prefixed ones are throwaway investigations,
+# not part of the shipped demo surface.
+demos/_*.py
 
 # C extensions
 *.so

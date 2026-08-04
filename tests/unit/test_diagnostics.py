@@ -1,5 +1,7 @@
 """Tests for the pre-flight subsystem screening (hallsim.diagnostics)."""
 
+import logging
+
 import pytest
 
 from hallsim.diagnostics import (
@@ -12,19 +14,22 @@ from hallsim.diagnostics import (
     screen_sensitivity,
 )
 from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
+from hallsim.models.hill_edge import HillActivationEdge
 from hallsim.models.multi_hallmark import (
     GZ06_PSI_DEFAULT,
     GZ06_PSI_NAME,
     GZ06_SBML_PATH,
     build_multi_hallmark_composite,
 )
+from hallsim.models.sbml import sbml_source
+from hallsim.process import Port, PortRole, Process
 from hallsim.sbml_import import process_from_sbml
 
 # A vendored (committed) model with both a dead-sink species (`s195`) and
 # produced-and-consumed species (`s305`) — exercises the coupling-source
 # diagnostic locally, no BioModels download.
-WNT_SBML_PATH = (
-    GZ06_SBML_PATH.parent.parent / "sivakumar2011" / "wnt_BIOMD0000000397.xml"
+WNT_SBML_PATH = sbml_source(
+    "sivakumar2011", "wnt_BIOMD0000000397.xml", "BIOMD0000000397"
 )
 
 
@@ -123,6 +128,50 @@ def test_recommendation_flags_dead_sink_and_clock_mismatch():
     assert rec.suitable == ("s305",)
     assert any("s195" in n and "unusable" in n for n in rec.notes)
     assert any("finer than the composite clock" in n for n in rec.notes)
+
+
+class _DeadDecay(Process):
+    """Decays to zero whatever its input does — genuinely vanishing."""
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.EVOLVED, default=1.0),
+            "drive": Port(role=PortRole.INPUT, default=0.0),
+        }
+
+    def derivative(self, t, state):
+        return {"x": -10.0 * state["x"]}
+
+
+def test_driven_edge_is_undriven_not_vanishing():
+    """A coupling edge screened solo sits at its port defaults. That is the
+    screen having no driver, not the component having no dynamics — it must
+    not fail the constituents-first assertion agents are told to write."""
+    edge = HillActivationEdge(k_act=1.0, K=(1.0,), n=(2.0,))
+    report = screen_process(edge, t_end=100.0)
+    assert report.undriven and not report.vanishing, report
+    assert report.ok
+    assert report.max_abs > 0.0  # flags measured on the driven run
+    assert "unfed INPUT" in report.detail
+
+
+def test_probe_does_not_rescue_a_genuinely_vanishing_process():
+    """The probe reclassifies only when the drive actually wakes the model."""
+    report = screen_process(_DeadDecay(), t_end=10.0, check_tunability=False)
+    assert report.vanishing and not report.undriven, report
+    assert not report.ok
+
+
+def test_solo_screen_does_not_warn_about_its_own_unfed_inputs(caplog):
+    """A lone process has unfed INPUTs by construction; warning about them on
+    every screen is noise that trains agents to ignore validation."""
+    with caplog.at_level(logging.WARNING):
+        screen_process(
+            HillActivationEdge(k_act=1.0, K=(1.0,), n=(2.0,)),
+            t_end=100.0,
+            check_tunability=False,
+        )
+    assert "Unfed input" not in caplog.text
 
 
 def test_gz06_flagged_tolerance_sensitive():

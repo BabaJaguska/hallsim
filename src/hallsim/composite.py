@@ -1,17 +1,11 @@
 """Composite — wires Processes together via a Topology into a single ODE RHS.
 
-A Composite is an Equinox module that bundles:
-
-1. A dict of named Processes (each an Equinox module).
-2. A topology mapping each process's port names to store paths.
-
-It builds a JAX-compatible flat RHS ``f(t, y_vec) -> dy_vec`` that:
-
-- Calls each process's ``derivative()`` with a small per-process port view.
-- Scatter-adds each process's contribution into a single accumulator vector.
-- Sums additive contributions (EVOLVED ports) implicitly via the scatter.
-- Enforces exclusivity (EXCLUSIVE ports) at composition time via topology
-  validation.
+An Equinox module bundling named Processes with a topology mapping their port
+names to store paths. It builds a flat ``f(t, y_vec) -> dy_vec`` that calls
+each process's ``derivative()`` with a small per-process port view and
+scatter-adds the contributions into one accumulator — so EVOLVED ports sum
+implicitly, while EXCLUSIVE ports are enforced at composition time by topology
+validation.
 
 Example
 -------
@@ -165,8 +159,7 @@ class _FlatRHS(eqx.Module):
 
     A closure inside ``ODETerm`` is a static leaf, so a fresh one per
     :meth:`Composite.build_rhs` hashes differently and every solve misses the
-    JIT cache. As a Module the index maps are static and the Processes are
-    children, so repeated builds share a treedef and reuse the compiled solve.
+    JIT cache. As a Module, repeated builds share a treedef.
     """
 
     procs: tuple
@@ -177,11 +170,9 @@ class _FlatRHS(eqx.Module):
     assign_write_maps: tuple = eqx.field(static=True, default=())
 
     def __call__(self, t, y_vec, args=None):
-        # Trailing-axis convention: y_vec is (..., n_vars) — (n,) unbatched,
-        # (batch, n) for a population run. accum follows y_vec's shape so the
-        # scatter stays aligned. Assignments run first so the derivative pass
-        # reads fresh algebraic values; they are not integrated, so a saved
-        # trajectory needs Composite.materialize_assigned to read them.
+        # Assignments run first so the derivative pass reads fresh algebraic
+        # values; they are not integrated, so a saved trajectory needs
+        # Composite.materialize_assigned to see them.
         y_vec = _apply_assignments(
             zip(
                 self.assign_procs,
@@ -214,27 +205,17 @@ class Composite(eqx.Module):
     Parameters
     ----------
     processes:
-        ``{name: Process | Composite}`` — each an Equinox module. When a
-        value is another Composite, it is flattened in place: each
-        sub-process is renamed ``<outer_key>.<sub_name>`` and every store
-        path the sub-composite references is prefixed with
-        ``<outer_key>/`` unless it already carries that prefix. This is
-        how independent published composites are merged into one.
+        ``{name: Process | Composite}``. A nested Composite is flattened in
+        place — sub-processes renamed ``<outer_key>.<sub_name>``, store paths
+        prefixed ``<outer_key>/`` — which is how published composites merge.
     topology:
-        ``{name: {port_name: store_path}}`` — maps each top-level
-        Process's local port names to global store paths. Sub-composites
-        bring their own topology; the caller only writes topology entries
-        for raw Process values at the top level.  Two processes writing
-        to the same store path contribute additively (EVOLVED) or
-        exclusively (EXCLUSIVE).
+        ``{name: {port_name: store_path}}`` for top-level Processes;
+        sub-composites bring their own. Two processes writing one path
+        contribute additively (EVOLVED) or exclusively (EXCLUSIVE).
     rewire:
-        Optional ``{old_path: new_path}`` mapping applied after sub-
-        composite flattening. Use this to resolve overlapping biology
-        across merged composites — e.g.,
-        ``rewire={"dp14/mTORC1_pS2448": "eriq/mTOR_activity"}`` declares
-        DP14's phospho-mTOR state and ERiQ's mTOR activity refer to the
-        same canonical store path. Targets are taken as-is; the rewire
-        is a single pass over the flattened topology.
+        ``{old_path: new_path}`` applied after flattening, to declare that two
+        merged models' states are the same quantity — e.g.
+        ``{"dp14/mTORC1_pS2448": "eriq/mTOR_activity"}``.
     """
 
     processes: dict[str, Process]
@@ -294,43 +275,23 @@ class Composite(eqx.Module):
         state: dict[str, jnp.ndarray],
         keys: list[str] | None = None,
     ) -> jnp.ndarray:
-        """Convert state dict → array in sorted key order.
+        """State dict → ``(..., n_vars)`` array in sorted key order.
 
-        Stacks values along the *last* axis so the layout works for
-        scalar values (rank-0) and batched values (rank-1+) without
-        change. Scalars produce ``(n_vars,)``; ``(batch,)`` values
-        produce ``(batch, n_vars)``. This is what makes ``Scheduler.run``
-        accept batched y0 dicts natively — no special vmap path needed.
-
-        Parameters
-        ----------
-        state:
-            ``{store_path: scalar_or_array}``. Each value may be a
-            JAX scalar or a batched array; all values must share a
-            common batch shape.
-        keys:
-            Key order.  If ``None``, uses ``store_keys()`` (sorted).
-
-        Returns
-        -------
-        ``jnp.ndarray`` of shape ``(..., n_vars)``.
+        Stacking on the *last* axis means scalars give ``(n_vars,)`` and
+        ``(batch,)`` values give ``(batch, n_vars)`` with no code change —
+        which is why ``Scheduler.run`` takes batched y0 without a vmap path.
+        ``keys`` defaults to :meth:`store_keys`.
         """
         if keys is None:
             keys = self.store_keys()
         return jnp.stack([jnp.asarray(state[k]) for k in keys], axis=-1)
 
     def initial_state_vec(self, keys: list[str] | None = None) -> jnp.ndarray:
-        """Initial state as a flat tensor in trailing-axis convention.
+        """Initial state as a flat ``(n_vars,)`` tensor — the default y0 for
+        ``Scheduler.run``, whose public API takes a tensor, not a dict.
 
-        JAX-native counterpart to :meth:`initial_state` (which returns a
-        dict). Use this as the default y0 for ``Scheduler.run`` and
-        ``Scheduler.run`` — the public API takes a tensor, not a dict.
-
-        Returns
-        -------
-        ``jnp.ndarray`` of shape ``(n_vars,)``. To override values, use
-        ``y0.at[composite.keys.index("path")].set(value)``. To batch over
-        a population, ``jnp.broadcast_to(y0, (batch, n_vars))``.
+        Override a value with ``y0.at[keys.index("path")].set(v)``; batch a
+        population with ``jnp.broadcast_to(y0, (batch, n_vars))``.
         """
         return self.flatten(self.initial_state(), keys)
 
@@ -339,18 +300,9 @@ class Composite(eqx.Module):
         vec: jnp.ndarray,
         keys: list[str] | None = None,
     ) -> dict[str, jnp.ndarray]:
-        """Convert array (last axis = state vars) → state dict.
-
-        Symmetric inverse of :meth:`flatten`. Indexes the last axis so
-        ``(n_vars,)`` produces scalars in the dict and ``(batch, n_vars)``
-        produces ``(batch,)`` arrays in the dict.
-
-        Parameters
-        ----------
-        vec:
-            Array from :meth:`flatten` with state vars on the last axis.
-        keys:
-            Key order (must match the order used in ``flatten``).
+        """Inverse of :meth:`flatten`: ``(..., n_vars)`` → state dict, so
+        ``(n_vars,)`` gives scalars and ``(batch, n_vars)`` gives ``(batch,)``
+        arrays. ``keys`` must match the order used in ``flatten``.
         """
         if keys is None:
             keys = self.store_keys()
@@ -425,27 +377,14 @@ class Composite(eqx.Module):
         )(jnp.asarray(ts), ys)
 
     def build_rhs(self, proc_names: list[str] | None = None):
-        """Return a JAX-compatible flat ``f(t, y_vec, args=None) -> dy_vec``.
+        """Flat ``f(t, y_vec, args=None) -> dy_vec`` over a 1-D array indexed
+        by ``sorted(store_paths())``, plus that key list.
 
-        Operates on a flat 1-D ``jnp.ndarray`` indexed by
-        ``sorted(store_paths())``.  Per-process index maps are precomputed
-        at composition time; each process contributes via a single batched
-        ``.at[idxs].add(vals)`` scatter.
-
-        Parameters
-        ----------
-        proc_names:
-            Subset of processes to include.  ``None`` (default) uses every
-            CONTINUOUS process — the whole-system case.  Pass an explicit
-            list for operator splitting (the Scheduler does this per
-            group); only the named processes contribute, all other store
-            entries get zero.  ``keys`` is always the full store layout,
-            so a single flat state vector is valid for every group's solve.
-
-        Returns
-        -------
-        ``(rhs_fn, keys)`` — pair with :meth:`flatten` / :meth:`unflatten`
-        at the API boundary if you need dict-shaped state.
+        Index maps are precomputed here, so each process contributes via one
+        batched ``.at[idxs].add(vals)`` scatter. ``proc_names`` selects a
+        subset for operator splitting (the Scheduler does this per group);
+        unnamed processes contribute zero, and ``keys`` is always the full
+        layout, so one flat state vector serves every group's solve.
         """
         if proc_names is None:
             proc_names = list(self.continuous_processes().keys())
@@ -453,17 +392,13 @@ class Composite(eqx.Module):
         keys = self.store_keys()
         key_to_idx = {k: i for i, k in enumerate(keys)}
 
-        # Canonical unit per store path (whole composite, so it's consistent
-        # across operator-splitting groups and with the seeded initial state).
+        # Canonical unit per store path, taken over the whole composite so it
+        # agrees across splitting groups and with the seeded initial state.
         canon = canonical_units(self.processes, self.topology)
 
-        # Precompute static index maps per process.  The per-process port
-        # dict (``view`` below) survives because ``Process.derivative``'s
-        # public contract is ``derivative(t, {port_name: value}) -> dict``.
-        # Each read carries a factor canonical→port-unit; each write a factor
-        # port-unit→canonical — 1.0 unless the port's unit differs from the
-        # path's canonical, in which case contributions are reconciled so
-        # writers with compatible-but-different units sum correctly.
+        # Reads carry a canonical→port factor, writes port→canonical; 1.0
+        # unless the units differ, so writers with compatible-but-different
+        # units still sum correctly.
         pre = []  # derivative contributors: (proc, read_pairs, write_pairs)
         for proc_name in proc_names:
             proc = self.processes[proc_name]
@@ -507,26 +442,12 @@ class Composite(eqx.Module):
         proc_names: list[str] | None = None,
         keys: list[str] | None = None,
     ) -> jnp.ndarray:
-        """Trailing-axis indices a set of processes writes derivatives to.
+        """Sorted int32 trailing-axis indices these processes write derivatives
+        to — the union over their EVOLVED / EXCLUSIVE ports, i.e. the states
+        that actually evolve under ``build_rhs(proc_names)``.
 
-        The union of store indices targeted by every ``EVOLVED`` /
-        ``EXCLUSIVE`` port of the named processes — i.e. the state
-        components that actually evolve when ``build_rhs(proc_names)`` is
-        integrated (all other indices keep a zero derivative). Used to
-        restrict a group's Jacobian to its own dynamics for stiffness
-        analysis and to scope coupling splices.
-
-        Parameters
-        ----------
-        proc_names:
-            Subset of processes. ``None`` (default) uses every CONTINUOUS
-            process.
-        keys:
-            Store layout. ``None`` uses :meth:`store_keys`.
-
-        Returns
-        -------
-        ``jnp.ndarray`` of sorted int32 indices.
+        Used to restrict a group's Jacobian to its own dynamics and to scope
+        coupling splices. Defaults: every CONTINUOUS process, :meth:`store_keys`.
         """
         if proc_names is None:
             proc_names = list(self.continuous_processes().keys())
@@ -542,17 +463,42 @@ class Composite(eqx.Module):
                     written.add(key_to_idx[proc_topo[port]])
         return jnp.array(sorted(written), dtype=jnp.int32)
 
+    def unfed_input_indices(
+        self,
+        keys: list[str] | None = None,
+    ) -> jnp.ndarray:
+        """Trailing-axis indices of INPUT paths that no process writes.
+
+        These components hold their port default for the whole run — the
+        state a driven component (coupling edge, clamp, param-input) sees
+        when nothing drives it. Screening and validation use this to tell
+        "undriven here" apart from "has no dynamics".
+
+        Returns
+        -------
+        ``jnp.ndarray`` of sorted int32 indices.
+        """
+        if keys is None:
+            keys = self.store_keys()
+        key_to_idx = {k: i for i, k in enumerate(keys)}
+        read: set[str] = set()
+        written: set[str] = set()
+        for pname, proc in self.processes.items():
+            proc_topo = self.topology[pname]
+            for port, p in proc.ports_schema().items():
+                path = proc_topo[port]
+                (read if p.role == PortRole.INPUT else written).add(path)
+        return jnp.array(
+            sorted(key_to_idx[p] for p in read - written), dtype=jnp.int32
+        )
+
     # -----------------------------------------------------------------
     # Initial state
     # -----------------------------------------------------------------
 
     def initial_state(self) -> dict[str, jnp.ndarray]:
-        """Merge all process port defaults into a single store dict.
-
-        Returns
-        -------
-        ``{store_path: jnp.ndarray}`` — ready to pass to a Diffrax solver.
-        """
+        """All process port defaults merged into one
+        ``{store_path: jnp.ndarray}`` store."""
         return build_initial_store(self.processes, self.topology)
 
     # -----------------------------------------------------------------
@@ -659,34 +605,17 @@ class Composite(eqx.Module):
         include_hallmark_targets: bool = False,
         registry: dict | None = None,
     ) -> list:
-        """Enumerate mechanism parameters across processes, minus hallmark knobs.
+        """Every process's ``calibratable_params()`` with the namespace filled
+        in, minus the ``(process, field)`` pairs any hallmark mapping targets.
 
-        Walks every process, calls each one's ``calibratable_params()``,
-        fills in the process namespace, and **subtracts every
-        ``(process_name, field)`` pair that's targeted by any
-        :class:`hallsim.hallmarks.ParameterMapping` in the active
-        hallmark registry**. Hallmarks are knobs — the experimenter /
-        modeller sets them via ``Condition.hallmarks[name] = severity``
-        — so their target parameters aren't valid Calibrator inputs.
-        Everything else in those same processes (upstream regulators,
-        downstream rate constants, parallel parameters not touched by
-        any hallmark) remains visible and calibratable.
+        Hallmarks are experimenter knobs set through
+        ``Condition.hallmarks[name] = severity``, so their targets aren't valid
+        Calibrator inputs; everything else in those processes stays
+        calibratable. Set ``include_hallmark_targets`` to keep them.
 
-        Parameters
-        ----------
-        include_hallmark_targets:
-            If True, include hallmark-targeted parameters in the
-            returned list. Defaults to False.
-        registry:
-            Hallmark registry to consult. Defaults to
-            :data:`hallsim.hallmarks.HALLMARK_REGISTRY`.
-
-        Returns
-        -------
-        list of :class:`hallsim.calibration.CalibratableParam`, each
-        with ``process_name`` filled in. Pass any entry through
-        ``ParameterRef(process_name=..., field=..., init=..., clamp=...)``
-        to wire it into a :class:`hallsim.calibration.CalibrationProblem`.
+        Returns :class:`~hallsim.calibration.CalibratableParam` entries — pass
+        one through ``ParameterRef(...)`` to wire it into a
+        :class:`~hallsim.calibration.CalibrationProblem`.
         """
         from hallsim.calibration import CalibratableParam
         from hallsim.hallmarks import HALLMARK_REGISTRY
@@ -723,16 +652,17 @@ class Composite(eqx.Module):
 def single_process_composite(process, name: str | None = None) -> Composite:
     """Wrap one Process as a runnable Composite with identity topology.
 
-    Each port maps to its own name (no cross-model wiring), and topology +
-    semantic checks are off — there is nothing to validate for a lone
-    process. The standard way to run or screen a single Process on its own;
-    ``name`` defaults to the process's own ``_name`` (imported models) or
-    class name.
+    Each port maps to its own name (no cross-model wiring), and validation
+    is off — a lone process has no cross-model wiring to check, and its
+    INPUT ports are unfed by construction, so the graph analyser's
+    unfed-input warning is noise here.  The standard way to run or screen a
+    single Process on its own; ``name`` defaults to the process's own
+    ``_name`` (imported models) or class name.
     """
     name = name or getattr(process, "_name", None) or type(process).__name__
     return Composite(
         processes={name: process},
         topology={},
         validate=False,
-        semantic_validation={"check_semantics": False},
+        semantic_validation=False,
     )

@@ -1,35 +1,20 @@
 """Stem Cell Niche — age-dependent decline in niche signaling.
 
-Models the deterioration of the stem cell niche by contributing
-negative (decay) derivatives to key ligand/receptor species in the
-Sivakumar2011 crosstalk model (BIOMD0000000398).
+Contributes decay derivatives to the Wnt / EGF / Shh / Notch species of the
+Sivakumar 2011 crosstalk model (BIOMD0000000398): declining self-renewal,
+proliferative capacity, niche structure, and asymmetric division, i.e. the
+Stem Cell Exhaustion hallmark (Lopez-Otin 2023).
 
-The niche process composes additively with the SBML crosstalk model:
-both declare EVOLVED ports on the same species, and the Composite sums
-their derivatives.  At severity=0 the niche contributes nothing; at
-severity=1 it drives strong ligand depletion → stem cell exhaustion.
+A demonstration of additive composition — both this and the SBML model declare
+EVOLVED ports on the same species, so the Composite sums their derivatives. At
+severity=0 the niche contributes nothing.
 
-Biological rationale
---------------------
-With aging, the stem cell niche deteriorates:
-- Wnt ligand availability declines → reduced self-renewal
-- EGF/growth factor signaling drops → less proliferative capacity
-- Shh signaling weakens → niche structural deterioration
-- Notch lateral inhibition is disrupted → impaired asymmetric division
-
-These map directly to the "Stem Cell Exhaustion" hallmark
-(Lopez-Otin et al., Cell 2023).
-
-Usage
------
->>> from hallsim.models.stem_cell_niche import StemCellNiche, build_niche_crosstalk
 >>> comp = build_niche_crosstalk(severity=0.5)
->>> result = Scheduler().run(comp, t_span=(0.0, 100.0), macro_dt=0.5, save_dt=0.5)
+>>> result = Scheduler().run(comp, t_span=(0.0, 100.0), macro_dt=0.5)
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 
 from hallsim.process import Port, PortRole, Process
 
@@ -42,25 +27,9 @@ CROSSTALK_NOTCH = "s57"  # Notch receptor
 
 
 class StemCellNiche(Process):
-    """Age-dependent niche deterioration for Sivakumar2011 crosstalk model.
-
-    Contributes decay derivatives to niche ligand species, scaled by
-    ``severity``.  Composes additively with the SBML crosstalk process.
-
-    Parameters
-    ----------
-    severity:
-        Niche deterioration level in [0, 1].
-        0 = healthy niche (no effect), 1 = severely deteriorated.
-    wnt_decay:
-        Decay rate constant for Wnt ligand.
-    egf_decay:
-        Decay rate constant for EGF.
-    shh_decay:
-        Decay rate constant for Shh.
-    notch_decay:
-        Decay rate constant for Notch receptor availability.
-    """
+    """Age-dependent niche deterioration, as decay derivatives on the
+    Sivakumar 2011 ligand species scaled by ``severity`` (0 healthy → 1
+    severely deteriorated). ``*_decay`` are the per-ligand rate constants."""
 
     hallmark = "Stem Cell Exhaustion"
     reference = "Sivakumar et al. 2011 (BIOMD0000000398)"
@@ -117,29 +86,18 @@ def build_niche_crosstalk(
     severity: float = 0.0,
     sbml_path: str | None = None,
 ):
-    """Build a Composite wiring StemCellNiche + Sivakumar crosstalk model.
-
-    Parameters
-    ----------
-    severity:
-        Niche deterioration severity (0-1).
-    sbml_path:
-        Path to the crosstalk SBML file.  Defaults to the bundled
-        ``models/sivakumar2011/crosstalk_BIOMD0000000398.xml``.
-
-    Returns
-    -------
-    Composite with two processes: ``"crosstalk"`` and ``"niche"``.
-    """
+    """Composite of ``"crosstalk"`` (Sivakumar 2011, bundled unless
+    ``sbml_path`` says otherwise) and ``"niche"`` at ``severity``."""
     from hallsim.composite import Composite
     from hallsim.sbml_import import process_from_sbml
 
     if sbml_path is None:
-        sbml_path = str(
-            Path(__file__).parent.parent.parent.parent
-            / "models"
-            / "sivakumar2011"
-            / "crosstalk_BIOMD0000000398.xml"
+        from hallsim.models.sbml import sbml_source
+
+        sbml_path = sbml_source(
+            "sivakumar2011",
+            "crosstalk_BIOMD0000000398.xml",
+            "BIOMD0000000398",
         )
 
     crosstalk = process_from_sbml(sbml_path, name="crosstalk")

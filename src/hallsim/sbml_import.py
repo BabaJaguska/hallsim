@@ -222,77 +222,56 @@ def _precheck_sbml_supported(xml_path: str) -> list[str]:
 
 
 class SBMLProcess(ImportedODEProcess):
-    """Process auto-generated from an SBML model via sbmltoodejax.
+    """Process auto-generated from an SBML model via sbmltoodejax, exposing
+    SBML species as EVOLVED ports. Built by :func:`process_from_sbml`, not
+    directly.
 
-    This wraps the JAX-compiled model step function from sbmltoodejax,
-    exposing SBML species as EVOLVED ports.
-
-    Not constructed directly — use :func:`process_from_sbml`.
-
-    The ``parameters`` field (inherited) is the named, substitutable
-    surface for every SBML ``<parameter>`` and constant-rate species in the
-    model. At construction time it is auto-populated with every SBML
-    constant at its published default value, so the full mechanism surface
-    is immediately discoverable via :meth:`calibratable_params` and
-    :meth:`hallsim.composite.Composite.calibration_targets`. User-supplied
-    ``parameters`` at construction override specific defaults; hallmarks
-    substitute values via ``eqx.tree_at`` on a dotted ``parameters.<key>``
-    field path; Calibrator does the same.
+    The inherited ``parameters`` field is the substitutable surface for every
+    SBML ``<parameter>`` and constant-rate species, auto-populated at import
+    with published defaults — so the full mechanism surface is discoverable via
+    :meth:`calibratable_params`. Hallmarks and Calibrator substitute into it
+    through a dotted ``parameters.<key>`` path.
     """
 
     _param_label = "SBML constant"
 
-    _species_names: tuple[str, ...] = ()
-    _species_y0: tuple[float, ...] = ()
-    _species_ontology: tuple[dict[str, str], ...] = ()
-    # Structure for the coupling-wiring checker: param constancy + SBO, the
-    # set of dynamic variables, and the assignment-rule dependency graph — so a
-    # driver targeting a rate constant that the model modulates via a rule can
-    # be flagged (see hallsim.coupling_wiring, _extract_coupling_metadata).
-    # Static metadata; round-trips untouched through eqx.tree_at substitutions.
+    # Everything below is structure, not fitted values: static, so
+    # ports_schema() stays concrete under a trace and these round-trip
+    # untouched through eqx.tree_at substitutions on `parameters`.
+    _species_names: tuple[str, ...] = eqx.field(static=True, default=())
+    _species_y0: tuple[float, ...] = eqx.field(static=True, default=())
+    _species_ontology: tuple[dict[str, str], ...] = eqx.field(
+        static=True, default=()
+    )
+    # Param constancy + SBO, dynamic variables, and the assignment-rule graph,
+    # so a driver aimed at a rate constant the model modulates via a rule can
+    # be flagged (see hallsim.coupling_wiring).
     _coupling_meta: dict = eqx.field(static=True, default=None)
-    # native_time_seconds / time_scale / parameters / _param_names / _name
-    # are inherited from ImportedODEProcess. Extraction fills them at import
-    # (native_time_seconds = day 86400 / hour 3600 / second 1). Parallel
-    # tuple below is fixed at construction so derivative-time lookup by name
-    # stays JIT-safe even when eqx.tree_at reorders the parameters dict.
     _model: Any = None  # sbmltoodejax model object
     _w0: Any = None
     _c: Any = None
-    _param_indexes: tuple[int, ...] = ()
-    # Boundary-input species (e.g. Irradiation, Insulin) are the model's
-    # experimental input ports. They live in the SBML `w` vector, not `c`,
-    # but are exposed through the same `parameters` surface; these parallel
-    # tuples route their current values into `_w0` at derivative time.
-    _w_names: tuple[str, ...] = ()
-    _w_indexes: tuple[int, ...] = ()
-    # Inert "sink" species (written by degradation reactions, read by
-    # nothing — e.g. a `Nil` degradation collector). Integrating them is
-    # pointless and lets them accumulate unboundedly, wrecking the state's
-    # numerical scaling. Their derivative is frozen to 0 (treated as a
-    # boundary species), which is exact since no rate law reads them.
-    _frozen_indices: tuple[int, ...] = ()
-    # _param_drivers, with_param_input, and the driver INPUT ports are
-    # inherited from ImportedODEProcess; derivative() below applies the driven
-    # values (base helper) onto the c-vector by index.
-    # Translated SBML <event> elements as EVENT processes (see
-    # hallsim.sbml_events). Static metadata; expand into a composite with
-    # ``hallsim.sbml_events.expand_events``. Empty for event-free models.
+    # Parallel to _param_names, fixed at construction so derivative-time
+    # lookup stays JIT-safe even when tree_at reorders the parameters dict.
+    _param_indexes: tuple[int, ...] = eqx.field(static=True, default=())
+    # Boundary-input species (Irradiation, Insulin) — the model's experimental
+    # input ports. They live in the `w` vector but are exposed through the same
+    # `parameters` surface; these route their values into `_w0`.
+    _w_names: tuple[str, ...] = eqx.field(static=True, default=())
+    _w_indexes: tuple[int, ...] = eqx.field(static=True, default=())
+    # Inert sinks: written by degradation, read by nothing. Frozen to dy/dt=0
+    # so they can't accumulate unboundedly and wreck the state scaling — exact,
+    # since no rate law reads them.
+    _frozen_indices: tuple[int, ...] = eqx.field(static=True, default=())
+    # Translated SBML <event> elements; expand with sbml_events.expand_events.
     _events: tuple = eqx.field(static=True, default=())
-    # Boundary inputs driven from an INPUT port each step — the general
-    # port-coupling path (:meth:`with_input_driver`):
-    # ``((input_name, input_port), ...)``. A driven input takes the port's
-    # value, overriding its native SBML rule; wire the port via topology to a
-    # forcing source (:class:`hallsim.models.forcing.PulseSource`) or another
-    # model's state. Undriven inputs keep their native SBML drive, so a raw
-    # import reproduces the source model's own experiment.
+    # ``((input_name, input_port), ...)`` — boundary inputs driven from an
+    # INPUT port, overriding their native SBML rule (:meth:`with_input_driver`).
+    # Undriven inputs keep that rule, so a raw import reproduces the source
+    # model's own experiment.
     _input_drivers: tuple = eqx.field(static=True, default=())
-    # SBML constants delivered as a one-time step at a threshold time:
-    # ``((param_name, t_step, value_before), ...)``. The constant holds
-    # ``value_before`` while composite time ``t < t_step`` and its configured
-    # ``parameters`` value once ``t >= t_step`` — a timed intervention (e.g.
-    # rapamycin added at washout day 2 drops the mTOR rate) instead of a
-    # severity applied for the whole trajectory.
+    # ``((param_name, t_step, value_before), ...)`` — a constant that holds
+    # ``value_before`` until ``t_step``, for a timed intervention rather than a
+    # severity applied across the whole trajectory.
     _param_steps: tuple = eqx.field(static=True, default=())
 
     def coupling_structure(self) -> dict:
@@ -406,48 +385,46 @@ class SBMLProcess(ImportedODEProcess):
         )
         return schema
 
+    def _constants(self, t):
+        """The SBML ``c`` vector with ``parameters`` scattered in — one
+        vectorised write covering every constant.
+
+        Left inside the RHS deliberately: memoising it on the instance would
+        make the pytree structure change after first use and lose the JIT
+        cache. It is loop-invariant unless a ``_param_step`` makes it depend
+        on ``t``, and XLA hoists it out of the solver loop (measured: no
+        runtime difference when hoisted by hand).
+        """
+        if not self._param_indexes:
+            return self._c
+        steps = {n: (ts, v0) for n, ts, v0 in self._param_steps}
+        values = jnp.stack(
+            [
+                (
+                    jnp.where(
+                        t >= steps[n][0], self.parameters[n], steps[n][1]
+                    )
+                    if n in steps
+                    else jnp.asarray(self.parameters[n], dtype=float)
+                )
+                for n in self._param_names
+            ]
+        )
+        return self._c.at[jnp.asarray(self._param_indexes)].set(values)
+
     def derivative(self, t, state):
-        # Stack species along the trailing axis. For scalar state values
-        # this yields shape (n_species,); for batched values (batch,) it
-        # yields (batch, n_species). The trailing-axis convention matches
-        # Composite.flatten/unflatten, so this Process is shape-polymorphic
-        # and works under jax.vmap'd / batched Scheduler runs without
-        # extra vmap'ing at the composite level.
+        # Trailing-axis stack, matching Composite.flatten/unflatten, so this
+        # Process is shape-polymorphic and batched runs need no extra vmap.
         y = jnp.stack([state[name] for name in self._species_names], axis=-1)
         host = getattr(self._model, "modelstepfunc", self._model)
         ratefunc = host.ratefunc
-        # AssignmentRule recomputes the `w` vector (observables, computed
-        # totals, time-dependent inputs) from the current state each step.
         assignmentfunc = getattr(host, "assignmentfunc", None)
         is_batched = y.ndim > 1
 
-        # Build the constants vector. parameters.<key> entries
-        # substitute into c via a single vectorised scatter — one
-        # XLA-fused write covering every constant, whether or not it
-        # was modified from its SBML default.
-        if self._param_indexes:
-            indexes = jnp.asarray(self._param_indexes)
-            steps = {n: (ts, v0) for n, ts, v0 in self._param_steps}
-            values = jnp.stack(
-                [
-                    (
-                        jnp.where(
-                            t >= steps[n][0], self.parameters[n], steps[n][1]
-                        )
-                        if n in steps
-                        else jnp.asarray(self.parameters[n], dtype=float)
-                    )
-                    for n in self._param_names
-                ]
-            )
-            c = self._c.at[indexes].set(values)
-        else:
-            c = self._c
+        c = self._constants(t)
 
-        # Live parameter drivers: override each driven constant with a value
-        # read from an INPUT port this step (base helper computes the values;
-        # SBML bridges param_name -> c-index here). A batched driving signal
-        # makes c per-batch, so the ratefunc vmaps over c too.
+        # Live drivers override a constant with an INPUT-port value. A batched
+        # driving signal makes c per-batch, so the ratefunc vmaps over c too.
         c_batched = False
         if self._param_drivers:
             dv = self._driven_param_values(state)  # {param_name: value}
@@ -470,18 +447,12 @@ class SBMLProcess(ImportedODEProcess):
             else:
                 c = c.at[d_idx].set(driven)
 
-        # Map canonical time to this model's native time, evaluate the
-        # native rate law there, and scale dy back to canonical time:
-        #   τ = t · time_scale,  dy/dt = (dy/dτ)·time_scale.
-        # Feeding t_native (not t) keeps time-referencing assignment rules
-        # on the model's own clock. time_scale=1.0 leaves both untouched.
+        # τ = t·time_scale, dy/dt = (dy/dτ)·time_scale — so time-referencing
+        # assignment rules stay on the model's own clock.
         t_native = t * self.time_scale
 
-        # Evaluate the SBML assignment rules from the *current* state rather
-        # than freezing `w` at its initial value. A state-dependent rule
-        # that feeds a rate law (a conserved moiety, a computed total) is
-        # then correct instead of silently stuck at t=0; SBML observables
-        # (`*_obs`) are likewise computed live.
+        # Assignment rules evaluated from the *current* state; freezing `w` at
+        # its initial value would leave a state-dependent rule stuck at t=0.
         w_batched = False
         if assignmentfunc is not None:
             if is_batched:
@@ -494,13 +465,9 @@ class SBMLProcess(ImportedODEProcess):
         else:
             w = self._w0
 
-        # Boundary inputs follow their native SBML drive — already evaluated
-        # into `w` above (Irradiation's 5-min pulse, Insulin's continuous
-        # stimulus, …). A driven input (with_input_driver) instead takes its
-        # INPUT-port value this step — the general override knob — so a
-        # prescribed dose is a wired forcing source, not a special case. Undriven
-        # inputs keep the imported drive, so a raw import reproduces the source
-        # model's own experiment.
+        # A driven input overrides the native SBML drive already in `w` with
+        # its INPUT-port value, so a prescribed dose is a wired forcing source
+        # rather than a special case.
         if self._input_drivers:
             name_to_widx = dict(zip(self._w_names, self._w_indexes))
             drv_idx = jnp.asarray(
@@ -528,10 +495,6 @@ class SBMLProcess(ImportedODEProcess):
             dydt = ratefunc(y, t_native, w, c)
         dydt = dydt * self.time_scale
 
-        # Freeze inert sink species (written by degradation, read by
-        # nothing) so they don't accumulate and wreck the state scaling.
-        # Exact: no rate law reads them, so zeroing their rate changes no
-        # other trajectory.
         if self._frozen_indices:
             dydt = dydt.at[..., jnp.asarray(self._frozen_indices)].set(0.0)
 
@@ -727,38 +690,21 @@ def _extract_coupling_metadata(xml_path: str) -> dict:
 
 
 def _extract_native_time_seconds(xml_path: str) -> tuple[float, bool]:
-    """Seconds-per-time-unit the model's rate constants are expressed in,
-    and whether the model actually *declared* it.
+    """``(seconds_per_time_unit, declared)`` for the model's rate constants.
 
-    SBML rate laws are written in a model-specific time unit. Composing
-    models that disagree (DallePezze 2014 in days, Geva-Zatorsky 2006 in
-    hours, an unannotated model in seconds) silently runs them at
-    different real-world speeds on a shared ``t`` axis. This value is the
-    conversion the composite uses to put every sub-model on one canonical
-    clock (see :attr:`SBMLProcess.time_scale`).
+    SBML rate laws use a model-specific time unit, so composing models that
+    disagree (days vs hours vs seconds) silently runs them at different
+    real-world speeds on a shared ``t``. This is the conversion
+    :attr:`SBMLProcess.time_scale` uses to put them on one clock.
 
-    Returns ``(seconds, declared)``. ``declared`` is ``False`` when the
-    model carries no usable time-unit annotation and the seconds value is
-    the SBML *default* fallback (``second`` → ``1.0``), not something the
-    modeller stated. That distinction matters: a per-minute model that
-    simply omits ``timeUnits`` (common) is indistinguishable by value from a
-    genuine seconds model, so reconciling it onto a shared axis is silently
-    60× wrong. Callers warn on ``declared is False``.
+    ``declared`` is False when the seconds value is the SBML fallback rather
+    than something the modeller stated — a per-minute model that omits
+    ``timeUnits`` is indistinguishable by value from a genuine seconds model,
+    so reconciling it is silently 60x wrong. Callers warn on it.
 
-    Resolution order:
-
-    1. The model-level ``timeUnits`` attribute (SBML L3) naming a
-       ``<unitDefinition>`` → its scale, ``declared=True``.
-    2. A ``<unitDefinition id="time">`` (the SBML L2 convention; this is
-       where DallePezze 2014's ``second × 86400`` lives) → ``declared=True``.
-    3. A base-unit ``timeUnits`` (e.g. ``second``, no unitDefinition) →
-       ``1.0``, ``declared=True``.
-    4. Otherwise (unset or ``dimensionless``) → ``(1.0, False)``: undeclared,
-       assumed seconds. ``(1.0, False)`` also on unparseable files.
-
-    A time unit is a product of ``<unit>`` terms; for a well-formed time
-    definition that is a single ``second`` term with a multiplier (and
-    optional power-of-ten scale).
+    Resolution order: model-level ``timeUnits`` naming a ``<unitDefinition>``
+    (L3); a ``<unitDefinition id="time">`` (the L2 convention); a base-unit
+    ``timeUnits``; otherwise ``(1.0, False)``.
     """
     import libsbml
 
@@ -816,18 +762,12 @@ _GENERATED_MODELS: dict = {}
 
 
 def _load_local_sbml(sbml_path: str):
-    """Load a local SBML XML file via sbmltoodejax.
+    """Load a local SBML file via sbmltoodejax's codegen, returning
+    ``(model, y0, w0, c)`` to match ``load_biomodel``.
 
-    sbmltoodejax works by generating a Python module from SBML; this
-    is the same approach load_biomodel uses internally, just with a
-    local file instead of a BioModels API download.
-
-    Codegen output is cached per source file (path + mtime + size), because
-    each generated module defines a *new* model class: importing the same SBML
-    twice would otherwise produce two pytree node types for one model, and no
-    compiled solve could be reused across them.
-
-    Returns (model, y0, w0, c) matching load_biomodel's signature.
+    Cached per source file (path + mtime + size): each generated module defines
+    a *new* model class, so importing the same SBML twice would otherwise give
+    one model two pytree node types and share no compiled solve.
     """
     import os
 
@@ -874,8 +814,6 @@ def _generate_model_module(sbml_path: str):
 
     model_data = ParseSBMLFile(sbml_path)
 
-    # sbmltoodejax generates a .py file — use a temp location
-    # Use home directory for temp files (avoid /tmp space issues)
     tmp_dir = os.path.expanduser("~/.cache/hallsim")
     os.makedirs(tmp_dir, exist_ok=True)
     fd, tmp_py = tempfile.mkstemp(
@@ -884,35 +822,23 @@ def _generate_model_module(sbml_path: str):
     os.close(fd)
     try:
         GenerateModel(model_data, tmp_py)
-        # sbmltoodejax emits bare `no.sqrt(...)` for some models (e.g.
-        # Sivakumar2011 BIOMD0000000398): the SBML MathML namespace prefix
-        # "no" passes through verbatim instead of mapping to jax.numpy, so
-        # `no` is undefined. Alias `no` to jax.numpy in the generated source.
         with open(tmp_py, "r") as f:
             code = f.read()
         patched = False
-        # Patch MathML namespace prefix "no" → jax.numpy
+        # Some models (Sivakumar2011) emit bare `no.sqrt(...)`: the MathML
+        # namespace prefix passes through instead of mapping to jax.numpy.
         if "\tno " in code or " no." in code or "\tno." in code:
             code = code.replace("import no\n", "import jax.numpy as no\n")
             if "import no" not in code:
                 code = "import jax.numpy as no\n" + code
             patched = True
-        # Patch deprecated eqx.static_field() → eqx.field(static=True)
         if "eqx.static_field()" in code:
             code = code.replace("eqx.static_field()", "eqx.field(static=True)")
             patched = True
-        # Patch hardcoded float32 → float64. sbmltoodejax emits the
-        # stoichiometric matrix, constants, and rate vectors as
-        # ``dtype=jnp.float32``; an explicit dtype overrides the global
-        # ``jax_enable_x64`` setting, so the RHS is computed at float32
-        # precision (~1e-7) even when HallSim runs in float64. With an
-        # adaptive controller at ``rtol=1e-6`` (below the float32 floor)
-        # the embedded error estimate is dominated by float32 roundoff
-        # and the step controller thrashes — ~57% step rejection that
-        # masquerades as stiffness, defeating implicit solvers. float64
-        # constants let the controller actually meet tolerance. (With
-        # ``jax_enable_x64`` off, JAX downcasts float64 → float32, so this
-        # is a no-op rather than a precision promotion.)
+        # sbmltoodejax hardcodes dtype=jnp.float32, which overrides
+        # jax_enable_x64. At rtol=1e-6 — below the float32 floor — the error
+        # estimate is then dominated by roundoff and the controller thrashes
+        # (~57% rejection masquerading as stiffness). No-op with x64 off.
         if "float32" in code:
             code = code.replace("float32", "float64")
             patched = True
@@ -1189,36 +1115,21 @@ def process_from_sbml(
     Parameters
     ----------
     model_id:
-        Either a BioModels numeric ID (e.g. ``10`` for Kholodenko2000
-        MAPK) or a path to a local SBML XML file.
+        A BioModels numeric ID (``10`` = Kholodenko2000 MAPK) or a path to a
+        local SBML XML file.
     name:
-        Human-readable name for the process. Defaults to
-        ``"biomodel_{model_id}"`` or the filename.
+        Process name; defaults to ``"biomodel_{model_id}"`` or the filename.
     timescale:
-        Characteristic timescale in hours for multi-rate scheduling.
-        If ``None``, the process lands in the default group.
+        Characteristic timescale for multi-rate scheduling. ``None`` uses the
+        model's native time unit.
     parameters:
-        Optional ``{c_name: initial_value}`` dict that overrides the
-        SBML default for specific constants at construction. Each name
-        must exist in ``c_indexes``. The returned Process's
-        :attr:`SBMLProcess.parameters` field is auto-populated with
-        the published default for **every** SBML constant, then
-        ``parameters`` entries replace those defaults for the
-        listed keys. After construction the dict supports the standard
-        ``eqx.tree_at`` substitution path used by hallmarks
-        (``param_name="parameters.<c_name>"``) and Calibrator.
+        ``{c_name: value}`` overriding SBML defaults at construction. Every
+        constant is auto-populated at its published default first, so this
+        only replaces the listed keys.
 
-    Returns
-    -------
-    SBMLProcess instance with auto-generated ports from SBML species.
-
-    Raises
-    ------
-    ImportError
-        If ``sbmltoodejax`` is not installed.
-    KeyError
-        If any name in ``parameters`` is not a constant in
-        the SBML model.
+    Returns an :class:`SBMLProcess` with ports auto-generated from the species.
+    Raises ``ImportError`` without sbmltoodejax, ``KeyError`` on an unknown
+    parameter name.
     """
     try:
         import sbmltoodejax  # noqa: F401  (only checking availability)

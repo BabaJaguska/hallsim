@@ -1,27 +1,16 @@
 """Gene-reporter validation: one-to-one mapping from a mechanistic
 observable to a canonical reporter transcript.
 
-Each entry in :data:`CANONICAL_REPORTERS` pairs one HallSim mechanistic
-quantity (a state variable or an algebraic intermediate) with the
-single canonical gene whose expression is the textbook readout of that
-quantity, plus an expected sign and a literature anchor. The mapping has
-no tunable parameters.
+Each entry in :data:`CANONICAL_REPORTERS` pairs one mechanistic quantity with
+the single gene whose expression is its textbook readout, plus an expected sign
+and a literature anchor. The mapping has **no tunable parameters** — calibration
+belongs to the mechanism, not the readout layer.
 
-Validation pipeline:
-
-1. Run the simulator under control and perturbed conditions.
-2. Compute Δ_observable via :func:`derive_observables` applied to
-   late-time (or trajectory-sampled) state snapshots.
-3. Compute Δ_gene from a bulk or pseudo-bulk expression matrix via
-   :func:`log2_fold_change`.
-4. Aggregate per-reporter sign agreement and Spearman correlation via
-   :func:`compute_concordance`.
-
-Calibration belongs to the mechanism, not the readout layer: parameters
-of the composite (e.g. ``alpha``, ``k_sasp``, ``MDAMAGE_SA``) are
-differentiable end-to-end and can be fit against the gene-level Δ_data
-using ``jax.grad`` + ``optax``, with a held-out split across conditions
-(e.g. fit on DDIS, evaluate on OIS).
+Pipeline: run control and perturbed conditions, take Δ_observable via
+:func:`derive_observables`, Δ_gene via :func:`log2_fold_change`, then aggregate
+sign agreement and Spearman correlation with :func:`compute_concordance`. Fit
+composite parameters against the gene-level Δ_data with ``jax.grad`` + ``optax``
+on a held-out split across conditions.
 """
 
 from __future__ import annotations
@@ -70,20 +59,14 @@ def last_value(ts, y, query_times=None):
 def window_mean(window: float = 0.5):
     """Exact mean of an observable over a trailing fixed-duration window.
 
-    For an observable routed through a
-    :class:`hallsim.models.running_integral.RunningIntegral` — whose path
-    holds the cumulative integral ``A = ∫₀ᵗ source`` — the mean of the
-    source over ``[t - window, t]`` is, by the fundamental theorem of
-    calculus, ``(A(t) - A(t - window)) / window``. Early (``t < window``)
-    the window clamps to ``[0, t]``.
+    Reads a :class:`~hallsim.models.running_integral.RunningIntegral` path
+    holding ``A = ∫₀ᵗ source``, so the mean over ``[t-window, t]`` is
+    ``(A(t) - A(t-window)) / window``, clamped to ``[0, t]`` early on.
+    Grid-independent — ``A`` is interpolated at the window edges.
 
-    ``window`` is a **fixed duration in the trajectory's time unit** (days
-    on the composite axis, so ``0.5`` is 12 h), sized to average over a few
-    of the species' oscillation periods — a transcript readout reflects its
-    recent transcription, not a fraction of the whole experiment. The
-    readout is grid-independent: the integral is interpolated at the window
-    edges (smooth, taken at the solver's fine steps). ``query_times=None``
-    collapses to the exact mean over the last save interval (batch-safe).
+    ``window`` is a duration in the trajectory's time unit (0.5 = 12 h on a day
+    axis), sized to a few oscillation periods: a transcript reflects recent
+    transcription, not a fraction of the whole experiment.
     """
     if window <= 0:
         raise ValueError(f"window must be > 0; got {window!r}")
@@ -101,16 +84,12 @@ def window_mean(window: float = 0.5):
 
 
 def window_rms(window: float = 0.5):
-    """Root-mean-square of an observable over the trailing window.
+    """``√⟨source²⟩`` over the trailing window, off a ``RunningIntegral(power=2)``.
 
-    For a source routed through a ``RunningIntegral(power=2)`` (path holds
-    ∫source²), this returns ``√⟨source²⟩`` at each query time. Unlike the
-    plain mean it rises with oscillation amplitude, so it reads a
-    pulsatile species' damage-encoded pulsing rather than its buffered
-    mean; unlike bare amplitude it keeps the mean as a floor, so a
-    quiescent baseline gives a finite fold-change instead of diverging.
-    Same fixed-duration ``window`` and query-time contract as
-    :func:`window_mean`. See docs/gz06-basal-p53.md.
+    Rises with oscillation amplitude, so it reads a pulsatile species' encoded
+    pulsing rather than its buffered mean, while keeping that mean as a floor —
+    a quiescent baseline gives a finite fold-change instead of diverging. Same
+    contract as :func:`window_mean`. See docs/gz06-basal-p53.md.
     """
     mean_square = window_mean(window)
 
@@ -198,25 +177,20 @@ def _zerophase_ema(seq, a, mirror=True):
 
 
 def zerophase_rms(tau: float):
-    """Zero-phase (forward-backward EMA) RMS amplitude envelope — smooth, and
-    with *no phase lag*, so a query at day 7 reads the amplitude *at* day 7
-    rather than a trailing average biased low by half a window.
+    """Zero-phase RMS amplitude envelope: smooth and *lag-free*, so a query at
+    day 7 reads the amplitude at day 7, not a trailing average biased low.
 
-    Reads a ``RunningIntegral(power=2)`` path (∫x²), recovers the per-interval
-    ⟨x²⟩ by differencing, then low-passes it with an exponential moving average
-    run forward and backward (the two passes' phase shifts cancel), each warm-
-    started at its boundary sample. ``√`` gives the amplitude. The constant
-    warm-start (rather than reflection) is deliberate: ⟨x²⟩ can carry a lone
-    near-zero interval where a save step straddles a p53 trough, and reflecting
-    it into the endpoint collapses the RMS to zero; the warm-start rides over
-    that aliasing blip.
+    Differences a ``RunningIntegral(power=2)`` path to per-interval ⟨x²⟩, then
+    low-passes it with an EMA run forward and backward so the phase shifts
+    cancel, each pass warm-started at its boundary sample. The constant
+    warm-start rather than reflection is deliberate: a save step straddling a
+    p53 trough leaves a lone near-zero interval, and reflecting that into the
+    endpoint would collapse the RMS to zero.
 
-    This is an *acausal* readout — legitimate here because the integral is an
-    output only (never read back into any derivative), so the summary is a
-    post-hoc transform of the fully-solved trajectory; there is no way for the
-    future to leak into the ODE. ``tau`` is the smoothing memory (trajectory
-    time unit), sized to a few oscillation periods. Assumes uniform save
-    spacing (the Scheduler's ``save_dt`` grid).
+    Acausal, which is legitimate only because the integral is output-only and
+    never read back into a derivative — this is a post-hoc transform of a
+    fully-solved trajectory, so the future cannot leak into the ODE. ``tau`` is
+    the smoothing memory, sized to a few periods; assumes uniform save spacing.
     """
 
     def summarize(ts, y, query_times=None):
@@ -349,26 +323,15 @@ def cycle_average(fraction: float = 0.25):
 class GeneReporter:
     """One mechanistic observable ↔ one canonical reporter gene.
 
-    Attributes
-    ----------
-    observable:
-        Key from :func:`derive_observables` output (e.g. ``"p53_activity"``).
-    gene_symbol:
-        HGNC gene symbol of the canonical transcript reporter.
-    sign:
-        ``+1`` if (observable ↑ ⇒ gene ↑); ``-1`` for inverse.
-    description:
-        Short mechanistic rationale for the mapping.
-    reference:
-        Primary literature anchor.
-    summary:
-        Callable ``(ts, y, query_times=None) -> value(s)`` reading a
-        trajectory ``y`` (shape ``(n_time, ...)``) at the query times —
-        one value per time, or the endpoint scalar when
-        ``query_times is None``. Defaults to :func:`last_value` (the
-        instantaneous value). Use :func:`window_mean` / :func:`window_rms`
-        over a :class:`~hallsim.models.running_integral.RunningIntegral`
-        for observables routed through an oscillating state.
+    ``observable`` is a store path, ``gene_symbol`` its HGNC reporter, ``sign``
+    ``+1`` when both move together and ``-1`` when inverse, with ``description``
+    and ``reference`` carrying the rationale and its literature anchor.
+
+    ``summary`` is ``(ts, y, query_times=None) -> value(s)`` — one value per
+    query time, or the endpoint scalar when ``query_times is None``. Defaults
+    to :func:`last_value`; use :func:`window_mean` / :func:`window_rms` over a
+    :class:`~hallsim.models.running_integral.RunningIntegral` for an
+    oscillating state.
     """
 
     observable: str
@@ -621,25 +584,13 @@ def derive_multi_hallmark_summaries(
     state_trajectory: dict,
     reporters: list[GeneReporter] | None = None,
 ) -> dict[str, Any]:
-    """Apply each reporter's ``summary`` callable to its store-path trajectory.
+    """Each reporter's ``summary`` applied to its store-path trajectory →
+    ``{observable: scalar}``, ready for :func:`compute_concordance`.
 
-    Parameters
-    ----------
-    ts:
-        Save times, shape ``(n_time,)`` — the axis of each trajectory.
-        Passed to the summary so time-aware summaries (e.g.
-        :func:`window_mean`) can compute a per-time mean.
-    state_trajectory:
-        ``{store_path: jnp.ndarray}`` with each array shaped
-        ``(n_time, ...)``. Typically the result of
-        ``Composite.unflatten(scheduler_result.ys)``.
-    reporters:
-        Defaults to :data:`MULTI_HALLMARK_REPORTERS`.
-
-    Returns
-    -------
-    ``{reporter.observable: scalar (or batched array)}``, ready to feed
-    :func:`compute_concordance`.
+    ``state_trajectory`` is ``{store_path: (n_time, ...) array}`` — typically
+    ``Composite.unflatten(result.ys)``. ``ts`` goes to the summary so
+    time-aware ones (:func:`window_mean`) can read a per-time value.
+    ``reporters`` defaults to :data:`MULTI_HALLMARK_REPORTERS`.
     """
     if reporters is None:
         reporters = MULTI_HALLMARK_REPORTERS
@@ -654,22 +605,12 @@ def derive_multi_hallmark_summaries(
 
 
 def derive_observables(state: dict) -> dict[str, Any]:
-    """Compute the named observables consumed by the reporter table.
+    """Named observables for the reporter table, from a dict keyed by
+    ``eriq/<name>`` store paths.
 
-    The set blends raw state variables and algebraic intermediates: NF-κB
-    and the algebraic MTOR / ROS values come from
-    :func:`hallsim.models.eriq._compute_algebraic` so the mapping
-    matches what ERiQ downstream processes use.
-
-    Parameters
-    ----------
-    state:
-        Dict keyed by ``eriq/<name>`` store paths.
-
-    Returns
-    -------
-    Dict mapping observable name → scalar (or batched array, since
-    ``_compute_algebraic`` is shape-polymorphic).
+    Blends raw states with algebraic intermediates: NF-κB, MTOR and ROS come
+    from ERiQ's own ``_compute_algebraic``, so they match what its downstream
+    processes see. Shape-polymorphic, so trajectory arrays pass through.
     """
     sub = {
         "mito_function": state["eriq/mito_function"],
@@ -696,28 +637,14 @@ def derive_observable_summaries(
     state_trajectory: dict,
     reporters: list[GeneReporter] | None = None,
 ) -> dict[str, Any]:
-    """Apply each reporter's ``summary`` callable to its observable trajectory.
+    """As :func:`derive_multi_hallmark_summaries`, but over the *derived*
+    ERiQ observables rather than raw store paths — for a loss or concordance
+    that routes through an oscillating state.
 
-    Use this when the loss / concordance routes through an oscillating
-    state. ``derive_observables`` is shape-polymorphic (via
-    :func:`_compute_algebraic`), so passing a state dict whose values
-    are time-axis-leading trajectory arrays produces per-observable
-    trajectories. Each reporter's ``summary`` then collapses its own
-    observable to a scalar; defaults to :func:`last_value` (endpoint).
-
-    Parameters
-    ----------
-    state_trajectory:
-        ``{store_path: jnp.ndarray}`` with each array shaped
-        ``(n_time, ...)`` — typically the output of
-        ``Composite.unflatten(scheduler_result.ys)``.
-    reporters:
-        Defaults to :data:`CANONICAL_REPORTERS`.
-
-    Returns
-    -------
-    ``{observable_name: scalar (or batched array)}`` ready to be
-    consumed by :func:`compute_concordance`.
+    :func:`derive_observables` is shape-polymorphic, so a ``{store_path:
+    (n_time, ...) array}`` input yields per-observable trajectories that each
+    reporter's ``summary`` then collapses. ``reporters`` defaults to
+    :data:`CANONICAL_REPORTERS`.
     """
     if reporters is None:
         reporters = CANONICAL_REPORTERS

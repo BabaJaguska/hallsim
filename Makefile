@@ -1,4 +1,4 @@
-.PHONY: install install-dev format lint test test-all run run-compose run-validate help all
+.PHONY: install install-dev format lint check test test-all run run-compose run-validate help all
 
 install:
 	pip install --upgrade pip
@@ -18,6 +18,14 @@ lint:
 	flake8 --ignore E501,E402,W504,W503,E226,E203 tests/
 	flake8 --ignore E501,E402,W504,W503,E226,E203 demos/
 
+check:
+	black --check --line-length 79 src/ tests/ demos/
+	$(MAKE) lint
+	python scripts/check_prose_ratio.py src/hallsim
+
+hooks:
+	pre-commit install
+
 test:
 	python -m pytest tests/ -m "not slow and not network and not demo"
 
@@ -25,7 +33,7 @@ test-all:
 	python -m pytest tests/ -m "not network"
 
 run:
-	simulate basic
+	simulate multi-hallmark run
 
 run-compose:
 	simulate compose

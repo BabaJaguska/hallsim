@@ -1,51 +1,28 @@
 """Hallmark handles — high-level control interface for aging biology.
 
-A hallmark of aging (Lopez-Otin et al., 2023) is represented as a
-signed severity handle in [-1, 1] that modulates parameters across one
-or more Processes. Zero is homeostasis (the untreated / calibrated base);
-the sign selects direction, so a hallmark can be dialed toward impairment
-or toward a pharmacological correction of it.
-The abstraction targets all 12 hallmarks; :data:`HALLMARK_REGISTRY`
-maps 4 today — Stem Cell Exhaustion, Mitochondrial Dysfunction,
-Deregulated Nutrient Sensing, and Genomic Instability — and each new
-one is a single :class:`HallmarkHandle` entry away.
+A hallmark of aging (Lopez-Otin et al., 2023) is a signed severity handle in
+[-1, 1] modulating parameters across one or more Processes: -1 is the full
+opposite perturbation (mTOR suppression), 0 homeostasis, +1 severely impaired.
+A hallmark with no meaningful opposite — there is no negative DNA damage —
+uses the [0, 1] half. :data:`HALLMARK_REGISTRY` maps 4 of the 12 today; each
+new one is a single :class:`HallmarkHandle` entry.
 
-    severity = -1.0  ->  full opposite perturbation (e.g. mTOR suppression)
-    severity =  0.0  ->  homeostasis / untreated control (native base)
-    severity = +1.0  ->  severely impaired
+Transforms are **multiplicative of the current base**: ``base * f(severity)``,
+not an absolute value, so a calibration can fit mechanism parameters and then
+apply severities without the hallmark clobbering the fit. Processes are
+immutable, so applying a handle builds *new* instances; both severity and base
+are JAX-traceable, and ``jax.grad`` flows through either.
 
-Hallmarks with no meaningful "opposite" (Genomic Instability: there is no
-negative DNA damage) simply use the [0, 1] half; the neutral point is still
-0.
+**Severity is an experimental-design knob, not a fittable parameter.** Set it
+per condition (DDIS=1.0, ctrl=0.0) and fit mechanism parameters with
+Calibrator. Its differentiability is there for sensitivity analysis and
+severity sweeps, not for inferring "what severity does the data show" — that
+would conflate experimental setup with model state.
 
-Hallmark transforms are **multiplicative of the current calibrated
-base value**, not absolute. A transform receives ``(severity, base)``
-and returns ``base * f(severity)``. This lets a calibration loss
-substitute mechanism parameters via ``parameters`` and then
-apply hallmarks at the experimental severity profile without the
-hallmark clobbering the calibrated values.
-
-Because Process instances are immutable Equinox modules, hallmark
-handles work by constructing *new* Process instances with modified
-parameters. Severity is JAX-traceable (pass a ``jnp.ndarray`` and
-``jax.grad`` flows through), and so is the base value (so Calibrator
-can fit through ``parameters`` while hallmarks scale by
-severity).
-
-**Severity is an experimental-design knob, not a fittable parameter.**
-The intended pattern is to set severity for each experimental
-condition (DDIS=1.0, ctrl=0.0, RAPA-rescued=0.3) and fit mechanism
-parameters via ``parameters`` with Calibrator. Severity-
-differentiability is preserved for sensitivity analysis and severity-
-sweep population studies, not for inferring "what severity does the
-data show" — that would conflate experimental setup with model state.
-
-Usage
------
->>> from hallsim.hallmarks import HallmarkHandle, HALLMARK_REGISTRY
 >>> handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
->>> modified_procs = handle.apply(composite.processes, severity=0.7)
->>> new_composite = Composite(modified_procs, composite.topology)
+>>> new_composite = Composite(
+...     handle.apply(composite.processes, severity=0.7), composite.topology
+... )
 """
 
 from __future__ import annotations
@@ -78,38 +55,20 @@ class FittableCoeff:
 
 @dataclass
 class ParameterMapping:
-    """Maps a hallmark severity to a process parameter value.
+    """Maps a hallmark severity to a process parameter value, two forms:
 
-    Two forms, resolved by :meth:`value`:
+    - **Affine** (``floor`` set): ``base * (floor + slope * severity)``. Use
+      ``floor=1`` for a modifier that leaves ``base`` untouched at neutral,
+      ``floor=0`` for an input that is off there. ``slope`` is the signed gain
+      per unit severity and is required — the neutral point is fixed at
+      severity=0, not at either end. Either coefficient may be a
+      :class:`FittableCoeff`.
+    - **Custom** (``transform`` set): ``transform(severity, base)``, for a dial
+      that sets the value directly and ignores ``base`` (``lambda h, _: h``).
 
-    - **Affine** (``floor`` set): ``value = base * (floor + slope * severity)``.
-      ``floor`` is the severity=0 (homeostasis) multiple of ``base`` — so a
-      modifier that leaves the base untouched at neutral uses ``floor=1``, and
-      an input that is off at neutral uses ``floor=0``. ``slope`` is the signed
-      gain per unit severity (positive dials toward +1, negative toward -1).
-      Both ``floor`` and ``slope`` may be a :class:`FittableCoeff` to calibrate
-      them. ``slope`` is required for an affine mapping — there is no default,
-      since the neutral point is fixed at severity=0 rather than at either end.
-    - **Custom** (``transform`` set): ``value = transform(severity, base)``.
-      For a severity *dial* that sets the value directly and ignores ``base``
-      (``lambda h, base: h``).
-
-    Attributes
-    ----------
-    process_name:
-        Name of the target process in the composite.
-    param_name:
-        Name of the Process field to modify. Either a plain attribute
-        (``"alpha"``) or a dotted path into a dict-valued field
-        (``"parameters.<key>"``).
-    floor, slope:
-        Affine coefficients (see above). ``base`` is read fresh from the
-        target field on each application, so a prior calibration
-        substitution into it flows through cleanly.
-    transform:
-        Escape hatch for non-affine / base-independent dials.
-    description:
-        Human-readable description of what this mapping does.
+    ``process_name`` keys into the composite; ``param_name`` is an attribute
+    (``"alpha"``) or dotted path (``"parameters.<key>"``). ``base`` is read
+    fresh on each application, so an earlier calibration flows through.
     """
 
     process_name: str
@@ -177,31 +136,11 @@ class HallmarkHandle:
         processes: dict[str, Process],
         severity: float,
     ) -> dict[str, Process]:
-        """Return new process dict with parameters modified by severity.
-
-        Processes not targeted by any mapping are returned unchanged.
-        Target processes get new instances with updated parameter values
-        via ``eqx.tree_at``.
-
-        ``ParameterMapping.param_name`` may be either a plain attribute
-        (e.g. ``"alpha"``) or a dotted path into a dict-valued field
-        (e.g. ``"parameters.mTORC1_S2448_phos_by_AA"``). The
-        dotted form lets a hallmark target a specific key inside the
-        ``parameters`` dict on an :class:`hallsim.sbml_import.SBMLProcess`,
-        which is the mechanism for parameterising specific SBML rate
-        constants from a hallmark severity.
-
-        Parameters
-        ----------
-        processes:
-            ``{name: Process}`` from a Composite.
-        severity:
-            Hallmark severity in [-1, 1] (0 = homeostasis).
-
-        Returns
-        -------
-        New dict with modified Process instances.
-        """
+        """New ``{name: Process}`` with this hallmark applied at ``severity``
+        (in [-1, 1], 0 = homeostasis). Untargeted processes pass through
+        unchanged; targeted ones are rebuilt via ``eqx.tree_at``. A dotted
+        ``param_name`` reaches inside a dict-valued field, which is how a
+        hallmark drives one SBML rate constant."""
         result = dict(processes)
         for mapping in self.mappings:
             pname = mapping.process_name
@@ -246,14 +185,9 @@ class HallmarkHandle:
         severity: float,
         processes: dict[str, Process] | None = None,
     ) -> dict[str, Any]:
-        """Show what parameters would be set at a given severity.
-
-        If ``processes`` is provided, reads the actual current base
-        values from each target process and returns the transformed
-        result. If omitted, uses ``base=1.0`` as a placeholder
-        (suitable for displaying the transform's severity-shape but
-        not the absolute resulting value).
-        """
+        """What each mapping resolves to at ``severity``. With ``processes``,
+        reads each target's real base; without, uses ``base=1.0``, which shows
+        the transform's shape but not the absolute value."""
         out: dict[str, Any] = {}
         for m in self.mappings:
             base: Any = 1.0

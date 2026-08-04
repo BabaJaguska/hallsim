@@ -1,15 +1,11 @@
 """ImportedODEProcess — shared base for models imported from an ODE format.
 
-Carries the machinery common to every format importer (SBML, XPP): the
-native-time clock and its chain-rule reconciliation, and the
-``parameters`` dict as the fittable calibration surface. Keeping it here
-means the importers stay in lockstep on time handling and parameter
-discovery — a change to reconciliation or calibratable extraction lands
-once, for both.
+Holds what every importer (SBML, XPP) needs: the native-time clock and its
+chain-rule reconciliation, and the ``parameters`` dict as the fittable
+calibration surface — so a change to either lands once, for both.
 
-Subclasses supply the format-specific parts — the parsed model, ports,
-``derivative``, and ``coupling_structure`` — and set ``_param_label`` to
-name their parameters in calibration descriptions.
+Subclasses supply the format-specific parts (parsed model, ports,
+``derivative``, ``coupling_structure``) and set ``_param_label``.
 """
 
 from __future__ import annotations
@@ -21,14 +17,12 @@ from hallsim.process import Port, PortRole, Process
 
 
 class ParamInput(eqx.Module):
-    """Exposes an imported model's constant as a plain INPUT port.
+    """Exposes an imported model's constant as a plain INPUT port, taking the
+    port's value directly each step.
 
-    Each derivative step the parameter takes the port's value directly
-    (identity) — an external process supplies it as a computed store-path
-    value. The transform-free primitive for parameter coupling: put any Hill /
-    gate / product in a composable edge (e.g.
-    :class:`hallsim.models.hill_edge.HillSignalEdge`) that writes the driving
-    path, then this reads the result.
+    The transform-free primitive for parameter coupling: put any Hill / gate /
+    product in a composable edge that writes the driving path (e.g.
+    :class:`hallsim.models.hill_edge.HillSignalEdge`), then this reads it.
     """
 
     param_name: str = eqx.field(static=True)
@@ -52,31 +46,23 @@ class ImportedODEProcess(Process):
     # 60×/3600×/86400× wrong. Set at import; True for hand-built processes.
     native_time_declared: bool = eqx.field(static=True, default=True)
     time_scale: float = 1.0
+    # The calibration surface — traced, so Calibrator/hallmarks differentiate
+    # through it. Everything below is *structure*: names, index maps, port
+    # defaults. Static, so ports_schema() stays concrete under a trace and
+    # Scheduler.run can be jitted end to end.
     parameters: dict[str, float] = None  # type: ignore[assignment]
-    _param_names: tuple[str, ...] = ()
-    _name: str = ""
-    # Live parameter couplings: each drives one imported constant from an INPUT
-    # port every derivative step (see :class:`ParamInput`). Static metadata so
-    # it round-trips untouched through the ``eqx.tree_at`` substitutions the
-    # hallmark / Calibrator paths apply to ``parameters``. The subclass
-    # ``derivative`` applies them via :meth:`_driven_param_values`, each
-    # bridging ``param_name`` to its own constant representation.
+    _param_names: tuple[str, ...] = eqx.field(static=True, default=())
+    _name: str = eqx.field(static=True, default="")
+    # Each drives one imported constant from an INPUT port every step (see
+    # ParamInput). Static, so it round-trips untouched through the tree_at
+    # substitutions hallmarks and Calibrator apply to `parameters`.
     _param_drivers: tuple = eqx.field(static=True, default=())
 
-    # Label for this format's parameters in calibration descriptions,
-    # e.g. "SBML constant" / "XPP parameter". Class attribute, not a field.
-    _param_label = "parameter"
+    _param_label = "parameter"  # "SBML constant" / "XPP parameter"
 
     def with_param_input(self, param_name: str, input_port: str):
-        """Return a copy exposing constant ``param_name`` as a plain INPUT port
-        ``input_port``: each step the parameter takes the port's value directly
-        (wire the port to a driving store path via topology).
-
-        The general parameter-coupling primitive — no transform baked in.
-        Compose the transform (Hill, gate, product of several sources) as an
-        edge that writes the driving path (e.g.
-        :class:`hallsim.models.hill_edge.HillSignalEdge`), then this reads the
-        result."""
+        """Copy exposing constant ``param_name`` as an INPUT port; wire it to a
+        driving store path via topology. See :class:`ParamInput`."""
         return self._add_param_driver(
             ParamInput(
                 param_name=self._check_param(param_name), input_port=input_port
@@ -117,10 +103,8 @@ class ImportedODEProcess(Process):
         }
 
     def _driven_param_values(self, state) -> dict:
-        """``{param_name: driven_value}`` for every live driver this step —
-        each format's ``derivative`` writes these onto its own constant
-        representation (SBML: the ``c`` vector by index; XPP: the eval
-        namespace by name)."""
+        """``{param_name: value}`` per live driver, which each format's
+        ``derivative`` writes onto its own constant representation."""
         return {
             d.param_name: d.value(
                 self.parameters[d.param_name], state[d.input_port]
@@ -129,15 +113,10 @@ class ImportedODEProcess(Process):
         }
 
     def reconciled_to(self, canonical_time_seconds: float):
-        """Return a copy on the composite's canonical clock.
-
-        Sets ``time_scale = canonical_time_seconds / native_time_seconds``
-        so the native-time rate law is chain-rule-rescaled onto the shared
-        axis. ``canonical_time_seconds`` is the real-world duration of one
-        ``t_span`` unit (e.g. ``86400.0`` for a day axis). Scheduler
-        grouping is handled separately by ``timescale`` (set to
-        ``native_time_seconds`` at import, canonical-independent).
-        """
+        """Copy on the composite's canonical clock, chain-rule rescaling the
+        native rate law by ``canonical_time_seconds / native_time_seconds``.
+        ``canonical_time_seconds`` is the real-world duration of one ``t_span``
+        unit (86400 for a day axis); Scheduler grouping is separate."""
         scale = canonical_time_seconds / self.native_time_seconds
         return eqx.tree_at(lambda p: p.time_scale, self, float(scale))
 
@@ -150,14 +129,11 @@ class ImportedODEProcess(Process):
         return base
 
     def calibratable_params(self) -> list:
-        """Every imported parameter as a fittable ``parameters.<name>``.
-
-        One :class:`hallsim.calibration.CalibratableParam` per entry in
-        :attr:`parameters` (current value as default, two-order clamp),
-        composed with any :func:`hallsim.process.calibratable` field on the
-        subclass. :meth:`hallsim.composite.Composite.calibration_targets`
-        filters hallmark-controlled knobs, so exposing all of them is safe.
-        """
+        """Every imported parameter as a fittable ``parameters.<name>``, plus
+        any :func:`~hallsim.process.calibratable` field on the subclass.
+        Exposing all of them is safe —
+        :meth:`Composite.calibration_targets` filters hallmark-controlled
+        knobs."""
         from hallsim.calibration import CalibratableParam, default_clamp
 
         out = super().calibratable_params()
