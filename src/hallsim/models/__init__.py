@@ -10,6 +10,12 @@ Lazy import: importing a submodule explicitly (e.g.
 canonical path; the re-exports below are convenience aliases.
 """
 
+from hallsim.models.clamp_edge import (
+    ClampEdge,
+    clamp_species,
+    measure_unclamped_flux,
+    place_clamp_rate,
+)
 from hallsim.models.eriq import (
     ERiQEnergyMetabolism,
     ERiQOxidativeStress,
@@ -23,6 +29,7 @@ from hallsim.models.saturating_removal import SaturatingRemoval
 from hallsim.models.stem_cell_niche import build_niche_crosstalk
 
 __all__ = [
+    "ClampEdge",
     "ERiQEnergyMetabolism",
     "ERiQOxidativeStress",
     "ERiQSignaling",
@@ -33,4 +40,7 @@ __all__ = [
     "SaturatingRemoval",
     "build_eriq_composite",
     "build_niche_crosstalk",
+    "clamp_species",
+    "measure_unclamped_flux",
+    "place_clamp_rate",
 ]

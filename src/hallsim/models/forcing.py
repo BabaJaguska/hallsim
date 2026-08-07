@@ -23,16 +23,20 @@ class PulseSource(Process):
     """Rectangular forcing signal — emits ``amplitude`` on ``[t_start, t_end)``,
     else 0, to its ``signal`` ASSIGNED port. Wire ``signal`` to a boundary
     input's driver port (:meth:`hallsim.sbml_import.SBMLProcess.with_input_driver`).
-    ``amplitude`` is calibratable (a fittable or severity-driven exposure
-    level); the window is structural. Other shapes (ramp, decay) are sibling
-    sources over the same port mechanism."""
+    ``t_end=None`` drops the washout edge, giving a sustained step — the
+    setpoint source for a chronic exposure
+    (:func:`hallsim.models.clamp_edge.clamp_species`). ``amplitude`` is
+    calibratable (a fittable or severity-driven exposure level); the window is
+    structural. Other shapes (ramp, decay) are sibling sources over the same
+    port mechanism."""
 
     timescale: float | None = None
     amplitude: float = calibratable(
         1.0, description="pulse height / exposure level; 0 = no exposure."
     )
     t_start: float = eqx.field(static=True, default=0.0)
-    t_end: float = eqx.field(static=True, default=1.0)
+    t_end: float | None = eqx.field(static=True, default=1.0)
+    signal_units: str = eqx.field(static=True, default="dimensionless")
     signal_ontology: dict | None = eqx.field(static=True, default=None)
     hallmark: str | None = eqx.field(static=True, default=None)
     description: str | None = eqx.field(static=True, default=None)
@@ -42,17 +46,21 @@ class PulseSource(Process):
             "signal": Port(
                 role=PortRole.ASSIGNED,
                 default=0.0,
-                units="dimensionless",
+                units=self.signal_units,
                 description="rectangular forcing amplitude·1[t_start,t_end)",
                 ontology=self.signal_ontology or {},
             )
         }
 
     def assign(self, t, state):
-        gate = jnp.where((t >= self.t_start) & (t < self.t_end), 1.0, 0.0)
-        return {"signal": self.amplitude * gate}
+        on = t >= self.t_start
+        if self.t_end is not None:
+            on = on & (t < self.t_end)
+        return {"signal": self.amplitude * jnp.where(on, 1.0, 0.0)}
 
     def discontinuity_times(self):
+        if self.t_end is None:
+            return (self.t_start,)
         return (self.t_start, self.t_end)
 
 
@@ -73,8 +81,9 @@ def drive_pulse(
     """Drive ``target``'s boundary input ``input_name`` with a rectangular
     pulse on ``[t_start, t_end)``, composed from the general port path: adds a
     :class:`PulseSource` to ``processes`` and wires it to the input via
-    :meth:`SBMLProcess.with_input_driver`. Mutates ``processes``/``topology``
-    in place and returns ``(processes, topology, source_name)``.
+    :meth:`SBMLProcess.with_input_driver`. ``t_end=None`` sustains the drive
+    (no washout). Mutates ``processes``/``topology`` in place and returns
+    ``(processes, topology, source_name)``.
 
     Warns when the pulse's integrated exposure differs from the input's native
     SBML drive by more than ``warn_factor``× — the driven rate (e.g. potency)
@@ -91,13 +100,18 @@ def drive_pulse(
         timescale=getattr(processes[target], "timescale", None),
         amplitude=amplitude,
         t_start=float(t_start),
-        t_end=float(t_end),
+        t_end=None if t_end is None else float(t_end),
         signal_ontology=signal_ontology,
         hallmark=hallmark,
     )
     processes[target] = processes[target].with_input_driver(input_name, port)
     topology[src] = {"signal": path}
     topology.setdefault(target, {})[port] = path
+
+    if t_end is None:
+        # An open-ended drive has no integrated exposure to compare against
+        # the native one; the mismatch check below needs a finite window.
+        return processes, topology, src
 
     native = processes[target].native_input_exposure(
         input_name, t_start, t_end

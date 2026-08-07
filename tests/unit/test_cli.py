@@ -41,3 +41,17 @@ def test_multi_hallmark_dispatch_targets_exist():
     # "calibrate" is "run" with args.calibrate set, not its own handler.
     assert {c for c in offered if c != "calibrate"} <= set(_COMMANDS)
     assert "run" in _COMMANDS
+
+
+def test_clamp_options_name_real_config_keys():
+    """``simulate clamp`` forwards its options as config overrides, so an
+    option whose name drifts from the demo's config key silently stops
+    applying."""
+    sys.path.insert(0, str(DEMOS))
+    try:
+        from clamp_setpoint import DEFAULTS
+    finally:
+        sys.path.remove(str(DEMOS))
+
+    offered = {p.name for p in simulate.commands["clamp"].params} - {"help"}
+    assert offered and offered <= set(DEFAULTS)

@@ -86,6 +86,29 @@ adding a model, `hallsim.diagnostics.recommend_coupling_source` checks whether
 it even exposes a usable coupling source (a bounded, consumed state) rather
 than a dead sink or an unbounded accumulator.
 
+### Driving a model from outside — pick by what the target *is*
+
+An imported model exposes three kinds of target, and each has its own
+primitive. Reaching for the wrong one is how a hand-authored one-off gets
+written:
+
+| Target | Primitive |
+| --- | --- |
+| a constant (SBML parameter) | `ImportedODEProcess.with_param_input` — read a store path as the parameter's value each step |
+| a boundary input (`boundaryCondition` species) | `models.forcing.drive_pulse` — a `PulseSource` on `[t_start, t_end)`, or `t_end=None` to sustain |
+| a species the model **integrates** | `models.clamp_edge.clamp_species` — a `ClampEdge` holding it at a setpoint |
+
+The third is the one with no obvious workaround: an integrated species is
+consumed by the model's own rate laws, so a pulse into it drains away and the
+composite can only show an acute response. A `ClampEdge` adds
+`k_clamp·(setpoint − target)`, which competes with that consumption rather
+than overriding it — additive `EVOLVED` semantics leave no way to preempt
+another writer. So the hold is proportional: with net removal flux `v` at the
+setpoint, the clamped level settles at `setpoint − v/k_clamp`. Measure `v`
+with `measure_unclamped_flux` and pick the rate with `place_clamp_rate`
+(which also flags a clamp stiff enough to split off into its own
+`auto_groups` group) instead of guessing. `simulate clamp` plots all of it.
+
 ## SBML import
 
 [`sbml_import.py`](../src/hallsim/sbml_import.py) auto-generates a Process

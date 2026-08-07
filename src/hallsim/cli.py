@@ -424,6 +424,44 @@ def multiscale(t1, macro_dt):
     click.echo(f"Alarm triggered: {'yes' if float(alarm[-1]) > 0.5 else 'no'}")
 
 
+@simulate.command("clamp")
+@click.option(
+    "--level", type=float, default=2.0, show_default=True, help="Setpoint"
+)
+@click.option("--t1", type=float, default=60.0, show_default=True)
+@click.option(
+    "--rel-error",
+    type=float,
+    default=0.01,
+    show_default=True,
+    help="Residual offset the placed clamp rate must hold to.",
+)
+@click.option(
+    "--k",
+    "k_clamps",
+    type=float,
+    multiple=True,
+    help="Clamp rates to overlay (repeatable). Default: 0.05, 0.2, 1.",
+)
+def clamp(level, t1, rel_error, k_clamps):
+    """Chronic vs transient exposure: hold a consumed species at a setpoint.
+
+    Runs a ligand-uptake model with and without a ClampEdge, sweeps the clamp
+    rate against its residual offset, and writes the three-panel figure to
+    ``outputs/clamp_setpoint/``.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos"))
+    from clamp_setpoint import main
+
+    overrides = {"level": level, "t1": t1, "rel_error": rel_error}
+    if k_clamps:
+        overrides["k_clamps"] = list(k_clamps)
+    main(**overrides)
+
+
 @simulate.command("stiffness")
 @click.option(
     "--macro-dt",

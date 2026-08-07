@@ -95,6 +95,7 @@ Smaller pieces, end to end:
 simulate compose        # a minimal two-process composite
 simulate compose-kick   # the same, with a mid-run perturbation
 simulate multiscale     # continuous + discrete + event processes on one clock
+simulate clamp          # chronic vs transient exposure: hold a consumed species
 simulate info           # what the architecture exposes
 make test
 ```
