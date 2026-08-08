@@ -349,7 +349,6 @@ dependencies = [
 dev = [
     { name = "black" },
     { name = "flake8" },
-    { name = "matplotlib" },
     { name = "pre-commit" },
     { name = "pytest" },
 ]
@@ -362,8 +361,7 @@ requires-dist = [
     { name = "equinox", specifier = ">=0.13,<0.14" },
     { name = "flake8", marker = "extra == 'dev'" },
     { name = "jax", specifier = ">=0.7,<0.8" },
-    { name = "matplotlib", specifier = ">=3.11.0" },
-    { name = "matplotlib", marker = "extra == 'dev'" },
+    { name = "matplotlib" },
     { name = "networkx" },
     { name = "numpy" },
     { name = "optax", specifier = ">=0.2" },

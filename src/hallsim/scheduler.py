@@ -202,6 +202,55 @@ def _interp_uniform(
     return ys[i0] * (1.0 - frac) + ys[i0 + 1] * frac
 
 
+class _FrozenFill(eqx.Module):
+    """Exogenous states held at their macro-step-start values."""
+
+    full: jnp.ndarray
+
+    def __call__(self, t):
+        return self.full
+
+
+class _InterpFill(eqx.Module):
+    """Exogenous states with the previous group's own states read from its
+    dense output — interpolated coupling's time-varying inputs."""
+
+    full: jnp.ndarray
+    t0: jnp.ndarray
+    t1: jnp.ndarray
+    ys: jnp.ndarray
+    idx: jnp.ndarray
+
+    def __call__(self, t):
+        return self.full.at[..., self.idx].set(
+            _interp_uniform(t, self.t0, self.t1, self.ys)
+        )
+
+
+class _ReducedRHS(eqx.Module):
+    """A group's RHS over only the states it evolves.
+
+    The full-width RHS zeroes every state the group does not own, but the
+    solver cannot see that: an implicit method forms its stage system over
+    whatever it is handed, so a 24-state group inside a 52-state composite
+    factorizes a 52x52 Jacobian for 24 unknowns, and the waste grows with
+    every model composed. States this group does not own are not unknowns —
+    they are inputs, supplied by ``fill`` at the time asked for. Frozen
+    coupling makes that a constant, interpolated a function of ``t``; the
+    solved dimension is the same either way.
+
+    A Module, not a closure, for the same reason as :class:`_FlatRHS`.
+    """
+
+    base: Any
+    own: jnp.ndarray
+    fill: Any
+
+    def __call__(self, t, y_own, args=None):
+        full = self.fill(t).at[..., self.own].set(y_own)
+        return self.base(t, full, args)[..., self.own]
+
+
 class Scheduler:
     """Multi-rate orchestrator for composites with mixed process kinds.
 
@@ -662,6 +711,7 @@ class Scheduler:
                     state, last_dt, diag = self._solve_group(
                         rhs_fn,
                         state,
+                        group_write_idxs[gname],
                         keys,
                         t,
                         t_mid,
@@ -677,6 +727,7 @@ class Scheduler:
                     state, last_dt, diag = self._solve_group(
                         rhs_fn,
                         state,
+                        group_write_idxs[gname],
                         keys,
                         t_mid,
                         t_next,
@@ -697,6 +748,7 @@ class Scheduler:
                             self._solve_group_interpolated(
                                 rhs_fn,
                                 state,
+                                group_write_idxs[gname],
                                 t,
                                 t_next,
                                 prev_interpolant,
@@ -713,6 +765,7 @@ class Scheduler:
                         state, last_dt, diag = self._solve_group(
                             rhs_fn,
                             state,
+                            group_write_idxs[gname],
                             keys,
                             t,
                             t_next,
@@ -866,24 +919,22 @@ class Scheduler:
                 t0, t1, save_dt if save_dt is not None else macro_dt
             )
 
+            own = composite.evolved_indices(proc_names, keys)
+
             def core(comp, y0):
                 rhs_fn, _ = comp.build_rhs(proc_names)
-                sol = dfx.diffeqsolve(
-                    dfx.ODETerm(rhs_fn),
-                    integ.solver,
-                    t0=t0,
-                    t1=t1,
-                    dt0=min(self.dt0, t1 - t0),
-                    y0=y0,
-                    saveat=dfx.SaveAt(ts=save_ts),
-                    stepsize_controller=self._controller_with_jumps(
-                        integ.controller
-                    ),
-                    adjoint=adjoint,
-                    max_steps=self.max_steps,
-                    throw=False,
+                sol, ys = self._reduced_solve(
+                    rhs_fn,
+                    y0,
+                    own,
+                    t0,
+                    t1,
+                    integ,
+                    adjoint,
+                    dfx.SaveAt(ts=save_ts),
+                    group_name=gname,
+                    keys=keys,
                 )
-                ys = self._guard_result(sol.ys, sol.result, gname, integ, keys)
                 # ASSIGNED ports aren't integrated, so their saved columns
                 # hold a stale initial value until recomputed per saved state.
                 ys = comp.materialize_assigned(sol.ts, ys)
@@ -919,6 +970,8 @@ class Scheduler:
                     coupling,
                 )
 
+        if state.ndim > 1:
+            core = self._per_member(core)
         fn = eqx.filter_jit(core)
         # Only cache a core built eagerly. Built under an outer trace it can
         # close over that trace's tracers, which would escape it on reuse.
@@ -928,6 +981,30 @@ class Scheduler:
         ):
             self._core_cache[sig] = fn
         return fn
+
+    @staticmethod
+    def _per_member(core):
+        """Map a single-member ``core`` over the leading batch axis.
+
+        Batch members are independent, and the state layout has to say so: as
+        one flat ``(batch, n_vars)`` state an implicit solver treats it as a
+        single unknown vector and factorizes a dense ``(batch·n_vars)²``
+        Jacobian, cubic in population size. Per member the solve is
+        ``n_vars``-sized, which is the block structure the Jacobian already
+        has. ``ys`` keeps the ``(n_time, batch, n_vars)`` layout; per-group
+        stats come back per-member.
+        """
+        mapped = eqx.filter_vmap(
+            core,
+            in_axes=(None, eqx.if_array(0)),
+            out_axes=(eqx.if_array(0), eqx.if_array(1), eqx.if_array(0)),
+        )
+
+        def batched(comp, y0):
+            ts, ys, stats = mapped(comp, y0)
+            return ts[0], ys, stats
+
+        return batched
 
     def _effective_coupling(
         self,
@@ -1028,28 +1105,25 @@ class Scheduler:
         rej_init = jnp.zeros((n_groups,), jnp.int64)
         res_init = tuple(dfx.RESULTS.successful for _ in range(n_groups))
 
-        def solve_dense(gi, st, t_a, t_b, dt0hi, coupled_rhs):
+        def solve_dense(gi, st, t_a, t_b, dt0hi, fill):
             g, rhs = group_rhs[gi]
-            rhs_use = coupled_rhs if coupled_rhs is not None else rhs
+            own = write_idxs[gi]
             grid = t_a + save_frac * (t_b - t_a)
-            sol = dfx.diffeqsolve(
-                dfx.ODETerm(rhs_use),
-                integrators[g].solver,
-                t0=t_a,
-                t1=t_b,
-                dt0=jnp.minimum(dt0hi, t_b - t_a),
-                y0=st,
-                saveat=dfx.SaveAt(ts=grid),
-                stepsize_controller=self._controller_with_jumps(
-                    integrators[g].controller
-                ),
-                adjoint=adjoint,
-                max_steps=self.max_steps,
-                throw=False,
+            sol, saved = self._reduced_solve(
+                rhs,
+                st,
+                own,
+                t_a,
+                t_b,
+                integrators[g],
+                adjoint,
+                dfx.SaveAt(ts=grid),
+                fill=fill,
+                dt0_hint=dt0hi,
+                group_name=g,
+                keys=keys,
             )
-            final = self._guard_result(
-                sol.ys[-1], sol.result, g, integrators[g], keys
-            )
+            final = saved[-1]
             ld = (t_b - t_a) / jnp.maximum(sol.stats["num_steps"], 1)
             return (
                 final,
@@ -1072,6 +1146,7 @@ class Scheduler:
                     st, _, r, ns, nr = self._group_step(
                         rhs,
                         st,
+                        write_idxs[gi],
                         t_start,
                         t_mid,
                         integrators[g],
@@ -1086,6 +1161,7 @@ class Scheduler:
                     st, ld, r, ns, nr = self._group_step(
                         rhs,
                         st,
+                        write_idxs[gi],
                         t_mid,
                         t_next,
                         integrators[g],
@@ -1101,32 +1177,23 @@ class Scheduler:
                 traj = jnp.broadcast_to(st, (n_out,) + st.shape)
                 prev = None
                 for gi in range(n_groups):
-                    coupled = None
                     if interp and prev is not None:
                         p_t0, p_t1, p_ys = prev
-                        base = group_rhs[gi][1]
-                        widx = write_idxs[gi - 1]
-
-                        def _coupled(
-                            t,
-                            y,
-                            args=None,
-                            _b=base,
-                            _w=widx,
-                            _t0=p_t0,
-                            _t1=p_t1,
-                            _y=p_ys,
-                        ):
-                            pv = _interp_uniform(t, _t0, _t1, _y)
-                            return _b(t, y.at[_w].set(pv[_w]), args)
-
-                        coupled = _coupled
+                        fill = _InterpFill(
+                            full=st,
+                            t0=p_t0,
+                            t1=p_t1,
+                            ys=p_ys,
+                            idx=write_idxs[gi - 1],
+                        )
+                    else:
+                        fill = _FrozenFill(full=st)
 
                     st, gy, ld, ns, nr, r = solve_dense(
-                        gi, st, t_start, t_next, dt0h[gi], coupled
+                        gi, st, t_start, t_next, dt0h[gi], fill
                     )
                     w = write_idxs[gi]
-                    traj = traj.at[:, w].set(gy[1:][:, w])
+                    traj = traj.at[:, w].set(gy[1:])
                     steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
                     res = res[:gi] + (r,) + res[gi + 1 :]
                     dt0_next[gi] = ld
@@ -1402,12 +1469,15 @@ class Scheduler:
         # Loosen atol on large-magnitude states, which would otherwise force
         # stability-tiny steps, while keeping a tight floor near zero.
         atol_vec = jnp.maximum(self.atol, self.atol_scale * jnp.abs(state))
+        keys_ = composite.store_keys()
         integ: dict[str, GroupIntegrator] = {}
         for g, verdict in report.items():
             if verdict.stiff:
+                # Sliced to the group's own states — _ReducedRHS solves those.
+                own = composite.evolved_indices(groups[g], keys_)
                 integ[g] = GroupIntegrator(
                     self.implicit_solver,
-                    dfx.PIDController(rtol=self.rtol, atol=atol_vec),
+                    dfx.PIDController(rtol=self.rtol, atol=atol_vec[..., own]),
                     stiff=True,
                     info=verdict,
                 )
@@ -1453,10 +1523,67 @@ class Scheduler:
             composite, groups, state, t_span[0], macro_dt
         )
 
+    def _reduced_solve(
+        self,
+        rhs_fn,
+        state_vec: jnp.ndarray,
+        own: jnp.ndarray,
+        t0,
+        t1,
+        integ: GroupIntegrator,
+        adjoint: dfx.AbstractAdjoint,
+        saveat: dfx.SaveAt,
+        fill=None,
+        dt0_hint=None,
+        group_name: str = "",
+        keys: list[str] | None = None,
+    ):
+        """Solve one group over ``own`` and scatter the saved states back to
+        full width. Returns ``(sol, saved)`` — ``sol.ys`` is the group's own
+        states (what interpolated coupling passes on), ``saved`` the guarded
+        full-width trajectory.
+
+        The single solve site: every path (fast, scan, Strang, eager,
+        interpolated) differs only in ``saveat`` and ``fill``.
+        """
+        dt0_base = dt0_hint if dt0_hint is not None else self.dt0
+        # throw=False so a failed solve returns its RESULTS code rather than
+        # crashing opaquely; _guard_result decides what to do with it.
+        sol = dfx.diffeqsolve(
+            dfx.ODETerm(
+                _ReducedRHS(
+                    base=rhs_fn,
+                    own=own,
+                    fill=fill if fill is not None else _FrozenFill(state_vec),
+                )
+            ),
+            integ.solver,
+            t0=t0,
+            t1=t1,
+            dt0=jnp.minimum(dt0_base, t1 - t0),
+            y0=state_vec[..., own],
+            saveat=saveat,
+            stepsize_controller=self._controller_with_jumps(integ.controller),
+            adjoint=adjoint,
+            max_steps=self.max_steps,
+            throw=False,
+        )
+        saved = (
+            jnp.broadcast_to(
+                state_vec, sol.ys.shape[:-1] + state_vec.shape[-1:]
+            )
+            .at[..., own]
+            .set(sol.ys)
+        )
+        return sol, self._guard_result(
+            saved, sol.result, group_name, integ, keys
+        )
+
     def _group_step(
         self,
         rhs_fn,
         state_vec: jnp.ndarray,
+        own: jnp.ndarray,
         t0,
         t1,
         integ: GroupIntegrator,
@@ -1464,32 +1591,27 @@ class Scheduler:
         group_name: str = "",
         dt0_hint=None,
     ):
-        """Trace-safe single-group ``diffeqsolve`` over ``[t0, t1]``.
+        """Trace-safe single-group ``diffeqsolve`` over ``[t0, t1]``, solved
+        over ``own`` (the states this group evolves) with the rest held frozen.
 
         No Python-side guards or logging — ``t0``/``t1`` may be tracers, so
         this is the core used both inside ``lax.scan`` and by the eager
         :meth:`_solve_group`. Returns
         ``(final_vec, last_dt, result, num_steps, num_rejected)``.
         """
-        dt0_base = dt0_hint if dt0_hint is not None else self.dt0
-        # throw=False so a failed solve returns its RESULTS code rather than
-        # crashing opaquely; _guard_result decides what to do with it.
-        sol = dfx.diffeqsolve(
-            dfx.ODETerm(rhs_fn),
-            integ.solver,
-            t0=t0,
-            t1=t1,
-            dt0=jnp.minimum(dt0_base, t1 - t0),
-            y0=state_vec,
-            saveat=dfx.SaveAt(t1=True),
-            stepsize_controller=self._controller_with_jumps(integ.controller),
-            adjoint=adjoint,
-            max_steps=self.max_steps,
-            throw=False,
+        sol, saved = self._reduced_solve(
+            rhs_fn,
+            state_vec,
+            own,
+            t0,
+            t1,
+            integ,
+            adjoint,
+            dfx.SaveAt(t1=True),
+            dt0_hint=dt0_hint,
+            group_name=group_name,
         )
-        final_vec = self._guard_result(
-            sol.ys[-1], sol.result, group_name, integ
-        )
+        final_vec = saved[-1]
         # Average step over the interval — the settled step size, without
         # depending on Diffrax's internal controller_state API.
         last_dt = (t1 - t0) / jnp.maximum(sol.stats["num_steps"], 1)
@@ -1505,6 +1627,7 @@ class Scheduler:
         self,
         rhs_fn,
         state_vec: jnp.ndarray,
+        own: jnp.ndarray,
         keys: list[str],
         t0: float,
         t1: float,
@@ -1527,7 +1650,15 @@ class Scheduler:
         state_before = jnp.asarray(state_vec) if self.debug else None
 
         final_vec, last_dt, result, n_steps_s, n_rej_s = self._group_step(
-            rhs_fn, state_vec, t0, t1, integ, adjoint, group_name, dt0_hint
+            rhs_fn,
+            state_vec,
+            own,
+            t0,
+            t1,
+            integ,
+            adjoint,
+            group_name,
+            dt0_hint,
         )
         diag = (result, n_steps_s, n_rej_s)
 
@@ -1603,6 +1734,7 @@ class Scheduler:
         self,
         rhs_fn,
         state_vec: jnp.ndarray,
+        own: jnp.ndarray,
         t0: float,
         t1: float,
         prev_interpolant: Any | None = None,
@@ -1626,8 +1758,9 @@ class Scheduler:
         """
         k = self.coupling_interp_points
         grid = t0 + jnp.linspace(0.0, 1.0, k) * (t1 - t0)
+        own_vec = state_vec[..., own]
         if t1 <= t0:
-            ys_deg = jnp.broadcast_to(state_vec, (k,) + state_vec.shape)
+            ys_deg = jnp.broadcast_to(own_vec, (k,) + own_vec.shape)
             return (
                 state_vec,
                 (t0, t1, ys_deg),
@@ -1637,37 +1770,26 @@ class Scheduler:
 
         if prev_interpolant is not None and prev_idxs is not None:
             p_t0, p_t1, p_ys = prev_interpolant
-            base_rhs = rhs_fn
-            idxs = prev_idxs
-
-            def coupled_rhs(t, y, args=None):
-                interp_vec = _interp_uniform(t, p_t0, p_t1, p_ys)
-                merged = y.at[idxs].set(interp_vec[idxs])
-                return base_rhs(t, merged, args)
-
-            rhs_to_solve = coupled_rhs
+            fill = _InterpFill(
+                full=state_vec, t0=p_t0, t1=p_t1, ys=p_ys, idx=prev_idxs
+            )
         else:
-            rhs_to_solve = rhs_fn
+            fill = _FrozenFill(full=state_vec)
 
-        term = dfx.ODETerm(rhs_to_solve)
-        dt0_base = dt0_hint if dt0_hint is not None else self.dt0
-        sol = dfx.diffeqsolve(
-            term,
-            integ.solver,
-            t0=t0,
-            t1=t1,
-            dt0=jnp.minimum(dt0_base, t1 - t0),
-            y0=state_vec,
-            saveat=dfx.SaveAt(ts=grid),
-            stepsize_controller=self._controller_with_jumps(integ.controller),
-            adjoint=adjoint,
-            max_steps=self.max_steps,
-            throw=False,
+        sol, saved = self._reduced_solve(
+            rhs_fn,
+            state_vec,
+            own,
+            t0,
+            t1,
+            integ,
+            adjoint,
+            dfx.SaveAt(ts=grid),
+            fill=fill,
+            dt0_hint=dt0_hint,
+            group_name="interpolated",
         )
-
-        final_vec = self._guard_result(
-            sol.ys[-1], sol.result, "interpolated", integ
-        )
+        final_vec = saved[-1]
         last_dt = (t1 - t0) / jnp.maximum(sol.stats["num_steps"], 1)
         diag = (
             sol.result,

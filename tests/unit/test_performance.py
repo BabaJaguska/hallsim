@@ -5,7 +5,8 @@ actually decide whether HallSim is fast are deterministic:
 
 - a repeated or parameter-swept run reuses the compiled solve (0 recompiles),
 - ``build_rhs`` returns a structurally stable pytree, so the JIT cache can hit,
-- Process parameters are traced arrays, not values baked into the executable.
+- Process parameters are traced arrays, not values baked into the executable,
+- a batched implicit run's compiled FLOP count is linear in the batch size.
 
 Every compile-count test first asserts the *cold* run does compile, so a change
 in JAX's log format fails the test instead of silently reporting zero.
@@ -16,6 +17,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 
+import diffrax as dfx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -110,6 +112,34 @@ def test_sbml_reimport_reuses_generated_class():
     b = process_from_sbml(str(GZ06_SBML_PATH), name="gz06")
     assert type(a._model) is type(b._model)
     assert jtu.tree_structure(a) == jtu.tree_structure(b)
+
+
+def _flops_per_member(sched, comp, n_batch):
+    y0 = comp.initial_state_vec()
+    yb = jnp.broadcast_to(y0, (n_batch, y0.shape[0]))
+    lowered = jax.jit(
+        lambda y: sched.run(comp, (0.0, 10.0), macro_dt=10.0, y0=y).ys
+    ).lower(yb)
+    return lowered.compile().cost_analysis()["flops"] / n_batch
+
+
+def test_batched_implicit_solve_is_linear_in_batch_size():
+    """Batch members are independent, so the compiled FLOP count must be
+    linear in the batch size.
+
+    Handed a batch as one flat ``(batch, n_vars)`` state, an implicit solver
+    treats it as a single unknown vector and factorizes a dense
+    ``(batch·n_vars)²`` Jacobian — cubic in population size, and at N=128 that
+    measured 76x *slower* than a Python loop over members. Pins the implicit
+    solver rather than relying on the stiffness verdict; an explicit solver has
+    no stage solve and would pass either way.
+
+    Discrimination: without the per-member map this is 11.3x at N=16, not 1.0x.
+    """
+    comp = _composite()
+    sched = Scheduler(solver=dfx.Kvaerno5())
+    solo = _flops_per_member(sched, comp, 1)
+    assert _flops_per_member(sched, comp, 16) / solo < 1.5
 
 
 def test_parameter_change_does_not_recompile():

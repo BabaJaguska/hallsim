@@ -9,8 +9,11 @@ JIT cache or recompiles:
 2. **Parameter sweep** — the same value varied three ways (rerun unchanged,
    ``eqx.tree_at``, composite rebuilt per point). A parameter value is data,
    so none of them should recompile after the first point.
-3. **Solver routing** — explicit (default) vs ``auto_stiffness=True`` on a
-   stiff SBML import, where the cost is solver steps rather than compilation.
+3. **Solver routing** — explicit vs the routed default on a stiff SBML import,
+   where the cost is solver steps rather than compilation.
+4. **Batched population** — per-member cost across batch sizes, against a
+   Python loop over the same members. Members are independent, so per-member
+   cost must not grow with N.
 
 Also tracks RSS across the repeat sweep: retained compiled executables that
 can never be reused show up as monotonic growth.
@@ -34,6 +37,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import psutil
 
 from hallsim.composite import single_process_composite
@@ -51,6 +55,8 @@ DEFAULTS = {
     "sweep_values": [1.0, 1.1, 1.2, 1.3, 1.4],
     "stiff_model": "BIOMD0000000582",
     "stiff_macro_dt": 10.0,
+    "batch_sizes": [1, 8, 32, 128],
+    "batch_degradation_max": 2.0,
     "outdir": "bench_dispatch",
     "plot": "bench_dispatch.png",
 }
@@ -139,15 +145,19 @@ def measure_sweep(cfg):
 
 
 def measure_routing(cfg):
-    """Wall time + solver steps on a stiff SBML import, explicit vs auto."""
+    """Wall time + solver steps on a stiff SBML import, explicit vs routed.
+
+    The explicit arm must ask for `auto_stiffness=False` — routing is the
+    default, so an empty kwargs arm compares the default against itself.
+    """
     comp = single_process_composite(
         process_from_sbml(cfg["stiff_model"]), "stiff"
     )
     span = (0.0, cfg["t_end"])
     out = {}
     for label, kw in (
-        ("default\n(explicit)", {}),
-        ("auto_stiffness\n=True", dict(auto_stiffness=True)),
+        ("explicit\n(auto_stiffness=False)", dict(auto_stiffness=False)),
+        ("routed\n(default)", {}),
     ):
         sched = Scheduler(max_steps=2_000_000, **kw)
         sched.warm_up(comp, span, macro_dt=cfg["stiff_macro_dt"])
@@ -172,6 +182,60 @@ def measure_routing(cfg):
             ms,
             steps,
             solver,
+        )
+    return out
+
+
+def measure_batch(cfg):
+    """Per-member cost of a batched population on the stiff import, against a
+    Python loop over the same members.
+
+    Batch members are independent, so per-member cost must not grow with N. It
+    did: handed the batch as one flat state, the implicit stage solve
+    factorized a dense ``(batch·n_vars)²`` Jacobian, and at N=128 the batched
+    path measured 76x *slower* than the loop it exists to replace. Degradation
+    past ``batch_degradation_max`` is logged as a warning here — this panel is
+    what would have caught the regression when the routing default flipped.
+    """
+    proc = process_from_sbml(cfg["stiff_model"])
+    comp = single_process_composite(proc, "stiff")
+    span = (0.0, cfg["t_end"])
+    y0 = comp.initial_state_vec()
+    sched = Scheduler(max_steps=2_000_000)
+    sched.warm_up(comp, span, macro_dt=cfg["stiff_macro_dt"], y0=y0)
+
+    @eqx.filter_jit
+    def solve(y):
+        return sched.run(comp, span, macro_dt=cfg["stiff_macro_dt"], y0=y).ys
+
+    rng = np.random.default_rng(0)
+    out = {}
+    for n in cfg["batch_sizes"]:
+        yb = jnp.asarray(y0)[None, :] * jnp.asarray(
+            1.0 + 0.05 * rng.standard_normal((n, y0.shape[0]))
+        )
+        jax.block_until_ready(solve(yb))
+        jax.block_until_ready(solve(yb[0]))
+        batched = timed(lambda: solve(yb)) / n
+        loop = timed(lambda: [solve(yb[i]) for i in range(n)]) / n
+        out[n] = (batched, loop)
+        log.info(
+            "batch N=%d: %.2f ms/member batched, %.2f ms/member looped",
+            n,
+            batched,
+            loop,
+        )
+
+    sizes = sorted(out)
+    degradation = out[sizes[-1]][0] / out[sizes[0]][0]
+    if degradation > cfg["batch_degradation_max"]:
+        log.warning(
+            "per-member cost degraded %.1fx from N=%d to N=%d (max %.1fx): "
+            "batch members are being solved as one coupled system",
+            degradation,
+            sizes[0],
+            sizes[-1],
+            cfg["batch_degradation_max"],
         )
     return out
 
@@ -211,8 +275,8 @@ def _bars(ax, labels, values, colors, fmt, log_scale=True):
     ax.set_ylim(top=top * (4 if log_scale else 1.18))
 
 
-def make_figure(repeat, sweep, routing, cfg, path):
-    fig, axes = plt.subplots(2, 2, figsize=(12.5, 8.4))
+def make_figure(repeat, sweep, routing, batch, cfg, path):
+    fig, axes = plt.subplots(2, 3, figsize=(18.5, 8.4))
     fig.patch.set_facecolor("#fcfcfb")
 
     # (a) repeated identical runs
@@ -301,6 +365,36 @@ def make_figure(repeat, sweep, routing, cfg, path):
     )
     _style(ax)
 
+    # (e) batched population on the stiff import
+    ax = axes[0, 2]
+    sizes = sorted(batch)
+    for series, label, c in (
+        (0, "batched", SERIES[0]),
+        (1, "Python loop over members", SERIES[1]),
+    ):
+        ax.plot(
+            sizes,
+            [batch[n][series] for n in sizes],
+            "-o",
+            color=c,
+            lw=2,
+            ms=6,
+            label=label,
+        )
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("population size N")
+    ax.set_ylabel("wall time per member (ms, log)")
+    ax.set_title(
+        "Batched population: per-member cost must stay flat",
+        fontsize=11,
+        loc="left",
+    )
+    ax.legend(frameon=False, fontsize=9, labelcolor=MUTED)
+    _style(ax)
+
+    axes[1, 2].set_visible(False)
+
     fig.suptitle(
         "HallSim dispatch overhead — host-side cost of reaching the solver",
         fontsize=13.5,
@@ -326,8 +420,9 @@ def main():
     repeat = measure_repeat(comp, cfg)
     sweep = measure_sweep(cfg)
     routing = measure_routing(cfg)
+    batch = measure_batch(cfg)
     make_figure(
-        repeat, sweep, routing, cfg, outdir(cfg["outdir"]) / cfg["plot"]
+        repeat, sweep, routing, batch, cfg, outdir(cfg["outdir"]) / cfg["plot"]
     )
 
 
