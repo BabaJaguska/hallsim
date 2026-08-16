@@ -29,7 +29,6 @@ operating point (:meth:`CalibrationProblem.operating_ranges`).
 from __future__ import annotations
 
 import equinox as eqx
-import jax.numpy as jnp
 
 from hallsim.kinetics import hill_gate
 from hallsim.process import Port, PortRole, Process, calibratable
@@ -44,13 +43,15 @@ class BistableLatch(Process):
         1.0,
         description="trigger→latch induction gain (kicks the state past threshold).",
     )
-    K_trig: float = eqx.field(static=True, default=1.0)
-    n_trig: float = eqx.field(static=True, default=2.0)
+    # Plain defaults, so __check_init__ traces them: static would bake each
+    # value into the solve and hide it from jax.grad.
+    K_trig: float = 1.0
+    n_trig: float = 2.0
 
-    k_feedback: float = eqx.field(static=True, default=1.0)
-    K_fb: float = eqx.field(static=True, default=0.4)
-    n_fb: float = eqx.field(static=True, default=4.0)
-    k_decay: float = eqx.field(static=True, default=0.3)
+    k_feedback: float = 1.0
+    K_fb: float = 0.4
+    n_fb: float = 4.0
+    k_decay: float = 0.3
 
     k_output: float = calibratable(
         1.0,
@@ -98,12 +99,8 @@ class BistableLatch(Process):
 
     def derivative(self, t, state):
         latch = state["latch"]
-        kick = hill_gate(
-            state["trigger"],
-            jnp.asarray(self.K_trig),
-            jnp.asarray(self.n_trig),
-        )
-        auto = hill_gate(latch, jnp.asarray(self.K_fb), jnp.asarray(self.n_fb))
+        kick = hill_gate(state["trigger"], self.K_trig, self.n_trig)
+        auto = hill_gate(latch, self.K_fb, self.n_fb)
         d_latch = (
             self.k_trigger * kick
             + self.k_feedback * auto * (1.0 - latch)

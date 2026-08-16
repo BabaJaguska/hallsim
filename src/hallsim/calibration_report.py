@@ -175,6 +175,108 @@ def save_outputs(
     }
 
 
+def rows_by_gene(result):
+    """``{gene_symbol: row}`` for one concordance result."""
+    return {r.reporter.gene_symbol: r for r in result.rows}
+
+
+def format_table(pre, post, fit_arms=()) -> str:
+    """Per-arm, per-timepoint out-of-the-box vs calibrated vs measured log2
+    fold-changes, with the error, sign agreement and Spearman rho each arm
+    moved by. Arms in ``fit_arms`` are labelled FIT, the rest HELD-OUT — pass
+    ``problem.fit_arms``. Returns the table; the caller prints or writes it.
+    """
+    fit = set(fit_arms)
+    out = [
+        "=" * 74,
+        "OUT-OF-THE-BOX vs CALIBRATED vs MEASURED  (log2 fold-change)",
+        "=" * 74,
+    ]
+    for arm in pre:
+        out.append(f"\n[{'FIT ' if arm in fit else 'HELD-OUT'}] {arm}")
+        for t in sorted(pre[arm]):
+            pre_r = rows_by_gene(pre[arm][t])
+            post_r = rows_by_gene(post[arm][t])
+            out.append(
+                f"  day {t:g}   {'gene':<9}{'measured':>10}"
+                f"{'model(oob)':>12}{'model(cal)':>12}   {'|err|oob→cal':>14}"
+            )
+            for g in pre_r:
+                e0 = abs(pre_r[g].delta_sim - pre_r[g].delta_data)
+                e1 = abs(post_r[g].delta_sim - post_r[g].delta_data)
+                out.append(
+                    f"  {'':<9}{g:<9}{pre_r[g].delta_data:>+10.3f}"
+                    f"{pre_r[g].delta_sim:>+12.4f}"
+                    f"{post_r[g].delta_sim:>+12.4f}   {e0:>6.3f}→{e1:<6.3f}"
+                )
+            out.append(
+                f"  {'':<9}{'mean|err|':<9}{'':>10}{'':>12}{'':>12}   "
+                f"{pre[arm][t].mean_abs_error:>6.3f}→"
+                f"{post[arm][t].mean_abs_error:<6.3f}   "
+                f"sign {pre[arm][t].sign_agreement * 100:.0f}→"
+                f"{post[arm][t].sign_agreement * 100:.0f}%  "
+                f"ρ {pre[arm][t].spearman_r:+.2f}→"
+                f"{post[arm][t].spearman_r:+.2f}"
+            )
+    return "\n".join(out)
+
+
+def plot_history(problem, history, path) -> None:
+    """Loss curve, per-parameter trajectories, and gradient norm / effective
+    LR over the fit. Parameters are drawn as their log-position within their
+    clamp range, so knobs spanning orders of magnitude are comparable.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    path = Path(path)
+    losses = np.asarray(history.losses)
+    epochs = np.arange(1, len(losses) + 1)
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
+
+    ax1.plot(epochs, losses, color="#2a7")
+    ax1.set_yscale("log")
+    ax1.set_xlabel("epoch")
+    ax1.set_ylabel("loss (log2FC MSE)")
+    ax1.set_title("training loss")
+
+    # Does a loss spike track a large gradient (→ clip) or an LR-schedule
+    # event (→ plateau scheduler)?
+    if history.grad_norms:
+        gn = np.asarray(history.grad_norms)
+        ax3.plot(epochs, gn, color="#c0392b", label="|grad| (global norm)")
+        ax3.set_yscale("log")
+        ax3.set_ylabel("|grad|", color="#c0392b")
+        ax3.tick_params(axis="y", labelcolor="#c0392b")
+        if history.lrs:
+            axlr = ax3.twinx()
+            axlr.plot(epochs, np.asarray(history.lrs), color="#2563eb")
+            axlr.set_ylabel("effective LR", color="#2563eb")
+            axlr.tick_params(axis="y", labelcolor="#2563eb")
+        for e in epochs[np.r_[False, np.diff(losses) > 0.02]]:
+            ax3.axvline(e, color="#999", lw=0.7, ls=":", zorder=0)
+    ax3.set_xlabel("epoch")
+    ax3.set_title("grad norm · LR scale  (dotted = loss spike)")
+
+    for name, ref in problem.param_refs.items():
+        lo, hi = ref.clamp
+        vals = np.asarray([float(ph[name]) for ph in history.param_history])
+        norm = (np.log(vals) - np.log(lo)) / (np.log(hi) - np.log(lo))
+        ax2.plot(epochs, norm, label=name)
+    ax2.set_ylim(-0.02, 1.02)
+    ax2.set_xlabel("epoch")
+    ax2.set_ylabel("param (log-position in clamp range)")
+    ax2.set_title("parameter trajectories")
+    ax2.legend(fontsize=7, loc="best")
+
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=130)
+
+
 def _conc_to_dict(results_dict: dict) -> dict:
     out: dict = {}
     for arm, per_t in results_dict.items():

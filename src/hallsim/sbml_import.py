@@ -509,6 +509,90 @@ class SBMLProcess(ImportedODEProcess):
         return base
 
 
+def _converted_cache_dir() -> str:
+    import os
+
+    path = os.path.expanduser("~/.cache/hallsim/converted")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _atomic_write(out_path: str, write) -> None:
+    """``write(tmp_path)`` into the destination directory, then rename.
+
+    A reader in another process sees either the old file or the new one, never
+    a half-written document.
+    """
+    import os
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(out_path), prefix=".tmp-", suffix=".xml"
+    )
+    os.close(fd)
+    try:
+        write(tmp)
+        os.replace(tmp, out_path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _source_stamp(sbml_path: str):
+    import os
+
+    try:
+        st = os.stat(sbml_path)
+    except OSError:
+        return None
+    return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
+def _cached_convert(sbml_path: str, out_name: str, transform) -> str:
+    """Path to a converted copy of ``sbml_path``, reusing a cached one.
+
+    ``transform(doc) -> bool`` mutates the parsed document and returns whether
+    a converted copy is needed; ``False`` means the source is usable as-is.
+    The entry is keyed on the source's size and mtime, so an edited source
+    reconverts, and both the document and its key are written atomically.
+    """
+    import json
+    import os
+
+    import libsbml
+
+    out_path = os.path.join(_converted_cache_dir(), out_name)
+    stamp_path = out_path + ".stamp"
+    stamp = _source_stamp(sbml_path)
+
+    if stamp is not None:
+        try:
+            with open(stamp_path) as fh:
+                record = json.load(fh)
+            if record.get("src") == stamp:
+                cached = record.get("result") or sbml_path
+                if cached == sbml_path or os.path.exists(cached):
+                    return cached
+        except (OSError, ValueError):
+            pass
+
+    doc = libsbml.SBMLReader().readSBMLFromFile(str(sbml_path))
+    if transform(doc):
+        _atomic_write(out_path, lambda p: libsbml.writeSBMLToFile(doc, p))
+        result = out_path
+    else:
+        result = sbml_path
+
+    if stamp is not None:
+        _atomic_write(
+            stamp_path,
+            lambda p: open(p, "w").write(
+                json.dumps({"src": stamp, "result": result})
+            ),
+        )
+    return result
+
+
 def _preprocess_sbml(sbml_path: str) -> str:
     """Apply libsbml converters that flatten SBML features sbmltoodejax
     cannot translate but that have well-defined equivalent forms.
@@ -523,30 +607,25 @@ def _preprocess_sbml(sbml_path: str) -> str:
       function definitions to begin with.
 
     Returns a path to the converted SBML file under
-    ``~/.cache/hallsim/converted``. The cache key is the basename of the
-    input, so a converted local file lives alongside any converted
-    BioModels download.
+    ``~/.cache/hallsim/converted``, reconverting only when the source
+    changes. The cache key is the basename of the input, so a converted local
+    file lives alongside any converted BioModels download.
     """
     import os
 
     import libsbml
 
-    reader = libsbml.SBMLReader()
-    doc = reader.readSBMLFromFile(str(sbml_path))
-    if doc.getModel() is None:
-        # libsbml couldn't parse it; let the downstream pre-check produce
-        # the actual diagnostic — we just hand back the original path.
-        return sbml_path
+    def transform(doc) -> bool:
+        if doc.getModel() is None:
+            # libsbml couldn't parse it; let the downstream pre-check produce
+            # the actual diagnostic — we just hand back the original path.
+            return False
+        props = libsbml.ConversionProperties()
+        props.addOption("expandFunctionDefinitions", True)
+        doc.convert(props)
+        return True
 
-    props = libsbml.ConversionProperties()
-    props.addOption("expandFunctionDefinitions", True)
-    doc.convert(props)
-
-    cache_dir = os.path.expanduser("~/.cache/hallsim/converted")
-    os.makedirs(cache_dir, exist_ok=True)
-    out_path = os.path.join(cache_dir, os.path.basename(sbml_path))
-    libsbml.writeSBMLToFile(doc, out_path)
-    return out_path
+    return _cached_convert(sbml_path, os.path.basename(sbml_path), transform)
 
 
 def _download_biomodel_to_cache(model_id) -> str:
@@ -570,8 +649,9 @@ def _download_biomodel_to_cache(model_id) -> str:
     cache_path = os.path.join(cache_dir, fname)
     if not os.path.exists(cache_path):
         xml = get_content_for_model(model_id)
-        with open(cache_path, "w") as f:
-            f.write(xml)
+        # Atomic, so an interrupted or concurrent download cannot leave a
+        # truncated file that every later run then trusts.
+        _atomic_write(cache_path, lambda p: open(p, "w").write(xml))
     return cache_path
 
 
@@ -742,20 +822,17 @@ def _strip_events(sbml_path: str) -> str:
     """
     import os
 
-    import libsbml
+    def transform(doc) -> bool:
+        model = doc.getModel()
+        if model is None or model.getNumEvents() == 0:
+            return False
+        while model.getNumEvents() > 0:
+            model.removeEvent(0)
+        return True
 
-    doc = libsbml.SBMLReader().readSBMLFromFile(str(sbml_path))
-    model = doc.getModel()
-    if model is None or model.getNumEvents() == 0:
-        return sbml_path
-    while model.getNumEvents() > 0:
-        model.removeEvent(0)
-    cache_dir = os.path.expanduser("~/.cache/hallsim/converted")
-    os.makedirs(cache_dir, exist_ok=True)
-    base = os.path.basename(sbml_path)
-    out_path = os.path.join(cache_dir, f"noevents_{base}")
-    libsbml.writeSBMLToFile(doc, out_path)
-    return out_path
+    return _cached_convert(
+        sbml_path, f"noevents_{os.path.basename(sbml_path)}", transform
+    )
 
 
 _GENERATED_MODELS: dict = {}

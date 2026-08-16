@@ -33,6 +33,16 @@ DEFAULT_MAX_STEPS = 4_000_000
 # Initial step size handed to the adaptive controller.
 DEFAULT_DT0 = 1e-3
 
+# Where XLA caches compiled executables between processes. Set
+# HALLSIM_COMPILATION_CACHE_DIR to relocate it, or to "" / "0" / "off" to
+# disable. Caches codegen only; tracing and lowering are Python and still run.
+DEFAULT_COMPILATION_CACHE_DIR = "~/.cache/hallsim/jax"
+
+# Minimum compile time worth a disk round trip. Zero, because one run emits a
+# couple of hundred individually-fast executables and the cost is their sum —
+# JAX's 1.0 s default caches four of them and saves nothing.
+DEFAULT_COMPILATION_CACHE_MIN_SECS = 0.0
+
 # Stiffness diagnostic threshold. The stiffness index ``spectral_abscissa
 # × dt`` is the number of stability-limited substeps an explicit method
 # would be forced to take across one solve interval (its step is bounded
@@ -44,3 +54,38 @@ DEFAULT_DT0 = 1e-3
 # λ≈-3e5, Ihekwaba NF-κB λ≈-1.7e4, index ~1e4–1e6) sits far above. 100
 # leaves a wide margin on both sides.
 DEFAULT_MAX_EXPLICIT_SUBSTEPS = 100.0
+
+
+def enable_compilation_cache(directory: str | None = None) -> str | None:
+    """Point XLA's persistent compilation cache at ``directory``.
+
+    Returns the path in use, or ``None`` when disabled. Called at package
+    import; safe to call again with an explicit path.
+    """
+    import os
+
+    raw = (
+        directory
+        if directory is not None
+        else os.environ.get(
+            "HALLSIM_COMPILATION_CACHE_DIR", DEFAULT_COMPILATION_CACHE_DIR
+        )
+    )
+    if raw.strip().lower() in ("", "0", "off", "false", "none"):
+        return None
+
+    import jax
+
+    path = os.path.abspath(os.path.expanduser(raw))
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        # A read-only or unwritable HOME is not a reason to fail an import.
+        return None
+    jax.config.update("jax_compilation_cache_dir", path)
+    jax.config.update(
+        "jax_persistent_cache_min_compile_time_secs",
+        DEFAULT_COMPILATION_CACHE_MIN_SECS,
+    )
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
+    return path

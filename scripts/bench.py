@@ -121,17 +121,15 @@ def bench_splitting() -> None:
 
 
 def bench_group_dimension() -> None:
-    """Feasibility probe for an UNIMPLEMENTED change: restricting each group's
-    solve to its own evolved states.
+    """Per-group Jacobian density and the cost of solving at full width.
 
-    The restricted side has no Scheduler path yet — that is the point of the
-    measurement — so both sides go through raw diffrax here to keep the
-    comparison like-for-like. Once the Scheduler grows the option, this should
-    become two ``Scheduler`` configurations, as :func:`bench_splitting` is.
+    Sizes what ``_ReducedRHS`` buys. Both arms go through raw diffrax to
+    isolate the dimension effect from the Scheduler's own machinery; for the
+    shipped end-to-end number, see :func:`bench_splitting`.
     """
     from hallsim.models.multi_hallmark import build_multi_hallmark_composite
 
-    print("\n== 3. PROPOSED: restrict each group's solve to its own states ==")
+    print("\n== 3. Group solve dimension (sizes _ReducedRHS) ==")
     comp = build_multi_hallmark_composite()
     keys = comp.store_keys()
     y0 = comp.initial_state_vec()
@@ -185,7 +183,7 @@ def bench_group_dimension() -> None:
 def bench_solver() -> None:
     from hallsim.models.multi_hallmark import build_multi_hallmark_composite
 
-    print("\n== 3. Implicit root finder ==")
+    print("\n== 4. Implicit root finder ==")
     comp = build_multi_hallmark_composite()
     for label, implicit in (
         ("optx.Newton (shipped)", None),
@@ -219,7 +217,7 @@ def bench_solver() -> None:
 def bench_graph() -> None:
     from hallsim.models.multi_hallmark import build_multi_hallmark_composite
 
-    print("\n== 4. RHS jaxpr composition ==")
+    print("\n== 5. RHS jaxpr composition ==")
     comp = build_multi_hallmark_composite()
     rhs, _ = comp.build_rhs()
     y0 = comp.initial_state_vec()

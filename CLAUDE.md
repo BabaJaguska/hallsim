@@ -8,6 +8,7 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 - Python >=3.11. Core stack: JAX + Equinox + Diffrax + Optax. Validation uses `pint` (units) and `networkx` (graph analysis). SBML import uses `sbmltoodejax`.
 - `pyproject.toml` is the single source of truth for dependencies. No lockfiles — `make install` / `make install-dev` editable-install directly from pyproject.
 - `cd` into the project before running scripts.
+- Importing `hallsim` enables x64 and points XLA's persistent compilation cache at `~/.cache/hallsim/jax`. **Set `HALLSIM_COMPILATION_CACHE_DIR=off` before timing anything compile-related**, or the second measurement is a cache hit and the comparison is meaningless.
 
 ## Common commands
 

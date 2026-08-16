@@ -90,6 +90,73 @@ def test_numeric_params_are_traced_arrays():
     assert not eqx.is_array(proc.timescale)
 
 
+# The only numeric fields that belong on the static side, per class: port
+# defaults (``ports_schema()`` must stay concrete under a trace) and
+# discontinuity times (read as Python floats to build the solver's jump_ts,
+# and branched on in Python). A rate constant here instead is on the wrong
+# side of the split — it bakes into the executable, recompiles on every
+# distinct value, and is invisible to ``jax.grad``.
+STRUCTURAL_NUMERIC_FIELDS = {
+    "BistableLatch": {"latch_default", "target_default"},
+    "ClampEdge": {"target_default"},
+    "HillActivationEdge": {"target_default"},
+    "PulseSource": {"t_start", "t_end"},
+}
+
+
+def _model_process_classes():
+    """Every Process subclass defined under ``hallsim.models``."""
+    import importlib
+    import pkgutil
+
+    import hallsim.models as models
+
+    for mod in pkgutil.iter_modules(models.__path__):
+        importlib.import_module(f"hallsim.models.{mod.name}")
+
+    found: dict[str, type] = {}
+
+    def walk(cls):
+        for sub in cls.__subclasses__():
+            if sub.__module__.startswith("hallsim.models"):
+                found[sub.__qualname__] = sub
+            walk(sub)
+
+    walk(Process)
+    return found
+
+
+def test_no_model_hides_a_rate_constant_on_the_static_side():
+    """Sweeps every model class, not just a toy one.
+
+    ``test_numeric_params_are_traced_arrays`` checks the mechanism on one
+    hand-written Process; this checks that no *shipped* model opted out of it.
+    A new static numeric field fails here until it is declared structural
+    above, which makes the static/traced call a conscious one.
+    """
+    import dataclasses
+
+    classes = _model_process_classes()
+    assert classes, "no model Process subclasses discovered"
+
+    offenders = {}
+    for name, cls in sorted(classes.items()):
+        static_numeric = {
+            f.name
+            for f in dataclasses.fields(cls)
+            if f.metadata.get("static")
+            and type(f.default) in (float, int)
+            and not isinstance(f.default, bool)
+        }
+        expected = STRUCTURAL_NUMERIC_FIELDS.get(name, set())
+        if static_numeric != expected:
+            offenders[name] = {
+                "unexpected": sorted(static_numeric - expected),
+                "no longer present": sorted(expected - static_numeric),
+            }
+    assert not offenders, offenders
+
+
 def test_repeated_identical_run_does_not_recompile():
     comp, sched = _composite(), Scheduler()
     with count_compiles() as cold:

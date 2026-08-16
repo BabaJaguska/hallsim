@@ -76,7 +76,7 @@ dictated by the stiffest mode: 4466 steps that *every* state must satisfy.
 Split, group_0 takes 1933 at its own pace and group_1 3834 at its own, and
 neither drags the other.
 
-## 3. Proposed: restrict each group's solve to its own states
+## 3. Restrict each group's solve to its own states
 
 Splitting decouples the dynamics correctly — off-group derivatives are
 *exactly* zero during a group's solve — but it does not shrink the system
@@ -94,8 +94,11 @@ measures **1.86×** and **2.78×**, and compounds with the 1.8× above.
 
 This is the half that scales badly for a composition framework: group size is
 fixed, total dimension is not, so the waste grows with every model added.
-**Not implemented** — only valid under frozen coupling, and the stiff-group
-vector `atol` needs restricting per group too.
+
+**Shipped** as `_ReducedRHS` (`scheduler.py`), measuring **2.30×** at
+`rtol=1e-6` and **2.67×** at `1e-8` against a worktree at the prior HEAD. The
+frozen-coupling caveat was wrong: `fill(t)` supplies the off-group states under
+interpolated coupling too, so the solved dimension is the same either way.
 
 Build the restricted RHS *once*, outside the timing loop. A closure rebuilt per
 call is a static leaf that rehashes, so every solve misses diffrax's cache and
@@ -119,7 +122,13 @@ biochemical RHSs that rejects a third of all steps:
 default. The remaining 21% rejection rate is *not* a Newton-tolerance problem:
 loosening its `atol` from 1e-9 to 1e-3 moved the step count by 0.5% (5767 →
 5735) and the rejection rate not at all. Max |y₀| is 25, so a 1e-9 absolute
-tolerance is not fighting large-magnitude states. Cause unidentified.
+tolerance is not fighting large-magnitude states.
+
+**Explained, and there is nothing to win.** `dfx.PIDController(rtol, atol)`
+takes diffrax's defaults `pcoeff=0, icoeff=1, dcoeff=0` — the class implements
+PID, the instance is a pure I-controller. PI control cuts rejection to 12.5%
+and leaves total work flat (~4150–4200 steps either way), so the wall time does
+not move. The name is a trap; the rejection rate is not the cost.
 
 ---
 
@@ -149,15 +158,60 @@ Two things were tried here and **both were rejected on measurement**:
   codegen.
 
 Both are recorded here so the next person doesn't re-derive them. The
-remaining plumbing is a real cost only for *tracing*, which item 1 now pays
-once per structure rather than once per call.
+remaining plumbing is a real cost only for *tracing* — which is no longer a
+footnote, see item 6.
+
+---
+
+## 6. Where the time goes now: the one-time cost dominates
+
+Full audit in [performance-audit.md](performance-audit.md). On the flagship:
+
+| stage | wall |
+|---|---|
+| `import hallsim` | 0.6–0.7 s |
+| composite build | ~1.1 s |
+| trace + lower + compile | **~11 s** |
+| the solve | **~3.2 s** |
+
+Only the last line is arithmetic. Python dispatch is *not* a factor — 2.298 s
+of a 2.308 s warm run is inside the compiled executable.
+
+**A persistent compilation cache takes compile 11.70 s → 7.76 s (1.5×)**, on by
+default at `~/.cache/hallsim/jax`. The threshold is the whole trick: at JAX's
+default `min_compile_time_secs=1.0`, and at 0.05, it stores **four entries and
+saves nothing**. One run emits ~250 individually-fast executables and the cost
+is their sum, so the floor is 0.0 with `min_entry_size_bytes` at 0 as well.
+
+The residue — ~7.8 s of tracing and MLIR lowering — is Python, scales with
+jaxpr size, and no cache can skip it. That makes item 5's plumbing count the
+live target rather than a curiosity.
+
+**Rejected on measurement:**
+
+| what | result |
+|---|---|
+| `--xla_cpu_multi_thread_eigen=false` | 2.247 → 2.276 s. Nil — the solve is single-threaded and has no parallelism to exploit |
+| `--xla_cpu_enable_fast_math=true` | 2.247 → 2.100 s (6.5%). Not worth FTZ and no-NaN reassociation at `atol=1e-9` with curated oscillators |
+| Lowering `max_steps` to shrink the reverse-mode checkpoint count | 32.1 s vs 27.7 s at the 4M default. `DEFAULT_MAX_STEPS` is not the lever |
+| Sharding the *existing vmapped* batch axis | 0.83× — slower than doing nothing. One vmapped `while_loop` has one trip-count predicate, so SPMD adds a cross-device reduce instead of splitting the loop. Needs `shard_map` (2.4×) |
+| Parallelising forward-mode parameter directions | 1.09×. The vmapped JVP already shares one primal solve |
+
+**A caveat on every absolute number above.** Re-running the same measurement
+hours later on this machine gave warm 3.2 s against 2.25 s and first-call ~14 s
+against 9.1 s — ~40% drift, no code change. Ratios held. Trust a *difference*
+only when its arms were interleaved serially in one session on an idle machine;
+treat a *level* as needing a re-measure.
 
 ---
 
 ## Reproducing
 
 ```bash
-python scripts/bench.py            # items 1-3
-python scripts/bench.py --solver   # item 4 (slow: ~2 min)
-python scripts/bench.py --graph    # item 5
+HALLSIM_COMPILATION_CACHE_DIR=off python scripts/bench.py            # items 1-3
+HALLSIM_COMPILATION_CACHE_DIR=off python scripts/bench.py --solver   # item 4 (slow: ~2 min)
+HALLSIM_COMPILATION_CACHE_DIR=off python scripts/bench.py --graph    # item 5
 ```
+
+Disable the compile cache when timing, or the second run of a pair is a cache
+hit and the comparison is meaningless.

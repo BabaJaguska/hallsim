@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -125,10 +126,16 @@ class SchedulerResult:
     events: list[EventRecord] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
 
+    @cached_property
+    def _index(self) -> dict[str, int]:
+        """``key -> trailing-axis position``, built once. A list scan per
+        readout is O(n_vars), and callers read every path in a loop."""
+        return {k: i for i, k in enumerate(self.keys)}
+
     def get(self, key: str) -> jnp.ndarray:
         """Per-path trajectory — ``(n_time,)``, or ``(n_time, batch)``
         batched."""
-        return self.ys[..., self.keys.index(key)]
+        return self.ys[..., self._index[key]]
 
     @property
     def ok(self) -> jnp.ndarray:
@@ -149,7 +156,7 @@ class SchedulerResult:
         )
 
     def __contains__(self, key: str) -> bool:
-        return key in self.keys
+        return key in self._index
 
 
 def _build_proc_index_maps(

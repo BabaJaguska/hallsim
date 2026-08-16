@@ -134,7 +134,7 @@ def _solo_run(
         y0=y0,
         save_dt=t_end / n_save,
     )
-    ys = np.asarray(jnp.stack([res.get(k) for k in res.keys], axis=-1))
+    ys = np.asarray(res.ys)
     if probe is None:
         return ys
     # The probed paths are held constants, not dynamics — judging the run on

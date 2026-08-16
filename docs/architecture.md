@@ -133,8 +133,24 @@ hits = search_for_model("genotoxic stress NFkB")   # -> [{'id': 'MODEL...'}]
 proc = process_from_sbml(hits[0]["id"], name="dna_nfkb")   # fetch + generate
 ```
 
-Bundled SBML lives under [`models/<author><year>/`](../models/) for offline
-use; arbitrary IDs download to `~/.cache/hallsim/biomodels/` on first import.
+Bundled SBML ships as package data under
+[`src/hallsim/models/sbml/<author><year>/`](../src/hallsim/models/sbml/) for
+offline use; arbitrary IDs download to `~/.cache/hallsim/biomodels/` on first
+import.
+
+### On-disk caches
+
+Three, all under `~/.cache/hallsim/`, all safe to delete:
+
+| path | holds | keyed on |
+|---|---|---|
+| `biomodels/` | SBML downloaded by ID | the BioModels ID |
+| `converted/` | function-expanded and event-stripped SBML | the source file's size and mtime |
+| `jax/` | XLA's compiled executables, reused across processes | JAX's own hash of the computation |
+
+Writes are atomic, so concurrent processes never read a partial file. Set
+`HALLSIM_COMPILATION_CACHE_DIR` to relocate the compile cache, or to `off` to
+disable it — which is what you want when timing a cold compile.
 
 ## Hallmark handles
 

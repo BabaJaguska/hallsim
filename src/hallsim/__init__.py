@@ -29,6 +29,12 @@ import jax as _jax
 
 _jax.config.update("jax_enable_x64", True)
 
+from hallsim.config import (
+    enable_compilation_cache as _enable_compilation_cache,
+)
+
+_enable_compilation_cache()
+
 from hallsim.calibration import (
     CalibrationProblem,
     Calibrator,

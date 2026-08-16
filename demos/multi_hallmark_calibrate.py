@@ -43,7 +43,13 @@ from hallsim.calibration import (  # noqa: E402
     ParamStep,
     ParameterRef,
 )
-from hallsim.calibration_report import save_outputs  # noqa: E402
+from hallsim.calibration_report import (  # noqa: E402
+    format_table,
+    plot_history,
+    rows_by_gene,
+    save_outputs,
+)
+from hallsim.io import make_run_dir  # noqa: E402
 from hallsim.hallmarks import with_hallmarks  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.gene_reporters import (  # noqa: E402
@@ -92,26 +98,7 @@ DATA_DIR = ROOT / "data" / "FibroblastsDNA_dmg_Rapamycin"
 SERIES_MATRIX = DATA_DIR / "GSE248823_series_matrix.txt"
 PLATFORM = DATA_DIR / "GPL17586-45144.txt"
 
-# Each calibrate run writes to its own timestamped subfolder so results never
-# overwrite; `latest` symlinks the most recent so the figure scripts follow it.
-RUNS_DIR = ROOT / "outputs" / "multi_hallmark_calibrate"
-LATEST_RUN = RUNS_DIR / "latest"
-
-
-def make_run_dir() -> Path:
-    from datetime import datetime
-
-    run = RUNS_DIR / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run.mkdir(parents=True, exist_ok=True)
-    if LATEST_RUN.is_symlink() or LATEST_RUN.exists():
-        if LATEST_RUN.is_symlink():
-            LATEST_RUN.unlink()
-        else:
-            import shutil
-
-            shutil.rmtree(LATEST_RUN)
-    LATEST_RUN.symlink_to(run.name)
-    return run
+RUN_NAME = "multi_hallmark_calibrate"
 
 
 # GSE248823 columns: etoposide DDIS sampled at D00 (baseline), D07, D14,
@@ -326,43 +313,6 @@ def build_problem(
     )
 
 
-def _rows_by_gene(result):
-    return {r.reporter.gene_symbol: r for r in result.rows}
-
-
-def print_table(pre, post) -> None:
-    print("\n" + "=" * 74)
-    print("OUT-OF-THE-BOX vs CALIBRATED vs MEASURED  (log2 fold-change)")
-    print("=" * 74)
-    for arm in ARMS:
-        tag = "FIT " if arm == "DDIS_vs_ctrl" else "HELD-OUT"
-        print(f"\n[{tag}] {arm}")
-        for t in sorted(pre[arm]):
-            pre_r = _rows_by_gene(pre[arm][t])
-            post_r = _rows_by_gene(post[arm][t])
-            print(
-                f"  day {t:g}   {'gene':<9}{'measured':>10}"
-                f"{'model(oob)':>12}{'model(cal)':>12}   {'|err|oob→cal':>14}"
-            )
-            for g in pre_r:
-                e0 = abs(pre_r[g].delta_sim - pre_r[g].delta_data)
-                e1 = abs(post_r[g].delta_sim - post_r[g].delta_data)
-                print(
-                    f"  {'':<9}{g:<9}{pre_r[g].delta_data:>+10.3f}"
-                    f"{pre_r[g].delta_sim:>+12.4f}"
-                    f"{post_r[g].delta_sim:>+12.4f}   {e0:>6.3f}→{e1:<6.3f}"
-                )
-            print(
-                f"  {'':<9}{'mean|err|':<9}{'':>10}{'':>12}{'':>12}   "
-                f"{pre[arm][t].mean_abs_error:>6.3f}→"
-                f"{post[arm][t].mean_abs_error:<6.3f}   "
-                f"sign {pre[arm][t].sign_agreement * 100:.0f}→"
-                f"{post[arm][t].sign_agreement * 100:.0f}%  "
-                f"ρ {pre[arm][t].spearman_r:+.2f}→"
-                f"{post[arm][t].spearman_r:+.2f}"
-            )
-
-
 def plot(pre, post, path: Path) -> None:
     import matplotlib
 
@@ -387,8 +337,8 @@ def plot(pre, post, path: Path) -> None:
                 ax.axis("off")
                 continue
             t = atimes[ti]
-            pre_r = _rows_by_gene(pre[arm][t])
-            post_r = _rows_by_gene(post[arm][t])
+            pre_r = rows_by_gene(pre[arm][t])
+            post_r = rows_by_gene(post[arm][t])
             genes = list(pre_r)
             x = np.arange(len(genes))
             w = 0.26
@@ -420,58 +370,6 @@ def plot(pre, post, path: Path) -> None:
             ax.set_title(f"{tag}: {arm} · day {t:g}")
     axes[0][0].set_ylabel("log2 fold-change")
     axes[0][0].legend(loc="best", fontsize=9)
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=130)
-
-
-def plot_history(problem, history, path: Path) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    losses = np.asarray(history.losses)
-    epochs = np.arange(1, len(losses) + 1)
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
-
-    ax1.plot(epochs, losses, color="#2a7")
-    ax1.set_yscale("log")
-    ax1.set_xlabel("epoch")
-    ax1.set_ylabel("loss (log2FC MSE)")
-    ax1.set_title("training loss")
-
-    # Grad norm + effective LR — to see whether loss spikes track large
-    # gradients (→ clip) or LR-schedule events (→ plateau scheduler).
-    if history.grad_norms:
-        gn = np.asarray(history.grad_norms)
-        ax3.plot(epochs, gn, color="#c0392b", label="|grad| (global norm)")
-        ax3.set_yscale("log")
-        ax3.set_ylabel("|grad|", color="#c0392b")
-        ax3.tick_params(axis="y", labelcolor="#c0392b")
-        if history.lrs:
-            axlr = ax3.twinx()
-            axlr.plot(epochs, np.asarray(history.lrs), color="#2563eb")
-            axlr.set_ylabel("effective LR", color="#2563eb")
-            axlr.tick_params(axis="y", labelcolor="#2563eb")
-        for e in epochs[np.r_[False, np.diff(losses) > 0.02]]:
-            ax3.axvline(e, color="#999", lw=0.7, ls=":", zorder=0)
-    ax3.set_xlabel("epoch")
-    ax3.set_title("grad norm · LR scale  (dotted = loss spike)")
-
-    # Each param's position within its clamp range, in log space (the
-    # params span orders of magnitude), so trajectories are comparable.
-    for name, ref in problem.param_refs.items():
-        lo, hi = ref.clamp
-        vals = np.asarray([float(ph[name]) for ph in history.param_history])
-        norm = (np.log(vals) - np.log(lo)) / (np.log(hi) - np.log(lo))
-        ax2.plot(epochs, norm, label=name)
-    ax2.set_ylim(-0.02, 1.02)
-    ax2.set_xlabel("epoch")
-    ax2.set_ylabel("param (log-position in clamp range)")
-    ax2.set_title("parameter trajectories")
-    ax2.legend(fontsize=7, loc="best")
-
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=130)
@@ -604,8 +502,8 @@ def write_reporter_table(pre, post, out_dir: Path) -> None:
     for arm in ARMS:
         tag = "fit" if arm in fit_arms else "held-out"
         for t in sorted(pre[arm]):
-            pr = _rows_by_gene(pre[arm][t])
-            po = _rows_by_gene(post[arm][t])
+            pr = rows_by_gene(pre[arm][t])
+            po = rows_by_gene(post[arm][t])
             for g in pr:
                 rows.append(
                     (
@@ -941,7 +839,7 @@ def cmd_run(args) -> None:
     problem = build_problem(equilibrate=equilibrate)
     print(f"[run] equilibrate={equilibrate}", flush=True)
     init = problem.initial_params()
-    out_dir = make_run_dir()
+    out_dir = make_run_dir(RUN_NAME)
     print(f"[run] writing to {out_dir.relative_to(ROOT)}/", flush=True)
 
     # ── out-of-the-box composite (always) ──
@@ -984,7 +882,7 @@ def cmd_run(args) -> None:
     print("[fit] calibrated concordance ...", flush=True)
     post = problem.evaluate(history.final_params)
 
-    print_table(pre, post)
+    print(format_table(pre, post, fit_arms=problem.fit_arms))
     print("\nfitted parameters (init → fit):")
     for k in problem.param_refs:
         print(

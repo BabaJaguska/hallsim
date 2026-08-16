@@ -76,9 +76,7 @@ class HillActivationEdge(Process):
     def derivative(self, t, state):
         drive = jnp.asarray(1.0)
         for name, K, n in zip(self.sources, self.K, self.n):
-            drive = drive * hill_gate(
-                state[name], jnp.asarray(K), jnp.asarray(n)
-            )
+            drive = drive * hill_gate(state[name], K, n)
         return {"target": self.k_act * drive}
 
 
@@ -92,20 +90,21 @@ class HillSignalEdge(Process):
     lag). An imported model reads the ``signal`` path through a plain
     parameter INPUT (``ImportedODEProcess.with_param_input``), so the Hill
     transform is a first-class composable edge rather than baked into a
-    driver. ``basal`` is the fittable floor; ``hi``/``K``/``n`` are structural.
+    driver. ``basal`` and ``K`` are the fittable pair; ``hi``/``n`` are traced
+    too but stay off the calibration surface.
     """
 
     timescale: float | None = None
     basal: float = calibratable(
         0.3, description="signal floor at source→0; fit against the reporter."
     )
-    hi: float = eqx.field(static=True, default=1.0)
+    hi: float = 1.0
     K: float = calibratable(
         1.0,
         description="source threshold; place at the operating point "
         "(hallsim.calibration.suggest_hill_gate) or fit against the readout.",
     )
-    n: float = eqx.field(static=True, default=2.0)
+    n: float = 2.0
 
     source_ontology: dict | None = eqx.field(static=True, default=None)
     source_description: str = eqx.field(static=True, default="")
@@ -131,9 +130,7 @@ class HillSignalEdge(Process):
         }
 
     def assign(self, t, state):
-        gate = hill_gate(
-            state["source"], jnp.asarray(self.K), jnp.asarray(self.n)
-        )
+        gate = hill_gate(state["source"], self.K, self.n)
         return {"signal": self.basal + (self.hi - self.basal) * gate}
 
 

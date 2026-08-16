@@ -118,7 +118,9 @@ class ImportedODEProcess(Process):
         ``canonical_time_seconds`` is the real-world duration of one ``t_span``
         unit (86400 for a day axis); Scheduler grouping is separate."""
         scale = canonical_time_seconds / self.native_time_seconds
-        return eqx.tree_at(lambda p: p.time_scale, self, float(scale))
+        # jnp, not float: tree_at skips __check_init__, and a float leaf is
+        # static — the clock ratio would recompile per factor.
+        return eqx.tree_at(lambda p: p.time_scale, self, jnp.asarray(scale))
 
     def metadata(self):
         base = super().metadata()
