@@ -25,6 +25,10 @@ DEFAULT_ATOL = 1e-9
 # stability-tiny steps, while keeping a tight floor near zero.
 DEFAULT_ATOL_SCALE = 1e-6
 
+# Algebraic convergence tolerance of an implicit stage's Newton solve — not an
+# accuracy target, and deliberately not DEFAULT_ATOL (docs/diary.md).
+DEFAULT_NEWTON_ATOL = 1e-6
+
 # Safety ceiling on solver steps per macro step. Sized for the
 # second-scale t_span values some SBML composites run at; far above any
 # healthy integration, it only fires on genuinely runaway dynamics.

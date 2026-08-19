@@ -33,7 +33,6 @@ __all__ = [
     "ERiQEnergyMetabolism",
     "ERiQOxidativeStress",
     "ERiQSignaling",
-    "ERiQSignalingNoP53",
     "HillActivationEdge",
     "KickEvent",
     "RunningIntegral",

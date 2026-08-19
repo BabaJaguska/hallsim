@@ -139,4 +139,17 @@ def steady_state(
     def tangent_solve(gg, b):
         return jnp.linalg.solve(jax.jacfwd(gg)(jnp.zeros_like(b)), b)
 
-    return jax.lax.custom_root(g, y0, solve, tangent_solve)
+    y_star = jax.lax.custom_root(g, y0, solve, tangent_solve)
+    if not isinstance(y_star, jax.core.Tracer):
+        res = float(jnp.max(jnp.abs(g(y_star))))
+        if res > tol:
+            log.warning(
+                "steady_state: Newton stopped at |f| = %.3g, above tol = "
+                "%.3g, after at most %d iterations. The returned state is "
+                "not a fixed point — seed y_guess closer (e.g. a short "
+                "forward pre-solve) or raise max_iter.",
+                res,
+                tol,
+                max_iter,
+            )
+    return y_star

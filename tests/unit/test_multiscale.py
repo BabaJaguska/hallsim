@@ -759,6 +759,7 @@ class TestBuildGroupRHS:
 # Tests: Scheduler (Phase 3)
 # ═══════════════════════════════════════════════════════════════════════════
 
+from hallsim.config import DEFAULT_NEWTON_ATOL
 from hallsim.scheduler import Scheduler, SchedulerResult
 
 
@@ -1515,3 +1516,26 @@ def test_result_carries_full_state(name, processes, topology):
     xpath = "pool/x" if "pool/z" in res else "a/x"
     assert zpath in res
     assert jnp.allclose(res.get(zpath), 2.0 * res.get(xpath), atol=1e-4)
+
+
+def test_newton_atol_decoupled_from_integration_atol():
+    """The implicit stage's algebraic tolerance is not the integration atol.
+
+    Reusing ``atol`` for the stage Newton asks every stage to converge orders
+    below the smallest state; on a model spanning 1e2 to 1e-3 that exhausts
+    the step budget and returns non-finite.
+    """
+    sched = Scheduler(atol=1e-9)
+    assert sched.implicit_solver.root_finder.atol == DEFAULT_NEWTON_ATOL
+    assert sched.implicit_solver.root_finder.atol != sched.atol
+
+
+def test_newton_tolerances_are_overridable():
+    sched = Scheduler(rtol=1e-8, newton_rtol=1e-3, newton_atol=1e-4)
+    assert sched.implicit_solver.root_finder.rtol == 1e-3
+    assert sched.implicit_solver.root_finder.atol == 1e-4
+
+
+def test_newton_rtol_defaults_to_rtol():
+    sched = Scheduler(rtol=1e-8)
+    assert sched.implicit_solver.root_finder.rtol == 1e-8

@@ -30,6 +30,7 @@ problem is solver config, atol scale, or timescale grouping — not the model.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import jax
@@ -39,6 +40,8 @@ import numpy as np
 from hallsim.composite import Composite, single_process_composite
 from hallsim.config import DEFAULT_ATOL, DEFAULT_MAX_STEPS
 from hallsim.scheduler import Scheduler
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -94,6 +97,8 @@ class ScreenReport:
             flags.append("NEGATIVE-DOMAIN")
         if self.tunes is False:
             flags.append("NON-TUNABLE")
+        elif self.tunes is None:
+            flags.append("TUNABILITY-NOT-CHECKED")
         if self.framework_suspect:
             flags.append("FRAMEWORK-SUSPECT")
         verdict = " + ".join(flags) if flags else "ok"
@@ -319,18 +324,22 @@ def _tunes(
                 return False
         return True
 
-    if all_finite(Scheduler(**sched_kwargs)):
+    # warm_up runs eagerly outside the jvp trace so the stiffness verdict is
+    # cached before tracing (analysis can't read tracer Jacobians). Warming
+    # the first probe too: cold, it falls back to Tsit5 for every group,
+    # which warns on a model that passes and grinds on a stiff one.
+    comp_solo = single_process_composite(process)
+    s_first = Scheduler(**sched_kwargs)
+    try:
+        s_first.warm_up(comp_solo, t_span=(0.0, t_end), macro_dt=t_end)
+    except Exception:
+        pass
+    if all_finite(s_first):
         return True, False
 
-    # warm_up runs eagerly outside the jvp trace so the stiffness verdict is
-    # cached before tracing (analysis can't read tracer Jacobians).
     s_imp = Scheduler(auto_stiffness=True)
     try:
-        s_imp.warm_up(
-            single_process_composite(process),
-            t_span=(0.0, t_end),
-            macro_dt=t_end,
-        )
+        s_imp.warm_up(comp_solo, t_span=(0.0, t_end), macro_dt=t_end)
     except Exception:
         return False, False
     if all_finite(s_imp):
@@ -584,11 +593,11 @@ class CouplingRecommendation:
         verdict = "RECOMMENDED" if self.recommended else "NOT RECOMMENDED"
         lines = [
             f"{self.name}: {verdict} as a coupling source{scope}.",
-            f"  {'state':<16}{'verdict':<22}why",
+            f"  {'state':<24}{'verdict':<22}why",
         ]
         shown = self._focused if self.focus else self.sources
         for s in sorted(shown, key=lambda x: (x.ok, x.state), reverse=True):
-            lines.append(f"  {s.state:<16}{s.verdict:<22}{s.reason}")
+            lines.append(f"  {s.state:<24}{s.verdict:<22}{s.reason}")
         if self.suitable:
             lines.append(f"  → couple from: {', '.join(self.suitable)}")
         for note in self.notes:
@@ -724,10 +733,23 @@ def screen_composite(
     in a test.
     """
     procs = composite.continuous_processes()
+    unknown = sorted(set(t_ends) - set(procs))
+    if unknown:
+        raise ValueError(
+            f"screen_composite: no continuous process named {unknown}. "
+            f"Known: {sorted(procs)}. A window whose name no longer "
+            f"matches (a renamed process) would otherwise screen nothing "
+            f"and read as a pass."
+        )
+    unscreened = sorted(set(procs) - set(t_ends))
+    if unscreened:
+        log.warning(
+            "screen_composite: no window given for %s — not screened.",
+            unscreened,
+        )
     return [
         screen_process(procs[name], t_end, **kwargs)
         for name, t_end in t_ends.items()
-        if name in procs
     ]
 
 
@@ -783,6 +805,7 @@ def screen_sensitivity(
     query_time: float | None = None,
     rel_threshold: float = 1e-3,
     auto_stiffness: bool = True,
+    registry=None,
 ) -> list["SensitivityReport"]:
     """Flag reporters that are insensitive to a hallmark *in this regime*.
 
@@ -815,7 +838,7 @@ def screen_sensitivity(
 
     def _build(hm):
         return Composite(
-            apply_hallmarks(composite.processes, hm),
+            apply_hallmarks(composite.processes, hm, registry),
             composite.topology,
             validate=False,
             semantic_validation=False,

@@ -13,10 +13,17 @@ format:
 	black --line-length 79 tests/
 	black --line-length 79 demos/
 
+# black skips gitignored files when walking a directory; flake8 does not.
+# Without the exclusion, lint gates on the scratch probes (demos/_*.py, in
+# .gitignore) that format refuses to touch, and make check cannot be made to
+# pass. Keep this pattern in step with .gitignore.
+LINT_EXCLUDE = demos/_*.py
+
 lint:
 	flake8 --ignore E501,E402,W504,W503,E226,E203 src/
 	flake8 --ignore E501,E402,W504,W503,E226,E203 tests/
-	flake8 --ignore E501,E402,W504,W503,E226,E203 demos/
+	flake8 --ignore E501,E402,W504,W503,E226,E203 \
+		--extend-exclude '$(LINT_EXCLUDE)' demos/
 
 check:
 	black --check --line-length 79 src/ tests/ demos/

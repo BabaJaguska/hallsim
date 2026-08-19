@@ -84,7 +84,7 @@ These decide whether the framework is fast. Violating one is a performance bug, 
 
 - **New model**: `src/hallsim/models/<name>.py`. Subclass `Process`, declare `ports_schema()`, implement `derivative` (or `update` / `condition`+`handler`). Provide a `build_<name>_composite()` factory — the pattern in `eriq.py` and `stem_cell_niche.py`.
 - **Multiplicative coupling**: effects are summed via EVOLVED ports. For multiplicative coupling, route the modulating variable through a separate store path and read it via an `INPUT` port.
-- **SBML model**: `hallsim.sbml_import.process_from_sbml(...)`. Pre-imported BioModels live under `src/hallsim/models/data/`.
+- **SBML model**: `hallsim.sbml_import.process_from_sbml(...)`. Pre-imported BioModels live under `src/hallsim/models/sbml/<author><year>/`.
 - **Hallmark mapping**: `hallsim.hallmarks.apply_hallmarks`.
 - **Tests**: `tests/unit/test_composition.py` (Process/Port/Topology contracts), `test_multiscale.py` (Scheduler), `test_validation.py` (semantic layer), `test_models.py` (per-model regression), `test_performance.py` (JAX invariants above).
 

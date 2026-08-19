@@ -158,6 +158,54 @@ class TestRoutingOptOut:
         assert _solvers(res) == {"Tsit5"}
 
 
+class TestVectorTolerance:
+    """The stiff route's ``atol`` is ``max(atol, atol_scale·|y|)``, so it
+    belongs to the state being solved, not to the routing verdict — which is
+    cached structurally, and captured by a core compiled once per structure."""
+
+    def _y0(self, comp, magnitude):
+        return jnp.full((len(comp.store_keys()),), magnitude)
+
+    def test_result_does_not_depend_on_the_previous_run(self):
+        """At ``|y0| = 1e6`` the scaled ``atol`` is 1.0 — meaningless for a
+        run starting at 1e-3, which is what a scheduler reused across
+        magnitudes would inherit."""
+        comp = _composite(StiffPair(), "stiff")
+        small, large = self._y0(comp, 1e-3), self._y0(comp, 1e6)
+
+        fresh = Scheduler().run(comp, (0.0, 5.0), y0=small).ys
+
+        reused = Scheduler()
+        reused.run(comp, (0.0, 5.0), y0=large)
+        assert jnp.allclose(
+            reused.run(comp, (0.0, 5.0), y0=small).ys, fresh, rtol=1e-6
+        )
+
+    def test_population_members_scale_to_their_own_magnitudes(self):
+        """The population case of the same thing, against the exact answer —
+        ``StiffPair`` is two decoupled exponentials. A scheduler already warmed
+        on a large state must not hand its tolerance to every member."""
+        comp = _composite(StiffPair(), "stiff")
+        proc = comp.processes["stiff"]
+        sched = Scheduler()
+        sched.run(comp, (0.0, 5.0), y0=self._y0(comp, 1e6))
+
+        pop = jnp.stack([self._y0(comp, 1e-3), self._y0(comp, 1e-2)])
+        res = sched.run(comp, (0.0, 5.0), y0=pop)
+        for i, member in enumerate(pop):
+            exact = jnp.stack(
+                [
+                    member[0] * jnp.exp(-proc.k_fast * res.ts),
+                    member[1] * jnp.exp(-proc.k_slow * res.ts),
+                ],
+                axis=-1,
+            )
+            err = jnp.max(jnp.abs(res.ys[:, i] - exact)) / jnp.max(
+                jnp.abs(member)
+            )
+            assert float(err) < 1e-4
+
+
 class TestRoutingUnderTracing:
     """A cold cache under tracing cannot measure a Jacobian — the eigenvalues
     are tracers — so routing degrades to the explicit solver and says so.

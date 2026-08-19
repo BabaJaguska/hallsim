@@ -36,6 +36,17 @@ end-to-end differentiability, JIT, and native batched populations — see
 - `EVOLVED` — additive; multiple processes' derivatives to the same path are summed. A pure source (contribution independent of the path's own value — e.g. a cross-model edge or a running integral) sets `reads_value=False` so the graph analyzer doesn't infer a spurious feedback cycle.
 - `EXCLUSIVE` — sole owner; a second writer raises at composition time.
 - `LATCHED` — written by discrete/event processes, read as a constant by continuous processes within a macro step.
+- `ASSIGNED` — algebraic, not integrated: the process computes the value each step in `assign(t, state)` and is the path's sole owner. Use it for anything defined by a formula rather than a rate (a ratio, a gate, a quasi-steady-state manifold). `Composite` sorts assignments into dependency order automatically, and `SchedulerResult.get` returns them materialised alongside the integrated states.
+
+**Timescales decide grouping.** `Composite.auto_groups` clusters CONTINUOUS
+processes by `proc.timescale`, and `timescale=None` is not "don't care" — it
+puts the process in its own `"default"` group, which is then *operator-split*
+from everything else. A hand-written coupling edge left at the default is
+therefore split away from the SBML module it writes into (imports always carry
+`timescale=native_time_seconds`), paying splitting error at every macro-step
+boundary with nothing in the output to show for it. Give an edge the same
+`timescale` as the module it drives; `models/multi_hallmark.py` is the worked
+example.
 
 ## Validation layer
 
@@ -119,8 +130,9 @@ from any BioModels entry via `sbmltoodejax`, and:
 - inlines `<functionDefinition>` blocks (via libsbml), unlocking the majority
   of curated models that would otherwise hit "Custom functions are not
   handled" upstream;
-- pre-flight-rejects `<event>` blocks and unsupported MathML with actionable
-  errors;
+- translates `<event>` blocks (see `hallsim.sbml_events`), skipping with a
+  warning only those whose assignment target is a parameter rather than a
+  species, and pre-flight-rejects unsupported MathML with actionable errors;
 - extracts MIRIAM annotations into `Port.ontology` from species CVTerms.
 
 Discover-then-import is two calls — the catalog is directly usable by an agent:
@@ -221,3 +233,20 @@ result.get("dp14/CDKN1A").shape                      # (n_time, 1024)
 
 Near-flat in `batch` on GPU (kernel launch dominates); sub-linear on CPU
 (Python overhead amortizes across the batch).
+
+Batched `y0` broadcasts *initial conditions*. Varying a **parameter** across a
+batch — a hallmark severity sweep, for instance — changes the process pytree
+rather than the state vector, so it is not a `y0` batch; build one composite
+per arm.
+
+## Supporting modules
+
+Small modules a model author needs early, each importable on its own:
+
+| Module | What it gives you |
+|---|---|
+| `hallsim.kinetics` | `hill_gate`, `hill_inhibition` and friends — the saturating forms every coupling edge needs. Reach for these instead of hand-rolling `x**n / (K**n + x**n)`. |
+| `hallsim.io` | `outdir` and `make_run_dir` — the output convention every demo follows (timestamped run directory plus a `latest` symlink). |
+| `hallsim.bifurcation` | `equilibrium`, `spectrum`, `hopf_scan` — continuation and stability analysis around a fixed point. `hopf_scan` finds oscillation onsets only; a real-eigenvalue crossing (bistability, an invasion threshold) has to be found from `spectrum` today. |
+| `hallsim.stiffness` | `analyze_groups(composite, *, y0, groups, t0, dt)` — per-group spectral abscissa, Jacobian condition number and state-scale spread, with the solver verdict. Keyword-only. |
+| `hallsim.diagnostics` | `screen_process` / `screen_composite` (the constituents-first pre-flight), `screen_sensitivity`, and `recommend_coupling_source`. |

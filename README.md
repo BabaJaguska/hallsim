@@ -27,7 +27,7 @@ HallSim is a **composition framework** — you bring the modules (hand-written, 
 | Concept | Role |
 |---|---|
 | **Process** | `eqx.Module` with typed ports and a kind (CONTINUOUS / DISCRETE / EVENT); parameters are JAX arrays. |
-| **Port** | Named connection point with a role (INPUT / EVOLVED / EXCLUSIVE / LATCHED), units, and ontology. |
+| **Port** | Named connection point with a role (INPUT / EVOLVED / EXCLUSIVE / LATCHED / ASSIGNED), units, and ontology. |
 | **Topology** | Static wiring `{proc: {port: store_path}}`, outside the processes. |
 | **Composite** | Bundles processes + topology into a flat, JAX-compatible ODE RHS; auto-groups by timescale. |
 | **Scheduler** | The one runner for every composite shape — timescale groups, discrete dispatch, events, batched populations. |

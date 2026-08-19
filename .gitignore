@@ -230,3 +230,19 @@ cython_debug/
 
 # Local scratch / untracked notes
 /misc/
+
+# Framework stress-test artefacts (mitochondrial-aging experiment)
+/src/hallsim/models/mitochondrial_aging.py
+/src/hallsim/models/sbml/kowald2006/
+/src/hallsim/models/sbml/nazaret2009/
+/demos/mitochondrial_aging.py
+/demos/mito_bioenergetics_reduction.py
+/demos/mito_clock_costs.py
+/tests/unit/test_mitochondrial_aging.py
+
+/docs/framework-report-mitochondria.md
+/docs/mitochondrial-aging-model.md
+/docs/performance-audit.md
+/docs/review-mito-maths.md
+/docs/review-mito-physics.md
+/docs/review-mito-wetlab.md

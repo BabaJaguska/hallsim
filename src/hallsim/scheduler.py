@@ -22,7 +22,7 @@ Example
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import Any
 
@@ -40,6 +40,7 @@ from hallsim.composite import Composite
 from hallsim.config import (
     DEFAULT_ATOL,
     DEFAULT_ATOL_SCALE,
+    DEFAULT_NEWTON_ATOL,
     DEFAULT_DT0,
     DEFAULT_MAX_EXPLICIT_SUBSTEPS,
     DEFAULT_MAX_STEPS,
@@ -97,9 +98,11 @@ class EventRecord:
 class GroupIntegrator:
     """Resolved per-group solver + step-size controller, from
     :meth:`Scheduler._resolve_integrators`. Stiff groups get an implicit
-    (A-stable) solver and a magnitude-scaled vector ``atol``; the rest keep
-    the cheaper explicit solver and the scalar controller. ``info`` is the
-    stiffness verdict (``None`` in manual-solver mode, where none runs)."""
+    (A-stable) solver, the rest the cheaper explicit one; both carry the
+    scalar controller until :meth:`Scheduler._scaled_tolerances` gives the
+    stiff ones their magnitude-scaled vector ``atol`` for the state being
+    solved. ``info`` is the stiffness verdict (``None`` in manual-solver
+    mode, where none runs)."""
 
     solver: dfx.AbstractSolver
     controller: dfx.AbstractStepSizeController
@@ -298,6 +301,13 @@ class Scheduler:
         ``max(atol, atol_scale·|y0|)``.
     atol_scale:
         Relative coefficient of the stiff-group vector ``atol`` (default 1e-6).
+    newton_rtol, newton_atol:
+        Convergence tolerances of the Newton solve *inside* each implicit
+        stage — algebraic, not an accuracy target. ``newton_rtol`` defaults to
+        ``rtol``; ``newton_atol`` defaults to ``1e-6`` and is deliberately not
+        ``atol``, which on a model whose smallest state is orders below 1 asks
+        every stage to converge far past the state itself and exhausts the
+        step budget. Ignored when ``implicit_solver`` is passed explicitly.
     max_steps:
         Safety limit on solver steps per macro step.
     dt0:
@@ -348,6 +358,8 @@ class Scheduler:
         implicit_solver: dfx.AbstractSolver | None = None,
         auto_stiffness: bool = True,
         atol_scale: float = DEFAULT_ATOL_SCALE,
+        newton_rtol: float | None = None,
+        newton_atol: float = DEFAULT_NEWTON_ATOL,
         max_explicit_substeps: float = DEFAULT_MAX_EXPLICIT_SUBSTEPS,
         groups: dict[str, list[str]] | None = None,
         coupling_mode: str = "auto",
@@ -406,7 +418,10 @@ class Scheduler:
         # rejects ~50% of steps on real biochemical RHSs; a true Newton
         # solve (fresh Jacobian — what CVODE does) cuts that to a few %.
         self.implicit_solver = implicit_solver or dfx.Kvaerno5(
-            root_finder=optx.Newton(rtol=rtol, atol=atol)
+            root_finder=optx.Newton(
+                rtol=rtol if newton_rtol is None else newton_rtol,
+                atol=newton_atol,
+            )
         )
         self.solver = solver or self.explicit_solver
         self.atol_scale = atol_scale
@@ -624,6 +639,12 @@ class Scheduler:
                 events=[],
                 stats=_attach_diagnosis(stats, ys),
             )
+
+        # Eager path: no compiled core to carry the tolerance, so scale it here
+        # against this run's initial state.
+        integrators = self._scaled_tolerances(
+            integrators, composite, groups, keys, state
+        )
 
         # Per-group RHS, plus the indices each group writes — interpolated
         # coupling splices the previous group's state at those positions.
@@ -921,7 +942,6 @@ class Scheduler:
         if fast:
             (gname,) = groups
             (proc_names,) = groups.values()
-            integ = integrators[gname]
             save_ts = self._save_grid(
                 t0, t1, save_dt if save_dt is not None else macro_dt
             )
@@ -929,6 +949,9 @@ class Scheduler:
             own = composite.evolved_indices(proc_names, keys)
 
             def core(comp, y0):
+                integ = self._scaled_tolerances(
+                    integrators, composite, groups, keys, y0
+                )[gname]
                 rhs_fn, _ = comp.build_rhs(proc_names)
                 sol, ys = self._reduced_solve(
                     rhs_fn,
@@ -966,7 +989,9 @@ class Scheduler:
                 return self._run_scan_continuous(
                     comp,
                     groups,
-                    integrators,
+                    self._scaled_tolerances(
+                        integrators, composite, groups, keys, y0
+                    ),
                     y0,
                     keys,
                     t0,
@@ -1400,12 +1425,14 @@ class Scheduler:
         t0: float,
         macro_dt: float,
     ) -> dict[str, GroupIntegrator]:
-        """Pick a solver + step-size controller for each group.
+        """Pick a solver for each group.
 
-        Routing (default): stiff groups get the implicit solver and a
-        magnitude-scaled vector ``atol``, the rest the explicit solver and the
-        scalar controller. Pinned (``solver=`` or ``auto_stiffness=False``):
-        every group uses ``self.solver``.
+        Routing (default): stiff groups get the implicit solver, the rest the
+        explicit one. Pinned (``solver=`` or ``auto_stiffness=False``): every
+        group uses ``self.solver``. Every group leaves here with the scalar
+        controller; :meth:`_scaled_tolerances` sets the stiff ones' vector
+        ``atol`` per run, since only the routing verdict is state-independent
+        enough to cache.
 
         Cached by structural signature so the analysis runs once, eagerly.
         Under grad/jvp/vmap the eigenvalues are tracers, so a traced call with
@@ -1473,18 +1500,12 @@ class Scheduler:
                 type(self.explicit_solver).__name__,
             )
             return _all_explicit()
-        # Loosen atol on large-magnitude states, which would otherwise force
-        # stability-tiny steps, while keeping a tight floor near zero.
-        atol_vec = jnp.maximum(self.atol, self.atol_scale * jnp.abs(state))
-        keys_ = composite.store_keys()
         integ: dict[str, GroupIntegrator] = {}
         for g, verdict in report.items():
             if verdict.stiff:
-                # Sliced to the group's own states — _ReducedRHS solves those.
-                own = composite.evolved_indices(groups[g], keys_)
                 integ[g] = GroupIntegrator(
                     self.implicit_solver,
-                    dfx.PIDController(rtol=self.rtol, atol=atol_vec[..., own]),
+                    self.controller,
                     stiff=True,
                     info=verdict,
                 )
@@ -1499,6 +1520,46 @@ class Scheduler:
                 log.info("  stiffness: %s", verdict)
         self._integrator_cache[sig] = integ
         return integ
+
+    def _scaled_tolerances(
+        self,
+        integrators: dict[str, GroupIntegrator],
+        composite: Composite,
+        groups: dict[str, list[str]],
+        keys: list[str],
+        state: jnp.ndarray,
+    ) -> dict[str, GroupIntegrator]:
+        """Give each stiff group a vector ``atol`` scaled to ``state``'s
+        magnitudes, sliced to the group's own indices (what ``_ReducedRHS``
+        solves). Loosens the tolerance on large-magnitude states, which would
+        otherwise force stability-tiny steps, while keeping a tight floor near
+        zero.
+
+        Called on the state a run actually starts from, and inside the traced
+        core, so the tolerance is a function of ``y0`` rather than a constant.
+        Resolving it alongside the routing verdict instead would bake the
+        first run's magnitudes into a structurally-cached executable, and
+        every later population member and calibration step would inherit them.
+        """
+        if not any(integ.stiff for integ in integrators.values()):
+            return integrators
+        atol_vec = jnp.maximum(self.atol, self.atol_scale * jnp.abs(state))
+        return {
+            g: (
+                replace(
+                    integ,
+                    controller=dfx.PIDController(
+                        rtol=self.rtol,
+                        atol=atol_vec[
+                            ..., composite.evolved_indices(groups[g], keys)
+                        ],
+                    ),
+                )
+                if integ.stiff
+                else integ
+            )
+            for g, integ in integrators.items()
+        }
 
     def warm_up(
         self,
