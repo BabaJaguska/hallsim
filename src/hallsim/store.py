@@ -11,9 +11,14 @@ Internally everything runs on the flat vector returned by
 
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 import jax.numpy as jnp
 
 from hallsim.process import PortRole, Process, ProcessKind
+
+log = logging.getLogger(__name__)
 
 
 def build_initial_store(
@@ -24,20 +29,64 @@ def build_initial_store(
 
     For each process, looks up its ports via ``ports_schema()``, maps them
     through the topology to store paths, and collects default values.
-    If two ports map to the same store path, the first-seen default wins
-    (deterministic because dicts are insertion-ordered in Python 3.7+).
+
+    When several ports share a store path, a *writer* port (EVOLVED,
+    EXCLUSIVE, LATCHED, ASSIGNED) seeds the value in preference to a reader
+    (INPUT) — a reader's default describes what it expects to be handed, not
+    what the path holds. Within a tier the lowest process name wins.
+
+    The tie-break is by name rather than by dict order on purpose: JAX sorts
+    dict keys when it flattens a pytree, so ``processes`` comes back sorted
+    from any ``jax.jit`` / ``vmap`` / ``eqx.tree_at`` round-trip of the
+    owning Composite. Keyed on insertion order, the same composite would seed
+    a different initial value after a round-trip than before it.
     """
-    store: dict[str, jnp.ndarray] = {}
-    for proc_name, proc in processes.items():
+    writer_roles = (
+        PortRole.EVOLVED,
+        PortRole.EXCLUSIVE,
+        PortRole.LATCHED,
+        PortRole.ASSIGNED,
+    )
+    # path -> {tier: [(proc_name, default)]}, tier 0 = writer, 1 = reader.
+    claims: dict[str, dict[int, list[tuple[str, Any]]]] = {}
+    for proc_name in sorted(processes):
+        proc = processes[proc_name]
         topo = topology.get(proc_name, {})
         for port_name, port in proc.ports_schema().items():
             store_path = topo.get(port_name, port_name)
-            if store_path not in store:
-                # No explicit dtype: honor the global JAX default (float64
-                # under jax_enable_x64), so integration state matches the
-                # rtol=1e-6 solver tolerance rather than the float32 floor.
-                store[store_path] = jnp.asarray(port.default)
+            tier = 0 if port.role in writer_roles else 1
+            claims.setdefault(store_path, {}).setdefault(tier, []).append(
+                (proc_name, port.default)
+            )
+
+    store: dict[str, jnp.ndarray] = {}
+    for store_path, tiers in claims.items():
+        winners = tiers[min(tiers)]
+        name, default = winners[0]
+        rejected = {d for _, d in winners[1:] if not _same_default(d, default)}
+        if rejected:
+            log.warning(
+                "build_initial_store: %s is claimed by %d ports of the same "
+                "role with differing defaults %s; seeding %r from '%s'. "
+                "Declare the value once, or wire the disagreeing ports to "
+                "separate paths.",
+                store_path,
+                len(winners),
+                sorted(rejected | {default}, key=repr),
+                default,
+                name,
+            )
+        # No explicit dtype: honor the global JAX default (float64 under
+        # jax_enable_x64), so integration state matches the rtol=1e-6 solver
+        # tolerance rather than the float32 floor.
+        store[store_path] = jnp.asarray(default)
     return store
+
+
+def _same_default(a: Any, b: Any) -> bool:
+    """Equality that tolerates array-valued port defaults."""
+    same = jnp.asarray(a) == jnp.asarray(b)
+    return bool(jnp.all(same))
 
 
 def validate_topology(

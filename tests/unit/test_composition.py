@@ -153,9 +153,11 @@ class TestStore:
             "decay": {"x": "pool/x"},
         }
         store = build_initial_store(procs, topo)
-        # Production's default=0.0 wins (first in dict order)
+        # Both are EVOLVED writers with differing defaults, so the choice is
+        # ambiguous and warned about; 'decay' wins the name tie-break.
         assert "pool/x" in store
         assert store["pool/x"].shape == ()
+        assert float(store["pool/x"]) == 1.0
 
     def test_build_store_separate_paths(self):
         procs = {"prod": Production(), "decay": Decay()}
@@ -166,6 +168,60 @@ class TestStore:
         store = build_initial_store(procs, topo)
         assert "pool/a" in store
         assert "pool/b" in store
+
+    def test_writer_default_outranks_reader(self):
+        """An INPUT default says what a reader expects, not what the path
+        holds; a writer on the same path seeds it."""
+
+        class Reader(Process):
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.INPUT, default=99.0)}
+
+            def derivative(self, t, state):
+                return {}
+
+        procs = {"a_reader": Reader(), "z_writer": Production()}
+        topo = {"a_reader": {"x": "pool/x"}, "z_writer": {"x": "pool/x"}}
+        store = build_initial_store(procs, topo)
+        assert float(store["pool/x"]) == 0.0
+
+    def test_initial_store_independent_of_insertion_order(self):
+        topo = {"prod": {"x": "pool/x"}, "decay": {"x": "pool/x"}}
+        forward = build_initial_store(
+            {"prod": Production(), "decay": Decay()}, topo
+        )
+        reverse = build_initial_store(
+            {"decay": Decay(), "prod": Production()}, topo
+        )
+        assert float(forward["pool/x"]) == float(reverse["pool/x"])
+
+    def test_initial_state_survives_pytree_roundtrip(self):
+        """JAX sorts dict keys when flattening, so ``processes`` comes back
+        reordered from any jit/vmap/tree_at over the Composite. The initial
+        state must not depend on that order."""
+
+        class Reader(Process):
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.INPUT, default=99.0)}
+
+            def derivative(self, t, state):
+                return {}
+
+        comp = Composite(
+            processes={"z_writer": Production(), "a_reader": Reader()},
+            topology={
+                "z_writer": {"x": "pool/x"},
+                "a_reader": {"x": "pool/x"},
+            },
+            semantic_validation=False,
+        )
+        roundtripped = jax.tree_util.tree_map(lambda v: v, comp)
+        assert (
+            comp.initial_state().keys() == roundtripped.initial_state().keys()
+        )
+        assert float(comp.initial_state()["pool/x"]) == float(
+            roundtripped.initial_state()["pool/x"]
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
