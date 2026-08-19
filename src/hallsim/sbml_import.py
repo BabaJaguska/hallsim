@@ -247,6 +247,9 @@ class SBMLProcess(ImportedODEProcess):
     # so a driver aimed at a rate constant the model modulates via a rule can
     # be flagged (see hallsim.coupling_wiring).
     _coupling_meta: dict = eqx.field(static=True, default=None)
+    # Species × reaction stoichiometry from the source SBML — the exact,
+    # parameter-independent basis for conserved-moiety analysis.
+    _stoichiometry: dict = eqx.field(static=True, default=None)
     _model: Any = None  # sbmltoodejax model object
     _w0: Any = None
     _c: Any = None
@@ -278,6 +281,15 @@ class SBMLProcess(ImportedODEProcess):
         """SBML equation structure for the coupling-wiring check (extracted at
         import; see :func:`_extract_coupling_metadata`)."""
         return self._coupling_meta
+
+    def stoichiometry(self) -> dict | None:
+        """Species × reaction ``N`` from the source SBML (see
+        :func:`_extract_stoichiometry`). ``None`` when the model declares no
+        reactions or a symbolic stoichiometry, where ``N`` would not be
+        parameter-independent."""
+        if not self._stoichiometry or not self._stoichiometry["species"]:
+            return None
+        return self._stoichiometry
 
     def with_param_step(
         self, param_name: str, t_step: float, value_before: float
@@ -698,6 +710,70 @@ def _extract_species_ontology(xml_path: str) -> dict[str, dict[str, str]]:
                     ontology.setdefault(namespace, identifier)
         result[sp_id] = ontology
     return result
+
+
+def _extract_stoichiometry(xml_path: str) -> dict:
+    """Species × reaction stoichiometry ``N`` straight from the SBML.
+
+    Returns ``{"species": (id, ...), "reactions": (id, ...), "matrix":
+    ((coeff, ...), ...)}`` with one matrix row per species. This is the
+    model's wiring, not its kinetics: it fixes the conserved moieties exactly
+    and independently of every rate constant, which is what distinguishes a
+    moiety from a merely slow direction.
+
+    Species the network cannot change are excluded — ``boundaryCondition``
+    (held by the experiment) and ``constant`` — since a reaction touching one
+    is not a constraint on the state. A species carrying a non-integer or
+    symbolic stoichiometry (``stoichiometryMath``) makes the matrix
+    parameter-dependent, so the extraction reports nothing rather than
+    something conditionally true. Likewise a ``rateRule`` on one of these
+    species — its dynamics are then not ``N·v`` at all, so ``N`` no longer
+    settles what is conserved.
+
+    Empty structure if libsbml cannot parse the file or the model has no
+    reactions (a rules-only model, where ``N`` says nothing).
+    """
+    import libsbml
+
+    empty = {"species": (), "reactions": (), "matrix": ()}
+    model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
+    if model is None or model.getNumReactions() == 0:
+        return empty
+
+    dynamic = [
+        s.getId()
+        for s in model.getListOfSpecies()
+        if not s.getBoundaryCondition() and not s.getConstant()
+    ]
+    if not dynamic:
+        return empty
+    rate_ruled = {
+        r.getVariable() for r in model.getListOfRules() if r.isRate()
+    }
+    if rate_ruled & set(dynamic):
+        return empty
+    row_of = {sid: i for i, sid in enumerate(dynamic)}
+
+    reactions = [r.getId() for r in model.getListOfReactions()]
+    matrix = [[0.0] * len(reactions) for _ in dynamic]
+    for col, reaction in enumerate(model.getListOfReactions()):
+        for refs, sign in (
+            (reaction.getListOfReactants(), -1.0),
+            (reaction.getListOfProducts(), +1.0),
+        ):
+            for ref in refs:
+                if ref.isSetStoichiometryMath():
+                    return empty
+                row = row_of.get(ref.getSpecies())
+                if row is None:
+                    continue
+                matrix[row][col] += sign * ref.getStoichiometry()
+
+    return {
+        "species": tuple(dynamic),
+        "reactions": tuple(reactions),
+        "matrix": tuple(tuple(r) for r in matrix),
+    }
 
 
 def _extract_coupling_metadata(xml_path: str) -> dict:
@@ -1230,6 +1306,7 @@ def process_from_sbml(
     # SBML models by their identifiers.org references.
     ontology_map = _extract_species_ontology(xml_path)
     coupling_meta = _extract_coupling_metadata(xml_path)
+    stoichiometry = _extract_stoichiometry(xml_path)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
 
     native_time_seconds, native_time_declared = _native_clock(xml_path, name)
@@ -1265,6 +1342,7 @@ def process_from_sbml(
         _species_y0=tuple(float(y0[i]) for i in range(len(species_names))),
         _species_ontology=species_ontology,
         _coupling_meta=coupling_meta,
+        _stoichiometry=stoichiometry,
         native_time_seconds=native_time_seconds,
         native_time_declared=native_time_declared,
         time_scale=1.0,

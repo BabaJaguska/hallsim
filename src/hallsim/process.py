@@ -325,6 +325,22 @@ class Process(eqx.Module):
         importers override it, so the checker stays format-agnostic."""
         return None
 
+    def stoichiometry(self) -> dict | None:
+        """Species × reaction stoichiometry ``N``, as ``{"species": (port
+        name, ...), "reactions": (id, ...), "matrix": ((coeff, ...), ...)}``
+        with one row per species.
+
+        ``N`` is the process's wiring, independent of every rate constant, so
+        it settles the conserved moieties exactly — where the null space of a
+        Jacobian only ever says "nothing much is moving *here*, at *these*
+        parameters". Declare it whenever the dynamics really are
+        ``dy/dt = N·v(y)``.
+
+        ``None`` means undeclared, not "no conservation": callers fall back to
+        inferring the moieties numerically (see
+        :func:`hallsim.steady_state.conservation_laws`)."""
+        return None
+
     # --- Helpers -------------------------------------------------------------
 
     def ports_with_role(self, role: PortRole) -> dict[str, Port]:

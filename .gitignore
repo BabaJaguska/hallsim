@@ -246,3 +246,4 @@ cython_debug/
 /docs/review-mito-maths.md
 /docs/review-mito-physics.md
 /docs/review-mito-wetlab.md
+.claude/

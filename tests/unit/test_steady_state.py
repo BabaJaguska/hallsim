@@ -11,6 +11,7 @@ from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process
 from hallsim.steady_state import (
     conservation_laws,
+    conserved_moieties,
     steady_state,
     warn_if_time_dependent,
 )
@@ -99,3 +100,109 @@ def test_time_dependent_warns(caplog):
         auton = warn_if_time_dependent(comp, comp.initial_state_vec())
     assert not auton
     assert any("time-dependent" in r.message for r in caplog.records)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Conserved moieties from stoichiometry
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_moieties_are_integer_and_named():
+    """A ⇌ B conserves A+B, with coefficients 1 and 1 — not 0.707."""
+    n = {
+        "species": ("A", "B"),
+        "reactions": ("forward",),
+        "matrix": ((-1.0,), (1.0,)),
+    }
+    assert conserved_moieties(n) == [{"A": 1, "B": 1}]
+
+
+def test_no_moiety_when_species_is_produced_and_degraded():
+    n = {
+        "species": ("X",),
+        "reactions": ("synth", "degrade"),
+        "matrix": ((1.0, -1.0),),
+    }
+    assert conserved_moieties(n) == []
+
+
+def test_moieties_do_not_depend_on_rate_constants():
+    """The property the Jacobian null space cannot hold: a conservation law
+    is a fact about the wiring, so no rate constant can change it."""
+    n = {
+        "species": ("A", "B", "C"),
+        "reactions": ("exchange", "decay"),
+        "matrix": ((-1.0, 0.0), (1.0, 0.0), (0.0, -1.0)),
+    }
+    assert conserved_moieties(n) == [{"A": 1, "B": 1}]
+
+
+def test_slow_decay_is_not_conserved(caplog):
+    """C decays at k=1e-12. Declared stoichiometry says it is not conserved
+    however slow it gets; the Jacobian at a point cannot tell."""
+
+    class Exchange(Process):
+        def ports_schema(self):
+            return {
+                "A": Port(role=PortRole.EVOLVED, default=1.0),
+                "B": Port(role=PortRole.EVOLVED, default=1.0),
+            }
+
+        def derivative(self, t, state):
+            flux = state["A"] - state["B"]
+            return {"A": -flux, "B": flux}
+
+        def stoichiometry(self):
+            return {
+                "species": ("A", "B"),
+                "reactions": ("exchange",),
+                "matrix": ((-1.0,), (1.0,)),
+            }
+
+    class SlowDecay(Process):
+        k: float = 1e-12
+
+        def ports_schema(self):
+            return {"C": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def derivative(self, t, state):
+            return {"C": -self.k * state["C"]}
+
+        def stoichiometry(self):
+            return {
+                "species": ("C",),
+                "reactions": ("decay",),
+                "matrix": ((-1.0,),),
+            }
+
+    comp = Composite(
+        processes={"ex": Exchange(), "dec": SlowDecay()},
+        topology={"ex": {"A": "p/A", "B": "p/B"}, "dec": {"C": "p/C"}},
+        semantic_validation=False,
+    )
+    keys = comp.store_keys()
+    laws = conservation_laws(comp, comp.initial_state_vec())
+    assert laws.shape[0] == 1
+    row = {keys[i]: int(v) for i, v in enumerate(laws[0]) if abs(v) > 1e-12}
+    assert row == {"p/A": 1, "p/B": 1}
+
+
+def test_undeclared_process_falls_back():
+    """One process without a stoichiometry means N cannot describe the
+    composite, so the exact path must not be used."""
+
+    class Opaque(Process):
+        def ports_schema(self):
+            return {"C": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def derivative(self, t, state):
+            return {"C": -0.1 * state["C"]}
+
+    from hallsim.steady_state import composite_stoichiometry
+
+    comp = Composite(
+        processes={"op": Opaque()},
+        topology={"op": {"C": "p/C"}},
+        semantic_validation=False,
+    )
+    assert composite_stoichiometry(comp) is None
