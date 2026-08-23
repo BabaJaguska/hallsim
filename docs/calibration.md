@@ -94,9 +94,38 @@ results = problem.evaluate(history.final_params)
 
 - **Hallmark knobs aren't fittable by default** — a guard rail raises if you
   try to fit a pure severity dial (severity would overwrite the fit).
+- **One route for changing a parameter** — `with_overrides`, fitted or not. An
+  edit that substitution would overwrite raises instead of running unablated.
 - **Parameter discovery is self-documenting** via `calibration_targets()`.
 - **Held-out splits are mandatory** — calibrate on one arm, report concordance
   on another. Same-data fit-and-evaluate is curve-fitting, not concordance.
+
+### Changing a parameter for a run — ablations
+
+`with_overrides` is the one route, and it works the same whether or not the
+parameter is fitted:
+
+```python
+# Is the mTORC1 -> IKK edge load-bearing? Switch it off and re-score.
+off = problem.with_overrides({"mtor_to_nfkb": 0.0})
+ablated = off.evaluate(params)
+```
+
+A key names either a fittable (whatever `params` calls it) or a process field
+in dotted form — `"mtor_nfkb.k_act"` and `"dp14.parameters.k"` address the same
+places `ParameterRef` does. Both spellings reach the same field, so which list a
+parameter happens to be in is not something you have to know. The call returns a
+new problem and leaves the original alone; overrides compose.
+
+An override is applied **last**, so it beats the fitted iterate and the
+composite's own value alike. That is the whole reason this exists: every
+evaluation substitutes the current iterate into each fitted field, so editing
+one directly with `eqx.tree_at` is overwritten before the solve and the run
+silently proceeds unablated — a live edge then measures as dead. That edit now
+raises and points here.
+
+Under `fit`, an override holds its parameter fixed and the optimizer sees a zero
+gradient for it.
 
 ### Loss
 

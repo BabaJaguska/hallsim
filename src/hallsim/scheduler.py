@@ -1460,19 +1460,32 @@ class Scheduler:
                 for g in groups
             }
 
-        state_traced = isinstance(state, jax.core.Tracer)
-        try:
-            report = (
-                None
-                if state_traced
-                else analyze_groups(
-                    composite,
-                    y0=state,
-                    groups=groups,
-                    t0=t0,
-                    dt=macro_dt,
-                    max_explicit_substeps=self.max_explicit_substeps,
+        def _all_implicit():
+            return {
+                g: GroupIntegrator(
+                    self.implicit_solver, self.controller, stiff=True
                 )
+                for g in groups
+            }
+
+        # The cache signature excludes state values, so the verdict is already
+        # declared independent of them: a traced state can be analysed at the
+        # composite's concrete initial state instead of abandoning the
+        # analysis. Only a traced *composite* (parameters under grad) leaves
+        # nothing concrete to measure.
+        probe = (
+            composite.initial_state_vec(composite.store_keys())
+            if isinstance(state, jax.core.Tracer)
+            else state
+        )
+        try:
+            report = analyze_groups(
+                composite,
+                y0=probe,
+                groups=groups,
+                t0=t0,
+                dt=macro_dt,
+                max_explicit_substeps=self.max_explicit_substeps,
             )
         except RuntimeError:
             report = None  # tracers in the RHS — same cold-trace situation
@@ -1489,17 +1502,21 @@ class Scheduler:
 
         if report is None:
             # Not cached, so a later eager call still gets to measure and route.
+            # Degrade to the *implicit* solver, not the explicit one: an
+            # implicit solve of a non-stiff group is slower but correct, while
+            # an explicit solve of a stiff one returns finite, plausible and
+            # wrong sensitivities. Fall back toward correctness and let
+            # warm_up buy the speed back.
             log.warning(
                 "cannot measure group stiffness under tracing (grad/jvp/vmap) "
-                "with a cold cache; falling back to the explicit solver %s "
-                "for all groups. A stiff group solved this way can return NaN "
-                "sensitivities even where the trajectory is finite — call "
-                "warm_up(y0) once eagerly before differentiating so the "
-                "per-group verdict is resolved outside the trace "
-                "(CalibrationProblem.fit does this for you).",
-                type(self.explicit_solver).__name__,
+                "with a cold cache; using the implicit solver %s for all "
+                "groups. That is correct either way, but a non-stiff group "
+                "pays for it — call warm_up(y0) once eagerly before "
+                "differentiating so the per-group verdict is resolved outside "
+                "the trace (CalibrationProblem.fit does this for you).",
+                type(self.implicit_solver).__name__,
             )
-            return _all_explicit()
+            return _all_implicit()
         integ: dict[str, GroupIntegrator] = {}
         for g, verdict in report.items():
             if verdict.stiff:

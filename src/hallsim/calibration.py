@@ -27,6 +27,7 @@ calibration); ``"reverse"`` is one VJP and wins for many parameters
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from dataclasses import dataclass, field, replace as dc_replace
@@ -37,8 +38,11 @@ import equinox as eqx
 import jax
 import jax.flatten_util  # noqa: F401  # for ravel_pytree
 import jax.numpy as jnp
+import numpy as np
 import optax
 import optax.contrib
+
+from hallsim.process import read_param
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -661,6 +665,31 @@ def _substitute_param(proc, field: str, value: Any):
     return eqx.tree_at(lambda p, pn=field: getattr(p, pn), proc, value)
 
 
+def _reject_overwritten_edit(pname: str, pref, proc, baseline) -> None:
+    """Raise if a fitted field changed after the problem was wired.
+
+    Substitution is about to write the current iterate over it, so the edit
+    cannot survive — and an ablation that silently does nothing reads as an
+    edge with no influence, which is the one failure mode worse than an error.
+    Traced values are skipped: nothing concrete to compare.
+    """
+    current = read_param(proc, pref.field)
+    if isinstance(current, jax.core.Tracer) or isinstance(
+        baseline, jax.core.Tracer
+    ):
+        return
+    if np.array_equal(np.asarray(current), np.asarray(baseline)):
+        return
+    address = f"{pref.process_name}.{pref.field}"
+    raise ValueError(
+        f"{address} was edited after this problem was wired "
+        f"({baseline} → {current}), but params[{pname!r}] fits that field, so "
+        "the next substitution overwrites the edit and it has no effect. Use "
+        f"problem.with_overrides({{{address!r}: value}}) instead — an "
+        "override is applied last and wins."
+    )
+
+
 def gaussian_nll(
     model: jnp.ndarray, data: jnp.ndarray, weight: jnp.ndarray
 ) -> jnp.ndarray:
@@ -928,6 +957,19 @@ class CalibrationProblem:
         # `params` (declaration order) is the optimizer surface; `_params`
         # substitutes into processes, `_coeffs` overrides registry floors.
         self.params = proc_params
+        # What the fitted fields held when the problem was wired. Every
+        # evaluation overwrites them, so a later edit to one is inert; it is
+        # checked against this and raised on rather than silently discarded.
+        self._param_baseline = {
+            pname: read_param(
+                composite.processes[pref.process_name], pref.field
+            )
+            for pname, pref in proc_params.items()
+        }
+        # Set by with_overrides: fittables pinned by name, and process fields
+        # pinned by (process, field). Both applied after the fitted iterate.
+        self._override_params: dict = {}
+        self._override_fields: dict = {}
         self._coeffs = coeff_params
         self._all_refs = params
         self._base_registry = reg
@@ -1022,14 +1064,80 @@ class CalibrationProblem:
         starting vector, exactly what :meth:`fit` packs internally."""
         return {k: jnp.asarray(p.init) for k, p in self._all_refs.items()}
 
+    def with_overrides(self, overrides: dict) -> "CalibrationProblem":
+        """A copy of this problem with parameters pinned to given values.
+
+        The one route for changing a parameter for a run — ablations included —
+        whether or not that parameter is fitted, so nobody has to know which it
+        is. A key names either a fittable (whatever ``params`` calls it) or a
+        process field in dotted form::
+
+            problem.with_overrides({"mtor_to_nfkb": 0.0})    # a fittable
+            problem.with_overrides({"mtor_nfkb.k_act": 0.0})  # the same field
+            problem.with_overrides({"dp14.parameters.k": 1.0})
+
+        An override is applied last, so it wins over the fitted iterate and
+        over the composite's own value alike. Calls compose: each adds to the
+        overrides already set. Under :meth:`fit` an override holds its
+        parameter fixed and the optimizer sees a zero gradient for it.
+        """
+        pinned = dict(self._override_params)
+        fields = dict(self._override_fields)
+        for key, value in overrides.items():
+            value = jnp.asarray(value)
+            if key in self._all_refs:
+                pinned[key] = value
+                continue
+            proc_name, _, field_path = key.partition(".")
+            proc = self.composite.processes.get(proc_name)
+            if proc is not None and field_path:
+                try:
+                    read_param(proc, field_path)
+                except (AttributeError, KeyError, TypeError) as exc:
+                    raise KeyError(
+                        f"{key!r} names no field on process {proc_name!r} "
+                        f"({type(proc).__name__})."
+                    ) from exc
+                fields[(proc_name, field_path)] = value
+                continue
+            raise KeyError(
+                f"{key!r} is neither a fittable of this problem "
+                f"({sorted(self._all_refs)}) nor a '<process>.<field>' "
+                f"address into it (processes: "
+                f"{sorted(self.composite.processes)})."
+            )
+        clone = copy.copy(self)
+        clone._override_params = pinned
+        clone._override_fields = fields
+        return clone
+
+    def _pinned(self, param_values: dict) -> dict:
+        """``param_values`` with every overridden fittable replaced, so the
+        fitted-substitution path routes an override to the right home —
+        a process field or a hallmark coefficient — without knowing which."""
+        if not self._override_params:
+            return param_values
+        return {**param_values, **self._override_params}
+
     def _substitute(self, processes: dict, param_values: dict) -> dict:
+        param_values = self._pinned(param_values)
         new = dict(processes)
         for pname, pref in self.params.items():
+            _reject_overwritten_edit(
+                pname,
+                pref,
+                new[pref.process_name],
+                self._param_baseline[pname],
+            )
             new[pref.process_name] = _substitute_param(
                 new[pref.process_name],
                 pref.field,
                 param_values[pname],
             )
+        # Last, so an override outranks the fitted iterate whichever way the
+        # caller spelled it.
+        for (proc_name, path), value in self._override_fields.items():
+            new[proc_name] = _substitute_param(new[proc_name], path, value)
         return new
 
     def _registry(self, param_values: dict):
@@ -1040,6 +1148,7 @@ class CalibrationProblem:
         coefficients stay at their ``init``."""
         if not self._coeffs:
             return self._base_registry
+        param_values = self._pinned(param_values)
         overrides: dict[str, dict[str, dict[str, Any]]] = {}
         for name, cref in self._coeffs.items():
             overrides.setdefault(cref.hallmark, {}).setdefault(

@@ -68,6 +68,17 @@ def calibratable(
     )
 
 
+def read_param(proc, field: str):
+    """Current value at ``field`` on ``proc``, in the dotted convention shared
+    by :attr:`hallsim.hallmarks.ParameterMapping.param_name` and
+    :class:`hallsim.calibration.ParameterRef`: ``"alpha"`` reads ``proc.alpha``,
+    ``"parameters.<key>"`` one entry of a parameters dict."""
+    if "." in field:
+        field_name, key = field.split(".", 1)
+        return getattr(proc, field_name)[key]
+    return getattr(proc, field)
+
+
 # ---------------------------------------------------------------------------
 # Port role enum
 # ---------------------------------------------------------------------------

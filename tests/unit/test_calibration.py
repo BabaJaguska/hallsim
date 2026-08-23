@@ -6,6 +6,7 @@ optimal parameters are known analytically.
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax.numpy as jnp
 import optax
 import pytest
@@ -545,6 +546,149 @@ class TestCalibrationProblemEndToEnd:
         assert jnp.isfinite(v) and v.shape == ()
         results = problem.evaluate({"rate": jnp.asarray(0.2)})
         assert set(results["high_vs_ctrl"]) == {2.0, 5.0}
+
+
+class TestParameterOverrides:
+    """``with_overrides`` is the one route for changing a parameter for a run,
+    fitted or not. Editing a fitted field in the pytree instead cannot survive
+    — every evaluation substitutes the current iterate over it — and an inert
+    ablation reads as an edge that carries no influence, so it raises."""
+
+    def _problem(self):
+        import pandas as pd
+
+        from hallsim.calibration import (
+            CalibrationProblem,
+            Condition,
+            ParameterRef,
+        )
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter
+        from hallsim.process import Port, PortRole, Process
+
+        class Decay(Process):
+            rate: float = 0.1
+            scale: float = 1.0
+
+            def ports_schema(self):
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=1.0, units="uM"),
+                }
+
+            def derivative(self, t, state):
+                return {"x": -self.scale * self.rate * state["x"]}
+
+        return CalibrationProblem(
+            composite=Composite(
+                processes={"decay": Decay()},
+                topology={"decay": {"x": "pool/x"}},
+                validate=False,
+                semantic_validation=False,
+            ),
+            reporters=[
+                GeneReporter(observable="pool/x", gene_symbol="GENE_X", sign=1)
+            ],
+            conditions={
+                "ctrl": Condition("ctrl", {}),
+                "high": Condition("high", {}),
+            },
+            data={"high_vs_ctrl": pd.Series({"GENE_X": -0.5})},
+            arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
+            params={
+                "rate": ParameterRef(
+                    process_name="decay", field="rate", init=0.2
+                )
+            },
+            fit_arms=["high_vs_ctrl"],
+            t_end=5.0,
+            macro_dt=1.0,
+            n_save=3,
+        )
+
+    def test_editing_a_fitted_field_raises(self):
+        problem = self._problem()
+        problem.composite = eqx.tree_at(
+            lambda c: c.processes["decay"].rate,
+            problem.composite,
+            jnp.asarray(0.0),
+        )
+        with pytest.raises(ValueError, match="no effect"):
+            problem.simulate_reporters({"rate": jnp.asarray(0.2)}, "ctrl")
+
+    def test_override_pins_a_fitted_parameter(self):
+        """The route the raise points at: same answer as passing the value in
+        by hand, without the caller knowing the field is fitted."""
+        problem = self._problem()
+        by_hand = problem.simulate_reporters(
+            {"rate": jnp.asarray(0.0)}, "ctrl"
+        )
+        pinned = problem.with_overrides({"rate": 0.0})
+        by_override = pinned.simulate_reporters(
+            {"rate": jnp.asarray(0.2)}, "ctrl"
+        )
+        assert jnp.array_equal(by_hand[1], by_override[1])
+
+    def test_override_addresses_a_fitted_field_either_way(self):
+        """``"rate"`` (what params calls it) and ``"decay.rate"`` (where it
+        lives) name the same thing, so neither spelling has to be remembered.
+        """
+        problem = self._problem()
+        params = {"rate": jnp.asarray(0.2)}
+        by_name = problem.with_overrides({"rate": 0.0})
+        by_address = problem.with_overrides({"decay.rate": 0.0})
+        assert jnp.array_equal(
+            by_name.simulate_reporters(params, "ctrl")[1],
+            by_address.simulate_reporters(params, "ctrl")[1],
+        )
+
+    def test_override_pins_an_unfitted_field(self):
+        """Same call for a field nobody fits — equivalent to editing it."""
+        problem = self._problem()
+        params = {"rate": jnp.asarray(0.2)}
+        edited = eqx.tree_at(
+            lambda c: c.processes["decay"].scale,
+            problem.composite,
+            jnp.asarray(3.0),
+        )
+        by_edit = self._problem()
+        by_edit.composite = edited
+        pinned = problem.with_overrides({"decay.scale": 3.0})
+        assert jnp.array_equal(
+            by_edit.simulate_reporters(params, "ctrl")[1],
+            pinned.simulate_reporters(params, "ctrl")[1],
+        )
+
+    def test_unknown_override_key_raises(self):
+        problem = self._problem()
+        with pytest.raises(KeyError, match="neither a fittable"):
+            problem.with_overrides({"nonsense": 0.0})
+        with pytest.raises(KeyError, match="names no field"):
+            problem.with_overrides({"decay.nonsense": 0.0})
+
+    def test_overrides_compose_and_leave_the_original_alone(self):
+        problem = self._problem()
+        params = {"rate": jnp.asarray(0.2)}
+        both = problem.with_overrides({"rate": 0.0}).with_overrides(
+            {"decay.scale": 3.0}
+        )
+        assert both._override_params and both._override_fields
+        assert not problem._override_params and not problem._override_fields
+        assert not jnp.array_equal(
+            problem.simulate_reporters(params, "ctrl")[1],
+            both.simulate_reporters(params, "ctrl")[1],
+        )
+
+    def test_editing_an_unfitted_field_reaches_the_solver(self):
+        problem = self._problem()
+        params = {"rate": jnp.asarray(0.2)}
+        _, base = problem.simulate_reporters(params, "ctrl")
+        problem.composite = eqx.tree_at(
+            lambda c: c.processes["decay"].scale,
+            problem.composite,
+            jnp.asarray(3.0),
+        )
+        _, edited = problem.simulate_reporters(params, "ctrl")
+        assert not jnp.allclose(base, edited)
 
 
 class TestNormalizationModes:
