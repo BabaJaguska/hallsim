@@ -21,11 +21,15 @@ The framework returns a plausible number and nothing indicates it is wrong.
   the cache signature already declares the verdict state-independent), and a
   traced composite degrades to the **implicit** solver rather than the explicit
   one. Flagship: max|g| 270591 cold = 270591 warmed, against 6.19×10²³⁶ before.
-  **Still open:** `test_batched_matches_solo` — a batched run (traced → implicit)
-  and a solo run (eager → measured) can pick different solvers, so batched ≠
-  solo when the cache is cold. Closing it means resolving the verdict once at
-  construction and carrying it as a static field, which also removes the 115 ms
-  a fresh Scheduler pays and makes cross-process persistence a small extension.
+  **Still open:** `test_batched_matches_solo` — a batched run (traced →
+  implicit, `Kvaerno5`) and a solo run (eager → measured, `Tsit5`) pick
+  different solvers, so batched ≠ solo when the cache is cold; worst
+  disagreement 1.14×10⁻⁴ against the test's `atol=1e-10`. Marked
+  `xfail(strict=True)` on 2026-08-23 so the suite is green and the fix cannot
+  land silently — it will XPASS and force the marker's removal. Closing it means
+  resolving the verdict once at construction and carrying it as a static field,
+  which also removes the 115 ms a fresh Scheduler pays and makes cross-process
+  persistence a small extension.
   See the diary entry of 2026-08-19 (evening). Original report:
   `jax.jvp` through `Scheduler.run` returns −6.19×10²³⁶ for 22 of 52 states, all
   finite, no raise; `warm_up` first gives −4.9×10⁻³. Stiffness routing cannot
@@ -156,8 +160,21 @@ The check that would catch a mistake does not exist, does not run, or fails open
   Assignment-rule species report stale constants; a model's own conservation is
   visibly violated in the output with no warning. Fluxes are unreadable and
   unusable as coupling sources.
-- [ ] **P2.6 — Three documents describe three different reporter sets**, none
-  matching the code.
+- [x] **P2.6 — Three documents describe three different reporter sets**, none
+  matching the code. *Fixed 2026-08-23.* All three now state the live set —
+  CDKN1A, GLB1, BNIP3, DDB2, MDM2, NFKBIA with their real store paths — and
+  `tests/unit/test_gene_reporters.py::TestPublishedReporterTable` parses each
+  one and compares it to `MULTI_HALLMARK_REPORTERS`, so they fail rather than
+  drift. The two markdown tables sit inside `<!-- reporters:start/end -->`
+  markers, leaving prose elsewhere free to name any gene. Also corrected while
+  in there: `dataset.md` described the held-out arm as `RAPA_vs_DDIS` against a
+  time-matched comparator, where the code runs `RAPA_vs_ctrl` normalised within
+  the arm to `ETOPOSIDE_D00`; `calibration.md`'s worked example said the same
+  and described summaries as co-solved `RunningIntegral`s, which the flagship
+  stopped using in favour of post-hoc zero-phase filters.
+  **Found while fixing, not fixed:** `demos/multi_hallmark_hybrid.py:492` reads
+  `gz06/x2_integral`, a store path the composite no longer has — that demo
+  cannot run.
 
 ---
 

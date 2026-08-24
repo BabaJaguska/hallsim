@@ -39,10 +39,13 @@ Severity 0 is homeostasis for both; Nutrient Sensing runs -1 (rapamycin) to +1
 to 1 (DallePezze's published irradiation dose) on its damage rate.
 
 Gene reporters (see :mod:`hallsim.gene_reporters`): CDKN1A → ``dp14/CDKN1A``,
-EIF4EBP1 → ``dp14/mTORC1_pS2448``, CYCS → ``dp14/Mito_mass_new``, DDB2 →
-``gz06/x`` (RMS amplitude), MDM2 → ``gz06/y``, HMOX1 → ``dp14/ROS``, and
-NFKBIA → ``nfkb/IkBat`` — the IκBα *transcript*, which rises with NF-κB
-activity, not the cytoplasmic protein, which moves inversely to it.
+GLB1 → ``dp14/SA_beta_gal``, BNIP3 → ``dp14/FoxO3a``, DDB2 → ``gz06/x``
+(RMS amplitude), MDM2 → ``gz06/y``, and NFKBIA → ``nfkb/IkBat`` — the IκBα
+*transcript*, which rises with NF-κB activity, not the cytoplasmic protein,
+which moves inversely to it.
+
+``test_gene_reporters.py`` checks this list against
+``MULTI_HALLMARK_REPORTERS``, so it fails rather than drifts.
 """
 
 from __future__ import annotations

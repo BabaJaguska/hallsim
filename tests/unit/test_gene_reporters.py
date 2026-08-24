@@ -10,9 +10,14 @@ Covers:
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import jax.numpy as jnp
 import pandas as pd
 import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
 
 from hallsim.gene_reporters import (
     CANONICAL_REPORTERS,
@@ -421,3 +426,41 @@ class TestLog2FoldChange:
         df_neg = pd.DataFrame({"s": [2.0], "ctrl": [4.0]}, index=["GENE_A"])
         lfc_neg = log2_fold_change(df_neg, ["s"], ["ctrl"])
         assert lfc_neg["GENE_A"] == pytest.approx(-2.0)
+
+
+class TestPublishedReporterTable:
+    """The reporter set is published in three places outside the code. All
+    three are checked against ``MULTI_HALLMARK_REPORTERS`` rather than
+    trusted: each had drifted from it, and half the documented set named
+    store paths and genes the composite does not have."""
+
+    _TABLE_ROW = re.compile(
+        r"^\|\s*`([A-Z0-9]+)`[^|]*\|\s*`([A-Za-z0-9_/]+)`\s*\|", re.MULTILINE
+    )
+    _ARROW = re.compile(r"([A-Z0-9]+)\s*→\s*``([A-Za-z0-9_/]+)``")
+
+    def _live(self):
+        return {
+            (r.gene_symbol, r.observable) for r in MULTI_HALLMARK_REPORTERS
+        }
+
+    def _marked_block(self, relative_path: str) -> str:
+        """The region a document marks as this table, so prose elsewhere in
+        the file is free to mention any gene it likes."""
+        text = (ROOT / relative_path).read_text(encoding="utf-8")
+        start = text.index("<!-- reporters:start")
+        end = text.index("<!-- reporters:end", start)
+        return text[start:end]
+
+    def test_calibration_doc_matches_code(self):
+        block = self._marked_block("docs/calibration.md")
+        assert set(self._TABLE_ROW.findall(block)) == self._live()
+
+    def test_dataset_doc_matches_code(self):
+        block = self._marked_block("docs/dataset.md")
+        assert set(self._TABLE_ROW.findall(block)) == self._live()
+
+    def test_model_docstring_matches_code(self):
+        from hallsim.models import multi_hallmark
+
+        assert set(self._ARROW.findall(multi_hallmark.__doc__)) == self._live()

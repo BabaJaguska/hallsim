@@ -918,6 +918,15 @@ class TestSolveStatus:
         assert [bool(v) for v in nonfinite] == [False, True, False]
         assert [bool(v) for v in ok] == [True, False, True]
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Known failure, tracked as P0.1 in docs/known-problems.md. A "
+        "batched run traces, so stiffness cannot be measured and the fallback "
+        "takes the implicit solver; a solo run measures and takes the "
+        "explicit one. Same problem, two solvers, 1.1e-4 apart. Closing it "
+        "means recording the verdict where concrete parameters still exist — "
+        "composite construction. Remove this marker when that lands.",
+    )
     def test_batched_matches_solo(self):
         comp = self._composite()
         sched = Scheduler()

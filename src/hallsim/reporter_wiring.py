@@ -165,8 +165,8 @@ def resolve_ontology(
 ) -> tuple[dict, str]:
     """Annotation for ``path``, following one observer hop if needed.
 
-    A reporter often reads a derived path (``gz06/x2_integral``) whose
-    annotation lives on the source species (``gz06/x``). When ``path``
+    A reporter often reads a derived path — a running integral, a filtered
+    copy — whose annotation lives on the source species. When ``path``
     itself is unannotated, an observer process writing ``path`` from a
     single INPUT source resolves to that source's annotation. Returns
     ``(annotation, resolved_path)``.

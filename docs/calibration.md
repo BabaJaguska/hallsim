@@ -14,20 +14,32 @@ one canonical reporter gene per mechanistic store path, with a
 literature-anchored sign and a per-reporter trajectory summary. The
 multi-hallmark composite's reporters:
 
+<!-- reporters:start — checked against MULTI_HALLMARK_REPORTERS by
+     tests/unit/test_gene_reporters.py; edit the code, then this table. -->
+
 | Gene | Store path | Summary | Note |
 |---|---|---|---|
-| `CDKN1A` (p21) | `dp14/CDKN1A` | value at time | senescence/arrest marker; DP14 transcribes it via FoxO3a × damage (no explicit p53) |
-| `DDB2` | `gz06/x2_integral` | **RMS** `√⟨x²⟩` | p53 target; GZ06's mean p53 is analytically damage-blind, so DDB2 reads pulse amplitude — see [gz06-basal-p53.md](gz06-basal-p53.md) |
-| `HMOX1` | `dp14/ROS` | value at time | Nrf2/ARE oxidative-stress reporter |
-| `NFKBIA` (IκBα) | `nfkb/IkBat` | window-mean | IκBα *transcript* (an NF-κB target that rises with activity), not the protein |
-| `CYCS` (cyt c) | `dp14/Mito_mass_new` | value at time | mitochondrial biogenesis |
-| `EIF4EBP1` (4E-BP1) | `dp14/mTORC1_pS2448` | value at time | kinase-level mTOR proxy |
+| `CDKN1A` (p21) | `dp14/CDKN1A` | zero-phase mean, τ=2.0 | senescence/arrest marker; DP14 transcribes it via FoxO3a × damage (no explicit p53) |
+| `GLB1` (SA-β-gal) | `dp14/SA_beta_gal` | zero-phase mean, τ=2.0 | the canonical senescence marker, which DP14 models directly |
+| `BNIP3` | `dp14/FoxO3a` | zero-phase mean, τ=2.0 | FoxO3 target; reads the FoxO-driven mitophagy arm downstream of nutrient sensing |
+| `DDB2` | `gz06/x` | zero-phase **RMS** `√⟨x²⟩`, τ=0.75 | p53 target; GZ06's mean p53 is analytically damage-blind, so DDB2 reads pulse amplitude — see [gz06-basal-p53.md](gz06-basal-p53.md) |
+| `MDM2` | `gz06/y` | zero-phase mean, τ=0.75 | p53 target; `⟨y⟩ ∝ ψ` in the p53–Mdm2 steady state, so it reads the damage grade directly |
+| `NFKBIA` (IκBα) | `nfkb/IkBat` | zero-phase mean, τ=0.75 | IκBα *transcript* (an NF-κB target that rises with activity), not the protein |
 
-Oscillating species are read phase-insensitively via a
-[`RunningIntegral`](../src/hallsim/models/running_integral.py) co-solved at
-the oscillation's own resolution: `∫x` differenced over a trailing window
-gives the mean (`window_mean`); `∫x²` gives `√⟨x²⟩` (`window_rms`, for
-pulse-amplitude readouts like DDB2).
+<!-- reporters:end -->
+
+Oscillating species are read phase-insensitively, **post-hoc on the raw saved
+trajectory**: a forward–backward exponential filter, so the summary carries no
+phase lag and the composite gains no extra state (`zerophase_mean`,
+`zerophase_rms_raw`). The save grid has to resolve the oscillation for this to
+be faithful, which `Scheduler.run(antialias=True)` enforces.
+
+The alternative is still available and is the right choice when a summary must
+be read *inside* the solve rather than after it: `window_mean` / `window_rms`
+over a co-solved [`RunningIntegral`](../src/hallsim/models/running_integral.py),
+where `∫x` differenced over a trailing window gives the mean and `∫x²` gives
+`√⟨x²⟩`. That buys grid-independence at the cost of extra integrated state and
+a window's worth of lag.
 
 ## Calibration API
 
@@ -64,15 +76,18 @@ problem = CalibrationProblem(
                                    "Deregulated Nutrient Sensing": 0.3}),
     },
     arm_pairs={"DDIS_vs_ctrl": ("DDIS", "ctrl"),
-               "RAPA_vs_DDIS": ("RAPA", "DDIS")},
+               "RAPA_vs_ctrl": ("RAPA", "DDIS")},
     # Trajectory-native: each arm is a {day: Δlog2FC} time course (model time
     # units). A plain `ds.delta(...)` Series is the degenerate single-point
     # case, auto-normalized to {t_end: series}.
+    # Every arm is normalized within itself, to its own day 0 — the rapamycin
+    # culture's day 0 *is* ETOP_D00, since the drug goes in on day 2. The drug
+    # contrast is recovered afterwards by differencing the two arm curves.
     data={
         "DDIS_vs_ctrl": {7.0: ds.delta("ETOP_D07", "ETOP_D00"),
                          14.0: ds.delta("ETOP_D14", "ETOP_D00")},
-        "RAPA_vs_DDIS": {7.0: ds.delta("RAPA_D07", "ETOP_D07"),
-                         14.0: ds.delta("RAPA_D14", "ETOP_D14")},
+        "RAPA_vs_ctrl": {7.0: ds.delta("RAPA_D07", "ETOP_D00"),
+                         14.0: ds.delta("RAPA_D14", "ETOP_D00")},
     },
     params={
         "CDKN1A_transcr": ParameterRef(
@@ -83,7 +98,7 @@ problem = CalibrationProblem(
             prior=0.8, prior_sigma=0.5),
     },
     fit_arms=["DDIS_vs_ctrl"],       # in the loss
-    held_out_arms=["RAPA_vs_DDIS"],  # evaluated, not fit
+    held_out_arms=["RAPA_vs_ctrl"],  # evaluated, not fit
 )
 
 history = problem.fit(steps=150, mode="reverse")
