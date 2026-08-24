@@ -79,6 +79,56 @@ def read_param(proc, field: str):
     return getattr(proc, field)
 
 
+def write_param(proc, field: str, value):
+    """A copy of ``proc`` with ``field`` set to ``value``, in the same dotted
+    convention as :func:`read_param`.
+
+    The one implementation of "change a parameter". Reach it as
+    :meth:`Process.with_param`, :meth:`hallsim.composite.Composite.with_params`
+    or :meth:`hallsim.calibration.CalibrationProblem.with_overrides` —
+    whichever object is in hand. Hand-rolling ``eqx.tree_at`` instead is what
+    the calibration guard rejects: an edit to a *fitted* field is overwritten by
+    the next substitution, and an ablation that silently does nothing looks
+    exactly like an edge with no influence.
+    """
+    if "." in field:
+        field_name, key = field.split(".", 1)
+        current = getattr(proc, field_name)
+        if not isinstance(current, dict):
+            raise TypeError(
+                f"Dotted field {field!r} requires {field_name!r} to be a dict "
+                f"on {type(proc).__name__}; got {type(current).__name__}"
+            )
+        if key not in current:
+            raise KeyError(
+                f"Key {key!r} not in {field_name}; "
+                f"available: {sorted(current.keys())}"
+            )
+        return eqx.tree_at(
+            lambda p, fn=field_name, k=key: getattr(p, fn)[k], proc, value
+        )
+    if not hasattr(proc, field):
+        raise AttributeError(
+            f"{type(proc).__name__} has no field {field!r}. Fittable and "
+            f"settable fields: {sorted(_settable_fields(proc))}"
+        )
+    return eqx.tree_at(lambda p, pn=field: getattr(p, pn), proc, value)
+
+
+def _settable_fields(proc) -> list[str]:
+    """Field names ``write_param`` accepts, for an error message that answers
+    the question rather than only refusing it."""
+    names = [
+        f.name
+        for f in dataclasses.fields(proc)
+        if not f.metadata.get("static", False)
+    ]
+    params = getattr(proc, "parameters", None)
+    if isinstance(params, dict):
+        names += [f"parameters.{k}" for k in sorted(params)]
+    return names
+
+
 # ---------------------------------------------------------------------------
 # Port role enum
 # ---------------------------------------------------------------------------
@@ -353,6 +403,22 @@ class Process(eqx.Module):
         return None
 
     # --- Helpers -------------------------------------------------------------
+
+    def with_param(self, field: str, value) -> "Process":
+        """A copy of this process with one parameter changed.
+
+        ``field`` is a field name (``"k_act"``) or a dotted entry of a
+        parameters dict (``"parameters.kdeg"``)::
+
+            edge = edge.with_param("k_act", 0.0)      # ablate an edge
+            proc = proc.with_param("parameters.k", 2.0)
+
+        For a whole composite use
+        :meth:`hallsim.composite.Composite.with_params`; inside a calibration
+        use :meth:`hallsim.calibration.CalibrationProblem.with_overrides`, which
+        also wins over the fitted iterate. All three are this one call.
+        """
+        return write_param(self, field, value)
 
     def ports_with_role(self, role: PortRole) -> dict[str, Port]:
         """Subset of ``ports_schema()`` filtered by port role."""

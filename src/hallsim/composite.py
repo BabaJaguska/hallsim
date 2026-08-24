@@ -496,6 +496,42 @@ class Composite(eqx.Module):
     # Initial state
     # -----------------------------------------------------------------
 
+    def with_params(self, overrides: dict[str, Any]) -> "Composite":
+        """A copy with parameters changed, keyed ``"<process>.<field>"``::
+
+            comp = comp.with_params({"mtor_nfkb.k_act": 0.0})     # ablate
+            comp = comp.with_params({"dp14.parameters.kdeg": 2.0})
+
+        The route for an ablation or a sweep outside calibration — a
+        bifurcation scan, a robustness probe, a bare :meth:`Scheduler.run`.
+        Editing the pytree by hand instead is what
+        :meth:`hallsim.calibration.CalibrationProblem.with_overrides` rejects
+        for fitted fields, because the next substitution overwrites it and the
+        ablation silently does nothing.
+
+        Topology, rewiring and validation settings are untouched; only the
+        named fields move.
+        """
+        import equinox as eqx
+
+        from hallsim.process import write_param
+
+        procs = dict(self.processes)
+        for address, value in overrides.items():
+            name, _, field = address.partition(".")
+            if not field:
+                raise ValueError(
+                    f"Override key {address!r} must be "
+                    f"'<process>.<field>', e.g. 'mtor_nfkb.k_act'."
+                )
+            if name not in procs:
+                raise KeyError(
+                    f"No process {name!r} in this composite; "
+                    f"available: {sorted(procs)}"
+                )
+            procs[name] = write_param(procs[name], field, value)
+        return eqx.tree_at(lambda c: c.processes, self, procs)
+
     def initial_state(self) -> dict[str, jnp.ndarray]:
         """All process port defaults merged into one
         ``{store_path: jnp.ndarray}`` store."""

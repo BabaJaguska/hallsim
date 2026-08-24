@@ -786,3 +786,63 @@ class TestAssignedPaths:
         )
         with pytest.raises(ValueError, match="[Aa]lgebraic cycle"):
             comp.build_rhs()
+
+
+class TestParameterOverrides:
+    """One implementation of "change a parameter", reachable from whichever
+    object is in hand — the gap that had users inventing `replace_param`."""
+
+    def test_process_with_param(self):
+        proc = Production(rate=0.1)
+        assert float(proc.with_param("rate", 0.5).rate) == 0.5
+        assert float(proc.rate) == 0.1  # original untouched
+
+    def test_composite_with_params(self):
+        comp = Composite(
+            processes={"prod": Production(), "decay": Decay()},
+            topology={"prod": {"x": "pool/x"}, "decay": {"x": "pool/x"}},
+            semantic_validation=False,
+        )
+        out = comp.with_params({"prod.rate": 0.9, "decay.rate": 0.2})
+        assert float(out.processes["prod"].rate) == 0.9
+        assert float(out.processes["decay"].rate) == 0.2
+        assert float(comp.processes["prod"].rate) == 0.1
+
+    def test_unknown_process_named_with_alternatives(self):
+        comp = Composite(
+            processes={"prod": Production()},
+            topology={"prod": {"x": "pool/x"}},
+            semantic_validation=False,
+        )
+        with pytest.raises(KeyError, match="available"):
+            comp.with_params({"nope.rate": 1.0})
+
+    def test_unknown_field_lists_settable_ones(self):
+        with pytest.raises(AttributeError, match="settable fields"):
+            Production().with_param("nosuch", 1.0)
+
+    def test_address_without_a_field_is_rejected(self):
+        comp = Composite(
+            processes={"prod": Production()},
+            topology={"prod": {"x": "pool/x"}},
+            semantic_validation=False,
+        )
+        with pytest.raises(ValueError, match="<process>.<field>"):
+            comp.with_params({"prod": 1.0})
+
+    def test_override_reaches_the_solver(self):
+        """An ablation has to change the trajectory, or it is the silent no-op
+        this API exists to prevent."""
+        comp = Composite(
+            processes={"prod": Production(), "decay": Decay()},
+            topology={"prod": {"x": "pool/x"}, "decay": {"x": "pool/x"}},
+            semantic_validation=False,
+        )
+        sched = Scheduler()
+        base = sched.run(comp, t_span=(0.0, 5.0), macro_dt=1.0).get("pool/x")
+        off = sched.run(
+            comp.with_params({"prod.rate": 0.0}),
+            t_span=(0.0, 5.0),
+            macro_dt=1.0,
+        ).get("pool/x")
+        assert abs(float(base[-1]) - float(off[-1])) > 1e-6

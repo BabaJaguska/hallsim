@@ -42,7 +42,7 @@ import numpy as np
 import optax
 import optax.contrib
 
-from hallsim.process import read_param
+from hallsim.process import read_param, write_param
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -636,33 +636,13 @@ class HallmarkCoeffRef:
 
 
 def _substitute_param(proc, field: str, value: Any):
-    """Return a new Process with ``field`` set to ``value`` via eqx.tree_at.
+    """Deprecated alias for :func:`hallsim.process.write_param`.
 
-    Handles both plain and dotted (``parameters.<key>``) forms,
-    mirroring :meth:`hallsim.hallmarks.HallmarkHandle.apply` so the
-    calibration substitution path and the hallmark substitution path
-    use the same convention.
+    Kept because the substitution path calls it in a hot loop; the
+    implementation lives with :func:`hallsim.process.read_param` so the read
+    and the write cannot drift apart in their dotted-field convention.
     """
-    if "." in field:
-        field_name, key = field.split(".", 1)
-        current = getattr(proc, field_name)
-        if not isinstance(current, dict):
-            raise TypeError(
-                f"Dotted field {field!r} requires {field_name!r} to be "
-                f"a dict on {type(proc).__name__}; got "
-                f"{type(current).__name__}"
-            )
-        if key not in current:
-            raise KeyError(
-                f"Key {key!r} not in {field_name}; "
-                f"available: {sorted(current.keys())}"
-            )
-        return eqx.tree_at(
-            lambda p, fn=field_name, k=key: getattr(p, fn)[k],
-            proc,
-            value,
-        )
-    return eqx.tree_at(lambda p, pn=field: getattr(p, pn), proc, value)
+    return write_param(proc, field, value)
 
 
 def _reject_overwritten_edit(pname: str, pref, proc, baseline) -> None:

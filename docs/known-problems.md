@@ -9,6 +9,23 @@ Evidence sources: the mitochondrial stress test (2026-08-18) and the flagship
 review (2026-08-19), both by the review panel in `.claude/agents/`. Findings
 confirmed by two independent reviewers are marked ✓✓.
 
+## The standing criterion
+
+**A user must never have to edit the framework to finish a task.** Every time
+one does, that is a P0 regardless of how small the edit was, because the edit
+does not survive their next pull and the next user repeats it. Instances so far:
+
+| what forced it | status |
+|---|---|
+| `screen_sensitivity` would not take a `registry=`, so a model could not ship its own hallmark mappings | fixed |
+| `_same_default` broke the trace, so a calibration loss could not run | fixed, and guarded by `tests/unit/test_trace_safety.py` |
+| no public parameter setter (P0.9) | open |
+
+The guard for the second one is the pattern to repeat: reachability under trace
+is a whole-call-graph property, so the test traces the public entry points and
+lets the failure surface rather than trying to reason about it.
+
+
 ---
 
 ## P0 — produces a wrong answer with no warning
@@ -105,6 +122,35 @@ The framework returns a plausible number and nothing indicates it is wrong.
 
 ---
 
+- [ ] **P0.9 — The supported parameter route exists only on
+  `CalibrationProblem`, and is undiscoverable from anywhere else.**
+  `with_overrides` (`calibration.py:1067`) is the correct answer and P0.5's fix
+  routes users to it — but it is a method on the *calibration problem*. A user
+  doing bifurcation analysis, an ablation sweep, or any bare `Scheduler.run`
+  never touches a `CalibrationProblem`, finds nothing on `Process` or
+  `Composite`, and invents a name: `replace_param`, `set_param`, then falls
+  back to `eqx.tree_at`. Observed in an agent session after the P0.5 fix landed,
+  which is the point — the fix guards the footgun for calibration callers and
+  leaves everyone else where they were.
+  *Fix:* a `Process.with_param(name, value)` / `Composite.with_params({...})`
+  that `with_overrides` itself delegates to, so there is one implementation and
+  it is reachable from the object the user already has.
+
+- [ ] **P0.10 — The default `macro_dt = 5.0` carries material splitting error,
+  unwarned.** Lie splitting was measured at 17% error on the flagship at
+  `macro_dt = 3.5`; the shipped default is larger still, and nothing reports it.
+  `CalibrationProblem` defaults to it (`calibration.py:787`).
+  *Fix:* report the splitting-error estimate at construction, or default to a
+  step the order test justifies.
+
+- [ ] **P0.11 — One parameter feeding two consumers makes every diagnosis of it
+  ambiguous.** `atol` was the error controller's tolerance *and* the implicit
+  stage's Newton tolerance, so "relax `atol`" fixed a convergence failure while
+  silently degrading trajectory accuracy for every oscillator — and made the
+  prohibited workaround the only one that appeared to work. Fixed for `atol`
+  (`DEFAULT_NEWTON_ATOL`); the class is not audited. `rtol` still feeds both.
+  *Fix:* audit every solver parameter for double duty and split each one.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -137,6 +183,20 @@ The check that would catch a mistake does not exist, does not run, or fails open
   composite containing a hand-written process.** The exact stoichiometric path
   needs every process to declare `stoichiometry()`; one undeclared edge disables
   it.
+
+- [ ] **P1.10 — `equilibrate=True` is ill-posed for a composite containing an
+  autonomous oscillator, and fails.** `steady_state`'s Newton finds the
+  *unstable* fixed point at the centre of the Geva-Zatorsky limit cycle;
+  starting a forward solve there is unphysical and numerically hostile, which
+  is what "the Newton fixed point produces an initial condition the forward
+  solver can't handle" means. The module docstring assumes "any limit cycle
+  belongs to the perturbation" — GZ06 oscillates unperturbed, so the assumption
+  does not hold for any composite that includes it. Currently blocking a real
+  user, whose only recourse was to abandon equilibration entirely.
+  *Fix:* P3.4 — partial equilibration. Equilibrate the non-oscillatory
+  subsystem, hold the oscillator at its published initial condition. Until then
+  `equilibrate=True` should refuse with this explanation rather than fail in the
+  solver.
 
 ---
 
