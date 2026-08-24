@@ -39,6 +39,8 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
 
+from hallsim.tracing import is_traced
+
 log = logging.getLogger(__name__)
 
 
@@ -143,6 +145,8 @@ def conserved_moieties(stoichiometry: dict) -> list[dict[str, int]]:
 def warn_if_time_dependent(composite, y, dt: float = 1.0) -> bool:
     """Warn (COPASI-style) if the RHS is explicitly time-dependent at ``y`` —
     a Newton fixed point is meaningless then. Returns True if autonomous."""
+    if is_traced(y) or is_traced(*jax.tree_util.tree_leaves(composite)):
+        return True  # diagnostic: nothing concrete to test, so stay quiet
     rhs, _ = composite.build_rhs()
     autonomous = float(jnp.max(jnp.abs(rhs(0.0, y) - rhs(dt, y)))) < 1e-9
     if not autonomous:
@@ -302,6 +306,16 @@ def conservation_laws(composite, y, mask=None, rcond: float = 1e-9):
     is not physics: those directions are exactly singular, and the Newton
     solve in :func:`steady_state` needs them fixed to have a unique solution.
     """
+    if is_traced(y) or is_traced(*jtu.tree_leaves(composite)):
+        raise RuntimeError(
+            "conservation_laws needs concrete values and this call is traced "
+            "(jit/grad/vmap): the moieties come from a Jacobian or a declared "
+            "stoichiometry, neither of which can be read off tracers. They are "
+            "structural, so resolve them once eagerly and pass them in — "
+            "`laws = conservation_laws(composite, y0)` outside the trace, then "
+            "`steady_state(composite, laws=laws)` inside it. "
+            "CalibrationProblem does this for you."
+        )
     keys = composite.store_keys()
     mask = accumulator_mask(composite, keys) if mask is None else mask
     warn_if_time_dependent(composite, y)

@@ -17,6 +17,7 @@ from typing import Any
 import jax.numpy as jnp
 
 from hallsim.process import PortRole, Process, ProcessKind
+from hallsim.tracing import is_traced
 
 log = logging.getLogger(__name__)
 
@@ -84,9 +85,15 @@ def build_initial_store(
 
 
 def _same_default(a: Any, b: Any) -> bool:
-    """Equality that tolerates array-valued port defaults."""
-    same = jnp.asarray(a) == jnp.asarray(b)
-    return bool(jnp.all(same))
+    """Whether two port defaults agree. Drives a warning and nothing else.
+
+    Traced defaults count as agreeing: there is no concrete value to compare,
+    and this is reached under ``jit`` — ``initial_state_vec`` → ``steady_state``
+    → a calibration loss — where raising to report a warning would be absurd.
+    """
+    if is_traced(a, b):
+        return True
+    return bool(jnp.all(jnp.asarray(a) == jnp.asarray(b)))
 
 
 def validate_topology(
