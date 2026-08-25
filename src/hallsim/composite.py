@@ -636,7 +636,57 @@ class Composite(eqx.Module):
         if without_ts:
             groups["default"] = without_ts
 
-        return groups
+        return self._order_by_coupling(groups)
+
+    def _order_by_coupling(
+        self, groups: dict[str, list[str]]
+    ) -> dict[str, list[str]]:
+        """Reorder groups so a group runs after the groups that drive it.
+
+        Timescale decides which processes share a solver; the cross-group
+        edges decide execution order. A driven group placed first reads its
+        driver's previous-step value, and interpolated coupling cannot apply
+        to an edge whose source has not run yet. Cycles keep timescale order.
+        """
+        if len(groups) < 2:
+            return groups
+        names = list(groups)
+        writes, reads = {}, {}
+        for gname, procs in groups.items():
+            w, r = set(), set()
+            for pname in procs:
+                topo_p = self.topology.get(pname, {})
+                schema = self.processes[pname].ports_schema()
+                for port, path in topo_p.items():
+                    r.add(path)
+                    port_spec = schema.get(port)
+                    if port_spec is not None and port_spec.role in (
+                        PortRole.EVOLVED,
+                        PortRole.EXCLUSIVE,
+                        PortRole.ASSIGNED,
+                    ):
+                        w.add(path)
+            writes[gname], reads[gname] = w, r
+
+        drivers = {
+            g: {
+                other
+                for other in names
+                if other != g and writes[other] & reads[g]
+            }
+            for g in names
+        }
+        ordered, placed = [], set()
+        while len(ordered) < len(names):
+            ready = [
+                g for g in names if g not in placed and drivers[g] <= placed
+            ]
+            if not ready:  # cycle: keep the remaining timescale order
+                ready = [g for g in names if g not in placed]
+            for g in ready:
+                ordered.append(g)
+                placed.add(g)
+        return {g: groups[g] for g in ordered}
 
     def calibration_targets(
         self,

@@ -108,14 +108,42 @@ The framework returns a plausible number and nothing indicates it is wrong.
   so an edge appears dead when it is live. This produced a wrong finding in
   review (three edges measured at 2.7×10⁻¹³; true gains 1.85, ≤0.185, 0.0077).
 
-- [ ] **P0.6 — `timescale` is a declared unit, not a rate, and it decides
-  execution order.** `timescale = native_time_seconds`; `auto_groups` sorts by
-  it, putting NF-κB first, so every cross-group edge runs backwards.
-  `_effective_coupling` tests only `a < b`, returns `frozen`, and interpolated
-  coupling is unreachable. NF-κB integrates 3.5 days against a 4-point staircase
-  of its own driver.
-  *Fix:* order groups by a rate, not by a unit; make coupling mode independent
-  of declaration order.
+- [x] **P0.6 — Group execution order came from timescale, so cross-group edges
+  ran backwards and interpolated coupling was unreachable.** *Fixed
+  2026-08-25.* `auto_groups` still clusters by timescale; `_order_by_coupling`
+  then topologically sorts the groups so one runs after whatever drives it,
+  keeping timescale order on a cycle. The flagship's dp14/gz06 group now
+  precedes nfkb, `_effective_coupling` returns `interpolated`, and NF-κB reads
+  an interpolant of its driver instead of a staircase.
+
+  Measured on `nfkb/IkBat` against a `macro_dt=0.109` reference:
+
+  | `macro_dt` | frozen | interpolated |
+  |---|---|---|
+  | 3.5 (shipped) | 20.9% | **1.7%** |
+  | 1.75 | 15.2% | 1.7% |
+  | 0.875 | 12.6% | 3.4% |
+
+  Correct ordering at the shipped step beats frozen at a 4× smaller step, at no
+  cost. An outside reviewer independently measured ~20% at `macro_dt=3.5`,
+  matching the frozen column.
+  **Open:** the interpolated column is not monotone (1.7 → 1.7 → 3.4); a
+  smaller macro step should not be worse, so either the fixed
+  `coupling_interp_points=16` interacts with step size or the reference carries
+  error. Not yet understood.
+  Original report: `timescale = native_time_seconds`; `auto_groups` sorted by
+  it, putting NF-κB first; `_effective_coupling` finds no earlier-writes /
+  later-reads pair and returns `frozen`. NF-κB integrated 3.5 days against a
+  4-point staircase of its own driver.
+
+- [ ] **P0.13 — `timescale` is a declared unit, not a rate.** Split from P0.6,
+  whose execution-order half is fixed. An SBML import sets `timescale =
+  native_time_seconds` — the model's declared time unit, not how fast it
+  moves — and `auto_groups` clusters on it, so two models with the same
+  dynamics but different declared units land in different groups and one with
+  the same unit but different speeds lands in the same one.
+  *Fix:* cluster on a measured rate. `analyze_groups` already computes a
+  spectral abscissa.
 
 - [ ] **P0.7 — Prior σ is documented as log10 and passed linear.** Two priors
   are inoperative: `etoposide_potency` (σ=9000) and `psi_K` (σ=200), max penalty
