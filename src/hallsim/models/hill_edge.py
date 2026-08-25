@@ -41,7 +41,8 @@ class HillActivationEdge(Process):
     n: tuple = (2.0,)  # per-source Hill cooperativity
 
     sources: tuple = eqx.field(static=True, default=("source",))
-    target_default: float = eqx.field(static=True, default=0.0)
+    # None abstains; set it only when this edge owns the target path.
+    target_default: float | None = eqx.field(static=True, default=None)
     target_ontology: dict | None = eqx.field(static=True, default=None)
     target_description: str = eqx.field(static=True, default="")
     source_ontology: tuple | None = eqx.field(static=True, default=None)

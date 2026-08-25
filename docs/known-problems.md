@@ -76,6 +76,14 @@ The framework returns a plausible number and nothing indicates it is wrong.
   *Fix:* default `normalization="paired"` (already implemented —
   `calibration.py:1266`, uses the control arm at the same query times), and make
   summaries causal. Use one normalization rule everywhere.
+  **Third instance, 2026-08-24, independent model and dataset.** An outside
+  fibroblast composite calibrated on GSE248823 reports loss 105.8 → 9.86 while
+  every held-out correlation is *negative*: Spearman −0.061 / −0.339 / −0.043 /
+  −0.075, sign agreement 53–67%. A training loss falling 10× while the model
+  ranks genes backwards is the diagnostic signature of this defect — the loss is
+  reducible by matching the filter artefact. Nobody hunting a modelling problem
+  would look at the normalizer, which is why the default has to change rather
+  than be documented.
 
 - [ ] **P0.4 — `dose_window=None` silently deletes a hallmark dial.**
   Documented as "sustained drive". `drive_pulse` is skipped, the pulse process
@@ -112,6 +120,11 @@ The framework returns a plausible number and nothing indicates it is wrong.
 - [ ] **P0.7 — Prior σ is documented as log10 and passed linear.** Two priors
   are inoperative: `etoposide_potency` (σ=9000) and `psi_K` (σ=200), max penalty
   1.3×10⁻⁸ across the whole clamp box.
+  **Second instance, 2026-08-24.** The outside fibroblast model reports
+  `etoposide_potency = 9237.104086` after fitting — still the uncorrected 593×
+  exposure mismatch it started from, because nothing penalised it. Its own
+  earlier note said the inflated magnitudes were "to be corrected in
+  calibration"; they were not, and could not be.
 
 - [ ] **P0.8 — A contested initial value is resolved by a rule the user cannot
   see.** Was insertion order (and changed under any pytree round-trip — `jit`,
@@ -134,7 +147,31 @@ The framework returns a plausible number and nothing indicates it is wrong.
   leaves everyone else where they were.
   *Fix:* a `Process.with_param(name, value)` / `Composite.with_params({...})`
   that `with_overrides` itself delegates to, so there is one implementation and
-  it is reachable from the object the user already has.
+  it is reachable from the object the user already has. **Landed 2026-08-24**
+  (`hallsim.process.write_param`); the entry stays open until `with_overrides`
+  is confirmed delegating on every path.
+  **Second instance, 2026-08-24, cost a whole analysis.** The outside model's
+  sensitivity study covers "only SBML-based parameters; hand-written process
+  parameters (SASP, Passos) could not be analyzed due to API differences" — so
+  it excluded precisely the five processes that were the model's contribution.
+
+- [ ] **P0.12 — Nothing enforces the tolerance prohibition the docs state.**
+  `CLAUDE.md:160` says Geva-Zatorsky 2006 "diverges to ~300× its amplitude and
+  goes negative at `rtol=1e-4`, and is bounded from `rtol=1e-5` down". A user
+  may still pass `rtol=1e-4` to a composite containing that oscillator and gets
+  no warning. Worse, the workaround is *attractive*: relaxing tolerance is the
+  obvious response to a stage-convergence failure (see P0.11), so the prohibited
+  setting is the one a stuck user reaches for.
+  **Observed 2026-08-24.** The outside fibroblast model ran at `rtol=1e-4` with
+  GZ06 in the composite and reported, as a *biological* finding, that "the GZ06
+  p53 oscillator produces very large amplitude values that may need rescaling".
+  That is the documented anti-damping, mis-read as biology, and it contaminates
+  the dose-response, bifurcation and population figures the oscillator feeds.
+  *Fix:* refuse — or warn loudly and record on the result — when `rtol` is
+  looser than the screened bound for a composite whose constituents include a
+  model flagged oscillatory. `screen_process` already measures tolerance
+  sensitivity; the Scheduler should consult that verdict rather than leaving it
+  in a prose document.
 
 - [ ] **P0.10 — The default `macro_dt = 5.0` carries material splitting error,
   unwarned.** Lie splitting was measured at 17% error on the flagship at
@@ -171,6 +208,14 @@ The check that would catch a mistake does not exist, does not run, or fails open
   The mTOR suppression gain has exactly zero gradient on every fit arm and is
   the only parameter distinguishing the held-out arm.
   *Fix:* report zero-gradient fittables at problem construction.
+  **Second instance, 2026-08-24, and it invalidated a headline claim.** The
+  outside fibroblast model reports `passos_k_gadd45 = 0.100000` and
+  `passos_k_ros = 0.100000` — both exactly their initial values to six decimal
+  places — and `dns_mtor_gain = 0.703092` from an init of 0.7. Its key finding
+  states that "the Passos feedback loop … creates self-reinforcing senescence",
+  but the two parameters governing that loop were never fitted. A report cannot
+  be expected to notice three unmoved parameters among sixteen; the problem
+  construction can, in one pass, for free.
 - [ ] **P1.6 — No null-model baseline is reported.** The flagship scores 19/36
   signs (52.8%); "every reporter rises" scores 30/36 (83.3%).
 - [ ] **P1.7 — No parameter provenance.** Nothing distinguishes measured from
@@ -197,6 +242,18 @@ The check that would catch a mistake does not exist, does not run, or fails open
   subsystem, hold the oscillator at its published initial condition. Until then
   `equilibrate=True` should refuse with this explanation rather than fail in the
   solver.
+
+- [ ] **P1.11 — A `ParameterRef` is never validated against the field it
+  names.** Point one at a tuple-valued field — `HillActivationEdge.K`, `.n`,
+  which are `tuple` and deliberately *not* `calibratable` — and nothing objects.
+  Substitution writes a scalar over the tuple and the run dies inside
+  `HillActivationEdge.derivative` with `TypeError: iteration over a 0-d array`,
+  several frames from anything the user wrote. Observed in an agent session,
+  which lost a fit step to it and concluded the framework had a bug in the edge.
+  *Fix:* validate every `ParameterRef` at problem construction — the field must
+  exist, must not be static, and its current value must be a scalar. Say which
+  of those failed and, for a non-`calibratable` field, that fitting it is
+  unsupported. The check is cheap and the failure it replaces is unreadable.
 
 ---
 
@@ -244,7 +301,14 @@ The check that would catch a mistake does not exist, does not run, or fails open
   before the run, so aging is imposed as an initial condition. For an attractor
   to change, severity must evolve — a depleting repair capacity, a ratchet.
   This is the prerequisite for any bifurcation claim.
-- [ ] **P3.2 — No real-eigenvalue continuation.** `hopf_scan` finds oscillation
+- [ ] **P3.2 — No real-eigenvalue continuation.** *Second instance,
+  2026-08-24: the outside fibroblast model ran a "bifurcation" scan over
+  irradiation dose and produced `bifurcation_dose.png`. Dose enters only inside
+  a pulse window there, so after the pulse the vector field is dose-independent
+  and no transition can exist — the figure is a monotonic response curve
+  labelled as a bifurcation diagram. Both the missing fold scan and the absence
+  of any check that a scanned parameter still appears in the RHS after the scan
+  window.* `hopf_scan` finds oscillation
   onsets and returns `[]` on a textbook transcritical. Fold and transcritical
   crossings — bistability, invasion thresholds, senescence commitment — are the
   transitions this domain actually has.

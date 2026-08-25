@@ -90,6 +90,12 @@ class IdentifiabilityReport:
     confounded: list[tuple[str, str, float]]  # (a, b, corr) with |corr|≥tol
     recommended_freeze: list[str]
 
+    @property
+    def condition_number(self) -> float:
+        """Fisher spectrum spread. Above ~1e16 the flat directions are below
+        float64's noise floor and the problem is singular in practice."""
+        return float(self.eigenvalues[-1] / max(self.eigenvalues[0], 1e-300))
+
     def __str__(self) -> str:
         order = {"structural": 0, "practical": 1, "identifiable": 2}
         rows = sorted(self.names, key=lambda n: (order[self.verdict[n]], n))

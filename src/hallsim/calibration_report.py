@@ -48,7 +48,7 @@ def save_outputs(
     out.mkdir(parents=True, exist_ok=True)
 
     init = {k: jnp.asarray(p.init) for k, p in problem._all_refs.items()}
-    final = history.final_params or init
+    final = history.best_params or init
 
     # Densely-sampled trajectories at both ends of the fit.
     pre_runs = problem.simulate_all_conditions(init, n_save=n_save_plot)

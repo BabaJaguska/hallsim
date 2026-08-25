@@ -200,7 +200,6 @@ def build_multi_hallmark_composite(
             k_act=10.0,
             K=(0.3,),
             n=(1.8,),
-            target_default=0.0,
             target_ontology={"go": "GO:0006357"},
             target_description="p53-driven transcription summed into CDKN1A",
             source_ontology=({"go": "GO:0006977"},),

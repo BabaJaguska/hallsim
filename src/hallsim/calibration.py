@@ -22,13 +22,14 @@ calibration); ``"reverse"`` is one VJP and wins for many parameters
         fit_arms=["DDIS_vs_ctrl"],
     )
     history = problem.fit(steps=40)
-    results = problem.evaluate(history.final_params)
+    results = problem.evaluate(history.best_params)
 """
 
 from __future__ import annotations
 
 import copy
 import logging
+import math
 import time
 from dataclasses import dataclass, field, replace as dc_replace
 from pathlib import Path
@@ -53,6 +54,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Smallest prior penalty reachable in a clamp box that can still steer a fit;
+# below it the term is lost in the data loss.
+_MIN_OPERATIVE_PRIOR = 1e-2
+
+# Fisher condition number above which a fit is refused. float64 carries ~16
+# digits, so past this the flat directions are numerical noise.
+MAX_FIT_CONDITION_NUMBER = 1e12
+
 ParamPytree = Any  # PyTree of jnp.ndarrays / scalars
 
 
@@ -68,11 +77,12 @@ class CalibrationHistory:
     lrs: list[float] = field(
         default_factory=list
     )  # effective LR (schedule×scale)
-    final_params: ParamPytree | None = None
+    # The iterate that reached ``best_loss``, not the last step's.
+    best_params: ParamPytree | None = None
     best_loss: float = float("inf")
     stopped_epoch: int | None = None
     wall_time_s: float = 0.0
-    # Post-fit local identifiability at final_params (None if not requested or
+    # Post-fit local identifiability at best_params (None if not requested or
     # if the analysis failed); see hallsim.identifiability.
     identifiability: Any = None
 
@@ -396,7 +406,7 @@ class Calibrator:
                         no_improve,
                     )
                 break
-        history.final_params = best_params
+        history.best_params = best_params
         history.best_loss = best_loss
         history.wall_time_s = time.time() - t0
         return history
@@ -460,7 +470,7 @@ class Calibrator:
                     )
                 break
             params, opt_state = apply(params, opt_state, value, grad)
-        history.final_params = best_params
+        history.best_params = best_params
         history.best_loss = best_loss
         history.wall_time_s = time.time() - t0
         return history
@@ -937,6 +947,7 @@ class CalibrationProblem:
         # `params` (declaration order) is the optimizer surface; `_params`
         # substitutes into processes, `_coeffs` overrides registry floors.
         self.params = proc_params
+        self._check_param_targets(proc_params)
         # What the fitted fields held when the problem was wired. Every
         # evaluation overwrites them, so a later edit to one is inert; it is
         # checked against this and raised on rather than silently discarded.
@@ -954,6 +965,7 @@ class CalibrationProblem:
         self._all_refs = params
         self._base_registry = reg
         self.prior_weight = prior_weight
+        self._warn_inoperative_priors()
         self.fit_arms = fit_arms
         self.held_out_arms = held_out_arms or []
         self.t_end = t_end
@@ -1203,6 +1215,7 @@ class CalibrationProblem:
                 eq_comp, eq_comp.initial_state_vec()
             )
         y0 = steady_state(eq_comp, laws=self._laws)
+        self._require_stable_baseline(eq_comp, y0)
         # Force-linked baseline: apply the SAME reporter summaries the arms use
         # to the settled state (a constant trajectory at y0), so the reference
         # and the arm readout are the identical transform. Any summary constant
@@ -1422,6 +1435,129 @@ class CalibrationProblem:
             param_values, self.fit_arms
         ) + self._prior_penalty(param_values)
 
+    def prior_report(self) -> list[dict]:
+        """Largest penalty each prior can reach inside its clamp box.
+
+        ``prior_sigma`` is in log10 decades; one given in the parameter's own
+        units is no prior at all, and nothing in the loss shows it. Entries
+        carry ``name``, ``prior``, ``prior_sigma``, ``max_penalty``,
+        ``operative``.
+        """
+        out = []
+        for name, pref in self._all_refs.items():
+            if pref.prior is None:
+                continue
+            target = math.log10(float(pref.prior))
+            lo, hi = pref.clamp or (float(pref.init), float(pref.init))
+            corners = [max(float(lo), 1e-30), max(float(hi), 1e-30)]
+            worst = max(
+                ((math.log10(c) - target) / pref.prior_sigma) ** 2
+                for c in corners
+            )
+            penalty = self.prior_weight * worst
+            out.append(
+                {
+                    "name": name,
+                    "prior": float(pref.prior),
+                    "prior_sigma": float(pref.prior_sigma),
+                    "max_penalty": penalty,
+                    "operative": penalty >= _MIN_OPERATIVE_PRIOR,
+                }
+            )
+        return out
+
+    @staticmethod
+    def _require_stable_baseline(comp, y0, tol: float = 1e-6) -> None:
+        """Refuse an unstable fixed point as a baseline.
+
+        An autonomous oscillator's Newton solution is the unstable point at the
+        centre of its limit cycle; integrating from there diverges, which
+        surfaces later as a solver failure rather than a statement about the
+        model.
+        """
+        if isinstance(y0, jax.core.Tracer):
+            return
+        rhs, _ = comp.build_rhs()
+        jac = np.asarray(jax.jacfwd(lambda y: rhs(0.0, y))(y0))
+        worst = float(np.max(np.real(np.linalg.eigvals(jac))))
+        if worst <= tol:
+            return
+        raise ValueError(
+            f"equilibrate=True found an unstable fixed point (largest "
+            f"Re λ = {worst:.3g} > 0), so it is not a baseline: a forward "
+            f"solve from it diverges. A composite containing an autonomous "
+            f"oscillator has no stable whole-system rest state — equilibrate "
+            f"the non-oscillatory part and hold the oscillator at its "
+            f"published initial condition, or run with equilibrate=False."
+        )
+
+    def _check_param_targets(self, refs) -> None:
+        """Reject a ParameterRef whose field cannot carry a fitted scalar."""
+        for name, pref in refs.items():
+            process_name = pref.process_name
+            proc = self.composite.processes.get(process_name)
+            if proc is None:
+                raise KeyError(
+                    f"params[{name!r}] targets process {process_name!r}, "
+                    f"which is not in the composite. Available: "
+                    f"{sorted(self.composite.processes)}"
+                )
+            try:
+                value = read_param(proc, pref.field)
+            except (AttributeError, KeyError) as exc:
+                raise AttributeError(
+                    f"params[{name!r}] targets "
+                    f"{process_name}.{pref.field}, which does not exist "
+                    f"({exc})."
+                ) from None
+            if jnp.asarray(value).ndim:
+                raise TypeError(
+                    f"params[{name!r}] targets "
+                    f"{process_name}.{pref.field}, whose value is "
+                    f"{value!r} — shape {jnp.asarray(value).shape}, not a "
+                    f"scalar. Substitution writes one number, so a "
+                    f"tuple/array field would be overwritten with a scalar "
+                    f"and fail inside the process. Fit a scalar field, or "
+                    f"split this one."
+                )
+
+    def _require_identifiable(self) -> None:
+        """Refuse to fit a problem whose Fisher information is singular."""
+        from hallsim.identifiability import identifiability_report
+
+        report = identifiability_report(self)
+        cond = report.condition_number
+        if cond <= MAX_FIT_CONDITION_NUMBER:
+            return
+        raise ValueError(
+            f"Fisher condition number {cond:.2e} exceeds "
+            f"{MAX_FIT_CONDITION_NUMBER:.0e}: some combination of these "
+            f"parameters changes no reporter, so the fit has no unique "
+            f"answer and the iterate will wander along the flat directions. "
+            f"Freeze {report.recommended_freeze or '[see the report]'} and "
+            f"refit, reparameterize the confounded pairs "
+            f"({len(report.confounded)} found) to the combination the data "
+            f"sees, or add a condition that separates them. Pass "
+            f"allow_unidentifiable=True to fit anyway.\n\n{report}"
+        )
+
+    def _warn_inoperative_priors(self) -> None:
+        """Name any prior that cannot reach a penalty worth having."""
+        dead = [r for r in self.prior_report() if not r["operative"]]
+        if not dead:
+            return
+        for r in dead:
+            log.warning(
+                "prior on %r cannot constrain it: largest penalty reachable "
+                "in its clamp box is %.3g. prior_sigma is in log10 decades "
+                "(0.5 ~ a factor of 3), and %.3g decades constrains nothing "
+                "— a sigma set in the parameter's own units is the usual "
+                "cause.",
+                r["name"],
+                r["max_penalty"],
+                r["prior_sigma"],
+            )
+
     def _prior_penalty(self, param_values: dict) -> jnp.ndarray:
         """MAP log-normal prior penalty: prior_weight · Σ ((log10 p −
         log10 prior) / prior_sigma)² over params with a ``prior`` set.
@@ -1495,6 +1631,7 @@ class CalibrationProblem:
         mode: str = "forward",
         validation_arms: list[str] | None = None,
         identifiability: bool = True,
+        allow_unidentifiable: bool = False,
         **calibrator_kwargs,
     ) -> CalibrationHistory:
         """Fit the mechanism parameters.
@@ -1512,7 +1649,15 @@ class CalibrationProblem:
         (escalating to a warning if any parameter moves no reporter), and
         attaches it to ``history.identifiability``. Set ``False`` to skip it
         in inner-loop / toy fits. See :mod:`hallsim.identifiability`.
+
+        The same check runs *before* the fit and raises if the Fisher
+        condition number exceeds ``MAX_FIT_CONDITION_NUMBER``: descending a
+        singular problem moves parameters along directions the data cannot
+        see, so the iterate is arbitrary and the loss may rise. Freeze what
+        the report recommends, or pass ``allow_unidentifiable=True``.
         """
+        if not allow_unidentifiable:
+            self._require_identifiable()
         init = {k: jnp.asarray(p.init) for k, p in self._all_refs.items()}
         clamps = {
             k: p.clamp
@@ -1553,7 +1698,7 @@ class CalibrationProblem:
 
             try:
                 report = identifiability_report(
-                    self, history.final_params or init
+                    self, history.best_params or init
                 )
                 history.identifiability = report
                 log_summary(report, log)

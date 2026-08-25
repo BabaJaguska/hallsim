@@ -99,7 +99,8 @@ def test_numeric_params_are_traced_arrays():
 STRUCTURAL_NUMERIC_FIELDS = {
     "BistableLatch": {"latch_default", "target_default"},
     "ClampEdge": {"target_default"},
-    "HillActivationEdge": {"target_default"},
+    # target_default defaults to None (abstains), so it is not numeric here.
+    "HillActivationEdge": set(),
     "PulseSource": {"t_start", "t_end"},
 }
 

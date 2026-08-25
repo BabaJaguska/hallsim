@@ -110,14 +110,24 @@ SAMPLE_POSITION_GROUPS = {
     "ETOPOSIDE_D14": [4, 5],
     "ETOPOSIDE_RAPA_D07": [6, 7],
     "ETOPOSIDE_RAPA_D14": [8, 9],
-    # Oncogene-induced senescence (HRAS) arm — a mechanistically distinct
-    # senescence trigger the model is NOT calibrated on. Sampled D00/D04/D07.
-    "RAS_D00": [10, 11],
-    "RAS_D04": [12, 13],
-    "RAS_D07": [14, 15],
 }
 
-ARMS = ["DDIS_vs_ctrl", "RAPA_vs_ctrl", "RAS_vs_ctrl"]
+# The HRAS oncogene-induced arm is gone. It was wired to the same severities
+# as DDIS, so the composite produced a bit-identical trajectory (max|Δ| = 0)
+# and its "concordance" scored one model output against a second dataset. The
+# composite has no oncogene-specific mechanism; until it does, there is
+# nothing for that arm to test.
+ARMS = ["DDIS_vs_ctrl", "RAPA_vs_ctrl"]
+
+# "baseline" = each arm vs its own day 0; "paired" = vs its reference arm at
+# the same day, which needs that arm to exist in the data.
+NORMALIZATION = "baseline"
+
+ARM_PAIRS = {
+    "DDIS_vs_ctrl": ("DDIS", "ctrl"),
+    "RAPA_vs_ctrl": ("RAPA", "DDIS"),
+}
+ARM_CONDITIONS = {arm: cond for arm, (cond, _) in ARM_PAIRS.items()}
 
 
 def build_problem(
@@ -172,58 +182,31 @@ def build_problem(
                     ),
                 ),
             ),
-            # Oncogene-induced senescence: mapped to the same full-senescence
-            # severities as DDIS (oncogenic RAS drives replication-stress DNA
-            # damage AND mTOR hyperactivation). The composite has no
-            # oncogene-specific mechanism, so this is deliberately an
-            # out-of-the-box generalization test — does the senescence
-            # program calibrated on etoposide transfer to a different trigger?
-            "RAS_OIS": Condition(
-                "RAS_OIS",
-                # Matches DDIS: genomic instability only, nutrient sensing
-                # untouched — a pure damage-driven generalization arm.
-                {"Genomic Instability": 1.0},
-            ),
         },
-        # Trajectory-native: each arm is a {day: Δlog2FC} time course. Model
-        # time is in days (t_end=14), so the measured D07 / D14 samples map to
-        # query times 7.0 and 14.0. Every arm is normalized within-arm to its
-        # own D00 (fold-change-from-day-0) — matching the model's
-        # ``normalization="baseline"``. The rapamycin culture's day-0 is the
-        # shared etoposide D00 (rapamycin is not added until day 2), so the
-        # rapamycin arm normalizes to ETOPOSIDE_D00. The drug contrast (rapa
-        # vs no-rapa) is recovered post-hoc by differencing the two within-arm
-        # curves, not by cross-arm normalization.
-        data={
-            "DDIS_vs_ctrl": {
-                7.0: ds.delta("ETOPOSIDE_D07", "ETOPOSIDE_D00"),
-                14.0: ds.delta("ETOPOSIDE_D14", "ETOPOSIDE_D00"),
+        # Samples per arm per day. `arm_deltas` picks the reference from
+        # NORMALIZATION, so the data contrast tracks the model's. The
+        # rapamycin culture's day-0 is the shared etoposide D00.
+        data=ds.arm_deltas(
+            {
+                "DDIS_vs_ctrl": {
+                    0.0: "ETOPOSIDE_D00",
+                    7.0: "ETOPOSIDE_D07",
+                    14.0: "ETOPOSIDE_D14",
+                },
+                "RAPA_vs_ctrl": {
+                    0.0: "ETOPOSIDE_D00",
+                    7.0: "ETOPOSIDE_RAPA_D07",
+                    14.0: "ETOPOSIDE_RAPA_D14",
+                },
             },
-            "RAPA_vs_ctrl": {
-                7.0: ds.delta("ETOPOSIDE_RAPA_D07", "ETOPOSIDE_D00"),
-                14.0: ds.delta("ETOPOSIDE_RAPA_D14", "ETOPOSIDE_D00"),
-            },
-            # RAS vs its own pre-oncogene D00 baseline, at D04 and D07.
-            "RAS_vs_ctrl": {
-                4.0: ds.delta("RAS_D04", "RAS_D00"),
-                7.0: ds.delta("RAS_D07", "RAS_D00"),
-            },
-        },
-        # Model reproduces X_t/X_0 within each arm — the same reference the
-        # data deltas use. `base` in arm_pairs is unused under this mode. Every
-        # arm starts from the shared pre-perturbation homeostasis (the control
-        # condition run to its settled state), so the within-arm t=0 is the
-        # healthy baseline the data's D00 measures — not the composite's
-        # arbitrary initial condition (whose relaxation transient otherwise
-        # dominates and flips the damage sign).
-        normalization="baseline",
+            NORMALIZATION,
+            arm_pairs=ARM_PAIRS,
+            arm_conditions=ARM_CONDITIONS,
+        ),
+        normalization=NORMALIZATION,
         equilibrate=equilibrate,
         equilibration_condition="ctrl",
-        arm_pairs={
-            "DDIS_vs_ctrl": ("DDIS", "ctrl"),
-            "RAPA_vs_ctrl": ("RAPA", "DDIS"),
-            "RAS_vs_ctrl": ("RAS_OIS", "ctrl"),
-        },
+        arm_pairs=ARM_PAIRS,
         # Each fit param is read by ≥1 reporter and has a log-normal MAP prior.
         # See docs/coupling-edge-priors.md, docs/gz06-basal-p53.md.
         params={
@@ -299,7 +282,7 @@ def build_problem(
             # p53 → CDKN1A edge (P53CDKN1AActivator.k_act) is fixed, not fitted.
         },
         fit_arms=["DDIS_vs_ctrl"],
-        held_out_arms=["RAPA_vs_ctrl", "RAS_vs_ctrl"],
+        held_out_arms=["RAPA_vs_ctrl"],
         prior_weight=0.03,
         t_end=14.0,
         macro_dt=3.5,
@@ -319,8 +302,8 @@ def plot(pre, post, path: Path) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # Arms may have different timepoints (etoposide D07/D14, RAS D04/D07),
-    # so size the grid to the widest arm and use each arm's own times.
+    # Arms may have different timepoints, so size the grid to the widest
+    # arm and use each arm's own times.
     ncol = max(len(pre[a]) for a in ARMS)
     fig, axes = plt.subplots(
         len(ARMS),
@@ -626,7 +609,6 @@ def write_reporter_table(pre, post, out_dir: Path) -> None:
 _ARM_STYLE = {
     "DDIS_vs_ctrl": ("#c0392b", "DDIS"),
     "RAPA_vs_ctrl": ("#2a78d6", "RAPA"),
-    "RAS_vs_ctrl": ("#2a9d5a", "RAS"),
 }
 
 
@@ -645,9 +627,7 @@ def fig_oob_overview(
     n, ncol = len(genes), 3
     nrow = -(-n // ncol)
     qt = np.arange(0.1, problem.t_end + 1e-6, 0.1)
-    # RAS is held-out and shares DDIS's severities, so its model line just
-    # overplots DDIS — show RAS as data only (no trajectory).
-    line_arms = [a for a in _ARM_STYLE if a != "RAS_vs_ctrl"]
+    line_arms = list(_ARM_STYLE)
     lfc = {
         a: np.asarray(problem.model_lfc(params, a, jnp.asarray(qt)))
         for a in line_arms
@@ -663,7 +643,7 @@ def fig_oob_overview(
         g = genes[i]
         ax.axhline(0, color="#e6e6e2", lw=1.2, zorder=0)
         for a, (col, lbl) in _ARM_STYLE.items():
-            if a in lfc:  # RAS omitted: held-out, overplots DDIS
+            if a in lfc:
                 ax.plot(qt, lfc[a][i], color=col, lw=1.7, label=lbl)
             dts = sorted(problem.data[a])
             ax.plot(
@@ -880,14 +860,14 @@ def cmd_run(args) -> None:
     )
 
     print("[fit] calibrated concordance ...", flush=True)
-    post = problem.evaluate(history.final_params)
+    post = problem.evaluate(history.best_params)
 
     print(format_table(pre, post, fit_arms=problem.fit_arms))
     print("\nfitted parameters (init → fit):")
     for k in problem.param_refs:
         print(
             f"  {k:<20}{float(init[k]):>12.5g} → "
-            f"{float(history.final_params[k]):>12.5g}"
+            f"{float(history.best_params[k]):>12.5g}"
         )
 
     # ── post-fit figures (before/after + what changed inside) ──
@@ -896,7 +876,7 @@ def cmd_run(args) -> None:
     write_reporter_table(pre, post, out_dir)
     plot_history(problem, history, out_dir / "training_history.png")
     save_outputs(problem, str(out_dir), history)
-    fig_constituents(problem, init, history.final_params, out_dir)
+    fig_constituents(problem, init, history.best_params, out_dir)
     # Calibrated reporter figures on the fit just written, so the time-domain
     # trajectories and concordance dumbbells never lag behind the checkpoint.
     from multi_hallmark_figures import (

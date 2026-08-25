@@ -29,12 +29,12 @@ from hallsim.store import build_initial_store, validate_topology
 
 
 class Production(Process):
-    """Constant production: dx/dt = +rate."""
+    """Constant production: dx/dt = +rate. Abstains on the pool's value."""
 
     rate: float = 0.1
 
     def ports_schema(self):
-        return {"x": Port(role=PortRole.EVOLVED, default=0.0, units="uM")}
+        return {"x": Port(role=PortRole.EVOLVED, default=None, units="uM")}
 
     def derivative(self, t, state):
         return {"x": jnp.asarray(self.rate)}
@@ -180,10 +180,10 @@ class TestStore:
             def derivative(self, t, state):
                 return {}
 
-        procs = {"a_reader": Reader(), "z_writer": Production()}
+        procs = {"a_reader": Reader(), "z_writer": Decay()}
         topo = {"a_reader": {"x": "pool/x"}, "z_writer": {"x": "pool/x"}}
         store = build_initial_store(procs, topo)
-        assert float(store["pool/x"]) == 0.0
+        assert float(store["pool/x"]) == 1.0
 
     def test_initial_store_independent_of_insertion_order(self):
         topo = {"prod": {"x": "pool/x"}, "decay": {"x": "pool/x"}}

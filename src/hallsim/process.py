@@ -176,8 +176,11 @@ class PortRole(enum.Enum):
 class Port:
     """A single named connection point on a Process.
 
-    ``role`` is a :class:`PortRole`; ``default`` seeds the initial store when
-    no other process provides a value; ``units`` (``"uM"``) and ``ontology``
+    ``role`` is a :class:`PortRole`; ``default`` seeds the initial store, and
+    ``None`` abstains — the port writes to the path but claims nothing about
+    where it starts, which is what a coupling edge wiring into another model's
+    species wants. A path every claimant abstains on has no initial value and
+    raises. ``units`` (``"uM"``) and ``ontology``
     (``{"GO": "GO:0006915"}``) feed the validator and LLM-assisted composition.
 
     ``reads_value`` applies to EVOLVED ports only: set it False for a **pure
@@ -198,7 +201,7 @@ class Port:
     def __init__(
         self,
         role: PortRole = PortRole.EVOLVED,
-        default: float | jnp.ndarray = 0.0,
+        default: float | jnp.ndarray | None = 0.0,
         units: str = "",
         description: str = "",
         ontology: dict[str, str] | None = None,

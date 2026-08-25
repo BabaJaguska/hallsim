@@ -819,6 +819,66 @@ class GeneExpressionDataset:
             self.sample_groups[baseline],
         )
 
+    def arm_deltas(
+        self,
+        samples: dict[str, dict[float, str]],
+        normalization: str,
+        arm_pairs: dict[str, tuple[str, str]] | None = None,
+        arm_conditions: dict[str, str] | None = None,
+    ) -> dict[str, dict[float, pd.Series]]:
+        """Δ_data time courses whose reference matches ``normalization``.
+
+        ``samples`` names the sample group for each arm at each day, e.g.
+        ``{"DDIS_vs_ctrl": {0.0: "ETOPOSIDE_D00", 7.0: "ETOPOSIDE_D07"}}``.
+        The reference is then chosen, not hand-paired:
+
+        ``baseline`` divides each arm by its own day-0 group; ``paired``
+        divides by the arm's reference condition at the *same* day, taken from
+        ``arm_pairs`` and mapped back to an arm through ``arm_conditions``.
+        Day 0 is the reference under ``baseline`` and carries no data point.
+        """
+        if normalization not in ("baseline", "paired"):
+            raise ValueError(
+                f"arm_deltas supports 'baseline' and 'paired'; got "
+                f"{normalization!r}"
+            )
+        arm_of_condition = {
+            cond: arm for arm, cond in (arm_conditions or {}).items()
+        }
+        out: dict[str, dict[float, pd.Series]] = {}
+        for arm, by_day in samples.items():
+            if normalization == "baseline":
+                if 0.0 not in by_day:
+                    raise ValueError(
+                        f"arm {arm!r} has no day-0 group, which "
+                        f"normalization='baseline' divides by. Give it one, "
+                        f"or use normalization='paired'."
+                    )
+                ref_for = {t: by_day[0.0] for t in by_day}
+            else:
+                _, base_cond = (arm_pairs or {}).get(arm, (None, None))
+                base_arm = arm_of_condition.get(base_cond)
+                if base_arm is None or base_arm not in samples:
+                    raise ValueError(
+                        f"normalization='paired' needs a reference arm for "
+                        f"{arm!r}: arm_pairs names condition "
+                        f"{base_cond!r}, which no arm in `samples` supplies. "
+                        f"A single-arm dataset cannot be paired — use "
+                        f"normalization='baseline'."
+                    )
+                ref_for = {
+                    t: samples[base_arm][t]
+                    for t in by_day
+                    if t in samples[base_arm]
+                }
+            out[arm] = {
+                t: self.delta(by_day[t], ref_for[t])
+                for t in sorted(by_day)
+                if t in ref_for
+                and not (normalization == "baseline" and t == 0.0)
+            }
+        return out
+
     def variance(self, condition: str, baseline: str) -> pd.Series:
         """Per-gene sampling variance of the log2 fold change.
 

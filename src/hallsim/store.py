@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 def build_initial_store(
     processes: dict[str, Process],
     topology: dict[str, dict[str, str]],
+    initial: dict[str, float] | None = None,
 ) -> dict[str, jnp.ndarray]:
     """Create the initial state dict from port defaults.
 
@@ -35,6 +36,11 @@ def build_initial_store(
     EXCLUSIVE, LATCHED, ASSIGNED) seeds the value in preference to a reader
     (INPUT) — a reader's default describes what it expects to be handed, not
     what the path holds. Within a tier the lowest process name wins.
+
+    ``initial`` names a path's starting value outright and settles any
+    disagreement there. Two same-role ports claiming one path with *different*
+    defaults raise instead: which value the path starts at changes the
+    trajectory, so it is declared, not inferred.
 
     The tie-break is by name rather than by dict order on purpose: JAX sorts
     dict keys when it flattens a pytree, so ``processes`` comes back sorted
@@ -55,27 +61,34 @@ def build_initial_store(
         topo = topology.get(proc_name, {})
         for port_name, port in proc.ports_schema().items():
             store_path = topo.get(port_name, port_name)
+            claims.setdefault(store_path, {})
+            if port.default is None:
+                continue  # writes here, claims nothing about where it starts
             tier = 0 if port.role in writer_roles else 1
-            claims.setdefault(store_path, {}).setdefault(tier, []).append(
+            claims[store_path].setdefault(tier, []).append(
                 (proc_name, port.default)
             )
 
+    initial = dict(initial or {})
     store: dict[str, jnp.ndarray] = {}
     for store_path, tiers in claims.items():
+        if store_path in initial:
+            store[store_path] = jnp.asarray(initial.pop(store_path))
+            continue
+        if not tiers:
+            store[store_path] = jnp.asarray(0.0)  # every port abstained
+            continue
         winners = tiers[min(tiers)]
         name, default = winners[0]
         rejected = {d for _, d in winners[1:] if not _same_default(d, default)}
         if rejected:
-            log.warning(
-                "build_initial_store: %s is claimed by %d ports of the same "
-                "role with differing defaults %s; seeding %r from '%s'. "
-                "Declare the value once, or wire the disagreeing ports to "
-                "separate paths.",
-                store_path,
-                len(winners),
-                sorted(rejected | {default}, key=repr),
-                default,
-                name,
+            raise ValueError(
+                f"{store_path} is claimed by {len(winners)} ports of the same "
+                f"role with differing initial values "
+                f"{sorted(rejected | {default}, key=repr)}. Which one the "
+                f"path starts at is a modelling decision, not a tie-break: "
+                f"declare it with Composite(initial={{{store_path!r}: "
+                f"<value>}}), or wire the disagreeing ports to separate paths."
             )
         # No explicit dtype: honor the global JAX default (float64 under
         # jax_enable_x64), so integration state matches the rtol=1e-6 solver

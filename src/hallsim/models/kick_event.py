@@ -45,7 +45,7 @@ class KickEvent(Process):
         return {
             name: Port(
                 role=PortRole.LATCHED,
-                default=0.0,
+                default=None,  # kicks a path it does not own
                 units=units_map.get(name, ""),
                 description=f"kick target: {name}",
             )

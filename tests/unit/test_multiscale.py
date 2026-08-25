@@ -511,14 +511,14 @@ class TestContinuousOnly:
 
 
 class ConstantProduction(Process):
-    """Constant production: dx/dt = +rate."""
+    """Constant production: dx/dt = +rate. Abstains on the pool's value."""
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
     timescale: float = 1.0
     rate: float = 1.0
 
     def ports_schema(self):
-        return {"x": Port(role=PortRole.EVOLVED, default=0.0, units="uM")}
+        return {"x": Port(role=PortRole.EVOLVED, default=None, units="uM")}
 
     def derivative(self, t, state):
         return {"x": jnp.asarray(self.rate)}

@@ -220,6 +220,7 @@ class Composite(eqx.Module):
 
     processes: dict[str, Process]
     topology: dict[str, dict[str, str]]
+    initial: dict[str, float] = eqx.field(static=True, default_factory=dict)
 
     def __init__(
         self,
@@ -227,6 +228,7 @@ class Composite(eqx.Module):
         topology: dict[str, dict[str, str]] | None = None,
         *,
         rewire: dict[str, str] | None = None,
+        initial: dict[str, float] | None = None,
         validate: bool = True,
         semantic_validation: bool | dict = True,
     ) -> None:
@@ -242,6 +244,7 @@ class Composite(eqx.Module):
             }
         self.processes = flat_processes
         self.topology = flat_topology
+        self.initial = dict(initial or {})
         if validate:
             errors = validate_topology(flat_processes, flat_topology)
             if errors:
@@ -535,7 +538,7 @@ class Composite(eqx.Module):
     def initial_state(self) -> dict[str, jnp.ndarray]:
         """All process port defaults merged into one
         ``{store_path: jnp.ndarray}`` store."""
-        return build_initial_store(self.processes, self.topology)
+        return build_initial_store(self.processes, self.topology, self.initial)
 
     # -----------------------------------------------------------------
     # Introspection

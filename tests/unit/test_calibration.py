@@ -35,8 +35,8 @@ class TestForwardMode:
         history = cal.fit(steps=200)
         assert isinstance(history, CalibrationHistory)
         assert history.losses[-1] < 1e-3
-        assert float(history.final_params["a"]) == pytest.approx(1.5, abs=0.05)
-        assert float(history.final_params["b"]) == pytest.approx(
+        assert float(history.best_params["a"]) == pytest.approx(1.5, abs=0.05)
+        assert float(history.best_params["b"]) == pytest.approx(
             -0.7, abs=0.05
         )
 
@@ -57,7 +57,7 @@ class TestForwardMode:
         )
         history = cal.fit(steps=50)
         # Final param should saturate at the clamp upper bound.
-        assert float(history.final_params["a"]) == pytest.approx(2.0, abs=1e-3)
+        assert float(history.best_params["a"]) == pytest.approx(2.0, abs=1e-3)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -80,8 +80,8 @@ class TestReverseMode:
         )
         history = cal.fit(steps=200)
         assert history.losses[-1] < 1e-3
-        assert float(history.final_params["a"]) == pytest.approx(0.3, abs=0.05)
-        assert float(history.final_params["b"]) == pytest.approx(2.0, abs=0.05)
+        assert float(history.best_params["a"]) == pytest.approx(0.3, abs=0.05)
+        assert float(history.best_params["b"]) == pytest.approx(2.0, abs=0.05)
 
     def test_forward_and_reverse_agree(self):
         """The two autodiff modes should converge to the same optimum."""
@@ -109,7 +109,7 @@ class TestReverseMode:
         # Should converge to the same params within numerical noise.
         for k in init.keys():
             assert jnp.isclose(
-                h_f.final_params[k], h_r.final_params[k], atol=1e-3
+                h_f.best_params[k], h_r.best_params[k], atol=1e-3
             )
 
 
@@ -133,7 +133,7 @@ class TestCustomOptimizer:
         )
         history = cal.fit(steps=50)
         # SGD on a quadratic converges geometrically; should be near 0.
-        assert float(history.final_params["a"]) == pytest.approx(0.0, abs=0.02)
+        assert float(history.best_params["a"]) == pytest.approx(0.0, abs=0.02)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -864,3 +864,67 @@ class TestEquilibrationBaselineMatchesReadout:
         assert jnp.allclose(
             ref_readout[:, 0], jnp.asarray([jnp.sqrt(8.0), 2.0]), rtol=1e-2
         )
+
+
+class TestPriorStrength:
+    """A prior_sigma given in the parameter's own units instead of log10
+    decades is not a weak prior, it is no prior — and it is invisible."""
+
+    def _problem(self, sigma, clamp):
+        import pandas as pd
+
+        from hallsim.calibration import (
+            CalibrationProblem,
+            Condition,
+            ParameterRef,
+        )
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter
+        from hallsim.process import Port, PortRole, Process
+
+        class Knob(Process):
+            knob: float = 1.0
+
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"x": -self.knob * state["x"]}
+
+        return CalibrationProblem(
+            composite=Composite(
+                processes={"k": Knob()},
+                topology={"k": {"x": "pool/x"}},
+                validate=False,
+                semantic_validation=False,
+            ),
+            reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
+            conditions={"a": Condition("a", {})},
+            data={"a_vs_a": pd.Series({"GX": 0.0})},
+            arm_pairs={"a_vs_a": ("a", "a")},
+            params={
+                "knob": ParameterRef(
+                    process_name="k",
+                    field="knob",
+                    init=1.0,
+                    clamp=clamp,
+                    prior=1.0,
+                    prior_sigma=sigma,
+                )
+            },
+            fit_arms=["a_vs_a"],
+        )
+
+    def test_sane_sigma_is_operative(self):
+        report = self._problem(0.5, (0.01, 100.0)).prior_report()
+        assert report[0]["operative"]
+        assert report[0]["max_penalty"] > 1.0
+
+    def test_linear_units_sigma_is_flagged(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="hallsim.calibration"):
+            report = self._problem(9000.0, (0.01, 100.0)).prior_report()
+        assert not report[0]["operative"]
+        assert report[0]["max_penalty"] < 1e-6
+        assert any("log10 decades" in r.message for r in caplog.records)
