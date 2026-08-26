@@ -37,7 +37,7 @@ def test_uniprot_symbol_crosswalk_and_orthologs():
 
 @pytest.fixture(scope="module")
 def composite():
-    from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     return build_multi_hallmark_composite(validate=False)
 

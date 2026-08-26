@@ -84,7 +84,7 @@ def bench_trace_cost() -> None:
 
 def bench_splitting() -> None:
     """Does Lie splitting earn its keep? Both sides through Scheduler.run."""
-    from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     print("\n== 2. Lie splitting vs one merged group ==")
     comp = build_multi_hallmark_composite()
@@ -127,7 +127,7 @@ def bench_group_dimension() -> None:
     isolate the dimension effect from the Scheduler's own machinery; for the
     shipped end-to-end number, see :func:`bench_splitting`.
     """
-    from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     print("\n== 3. Group solve dimension (sizes _ReducedRHS) ==")
     comp = build_multi_hallmark_composite()
@@ -181,7 +181,7 @@ def bench_group_dimension() -> None:
 
 
 def bench_solver() -> None:
-    from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     print("\n== 4. Implicit root finder ==")
     comp = build_multi_hallmark_composite()
@@ -215,7 +215,7 @@ def bench_solver() -> None:
 
 
 def bench_graph() -> None:
-    from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     print("\n== 5. RHS jaxpr composition ==")
     comp = build_multi_hallmark_composite()

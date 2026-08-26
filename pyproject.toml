@@ -34,8 +34,6 @@ where = ["src"]
 [tool.setuptools.package-data]
 hallsim = [
   "py.typed",
-  "models/sbml/**/*.xml",
-  "models/sbml/**/*.md",
   "reference/**/*.tsv",
   "reference/**/*.md",
 ]

@@ -92,7 +92,7 @@ def build_niche_crosstalk(
     from hallsim.sbml_import import process_from_sbml
 
     if sbml_path is None:
-        from hallsim.models.sbml import sbml_source
+        from demos.models.sbml import sbml_source
 
         sbml_path = sbml_source(
             "sivakumar2011",

@@ -38,7 +38,7 @@ from hallsim.composite import Composite
 from hallsim.scheduler import Scheduler
 from hallsim.sbml_import import process_from_sbml
 
-from hallsim.models.sbml import sbml_source
+from demos.models.sbml import sbml_source
 
 XML = sbml_source(
     "zatorsky2006", "zatorsky2006_BIOMD0000000157.xml", "BIOMD0000000157"

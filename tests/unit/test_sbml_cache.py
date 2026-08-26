@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from hallsim.models.multi_hallmark import GZ06_SBML_PATH
+from demos.models.multi_hallmark import GZ06_SBML_PATH
 from hallsim.sbml_import import _preprocess_sbml, _strip_events
 
 N_RACERS = 12  # enough to reliably overlap the write window

@@ -32,7 +32,7 @@ jax.config.update("jax_enable_x64", True)
 
 from hallsim.composite import Composite
 from hallsim.hallmarks import apply_hallmarks
-from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+from demos.models.multi_hallmark import build_multi_hallmark_composite
 from hallsim.scheduler import Scheduler
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

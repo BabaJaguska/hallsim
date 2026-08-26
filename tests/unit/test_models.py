@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from hallsim.composite import Composite
-from hallsim.models.eriq import ERiQOxidativeStress
+from demos.models.eriq import ERiQOxidativeStress
 from hallsim.process import PortRole
 from hallsim.scheduler import Scheduler
 
@@ -214,7 +214,7 @@ def test_shooting_stabilizer_knobs_run_and_stay_finite():
 class TestHallmarkHandles:
     def test_apply_modifies_parameter(self):
         from hallsim.hallmarks import HALLMARK_REGISTRY
-        from hallsim.models.eriq import ERiQOxidativeStress
+        from demos.models.eriq import ERiQOxidativeStress
 
         handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
         procs = {"oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=1.0)}
@@ -227,7 +227,7 @@ class TestHallmarkHandles:
 
     def test_severity_zero_no_change(self):
         from hallsim.hallmarks import HALLMARK_REGISTRY
-        from hallsim.models.eriq import ERiQOxidativeStress
+        from demos.models.eriq import ERiQOxidativeStress
 
         handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
         procs = {"oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=1.0)}
@@ -239,7 +239,7 @@ class TestHallmarkHandles:
 
     def test_apply_hallmarks_multiple(self):
         from hallsim.hallmarks import apply_hallmarks
-        from hallsim.models.eriq import (
+        from demos.models.eriq import (
             ERiQEnergyMetabolism,
             ERiQOxidativeStress,
         )
@@ -286,7 +286,7 @@ class TestHallmarkHandles:
         output scales with it.
         """
         from hallsim.hallmarks import HALLMARK_REGISTRY
-        from hallsim.models.eriq import ERiQOxidativeStress
+        from demos.models.eriq import ERiQOxidativeStress
 
         handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
         # base=1 → severity=1 → 3
@@ -311,7 +311,7 @@ class TestHallmarkHandles:
         import jax
         import jax.numpy as jnp
         from hallsim.hallmarks import HALLMARK_REGISTRY
-        from hallsim.models.eriq import ERiQOxidativeStress
+        from demos.models.eriq import ERiQOxidativeStress
 
         handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
         procs = {"oxidative_stress": ERiQOxidativeStress(MDAMAGE_SA=1.0)}

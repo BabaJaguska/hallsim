@@ -15,6 +15,7 @@ import logging
 from typing import Any
 
 import jax.numpy as jnp
+import numpy as np
 
 from hallsim.process import PortRole, Process, ProcessKind
 from hallsim.tracing import is_traced
@@ -103,10 +104,14 @@ def _same_default(a: Any, b: Any) -> bool:
     Traced defaults count as agreeing: there is no concrete value to compare,
     and this is reached under ``jit`` — ``initial_state_vec`` → ``steady_state``
     → a calibration loss — where raising to report a warning would be absurd.
+
+    The comparison runs in numpy, not ``jnp``. Under ``jit`` a ``jnp`` compare
+    of two *concrete* floats still yields a traced bool, so ``bool()`` on it
+    raises — guarding the inputs with :func:`is_traced` is not enough.
     """
     if is_traced(a, b):
         return True
-    return bool(jnp.all(jnp.asarray(a) == jnp.asarray(b)))
+    return bool(np.all(np.asarray(a) == np.asarray(b)))
 
 
 def validate_topology(

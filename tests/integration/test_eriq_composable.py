@@ -9,7 +9,7 @@ import pytest
 
 pytestmark = pytest.mark.demo
 
-from hallsim.models.eriq import (
+from demos.models.eriq import (
     ERIQ_HOMEOSTATIC_IC,
     ERiQEnergyMetabolism,
     ERiQOxidativeStress,

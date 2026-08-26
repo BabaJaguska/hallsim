@@ -76,7 +76,7 @@ class TestMultiHallmarkWiring:
     # Builds the full composite (downloads DP14/GZ06/Ihekwaba SBML on a
     # clean checkout); deselected from `make test` via `-m "not network"`.
     def test_edges_present_and_wired_generically(self):
-        from hallsim.models.multi_hallmark import (
+        from demos.models.multi_hallmark import (
             build_multi_hallmark_composite,
         )
 
@@ -87,7 +87,7 @@ class TestMultiHallmarkWiring:
         assert comp.topology["p53_cdkn1a"]["target"] == "dp14/CDKN1A"
 
     def test_ikk_receives_additive_contribution(self):
-        from hallsim.models.multi_hallmark import (
+        from demos.models.multi_hallmark import (
             build_multi_hallmark_composite,
         )
 

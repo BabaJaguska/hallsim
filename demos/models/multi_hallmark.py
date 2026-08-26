@@ -8,7 +8,7 @@ Communication (Ihekwaba 2004's NF-κB / IκBα module).
 
 Constituents — DallePezze 2014 (BIOMD0000000582), Geva-Zatorsky 2006
 (BIOMD0000000157), Ihekwaba 2004 (BIOMD0000000230) — ship vendored under
-``hallsim/models/sbml/``; a missing file falls back to the BioModels id and
+``demos/models/sbml/``; a missing file falls back to the BioModels id and
 downloads on first import.
 
 Cross-publication edges:
@@ -53,7 +53,7 @@ from __future__ import annotations
 from hallsim.composite import Composite
 from hallsim.models.forcing import drive_pulse
 from hallsim.models.hill_edge import HillActivationEdge, HillSignalEdge
-from hallsim.models.sbml import sbml_source
+from demos.models.sbml import sbml_source
 from hallsim.sbml_import import process_from_sbml
 
 DP14_SBML_PATH = sbml_source(

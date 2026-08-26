@@ -33,7 +33,7 @@ from hallsim.gene_reporters import (
     window_rms,
     zerophase_mean,
 )
-from hallsim.models.eriq import derive_observables
+from demos.models.eriq import derive_observables
 
 
 class TestZerophaseMean:
@@ -462,6 +462,6 @@ class TestPublishedReporterTable:
         assert set(self._TABLE_ROW.findall(block)) == self._live()
 
     def test_model_docstring_matches_code(self):
-        from hallsim.models import multi_hallmark
+        from demos.models import multi_hallmark
 
         assert set(self._ARROW.findall(multi_hallmark.__doc__)) == self._live()

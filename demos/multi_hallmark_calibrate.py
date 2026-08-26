@@ -56,7 +56,7 @@ from hallsim.gene_reporters import (  # noqa: E402
     MULTI_HALLMARK_REPORTERS,
     GeneExpressionDataset,
 )
-from hallsim.models.multi_hallmark import (  # noqa: E402
+from demos.models.multi_hallmark import (  # noqa: E402
     build_multi_hallmark_composite,
     DP14_MTOR_PHOS_RATE_NAME,
     RAPA_INTERVENTION_DAY,

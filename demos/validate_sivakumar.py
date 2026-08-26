@@ -9,7 +9,7 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from hallsim.sbml_import import process_from_sbml
-from hallsim.models.sbml import sbml_dir
+from demos.models.sbml import sbml_dir
 from hallsim.validation import CompositeValidator
 
 MODEL_DIR = sbml_dir("sivakumar2011")

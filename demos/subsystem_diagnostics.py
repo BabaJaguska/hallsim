@@ -25,7 +25,7 @@ import numpy as np  # noqa: E402
 from hallsim.composite import Composite  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.sbml_import import process_from_sbml  # noqa: E402
-from hallsim.models.multi_hallmark import (  # noqa: E402
+from demos.models.multi_hallmark import (  # noqa: E402
     DP14_SBML_PATH,
     DP14_IRRADIATION_RATE_NAME,
     DP14_IRRADIATION_RATE_DEFAULT,

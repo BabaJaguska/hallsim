@@ -275,7 +275,7 @@ def fig_schematic(args):
 
 # ── trajectories ─────────────────────────────────────────────────────────
 def fig_trajectories(args):
-    from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     arms = [
         (0.0, 0.0, "ctrl", "tab:green"),
@@ -817,7 +817,7 @@ def fig_before_after(args):
     """
     from multi_hallmark_calibrate import build_problem
     from hallsim.sbml_import import process_from_sbml
-    from hallsim.models.multi_hallmark import (
+    from demos.models.multi_hallmark import (
         CANONICAL_TIME_SECONDS,
         DP14_SBML_PATH,
         GZ06_SBML_PATH,

@@ -477,7 +477,7 @@ def stiffness(macro_dt):
     auto-select. Use it on any composite via
     ``hallsim.stiffness.analyze_groups``.
     """
-    from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
     from hallsim.stiffness import analyze_groups
 
     comp = build_multi_hallmark_composite()

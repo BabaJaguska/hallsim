@@ -42,7 +42,7 @@ import psutil
 
 from hallsim.composite import single_process_composite
 from hallsim.io import outdir
-from hallsim.models.eriq import build_eriq_composite
+from demos.models.eriq import build_eriq_composite
 from hallsim.sbml_import import process_from_sbml
 from hallsim.scheduler import Scheduler
 

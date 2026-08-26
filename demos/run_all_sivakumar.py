@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 
 from hallsim.sbml_import import process_from_sbml
 from hallsim.composite import Composite
-from hallsim.models.sbml import sbml_dir
+from demos.models.sbml import sbml_dir
 from hallsim.scheduler import Scheduler
 
 MODEL_DIR = sbml_dir("sivakumar2011")

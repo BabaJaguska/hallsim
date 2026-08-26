@@ -173,7 +173,7 @@ def test_sbml_reimport_reuses_generated_class():
     """Codegen is cached per source file. A fresh generated class per import
     is a distinct pytree node type, so no compiled solve can be reused across
     two imports of the same model."""
-    from hallsim.models.multi_hallmark import GZ06_SBML_PATH
+    from demos.models.multi_hallmark import GZ06_SBML_PATH
     from hallsim.sbml_import import process_from_sbml
 
     a = process_from_sbml(str(GZ06_SBML_PATH), name="gz06")

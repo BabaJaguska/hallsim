@@ -21,7 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from hallsim.composite import Composite  # noqa: E402
-from hallsim.models.sbml import sbml_source  # noqa: E402
+from demos.models.sbml import sbml_source  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.sbml_import import process_from_sbml  # noqa: E402
 

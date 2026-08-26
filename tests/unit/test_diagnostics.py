@@ -19,13 +19,13 @@ from hallsim.diagnostics import (
 )
 from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
 from hallsim.models.hill_edge import HillActivationEdge
-from hallsim.models.multi_hallmark import (
+from demos.models.multi_hallmark import (
     GZ06_PSI_DEFAULT,
     GZ06_PSI_NAME,
     GZ06_SBML_PATH,
     build_multi_hallmark_composite,
 )
-from hallsim.models.sbml import sbml_source
+from demos.models.sbml import sbml_source
 from hallsim.process import Port, PortRole, Process
 from hallsim.sbml_import import process_from_sbml
 

@@ -51,7 +51,7 @@ for wiring any composite to any held-out gene-expression dataset:
 ```python
 from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
 from hallsim.gene_reporters import GeneExpressionDataset, MULTI_HALLMARK_REPORTERS
-from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+from demos.models.multi_hallmark import build_multi_hallmark_composite
 
 composite = build_multi_hallmark_composite()
 

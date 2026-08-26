@@ -597,7 +597,7 @@ def summarize_reporters(
 
     ``derive`` is the model's own map from store paths to named observables,
     for reporters that read an algebraic intermediate rather than a raw state
-    (see :func:`hallsim.models.eriq.derive_observables`). It must be
+    (see :func:`demos.models.eriq.derive_observables`). It must be
     shape-polymorphic so a trajectory passes through. Omit it when every
     reporter names a store path directly.
     """

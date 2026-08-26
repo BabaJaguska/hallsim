@@ -177,7 +177,7 @@ profile without the hallmark clobbering the fit.
 ```python
 from hallsim import Composite
 from hallsim.hallmarks import apply_hallmarks
-from hallsim.models.multi_hallmark import build_multi_hallmark_composite
+from demos.models.multi_hallmark import build_multi_hallmark_composite
 
 base = build_multi_hallmark_composite()
 # Rapamycin = downward shift on Deregulated Nutrient Sensing (targets DP14's

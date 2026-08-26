@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import pytest
 
 from hallsim.composite import Composite
-from hallsim.models.multi_hallmark import GZ06_PSI_NAME, GZ06_SBML_PATH
+from demos.models.multi_hallmark import GZ06_PSI_NAME, GZ06_SBML_PATH
 from hallsim.sbml_import import process_from_sbml
 from hallsim.scheduler import Scheduler
 
