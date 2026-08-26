@@ -57,6 +57,12 @@ class ScreenReport:
     param-input), so the flags were measured under a probe drive rather
     than at the port defaults. It describes the screen, not a defect, and
     does not gate ``ok``.
+
+    ``not_at_rest`` is likewise descriptive: ``rest_tau`` is how fast the
+    quickest state (``rest_state``) leaves the declared initial condition, and
+    a stimulus applied at t=0 is *supposed* to move it. It gates nothing, but a
+    τ far below the horizon means most of the run is relaxation — decide
+    whether to equilibrate before reading anything off the trajectory.
     """
 
     name: str
@@ -70,6 +76,9 @@ class ScreenReport:
     tunes: bool | None = None
     negative: bool = False
     undriven: bool = False
+    not_at_rest: bool = False
+    rest_tau: float = float("inf")
+    rest_state: str = ""
 
     @property
     def ok(self) -> bool:
@@ -95,6 +104,8 @@ class ScreenReport:
             flags.append("TOLERANCE-SENSITIVE")
         if self.negative:
             flags.append("NEGATIVE-DOMAIN")
+        if self.not_at_rest:
+            flags.append("NOT-AT-REST")
         if self.tunes is False:
             flags.append("NON-TUNABLE")
         elif self.tunes is None:
@@ -121,6 +132,33 @@ def _on_native_clock(process):
     ):
         return process.reconciled_to(process.native_time_seconds)
     return process
+
+
+def rest_timescale(composite, y0=None, t=0.0) -> tuple[float, str]:
+    """Fastest state's ``τ = |y₀| / |f(t, y₀)|`` at ``y0`` → ``(τ, path)``.
+
+    How long the quickest-moving state would take to change by 100% of itself
+    from the declared initial condition. A published initial condition is often
+    a fitted experimental starting point rather than a rest state, and one far
+    from rest spends the run relaxing — a transient that, in a composite, is
+    injected into every process downstream of it through the coupling edges.
+
+    ``τ`` rather than ``‖f(y₀)‖`` because the norm carries the model's units and
+    is not comparable between models, while a time compares directly against the
+    horizon and the save interval. Returns ``inf`` for a genuine rest state.
+    States at zero are scaled by the median magnitude of the non-zero ones, so
+    an empty pool is not reported as infinitely fast.
+    """
+    keys = list(composite.store_keys())
+    y0 = composite.initial_state_vec() if y0 is None else y0
+    rhs, _ = composite.build_rhs()
+    f = np.abs(np.asarray(rhs(t, y0)))
+    y = np.abs(np.asarray(y0))
+    nonzero = y[y > 0]
+    scale = np.maximum(y, np.median(nonzero) if nonzero.size else 1.0)
+    tau = np.where(f > 0, scale / np.maximum(f, 1e-300), np.inf)
+    i = int(np.argmin(tau))
+    return float(tau[i]), keys[i]
 
 
 def _solo_run(
@@ -491,6 +529,10 @@ def screen_process(
                 "tunes only under the implicit solver (auto_stiffness=True)",
             )
 
+    tau, state, at_rest_detail = _rest_verdict(proc, t_end, n_save)
+    if at_rest_detail:
+        v.detail = _and(v.detail, at_rest_detail)
+
     return ScreenReport(
         name=name,
         exploding=v.exploding,
@@ -503,6 +545,43 @@ def screen_process(
         tunes=tunes,
         negative=v.negative,
         undriven=undriven,
+        not_at_rest=bool(at_rest_detail),
+        rest_tau=tau,
+        rest_state=state,
+    )
+
+
+def _rest_verdict(proc, t_end: float, n_save: int):
+    """``(tau, state, detail)`` for the not-at-rest flag on a solo process.
+
+    Flags when the fastest state's τ is below the save interval: that state has
+    already relaxed before the first sample, so nothing in the saved trajectory
+    is the initial condition the model declares. A live time-dependent term at
+    t=0 is named in the detail rather than silently counted as disequilibrium —
+    a stimulus is supposed to move the state.
+    """
+    from hallsim.steady_state import is_autonomous
+
+    comp = single_process_composite(proc)
+    y0 = comp.initial_state_vec()
+    try:
+        tau, state = rest_timescale(comp, y0)
+    except Exception:  # a screen must never be the thing that fails
+        return float("inf"), "", ""
+    save_dt = t_end / max(n_save, 1)
+    if not np.isfinite(tau) or tau >= save_dt:
+        return tau, state, ""
+    driven = not is_autonomous(comp, y0)
+    return (
+        tau,
+        state,
+        f"{state} moves 100% in {tau:.3g} vs a {save_dt:.3g} save step"
+        + (
+            " (a time-dependent term is live at t=0, so this includes the "
+            "stimulus)"
+            if driven
+            else " — the initial condition is not a rest state"
+        ),
     )
 
 

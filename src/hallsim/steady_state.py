@@ -142,13 +142,22 @@ def conserved_moieties(stoichiometry: dict) -> list[dict[str, int]]:
     ]
 
 
+def is_autonomous(composite, y, dt: float = 1.0) -> bool:
+    """Whether the RHS at ``y`` is free of explicit time dependence.
+
+    True under trace, where there is nothing concrete to test — callers of this
+    are diagnostics, and a diagnostic stays quiet rather than guessing.
+    """
+    if is_traced(y) or is_traced(*jax.tree_util.tree_leaves(composite)):
+        return True
+    rhs, _ = composite.build_rhs()
+    return float(jnp.max(jnp.abs(rhs(0.0, y) - rhs(dt, y)))) < 1e-9
+
+
 def warn_if_time_dependent(composite, y, dt: float = 1.0) -> bool:
     """Warn (COPASI-style) if the RHS is explicitly time-dependent at ``y`` —
     a Newton fixed point is meaningless then. Returns True if autonomous."""
-    if is_traced(y) or is_traced(*jax.tree_util.tree_leaves(composite)):
-        return True  # diagnostic: nothing concrete to test, so stay quiet
-    rhs, _ = composite.build_rhs()
-    autonomous = float(jnp.max(jnp.abs(rhs(0.0, y) - rhs(dt, y)))) < 1e-9
+    autonomous = is_autonomous(composite, y, dt)
     if not autonomous:
         log.warning(
             "steady_state: the RHS is explicitly time-dependent at this "

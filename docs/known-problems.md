@@ -330,21 +330,25 @@ The check that would catch a mistake does not exist, does not run, or fails open
   of those failed and, for a non-`calibratable` field, that fitting it is
   unsupported. The check is cheap and the failure it replaces is unreadable.
 
-- [ ] **P1.12 — `screen_process` passes a model sitting 67 384 units/day from
-  its own rest state.** ✓✓ The screen checks exploding, vanishing and
-  tolerance-sensitivity; none of them notice that a declared initial condition
-  is nowhere near a steady state. DallePezze returns `ok=True` while its
-  mitophagy state has a 13-second time constant against a 14-day horizon — it
-  is fully relaxed long before the first save, so every measurement is
-  post-relaxation and the initial condition is a fiction. One RHS evaluation
-  would have caught P0.14 at import, before any composite was built.
-  *Fix:* a fourth failure mode, `not_at_rest`. Report it as a time, not a norm:
-  `τᵢ = |y₀ᵢ| / |fᵢ(0, y₀)|` per state, flag when the fastest τ is far below
-  the first save interval. Advisory like `exploding` — a pulse experiment is
-  legitimately off-equilibrium at t=0. Two details to get right: use
-  `warn_if_time_dependent` to say when the number includes a live drive rather
-  than mixing them silently, and pick a stated scale floor for states at zero.
-  Add it to the intake protocol in `CLAUDE.md` beside the other three.
+- [x] **P1.12 — `screen_process` passes a model sitting 67 384 units/day from
+  its own rest state.** *Fixed 2026-08-25.* Fourth failure mode `not_at_rest`,
+  reported as a time: `ScreenReport.rest_tau` / `.rest_state` from the new
+  public `diagnostics.rest_timescale(composite, y0)`. Flags when the fastest
+  state's τ falls below the save interval — that state has relaxed before the
+  first sample, so nothing saved is the declared IC. Advisory (does not gate
+  `ok`), and a live time-dependent term at t=0 is named in the detail rather
+  than counted as disequilibrium, via the new `steady_state.is_autonomous`
+  predicate split out of `warn_if_time_dependent`. DallePezze now screens
+  `NOT-AT-REST` at **τ = 0.000148 d = 12.8 s on `dp14/Mitophagy`**, matching
+  the reviewer's hand-derived 13 s. Added to the intake protocol in
+  `CLAUDE.md` beside the other three.
+  What it replaces: the screen checked exploding, vanishing and
+  tolerance-sensitivity, none of which notice that a declared initial condition
+  is nowhere near a steady state. One RHS evaluation would have caught P0.14 at
+  import, before any composite was built. Three independent parties — two
+  reviewers, an outside calibration agent, and an outside model-building agent
+  that chose a 30-day equilibration blind — each hand-rolled this measurement
+  because nothing reported it.
 
 - [ ] **P1.13 — Structurally redundant parameters are invisible before a fit.**
   DallePezze's `k33` and `k34` carry the *identical* rate law

@@ -247,4 +247,5 @@ cython_debug/
 # Review-panel reports: raw evidence. Findings that matter are lifted into
 # docs/known-problems.md, which is what the repo carries.
 docs/review-*.md
+docs/dp_edison.txt
 .claude/

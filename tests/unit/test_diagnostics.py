@@ -4,12 +4,16 @@ import logging
 
 import pytest
 
+import jax.numpy as jnp
+
+from hallsim.composite import single_process_composite
 from hallsim.diagnostics import (
     DEAD_SINK,
     SUITABLE,
     ScreenReport,
     coupling_source_verdict,
     recommend_coupling_source,
+    rest_timescale,
     screen_process,
     screen_sensitivity,
 )
@@ -141,6 +145,84 @@ class _DeadDecay(Process):
 
     def derivative(self, t, state):
         return {"x": -10.0 * state["x"]}
+
+
+class _AtRest(Process):
+    """Starts exactly on its fixed point: dx/dt = k(1 - x), x(0) = 1."""
+
+    def ports_schema(self):
+        return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+    def derivative(self, t, state):
+        return {"x": 2.0 * (1.0 - state["x"])}
+
+
+class _FarFromRest(Process):
+    """Same fixed point, released from x(0) = 100 and relaxing far faster than
+    the screen can save: tau = 100 / (1e5 * 99) is ~1e-3 of a save step, so the
+    saved trajectory never contains the declared initial condition.
+
+    The analytic tau makes the flag checkable against a number rather than a
+    threshold.
+    """
+
+    def ports_schema(self):
+        return {"x": Port(role=PortRole.EVOLVED, default=100.0)}
+
+    def derivative(self, t, state):
+        return {"x": 1e5 * (1.0 - state["x"])}
+
+
+class _Kicked(Process):
+    """Autonomous at its IC apart from an explicit pulse live at t=0."""
+
+    def ports_schema(self):
+        return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+    def derivative(self, t, state):
+        return {"x": 1e4 * jnp.where(t < 1e-3, 1.0, 0.0)}
+
+
+def test_rest_state_is_not_flagged():
+    r = screen_process(_AtRest(), t_end=5.0, check_tunability=False)
+    assert not r.not_at_rest
+    assert r.rest_tau == float("inf")
+
+
+def test_far_from_rest_is_flagged_but_still_ok():
+    r = screen_process(_FarFromRest(), t_end=5.0, check_tunability=False)
+    assert r.not_at_rest
+    assert r.rest_state.endswith("x")
+    assert r.rest_tau == pytest.approx(100 / (1e5 * 99), rel=1e-6)
+    # Advisory: a stimulus at t=0 legitimately moves the state, so the flag
+    # must describe the screen without failing the model.
+    assert r.ok
+    assert "not a rest state" in r.detail
+
+
+def test_live_stimulus_is_named_rather_than_called_disequilibrium():
+    r = screen_process(_Kicked(), t_end=5.0, check_tunability=False)
+    assert r.not_at_rest
+    assert "time-dependent term is live at t=0" in r.detail
+
+
+def test_rest_timescale_names_the_fastest_state():
+    """Two states, different rates — the report must name the quicker one."""
+
+    class _TwoRates(Process):
+        def ports_schema(self):
+            return {
+                "slow": Port(role=PortRole.EVOLVED, default=1.0),
+                "fast": Port(role=PortRole.EVOLVED, default=1.0),
+            }
+
+        def derivative(self, t, state):
+            return {"slow": 0.1, "fast": 50.0}
+
+    comp = single_process_composite(_TwoRates())
+    tau, state = rest_timescale(comp)
+    assert state.endswith("fast")
+    assert tau == pytest.approx(1 / 50, rel=1e-6)
 
 
 def test_driven_edge_is_undriven_not_vanishing():
