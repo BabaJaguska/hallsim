@@ -248,4 +248,7 @@ cython_debug/
 # docs/known-problems.md, which is what the repo carries.
 docs/review-*.md
 docs/dp_edison.txt
-.claude/
+# The panel's *reports* are raw evidence and stay out; the panel itself is
+# repo infrastructure — it produced known-problems.md and is the intake gate.
+.claude/*
+!.claude/agents/

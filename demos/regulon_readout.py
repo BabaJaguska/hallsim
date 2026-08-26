@@ -36,12 +36,12 @@ from demos.multi_hallmark_calibrate import (
 )
 from hallsim.gene_reporters import (
     GeneExpressionDataset,
-    GeneReporter,
     log2_fold_change,
     zerophase_mean,
     zerophase_rms_raw,
 )
 from hallsim.regulon import (
+    ActivityBinding,
     Regulon,
     RegulonHead,
     fit_gains,
@@ -52,30 +52,26 @@ log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# One modelled activity ↔ one CollecTRI regulator. Summaries match the
-# canonical reporters reading the same store paths, so the activity delta is
-# collapsed the same way the validated readout collapses it.
-TF_REPORTERS = [
-    GeneReporter(
+# Summaries match the canonical reporters reading the same store paths, so the
+# activity delta is collapsed the same way the validated readout collapses it.
+TF_BINDINGS = [
+    ActivityBinding(
         observable="gz06/x",
-        gene_symbol="TP53",
-        sign=+1,
+        tf="TP53",
         summary=zerophase_rms_raw(tau=0.75),
         description="p53 (Geva-Zatorsky x) — oscillates, read as envelope.",
         reference="Geva-Zatorsky et al. 2006, Mol Syst Biol 2:2006.0033",
     ),
-    GeneReporter(
+    ActivityBinding(
         observable="dp14/FoxO3a",
-        gene_symbol="FOXO3",
-        sign=+1,
+        tf="FOXO3",
         summary=zerophase_mean(tau=2.0),
         description="Unphosphorylated FoxO3a — the transcriptionally active pool.",
         reference="Dalle Pezze et al. 2014, PLoS Comput Biol 10:e1003728",
     ),
-    GeneReporter(
+    ActivityBinding(
         observable="nfkb/NFkBn",
-        gene_symbol="RELA",
-        sign=+1,
+        tf="RELA",
         summary=zerophase_mean(tau=0.75),
         description="Nuclear NF-κB — the transcriptionally competent pool.",
         reference="Ihekwaba et al. 2004, Syst Biol 1:93–103",
@@ -154,7 +150,7 @@ def permutation_null(head, activity, observed, n: int = 200, seed: int = 0):
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    problem = build_problem(reporters=TF_REPORTERS)
+    problem = build_problem(reporters=TF_BINDINGS)
     dataset = GeneExpressionDataset.from_series_matrix(
         SERIES_MATRIX,
         PLATFORM,
@@ -163,7 +159,7 @@ def main() -> None:
     )
     measured_genes = list(dataset.gene_expr.index)
 
-    tfs = [r.gene_symbol for r in TF_REPORTERS]
+    tfs = [b.tf for b in TF_BINDINGS]
     regulon = Regulon.from_collectri(tfs, restrict_to=measured_genes)
     log.info("Regulon coverage: %s", regulon.coverage)
 

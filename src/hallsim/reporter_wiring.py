@@ -371,6 +371,10 @@ def validate_reporter_mappings(reporters, composite):
     ontmap = store_ontology_map(composite)
     results = []
     for rep in reporters:
+        # No gene_symbol means no transcript is being claimed — an
+        # ActivityBinding names a regulator, not a readout gene.
+        if not getattr(rep, "gene_symbol", None):
+            continue
         v = classify_reporter(rep, composite, ontmap)
         msg = v.message + (" [" + "; ".join(v.notes) + "]" if v.notes else "")
         results.append(

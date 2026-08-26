@@ -158,6 +158,17 @@ A composite is only as trustworthy as its parts, and the most dangerous failures
 - `hallsim.diagnostics.screen_process(proc, t_end)` / `screen_composite(comp, t_end)` — returns a pass/flag `ScreenReport`; `assert all(r.ok for r in reports)` in a test.
 - `demos/subsystem_diagnostics.py` — the visual version.
 
+**Numerical screening is not scientific review.** A model can pass every check above and still be wrong: parameters invented rather than measured, a citation that does not say what it is cited for, a sign error, units that only appear consistent. Peer review is not a guarantee — assume nothing about an imported model because it was published.
+
+`hallsim.intake.triage_sbml` / `triage_batch` is the cheap gate that runs first — SBML metadata plus one solve, no reviewer. It rejects what will not import, has unsupported constructs, or fails the numerical screen, and flags a missing time unit, thin ontology coverage, or an IC that is not a rest state (`rest_residual` = ‖f(y₀)‖/‖y₀‖). Only `verdict.escalate` models are worth a reviewer's time.
+
+What survives triage then gets the review panel in `.claude/agents/`, run on the *individual* model before it joins any composite:
+- **bench-scientist** — pulls the cited papers, checks they say what they are cited for, classifies every parameter measured / fitted / invented.
+- **mathematician** — well-posedness, dimensional consistency, stiffness, identifiability.
+- **physicist** — orders of magnitude, thermodynamic consistency, timescale separation.
+
+Reports land in `docs/review-<model>-{wetlab,maths,physics}.md` (gitignored raw evidence); findings that matter are lifted into `docs/known-problems.md`. The panel definitions are tracked; their output is not. Skip the panel for a quick probe, never for a model whose numbers will be reported.
+
 **Solver tolerance.** Scheduler default is `rtol=1e-6, atol=1e-9`, because oscillatory biology (p53–Mdm2, NF-κB, cell cycle, MAPK) needs accuracy-limited stepping. Do **not** loosen it for a speed-up without screening every oscillator first. Canonical case: Geva-Zatorsky 2006 p53 (BIOMD0000000157) is a clean bounded oscillator that *diverges to ~300× its amplitude and goes negative* at `rtol=1e-4`, and is bounded from `rtol=1e-5` down. Nothing changed but the tolerance.
 
 **Time units.** Composed SBML models often declare different native time units (DallePezze 2014 = days, Geva-Zatorsky 2006 = hours, an unannotated model = seconds). `SBMLProcess` extracts `native_time_seconds` at import; `reconciled_to(canonical_seconds)` puts a model on the composite's clock via chain-rule rescaling. Compose without reconciling and the models run at different real-world speeds on a shared `t` — the result is meaningless. Screen for it.

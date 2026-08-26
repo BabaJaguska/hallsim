@@ -25,6 +25,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import equinox as eqx
 import jax
@@ -51,6 +52,28 @@ def load_collectri(path: Path | None = None) -> pd.DataFrame:
     if path is None:
         path = _reference_dir() / "collectri" / "collectri_human.tsv"
     return pd.read_csv(path, sep="\t")
+
+
+@dataclass(frozen=True)
+class ActivityBinding:
+    """One store path ↔ the regulator whose regulon that activity drives.
+
+    Distinct from :class:`~hallsim.gene_reporters.GeneReporter`, which claims
+    an observable predicts one *transcript*. This claims an observable **is** a
+    regulator's activity, and the transcripts follow from the prior. Carries
+    ``.observable`` / ``.summary`` / ``.sign`` so it feeds the same trajectory-
+    summary path a reporter does.
+    """
+
+    observable: str
+    tf: str
+    summary: Callable
+    description: str = ""
+    reference: str = ""
+    sign: int = +1
+    #: Empty by declaration — no transcript is claimed, so the reporter
+    #: validator skips it and its data column is absent rather than wrong.
+    gene_symbol: str = ""
 
 
 @dataclass(frozen=True)
