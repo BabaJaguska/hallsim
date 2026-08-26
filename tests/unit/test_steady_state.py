@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from hallsim.composite import Composite
@@ -44,6 +45,45 @@ class TimedSource(Process):
         return {"A": jnp.sin(t)}
 
 
+class Binding(Process):
+    """E + S ⇌ ES mass-action, stoichiometry declared.
+
+    Two moieties that *share* a species — E+ES and S+ES — so the exact left
+    null space is a basis whose rows are neither unit-length nor mutually
+    orthogonal. The case that separates orthonormalising from normalising.
+    """
+
+    kon: float = 1.0
+    koff: float = 0.5
+
+    def ports_schema(self):
+        return {
+            "E": Port(role=PortRole.EVOLVED, default=1.0),
+            "S": Port(role=PortRole.EVOLVED, default=2.0),
+            "ES": Port(role=PortRole.EVOLVED, default=0.0),
+        }
+
+    def stoichiometry(self):
+        return {
+            "species": ("E", "S", "ES"),
+            "reactions": ("bind",),
+            "matrix": ((-1,), (-1,), (1,)),
+        }
+
+    def derivative(self, t, state):
+        v = self.kon * state["E"] * state["S"] - self.koff * state["ES"]
+        return {"E": -v, "S": -v, "ES": v}
+
+
+def _binding():
+    return Composite(
+        processes={"b": Binding()},
+        topology={"b": {"E": "E", "S": "S", "ES": "ES"}},
+        validate=False,
+        semantic_validation={"check_semantics": False},
+    )
+
+
 def _rev(k1=2.0, k2=1.0):
     return Composite(
         processes={"r": Reversible(k1=k1, k2=k2)},
@@ -71,6 +111,29 @@ def test_one_conservation_law():
     comp = _rev()
     laws = conservation_laws(comp, comp.initial_state_vec())
     assert laws.shape[0] == 1  # A+B conserved
+
+
+def test_laws_are_orthonormal():
+    """``L.T @ L`` is only a projector when the rows are orthonormal. A
+    null-space basis is neither, and a caller projecting with a non-normalised
+    ``L`` silently leaves the conservation leaf."""
+    for comp in (_rev(), _binding()):
+        laws = conservation_laws(comp, comp.initial_state_vec())
+        gram = np.asarray(laws @ laws.T)
+        assert np.allclose(gram, np.eye(laws.shape[0]), atol=1e-10), gram
+
+
+def test_projector_step_stays_on_the_leaf():
+    """A tangent step taken with ``I - L.T @ L`` must not move any conserved
+    total — the property the projector exists for."""
+    comp = _binding()
+    y0 = comp.initial_state_vec()
+    laws = conservation_laws(comp, y0)
+    tangent = jnp.eye(y0.size) - laws.T @ laws
+    rng = np.random.default_rng(0)
+    step = tangent @ jnp.asarray(rng.normal(size=y0.size))
+    drift = np.abs(np.asarray(laws @ (y0 + step) - laws @ y0))
+    assert drift.max() < 1e-12, drift
 
 
 def test_ift_gradient_matches_analytic():
@@ -183,8 +246,11 @@ def test_slow_decay_is_not_conserved(caplog):
     keys = comp.store_keys()
     laws = conservation_laws(comp, comp.initial_state_vec())
     assert laws.shape[0] == 1
-    row = {keys[i]: int(v) for i, v in enumerate(laws[0]) if abs(v) > 1e-12}
-    assert row == {"p/A": 1, "p/B": 1}
+    # Rows are orthonormal, so the law reads as a direction: A+B, not C.
+    row = {keys[i]: float(v) for i, v in enumerate(laws[0]) if abs(v) > 1e-12}
+    assert set(row) == {"p/A", "p/B"}
+    assert row["p/A"] == pytest.approx(row["p/B"])
+    assert row["p/A"] == pytest.approx(1 / np.sqrt(2))
 
 
 def test_undeclared_process_falls_back():

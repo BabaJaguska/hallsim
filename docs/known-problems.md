@@ -5,9 +5,12 @@ Defects found by review, ordered by priority. Distinct from
 that is wrong now. Each entry carries the evidence that established it, so
 nothing has to be re-argued.
 
-Evidence sources: the mitochondrial stress test (2026-08-18) and the flagship
-review (2026-08-19), both by the review panel in `.claude/agents/`. Findings
-confirmed by two independent reviewers are marked ✓✓.
+Evidence sources: the mitochondrial stress test (2026-08-18), the flagship
+review (2026-08-19), and the DallePezze 2014 referee pass (2026-08-25) — all by
+the review panel in `.claude/agents/` — plus two outside models calibrated
+against GSE248823 by agents who did not have this list. Findings confirmed by
+two independent reviewers are marked ✓✓. The panel's raw reports are gitignored;
+what survived review is here.
 
 ## The standing criterion
 
@@ -216,6 +219,50 @@ The framework returns a plausible number and nothing indicates it is wrong.
   (`DEFAULT_NEWTON_ATOL`); the class is not audited. `rtol` still feeds both.
   *Fix:* audit every solver parameter for double duty and split each one.
 
+- [ ] **P0.14 — The flagship's control arm is not a control.** ✓✓ DallePezze
+  2014 is monostable: 512 leaf-preserving Newton seeds and 2001 projected seeds
+  each find exactly **one** non-negative fixed point, stable at max Re λ
+  = −0.0730/day, and 64 random ICs integrated 200 days all land on it (spread
+  1.7×10⁻⁵). Deleting the irradiation route entirely leaves
+  ‖y_dosed(400) − y_nodose(400)‖ = 1.8×10⁻⁵, and across six decades of dose the
+  day-400 endpoint is identical to six significant figures. The undosed arm is
+  *more* senescent at 14 d (γH2A.X ×9.03 vs ×8.28, SA-β-gal ×14.08 vs ×10.89):
+  the mitochondrial arm is a positive feedback loop and CDKN1A is its only
+  brake, so the dose acts as a brake on senescence. `ctrl` and `DDIS` therefore
+  end at the same attractor and the fold-change contrast is mostly timing —
+  the shape that lets a constant null beat the model on magnitude while the
+  training loss falls. Reproduced independently on an outside fibroblast
+  composite.
+  Worse, the published initial condition is not a state of the model:
+  ‖f(y₀)‖₂ = 67 593, and any rest state must satisfy
+  `SA_beta_gal = 0.45287·ROS` and `DNA_damage = 0.36495·ROS`, so ROS = 10
+  forces SA-β-gal 4.53 against the published 0.81. No parameterisation fixes
+  it; the PottersWheel source marks all 23 ICs `fix`.
+  *Fix:* a control arm needs a **parameter** change, not a withheld dose —
+  `AMPK_T172_phos × 10` breaks the loop at its hinge and gives an unirradiated
+  rest state (SA-β-gal 1.30, γH2A.X 1.05, ROS 2.88), the best any single
+  constant achieves. Open question whether changing the model between arms is
+  defensible. Until then no flagship concordance number means anything.
+
+- [ ] **P0.15 — `conservation_laws` returns rows that are not normalised, so
+  `LᵀL` is not a projector.** Rows are mutually orthogonal but have squared
+  norms `L Lᵀ = diag(2,2,2,3,2,1)`, and projecting with `LᵀL` — the obvious
+  use, and the documented one — silently leaves the conservation leaf. Cost a
+  reviewer a basin scan that looked multistable and was not. Nothing warns.
+  *Fix:* normalise each row at construction; assert `L Lᵀ = I` in a test, and
+  a second test that a projected step stays on the leaf.
+
+- [ ] **P0.16 — `bifurcation.equilibrium` and `hopf_scan` report zero equilibria
+  for any model with a conserved moiety.** Both call `linalg.solve` on the raw
+  Jacobian, which is singular whenever a conservation law exists (DallePezze has
+  five, plus an inert sink). They returned **no fixed points** for a model that
+  has one — and "no equilibria found" reads as a result, not a failure.
+  `steady_state` already carries the leaf projector that fixes it. Separately,
+  every eigenvalue crossing in that model is real, so a scan looking only for
+  complex pairs would have seen nothing either.
+  *Fix:* route both through the same projected solve `steady_state` uses, and
+  report real crossings alongside Hopf pairs.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -282,6 +329,35 @@ The check that would catch a mistake does not exist, does not run, or fails open
   exist, must not be static, and its current value must be a scalar. Say which
   of those failed and, for a non-`calibratable` field, that fitting it is
   unsupported. The check is cheap and the failure it replaces is unreadable.
+
+- [ ] **P1.12 — `screen_process` passes a model sitting 67 384 units/day from
+  its own rest state.** ✓✓ The screen checks exploding, vanishing and
+  tolerance-sensitivity; none of them notice that a declared initial condition
+  is nowhere near a steady state. DallePezze returns `ok=True` while its
+  mitophagy state has a 13-second time constant against a 14-day horizon — it
+  is fully relaxed long before the first save, so every measurement is
+  post-relaxation and the initial condition is a fiction. One RHS evaluation
+  would have caught P0.14 at import, before any composite was built.
+  *Fix:* a fourth failure mode, `not_at_rest`. Report it as a time, not a norm:
+  `τᵢ = |y₀ᵢ| / |fᵢ(0, y₀)|` per state, flag when the fastest τ is far below
+  the first save interval. Advisory like `exploding` — a pulse experiment is
+  legitimately off-equilibrium at t=0. Two details to get right: use
+  `warn_if_time_dependent` to say when the number includes a live drive rather
+  than mixing them silently, and pick a stated scale floor for states at zero.
+  Add it to the intake protocol in `CLAUDE.md` beside the other three.
+
+- [ ] **P1.13 — Structurally redundant parameters are invisible before a fit.**
+  DallePezze's `k33` and `k34` carry the *identical* rate law
+  `k·Mito_mass_turnover·mTORC1_pS2448` — the field is invariant under
+  `(k33+δ, k34−δ)` to 4.4×10⁻¹⁶ and `∂endpoint/∂k33 = ∂endpoint/∂k34` to ten
+  digits — so only their sum is identifiable. `k34` is *named*
+  `mito_biogenesis_by_AMPK_pT172` and never reads AMPK. The paper's Figure 6A
+  conclusion is an arbitrary split of one coordinate. This is visible from the
+  rate laws alone, with no data and no fit, but nothing looks. Distinct from
+  P1.3 (Fisher conditioning, needs a fit) and P1.5 (zero-gradient fittables,
+  needs arms): this is structural and available at import.
+  *Fix:* a collinearity pass over declared rate laws / stoichiometry at
+  `Process` construction, naming the redundant group.
 
 ---
 

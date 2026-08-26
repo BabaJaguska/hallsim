@@ -9,8 +9,9 @@ docs/diary.md
 /outputs/
 /one_off_scripts/
 /scratchpad/
-# Scratch/diagnostic demos: _-prefixed ones are throwaway investigations,
-# not part of the shipped demo surface.
+# Throwaway investigations: probe scripts, progress logs and figures, one
+# subfolder per run. Never part of the shipped demo surface.
+/scratch/
 demos/_*.py
 
 # C extensions
@@ -243,7 +244,7 @@ cython_debug/
 /docs/framework-report-mitochondria.md
 /docs/mitochondrial-aging-model.md
 /docs/performance-audit.md
-/docs/review-mito-maths.md
-/docs/review-mito-physics.md
-/docs/review-mito-wetlab.md
+# Review-panel reports: raw evidence. Findings that matter are lifted into
+# docs/known-problems.md, which is what the repo carries.
+docs/review-*.md
 .claude/

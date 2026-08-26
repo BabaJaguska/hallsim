@@ -290,7 +290,11 @@ def _surviving(candidates, blocks, eps_factor: float = 1e3):
 
 def conservation_laws(composite, y, mask=None, rcond: float = 1e-9):
     """Conservation-law matrix ``L`` (rows = conserved combinations) over the
-    composite's store paths. Returns an ``(n_laws, n_state)`` array.
+    composite's store paths. Returns an ``(n_laws, n_state)`` array whose rows
+    are **orthonormal**, so ``L.T @ L`` is the orthogonal projector onto the
+    conserved directions and ``I - L.T @ L`` projects onto the leaf's tangent
+    space. Use :func:`conserved_moieties` for the integer coefficients that
+    state the conservation as chemistry; these rows span the same space.
 
     Where every process declares a stoichiometry this is exact: the integer
     left null space of ``N``, identical for every parameter value and every
@@ -331,7 +335,7 @@ def conservation_laws(composite, y, mask=None, rcond: float = 1e-9):
             "Process.stoichiometry() makes this exact.",
             len(kept),
         )
-        return jnp.asarray(kept, dtype=float).reshape(len(kept), len(keys))
+        return _orthonormal_rows(kept, len(keys))
 
     # Solve only over the states N actually describes. A state outside it is
     # driven by something else (an SBML rateRule, a frozen sink), and its
@@ -363,7 +367,30 @@ def conservation_laws(composite, y, mask=None, rcond: float = 1e-9):
             laws.append(unit)
 
     kept = _verified(laws, jac, keys)
-    return jnp.asarray(kept, dtype=float).reshape(len(kept), len(keys))
+    return _orthonormal_rows(kept, len(keys))
+
+
+def _orthonormal_rows(rows, n_state: int) -> jnp.ndarray:
+    """Orthonormal basis of the span of ``rows`` → ``(n_laws, n_state)``.
+
+    ``LᵀL`` is the orthogonal projector onto the conserved directions only when
+    ``L`` has orthonormal rows, and a null-space basis has neither unit norm nor
+    mutual orthogonality. Orthonormalising preserves the row space — the same
+    leaf is pinned, the same totals are fixed — and leaves ``LᵀL`` usable as a
+    projector by every caller. Integer moiety coefficients are the physical
+    statement and stay in :func:`conserved_moieties`.
+
+    Signs are fixed so the first non-zero entry of each row is positive, since
+    QR's sign convention is otherwise arbitrary.
+    """
+    if not len(rows):
+        return jnp.zeros((0, n_state))
+    q = np.linalg.qr(np.asarray(rows, dtype=float).T)[0].T
+    lead = [np.flatnonzero(np.abs(r) > 1e-12) for r in q]
+    sign = np.array(
+        [1.0 if not i.size else np.sign(r[i[0]]) for r, i in zip(q, lead)]
+    )
+    return jnp.asarray(q * sign[:, None])
 
 
 def _verified(laws, jac, keys, rtol: float = 1e-8):

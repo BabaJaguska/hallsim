@@ -36,9 +36,7 @@ class TestForwardMode:
         assert isinstance(history, CalibrationHistory)
         assert history.losses[-1] < 1e-3
         assert float(history.best_params["a"]) == pytest.approx(1.5, abs=0.05)
-        assert float(history.best_params["b"]) == pytest.approx(
-            -0.7, abs=0.05
-        )
+        assert float(history.best_params["b"]) == pytest.approx(-0.7, abs=0.05)
 
     def test_clamping_respected(self):
         """Clamps should hold parameters inside the box even if the
