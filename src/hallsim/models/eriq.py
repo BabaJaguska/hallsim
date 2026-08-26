@@ -743,6 +743,42 @@ def build_eriq_composite(
     )
 
 
+def derive_observables(
+    state: dict, prefix: str = ERIQ_PREFIX
+) -> dict[str, jnp.ndarray]:
+    """Named observables for reporter concordance, from ``{prefix}/<name>``
+    store paths.
+
+    Blends raw states with algebraic intermediates so NF-κB, MTOR and ROS
+    match what ERiQ's own downstream processes see. Shape-polymorphic: a
+    ``(n_time, ...)`` trajectory passes straight through.
+
+    Pass as the ``derive`` hook of
+    :func:`hallsim.gene_reporters.summarize_reporters`.
+    """
+    sub = {
+        name: state[f"{prefix}/{name}"]
+        for name in (
+            "mito_function",
+            "glycolysis",
+            "mito_damage",
+            "mTOR_activity",
+            "p53_activity",
+            "ROS_activity",
+            "ROS_integrator_c",
+        )
+    }
+    obs = _compute_algebraic(sub)
+    return {
+        "p53_activity": sub["p53_activity"],
+        "mito_damage": sub["mito_damage"],
+        "mito_function": sub["mito_function"],
+        "mTOR_activity_algebraic": obs["MTOR"],
+        "NFKB_algebraic": obs["NFKB"],
+        "ROS_algebraic": obs["ROS"],
+    }
+
+
 # ── Original-equation variants (singular; pre-flight screening fixture) ─
 
 

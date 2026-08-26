@@ -1,10 +1,10 @@
-# HallSim: A Differentiable, Composable Multi-Scale Simulator for Aging Biology
+# HallSim: A Differentiable, Composable Multi-Scale Modelling Framework for Aging Biology
 [![Basic CI/CD Workflow](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml/badge.svg)](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml)
 
 **HallSim composes independently-published systems-biology models into one multi-scale dynamical system — and calibrates the whole thing by gradient descent through the ODE solve.** Built on JAX / Equinox / Diffrax, with a focus on aging biology, where no single model captures the crosstalk between hallmarks.
 
 - **End-to-end differentiable.** The entire composite — multiple stiff SBML models, operator-split across timescales — is a single differentiable function. Mechanism parameters spread across separate publications are fit with the same reverse-mode autodiff that trains neural networks, *through* the stiff ODE solve. GPU-friendly, with held-out validation. See [docs/calibration.md](docs/calibration.md).
-- **Agent-friendly by construction.** A model is discovered and imported from BioModels in two calls (`search_for_model` → `process_from_sbml`), wired by a plain `{process: {port: path}}` topology dict, and its fittable parameters self-document via `Composite.calibration_targets()`. Typed ports carry units and ontology; `analyze_composability` proposes how to merge overlapping models. Meant for an LLM agent to assemble and calibrate a digital twin without bespoke glue. See [docs/architecture.md](docs/architecture.md).
+- **Agent-friendly by construction.** A published model becomes a `Process` in one call — `process_from_sbml` for SBML from any source, `process_from_xpp` for XPP — wired by a plain `{process: {port: path}}` topology dict, with its fittable parameters self-documenting via `Composite.calibration_targets()`. Typed ports carry units and ontology; `analyze_composability` proposes how to merge overlapping models. Meant for an LLM agent to assemble and calibrate a digital twin without bespoke glue. See [docs/architecture.md](docs/architecture.md).
 
 ## Why
 
@@ -73,36 +73,36 @@ print(result.get("pool/x").shape)
 ```
 
 Parameters are JAX arrays, so you can `jax.grad` through an entire simulation.
-For the real, multi-model, calibrated version see
-**[docs/calibration.md](docs/calibration.md)**, and run it with
-`simulate multi-hallmark calibrate`.
+Calibration through the solve is documented in
+**[docs/calibration.md](docs/calibration.md)**.
 
 ### Demos & tests
 
-Three published SBML models stitched into one composite, scored against
-transcriptomics, then fit:
-
-```bash
-simulate multi-hallmark run        # score it out of the box, no fitting
-simulate multi-hallmark calibrate  # fit, then evaluate on held-out arms
-simulate multi-hallmark sweep      # two-hallmark severity sweep
-simulate stiffness                 # per-group stiffness verdict + solver routing
-```
-
-Smaller pieces, end to end:
+Framework mechanics, end to end:
 
 ```bash
 simulate compose        # a minimal two-process composite
 simulate compose-kick   # the same, with a mid-run perturbation
 simulate multiscale     # continuous + discrete + event processes on one clock
 simulate clamp          # chronic vs transient exposure: hold a consumed species
+simulate stiffness      # per-group stiffness verdict + solver routing
 simulate info           # what the architecture exposes
 make test
 ```
 
+One worked case study composes three published SBML models and calibrates them
+against a public dataset. It is there to exercise the framework on real
+published models — not a model of senescence to build on:
+
+```bash
+simulate multi-hallmark run        # score it out of the box, no fitting
+simulate multi-hallmark calibrate  # fit, then evaluate on held-out arms
+simulate multi-hallmark sweep      # two-hallmark severity sweep
+```
+
 ## What you can do with it
 
-- **Compose published SBML models.** Discover on BioModels and import in two calls; the full mechanism surface auto-populates and is discoverable. → [docs/architecture.md#sbml-import](docs/architecture.md#sbml-import)
+- **Compose published models.** Import SBML from any source — BioModels, CellML/Physiome, a paper supplement — or XPP; the full mechanism surface auto-populates and is discoverable. → [docs/architecture.md#sbml-import](docs/architecture.md#sbml-import)
 - **Turn hallmark severities.** 0–1 differentiable handles that modulate the right parameters across models; interventions (rapamycin, CR) live on the hallmark layer they perturb. → [docs/architecture.md#hallmark-handles](docs/architecture.md#hallmark-handles)
 - **Calibrate against data with held-out validation.** Gene-reporter concordance, log2-fold-change loss, MAP priors, differentiation through the stiff solve. → [docs/calibration.md](docs/calibration.md)
 - **Run batched population studies.** A `(batch, n_vars)` `y0` flows through the solve as one computation — no `vmap` — near-flat on GPU. → [docs/architecture.md#population-studies-via-batched-y0](docs/architecture.md#population-studies-via-batched-y0)

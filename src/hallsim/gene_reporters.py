@@ -6,11 +6,16 @@ the single gene whose expression is its textbook readout, plus an expected sign
 and a literature anchor. The mapping has **no tunable parameters** — calibration
 belongs to the mechanism, not the readout layer.
 
-Pipeline: run control and perturbed conditions, take Δ_observable via
-:func:`derive_observables`, Δ_gene via :func:`log2_fold_change`, then aggregate
-sign agreement and Spearman correlation with :func:`compute_concordance`. Fit
-composite parameters against the gene-level Δ_data with ``jax.grad`` + ``optax``
-on a held-out split across conditions.
+This is the hand-built, one-gene-per-observable readout. It scores a composite
+against a handful of textbook transcripts; it does not scale to a transcriptome,
+which needs a fitted regulon head instead.
+
+Pipeline: run control and perturbed conditions, collapse each reporter's
+trajectory with :func:`summarize_reporters`, take Δ_gene via
+:func:`log2_fold_change`, then aggregate sign agreement and Spearman correlation
+with :func:`compute_concordance`. Fit composite parameters against the
+gene-level Δ_data with ``jax.grad`` + ``optax`` on a held-out split across
+conditions.
 """
 
 from __future__ import annotations
@@ -24,8 +29,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-
-from hallsim.models.eriq import _compute_algebraic
 
 # ── Trajectory summaries ───────────────────────────────────────────
 #
@@ -579,80 +582,30 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
 ]
 
 
-def derive_multi_hallmark_summaries(
+def summarize_reporters(
     ts,
     state_trajectory: dict,
-    reporters: list[GeneReporter] | None = None,
+    reporters: list[GeneReporter],
+    derive: Callable[[dict], dict] | None = None,
 ) -> dict[str, Any]:
-    """Each reporter's ``summary`` applied to its store-path trajectory →
+    """Each reporter's ``summary`` applied to its trajectory →
     ``{observable: scalar}``, ready for :func:`compute_concordance`.
 
     ``state_trajectory`` is ``{store_path: (n_time, ...) array}`` — typically
     ``Composite.unflatten(result.ys)``. ``ts`` goes to the summary so
     time-aware ones (:func:`window_mean`) can read a per-time value.
-    ``reporters`` defaults to :data:`MULTI_HALLMARK_REPORTERS`.
+
+    ``derive`` is the model's own map from store paths to named observables,
+    for reporters that read an algebraic intermediate rather than a raw state
+    (see :func:`hallsim.models.eriq.derive_observables`). It must be
+    shape-polymorphic so a trajectory passes through. Omit it when every
+    reporter names a store path directly.
     """
-    if reporters is None:
-        reporters = MULTI_HALLMARK_REPORTERS
+    source = derive(state_trajectory) if derive else state_trajectory
     return {
-        rep.observable: rep.summary(ts, state_trajectory[rep.observable])
+        rep.observable: rep.summary(ts, source[rep.observable])
         for rep in reporters
-        if rep.observable in state_trajectory
-    }
-
-
-# ── Mechanistic observable derivation ──────────────────────────────
-
-
-def derive_observables(state: dict) -> dict[str, Any]:
-    """Named observables for the reporter table, from a dict keyed by
-    ``eriq/<name>`` store paths.
-
-    Blends raw states with algebraic intermediates: NF-κB, MTOR and ROS come
-    from ERiQ's own ``_compute_algebraic``, so they match what its downstream
-    processes see. Shape-polymorphic, so trajectory arrays pass through.
-    """
-    sub = {
-        "mito_function": state["eriq/mito_function"],
-        "glycolysis": state["eriq/glycolysis"],
-        "mito_damage": state["eriq/mito_damage"],
-        "mTOR_activity": state["eriq/mTOR_activity"],
-        "p53_activity": state["eriq/p53_activity"],
-        "ROS_activity": state["eriq/ROS_activity"],
-        "ROS_integrator_c": state["eriq/ROS_integrator_c"],
-    }
-    obs = _compute_algebraic(sub)
-    return {
-        "p53_activity": state["eriq/p53_activity"],
-        "mito_damage": state["eriq/mito_damage"],
-        "mito_function": state["eriq/mito_function"],
-        "mTOR_activity_algebraic": obs["MTOR"],
-        "NFKB_algebraic": obs["NFKB"],
-        "ROS_algebraic": obs["ROS"],
-    }
-
-
-def derive_observable_summaries(
-    ts,
-    state_trajectory: dict,
-    reporters: list[GeneReporter] | None = None,
-) -> dict[str, Any]:
-    """As :func:`derive_multi_hallmark_summaries`, but over the *derived*
-    ERiQ observables rather than raw store paths — for a loss or concordance
-    that routes through an oscillating state.
-
-    :func:`derive_observables` is shape-polymorphic, so a ``{store_path:
-    (n_time, ...) array}`` input yields per-observable trajectories that each
-    reporter's ``summary`` then collapses. ``reporters`` defaults to
-    :data:`CANONICAL_REPORTERS`.
-    """
-    if reporters is None:
-        reporters = CANONICAL_REPORTERS
-    obs_traj = derive_observables(state_trajectory)
-    return {
-        rep.observable: rep.summary(ts, obs_traj[rep.observable])
-        for rep in reporters
-        if rep.observable in obs_traj
+        if rep.observable in source
     }
 
 

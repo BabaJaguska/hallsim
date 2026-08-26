@@ -133,14 +133,14 @@ These decide whether the framework is fast. Violating one is a performance bug, 
 
 ## Validation methodology
 
-- **Validation against transcriptomic data uses `hallsim.gene_reporters`** — one mechanistic observable ↔ one canonical reporter gene, with literature-anchored sign expectations. No tunable interpretation layer between mechanism and observation.
-- **Calibration is at the mechanism level, not the readout layer.** Tuning composite parameters against gene-level Δ_data via `jax.grad` + `optax` is fine; tuning the reporter mapping itself is not.
+- **Two readout layers, two rules.** `hallsim.gene_reporters` is the validation instrument — one observable ↔ one canonical gene, literature-anchored sign, no tunable parameters. Its value is that it cannot be fit. A *fitted* readout head (TF activity → regulon → transcriptome) is how the framework reaches transcriptome scale; it is a model, needs priors, identifiability screening, and a held-out split over **perturbations**. Report the two scores separately.
+- **Calibration targets mechanism parameters and readout-head gains, never the canonical reporter mapping.**
 - **Held-out splits are mandatory** for any reported concordance number. Same-data calibrate-and-evaluate is curve-fit, not concordance. Test on held-out data, not training data.
 - **Constituents-first rule (always, no exceptions): before composing — and before debugging a composite — verify every constituent both *runs* and *tunes* on its own.** "Runs" = a successful solver result, bounded and tolerance-insensitive (`screen_process` / `screen_composite`). "Tunes" = a forward-mode gradient of a summary w.r.t. one parameter is finite. A composite can only be as healthy as its parts; when one misbehaves, re-run this check first — if each part is fine, the bug is in the *composition* (coupling edge, shared tolerance, timescale grouping, reconciliation).
 - Seek to understand why composites fail to converge rather than brute-forcing solvers.
-- Don't pull models from memory/training. Search BioModels or other objective sources.
+- Don't pull models from memory/training. Get them from a source that can be cited and re-downloaded: BioModels, CellML/Physiome, JWS Online, ModelDB (XPP), or a paper's supplement. Record where it came from.
 - Before composing an SBML model, test it with sbmltoodejax and with our framework.
-- Prefer models with downloadable implementations (BioModels or elsewhere).
+- Prefer models with a downloadable implementation over ones that exist only as printed equations — but transcribing equations from a paper is in scope, not a fallback.
 - Remember to equilibrate — but check whether the source model envisions it. Read the original literature.
 
 ## Model intake protocol — read before trusting a composite

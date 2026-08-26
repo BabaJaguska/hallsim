@@ -26,15 +26,14 @@ from hallsim.gene_reporters import (
     GeneReporter,
     compute_concordance,
     cycle_average,
-    derive_multi_hallmark_summaries,
-    derive_observable_summaries,
-    derive_observables,
     last_value,
     log2_fold_change,
+    summarize_reporters,
     window_mean,
     window_rms,
     zerophase_mean,
 )
+from hallsim.models.eriq import derive_observables
 
 
 class TestZerophaseMean:
@@ -318,7 +317,9 @@ class TestTrajectorySummaries:
             k: jnp.broadcast_to(v, (n_time,))
             for k, v in _stub_eriq_state().items()
         }
-        out = derive_observable_summaries(ts, state_traj)
+        out = summarize_reporters(
+            ts, state_traj, CANONICAL_REPORTERS, derive=derive_observables
+        )
         for r in CANONICAL_REPORTERS:
             assert r.observable in out
             assert jnp.isfinite(out[r.observable])
@@ -356,7 +357,7 @@ class TestMultiHallmarkReporters:
             r.observable: jnp.linspace(0, 10, n_time)
             for r in MULTI_HALLMARK_REPORTERS
         }
-        out = derive_multi_hallmark_summaries(ts, traj)
+        out = summarize_reporters(ts, traj, MULTI_HALLMARK_REPORTERS)
         for r in MULTI_HALLMARK_REPORTERS:
             assert r.observable in out
             assert jnp.isfinite(out[r.observable])

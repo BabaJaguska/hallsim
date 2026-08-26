@@ -123,7 +123,8 @@ with `measure_unclamped_flux` and pick the rate with `place_clamp_rate`
 ## SBML import
 
 [`sbml_import.py`](../src/hallsim/sbml_import.py) auto-generates a Process
-from any BioModels entry via `sbmltoodejax`, and:
+from any SBML source via `sbmltoodejax` — BioModels, CellML/Physiome, a paper
+supplement — and:
 
 - auto-populates every SBML constant into `SBMLProcess.parameters`, so the
   full mechanism surface is discoverable via `Composite.calibration_targets()`;
