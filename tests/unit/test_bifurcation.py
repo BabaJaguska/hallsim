@@ -16,9 +16,11 @@ from hallsim.bifurcation import (
     field_from_composite,
     equilibrium,
     first_lyapunov_coefficient,
-    hopf_scan,
-    leading_complex_pair_re,
+    codim1_scan,
+    critical_eigenvalue,
+    fold_coefficient,
     spectrum,
+    unstable_dim,
 )
 
 OMEGA = 1.3
@@ -51,10 +53,20 @@ def test_spectrum_matches_analytic_pair():
     assert np.allclose(sorted(np.abs(ev.imag)), [OMEGA, OMEGA])
 
 
-def test_leading_pair_crosses_zero_with_mu():
+def test_critical_eigenvalue_crosses_zero_with_mu():
     f_of = lambda m: _normal_form(m, -1.0)  # noqa: E731
-    assert leading_complex_pair_re(f_of(-0.1), [0.0, 0.0]) < 0
-    assert leading_complex_pair_re(f_of(+0.1), [0.0, 0.0]) > 0
+    assert critical_eigenvalue(f_of(-0.1), [0.0, 0.0]).real < 0
+    assert critical_eigenvalue(f_of(+0.1), [0.0, 0.0]).real > 0
+    # A Hopf is the complex case: the crossing pair keeps its frequency.
+    assert (
+        abs(abs(critical_eigenvalue(f_of(0.0), [0.0, 0.0]).imag) - OMEGA)
+        < 1e-9
+    )
+
+
+def test_unstable_dim_counts_the_pair():
+    assert unstable_dim(_normal_form(-0.1, -1.0), [0.0, 0.0]) == 0
+    assert unstable_dim(_normal_form(+0.1, -1.0), [0.0, 0.0]) == 2
 
 
 def test_supercritical_l1_negative():
@@ -67,29 +79,30 @@ def test_subcritical_l1_positive():
     assert l1 > 0
 
 
-def test_hopf_scan_locates_and_classifies():
+def test_scan_locates_and_classifies_a_hopf():
     params = np.linspace(-0.25, 0.25, 51)
-    sup = hopf_scan(
+    sup = codim1_scan(
         lambda m: _normal_form(m, -1.0), params, x0_guess=[0.02, 0.0]
     )
     assert len(sup) == 1
     h = sup[0]
+    assert h.kind == "hopf"
     assert abs(h.param) < 1e-3  # Hopf sits at mu=0
     assert abs(h.omega - OMEGA) < 1e-2
     assert h.supercritical is True
 
-    sub = hopf_scan(
+    sub = codim1_scan(
         lambda m: _normal_form(m, +1.0), params, x0_guess=[0.02, 0.0]
     )
     assert len(sub) == 1
     assert sub[0].supercritical is False
 
 
-def test_hopf_scan_no_false_positive_when_no_crossing():
+def test_scan_no_false_positive_when_no_crossing():
     # mu stays negative -> stable focus throughout, no Hopf.
     params = np.linspace(-0.5, -0.1, 21)
     assert (
-        hopf_scan(
+        codim1_scan(
             lambda m: _normal_form(m, -1.0), params, x0_guess=[0.02, 0.0]
         )
         == []
@@ -184,3 +197,91 @@ def test_dallepezze_equilibrium_needs_its_conservation_laws():
     leaf = spectrum(f, eq, laws)
     assert len(leaf) == 17
     assert np.isclose(leaf[0].real, -0.0730, atol=1e-3)
+
+
+# --- folds ----------------------------------------------------------------
+# The three real-crossing normal forms, each with a closed-form quadratic
+# coefficient a = 1/2 f'' and transversality s = <p, df/dmu>. No complex pair
+# is ever involved in any of them.
+
+
+def _scalar(g):
+    return lambda s: jnp.array([g(s[0])])
+
+
+def _scalar_family(g):
+    return lambda mu: (lambda s: jnp.array([g(mu, s[0])]))
+
+
+def test_saddle_node_coefficients():
+    # x' = mu + x^2 at mu=0: a = 1, and mu enters directly so s = 1.
+    a, q, p = fold_coefficient(_scalar(lambda x: 0.0 + x * x), [0.0])
+    assert np.isclose(a, 1.0)
+    assert np.isclose(abs(float(q[0] * p[0])), 1.0)
+
+
+def test_fold_coefficient_rejects_a_complex_crossing():
+    with pytest.raises(ValueError, match="complex"):
+        fold_coefficient(_normal_form(0.0, -1.0), [0.0, 0.0])
+
+
+def test_scan_finds_the_saddle_node_where_the_branch_ends():
+    # x' = mu + x^2: stable branch x = -sqrt(-mu) exists only for mu < 0 and
+    # ends at mu = 0. The grid deliberately straddles it without landing on
+    # it, so the location comes from the refinement, not the sampling.
+    params = np.linspace(-0.25, 0.25, 50)
+    assert not np.any(np.isclose(params, 0.0))
+    found = codim1_scan(
+        _scalar_family(lambda mu, x: mu + x * x), params, x0_guess=[-0.5]
+    )
+    assert len(found) == 1
+    b = found[0]
+    assert b.kind == "fold"
+    assert abs(b.param) < 1e-3
+    assert b.omega == 0.0
+    assert np.isclose(b.coefficient, 1.0, atol=1e-3)
+    assert abs(b.transversality) > 0.5  # mu enters f directly
+    assert b.degenerate is False
+
+
+def test_transcritical_has_no_parameter_transversality():
+    # x' = mu*x - x^2. The branch x=0 persists for every mu, so nothing
+    # vanishes; the crossing shows up as the unstable dimension changing.
+    # a = -1 but df/dmu = x = 0 at the crossing, which is what makes it
+    # transcritical rather than a saddle-node.
+    found = codim1_scan(
+        _scalar_family(lambda mu, x: mu * x - x * x),
+        np.linspace(-0.25, 0.25, 50),
+        x0_guess=[0.0],
+    )
+    assert len(found) == 1
+    b = found[0]
+    assert b.kind == "fold"
+    assert abs(b.param) < 1e-2
+    assert np.isclose(b.coefficient, -1.0, atol=1e-3)
+    assert abs(b.transversality) < 1e-6
+    assert b.degenerate is True
+
+
+def test_pitchfork_has_no_quadratic_coefficient():
+    # x' = mu*x - x^3: f'' = 0 at the origin, so a = 0 and the saddle-node
+    # classification does not hold.
+    found = codim1_scan(
+        _scalar_family(lambda mu, x: mu * x - x * x * x),
+        np.linspace(-0.25, 0.25, 50),
+        x0_guess=[0.0],
+    )
+    assert len(found) == 1
+    assert found[0].kind == "fold"
+    assert abs(found[0].coefficient) < 1e-6
+    assert found[0].degenerate is True
+
+
+def test_scan_reports_a_newton_failure_as_nothing():
+    # No equilibrium anywhere: x' = 1 + x^2. Losing the branch is not a fold.
+    found = codim1_scan(
+        _scalar_family(lambda mu, x: 1.0 + mu * 0.0 + x * x),
+        np.linspace(-0.25, 0.25, 20),
+        x0_guess=[0.0],
+    )
+    assert found == []

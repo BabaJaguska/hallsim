@@ -23,6 +23,8 @@ end-to-end differentiability, JIT, and native batched populations — see
 | **Port** | Named connection point with a role, default value, units, description, and ontology annotation. |
 | **Topology** | Static wiring map `{proc_name: {port_name: store_path}}`, defined at composition time — not inside processes. |
 | **Composite** | Bundles processes + topology. `build_rhs()` returns a JAX-compatible flat ODE right-hand side over `store_keys()` order. Auto-groups continuous processes by timescale. |
+| **Scheduler** | The unified runner for every composite shape — multi-rate orchestration (timescale groups, discrete dispatch, event firing), single-group fast path, shape-polymorphic state (single or batched `y0`). See [scheduler design](design-multiscale-scheduler.md). |
+| **Store** | Flat `dict[str, jnp.ndarray]` with path-like keys (`"cytoplasm/ROS"`). A valid JAX PyTree. |
 
 **Flat-state order.** `store_keys()` is natural-sorted — digit runs compare
 numerically, so `net/node2` precedes `net/node10` and a generator's own
@@ -31,8 +33,6 @@ node-indexed array (a weight matrix, a mask, an observation vector) through
 `store_index()`, which maps store path → column. Re-deriving the order instead
 misaligns silently: with generated port names there is no error, only wrong
 numbers.
-| **Scheduler** | The unified runner for every composite shape — multi-rate orchestration (timescale groups, discrete dispatch, event firing), single-group fast path, shape-polymorphic state (single or batched `y0`). See [scheduler design](design-multiscale-scheduler.md). |
-| **Store** | Flat `dict[str, jnp.ndarray]` with path-like keys (`"cytoplasm/ROS"`). A valid JAX PyTree. |
 
 **Process kinds:**
 - `CONTINUOUS` (default) — `derivative(t, state) -> dy/dt`, solved by Diffrax.
@@ -256,6 +256,6 @@ Small modules a model author needs early, each importable on its own:
 |---|---|
 | `hallsim.kinetics` | `hill_gate`, `hill_inhibition` and friends — the saturating forms every coupling edge needs. Reach for these instead of hand-rolling `x**n / (K**n + x**n)`. |
 | `hallsim.io` | `outdir` and `make_run_dir` — the output convention every demo follows (timestamped run directory plus a `latest` symlink). |
-| `hallsim.bifurcation` | `equilibrium`, `spectrum`, `hopf_scan` — continuation and stability analysis around a fixed point. `hopf_scan` finds oscillation onsets only; a real-eigenvalue crossing (bistability, an invasion threshold) has to be found from `spectrum` today. |
+| `hallsim.bifurcation` | `equilibrium`, `spectrum`, `codim1_scan` — continuation and stability analysis around a fixed point. `codim1_scan` finds both codimension-1 crossings, Hopf (oscillation onset) and fold (bistability, an invasion threshold), each with its normal-form coefficient. Pass `laws=` for any model with a conserved moiety, or the Newton is singular at every state. Continuation is plain Newton, so a branch is followed only until it folds — tracing both arms of a hysteresis loop needs a multi-seed sweep. |
 | `hallsim.stiffness` | `analyze_groups(composite, *, y0, groups, t0, dt)` — per-group spectral abscissa, Jacobian condition number and state-scale spread, with the solver verdict. Keyword-only. |
 | `hallsim.diagnostics` | `screen_process` / `screen_composite` (the constituents-first pre-flight), `screen_sensitivity`, and `recommend_coupling_source`. |

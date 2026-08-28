@@ -147,22 +147,22 @@ def gz_rhs(u):
 
 
 def hopf_analysis(psi=1.0):
-    """The α_y Hopf bifurcations of GZ06 as ``HopfPoint`` objects (location,
-    frequency, first Lyapunov coefficient / criticality) via
+    """The α_y bifurcations of GZ06 as ``Bifurcation`` objects (kind,
+    location, frequency, normal-form coefficient) via
     :mod:`hallsim.bifurcation`. Two supercritical Hopfs bound the oscillatory
     window: the p53 pulse exists only between them."""
     import numpy as np
-    from hallsim.bifurcation import hopf_scan
+    from hallsim.bifurcation import codim1_scan
 
     field_of = lambda ay: (lambda y: gz_rhs((psi, ay))(0.0, y))  # noqa: E731
-    return hopf_scan(
+    return codim1_scan(
         field_of, np.linspace(0.005, 2.0, 140), x0_guess=[0.4, 0.4, 0.4]
     )
 
 
 def hopf_points(psi=1.0):
     """The α_y Hopf-bifurcation locations (floats)."""
-    return [h.param for h in hopf_analysis(psi)]
+    return [h.param for h in hopf_analysis(psi) if h.kind == "hopf"]
 
 
 def train_stages():

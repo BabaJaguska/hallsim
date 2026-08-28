@@ -221,7 +221,7 @@ These gate every measurement the later phases depend on. All are already in
 
 | item | why it blocks |
 |---|---|
-| **P0.16, second half** — detect real eigenvalue crossings, not only Hopf pairs | a bistable switch is born at a saddle-node, which is a *real* crossing; `hopf_scan` looks for complex pairs and would report nothing at the fold Phase 2 exists to find. The projected solve (first half) is done — `equilibrium`, `spectrum` and `hopf_scan` take `laws=` and read stability on the leaf |
+| **multi-seed sweep for hysteresis** | `codim1_scan` now finds folds as well as Hopfs and reads stability on the leaf, but its continuation is plain Newton: where a fold joins two *stable* branches it steps across to the other arm and reports nothing. Phase 2's bistability claim needs both arms, so it needs a multi-seed equilibrium sweep per parameter value |
 | **P1.13** — collinearity pass over rate laws at `Process` construction | catches k33/k34-class duplicates before a fit, from structure alone |
 | **new: spontaneous-endpoint screen** | see below |
 

@@ -259,26 +259,32 @@ The framework returns a plausible number and nothing indicates it is wrong.
   the documented one — silently left the conservation leaf. Cost a reviewer a
   basin scan that looked multistable and was not.
 
-- [~] **P0.16 — `bifurcation.equilibrium` and `hopf_scan` report zero equilibria
-  for any model with a conserved moiety.** *Solve fixed 2026-08-28; the
-  real-crossing half is open.* `equilibrium`, `spectrum`,
-  `leading_complex_pair_re`, `first_lyapunov_coefficient` and `hopf_scan` all
-  take `laws=`. With it the Newton runs on the pinned residual
-  (`steady_state.pin_conserved`, one definition shared with `steady_state`) and
-  the spectrum is read on the leaf tangent space (`steady_state.leaf_basis`).
-  Without it a singular Newton step now logs what is wrong instead of returning
-  `None` in silence.
+- [x] **P0.16 — `bifurcation.equilibrium` and `hopf_scan` report zero equilibria
+  for any model with a conserved moiety.** *Fixed 2026-08-28.* `equilibrium`,
+  `spectrum`, `critical_eigenvalue`, `first_lyapunov_coefficient`,
+  `fold_coefficient` and `codim1_scan` all take `laws=`. With it the Newton
+  runs on the pinned residual (`steady_state.pin_conserved`, one definition
+  shared with `steady_state`) and the spectrum is read on the leaf tangent
+  space (`steady_state.leaf_basis`). Without it a singular Newton step now
+  logs what is wrong instead of returning `None` in silence.
   On DallePezze (6 laws over 23 states) the search returns the
   late-senescence fixed point — SA-β-gal 9.0315, DNA_damage 7.2781, ROS 19.9426
   — and the spectrum splits into the 6 conserved zeros and 17 real modes at
   max Re λ = −0.072969, reproducing the referee's hand-derived −0.0730.
-  Regression: `test_bifurcation.py`, an analytic two-state moiety plus the
-  DallePezze endpoint.
-  **Still open:** every eigenvalue crossing in that model is real, so a scan
-  looking only for complex pairs still sees nothing. Phase 2 of
-  [senescence-model-rebuild.md](senescence-model-rebuild.md) needs folds, not
-  Hopfs — a bistable switch is born at a saddle-node.
-  *Fix:* detect and report real crossings alongside Hopf pairs.
+  The second half — real crossings, which is every crossing in that model —
+  is covered by `codim1_scan` replacing `hopf_scan`: detection is by change in
+  unstable dimension rather than by watching one complex pair, a vanished
+  branch is bisected and kept only if the critical eigenvalue really reached
+  zero, and each crossing is classified fold or Hopf with its normal-form
+  coefficient plus, for a fold, the parameter transversality that separates a
+  saddle-node from a transcritical or pitchfork crossing.
+  Regression: `test_bifurcation.py` — the analytic two-state moiety, the
+  DallePezze endpoint, and the three real normal forms.
+  **Remaining limit** (documented, not a defect): continuation is plain
+  Newton, so a branch is followed only until it folds. Where a fold joins two
+  *stable* branches, Newton steps across to the other arm and the scan sees
+  no change; tracing a full hysteresis loop needs a multi-seed sweep per
+  parameter value.
 
 ## P1 — cannot tell whether a result is trustworthy
 
