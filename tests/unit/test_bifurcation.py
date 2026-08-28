@@ -9,9 +9,11 @@ pin the first Lyapunov coefficient's sign and the Hopf locator.
 """
 
 import jax.numpy as jnp
+import pytest
 import numpy as np
 
 from hallsim.bifurcation import (
+    field_from_composite,
     equilibrium,
     first_lyapunov_coefficient,
     hopf_scan,
@@ -92,3 +94,93 @@ def test_hopf_scan_no_false_positive_when_no_crossing():
         )
         == []
     )
+
+
+# --- conserved moieties (P0.16) -------------------------------------------
+# A <-> B with A + B conserved. The Jacobian [[-K1, K2], [K1, -K2]] is
+# singular at every state, so the raw Newton has no unique solution however
+# good the seed is; the fixed point on the leaf through y0 is analytic.
+
+K1, K2 = 0.7, 0.3
+TOTAL = 4.0
+A_STAR = TOTAL * K2 / (K1 + K2)
+
+
+def _reversible(s):
+    return jnp.array([-K1 * s[0] + K2 * s[1], K1 * s[0] - K2 * s[1]])
+
+
+LAWS = np.array([[1.0, 1.0]]) / np.sqrt(2.0)
+
+
+def test_conserved_model_has_no_equilibrium_without_laws():
+    assert equilibrium(_reversible, [1.0, 3.0]) is None
+
+
+def test_laws_recover_the_analytic_fixed_point_on_the_leaf():
+    eq = equilibrium(_reversible, [1.0, 3.0], laws=LAWS)
+    assert eq is not None
+    assert np.allclose(eq, [A_STAR, TOTAL - A_STAR], atol=1e-9)
+    assert np.isclose(eq.sum(), TOTAL, atol=1e-9)  # stayed on the leaf
+
+
+def test_y_ref_selects_the_leaf_not_the_seed():
+    eq = equilibrium(_reversible, [9.0, 9.0], laws=LAWS, y_ref=[1.0, 3.0])
+    assert np.isclose(eq.sum(), TOTAL, atol=1e-9)
+
+
+def test_leaf_spectrum_drops_the_conserved_zero():
+    eq = equilibrium(_reversible, [1.0, 3.0], laws=LAWS)
+    raw = spectrum(_reversible, eq)
+    assert len(raw) == 2 and abs(raw[0]) < 1e-12  # leading raw mode is a zero
+    leaf = spectrum(_reversible, eq, laws=LAWS)
+    assert len(leaf) == 1
+    assert np.isclose(leaf[0].real, -(K1 + K2))
+
+
+@pytest.mark.slow
+def test_dallepezze_equilibrium_needs_its_conservation_laws():
+    """The model P0.16 was filed against. Six laws over 23 states: without
+    them the search reports no equilibrium for a model that has one, and the
+    raw spectrum's leading mode is a conserved zero rather than the rate the
+    fixed point actually relaxes at."""
+    from hallsim.composite import Composite
+    from hallsim.sbml_import import process_from_sbml
+    from hallsim.steady_state import conservation_laws
+    from demos.models.multi_hallmark import (
+        DP14_IRRADIATION_RATE_NAME,
+        DP14_SBML_PATH,
+    )
+
+    proc = process_from_sbml(
+        str(DP14_SBML_PATH),
+        name="dp14",
+        parameters={DP14_IRRADIATION_RATE_NAME: 0.0},
+    )
+    comp = Composite(
+        processes={"dp14": proc},
+        topology={"dp14": {n: f"dp14/{n}" for n in proc._species_names}},
+        validate=False,
+        semantic_validation=False,
+    )
+    keys = comp.store_keys()
+    y0 = np.asarray(comp.initial_state_vec(keys))
+    f, _ = field_from_composite(comp)
+
+    assert equilibrium(f, y0) is None
+
+    laws = conservation_laws(comp, y0)
+    assert laws.shape[0] == 6
+    eq = equilibrium(f, y0, laws=laws)
+    assert eq is not None
+
+    # The late-senescence fixed point, docs/dallepezze2014-critique.md §4.
+    at = {k: float(eq[i]) for i, k in enumerate(keys)}
+    assert np.isclose(at["dp14/SA_beta_gal"], 9.0315, atol=1e-3)
+    assert np.isclose(at["dp14/DNA_damage"], 7.2781, atol=1e-3)
+    assert np.isclose(at["dp14/ROS"], 19.943, atol=1e-2)
+
+    assert abs(spectrum(f, eq)[0].real) < 1e-9  # raw: a conserved zero leads
+    leaf = spectrum(f, eq, laws)
+    assert len(leaf) == 17
+    assert np.isclose(leaf[0].real, -0.0730, atol=1e-3)

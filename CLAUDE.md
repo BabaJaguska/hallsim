@@ -45,7 +45,7 @@ The README has the overview. These are the load-bearing rules — break them and
 
 **Topology lives outside processes.** Wiring is `{proc_name: {port_name: store_path}}` passed to `Composite`. Never put store paths inside Process classes.
 
-**`composite.build_rhs(proc_names=None) -> (rhs_fn, keys)`.** Flat by design — operates on a 1-D array in `sorted(store_paths())` order so JAX traces a single array under JIT/grad. `proc_names=None` uses every CONTINUOUS process; an explicit list builds a partial RHS for operator splitting. State flows as a flat vector throughout; dict shape appears only at API boundaries and inside the per-process port view.
+**`composite.build_rhs(proc_names=None) -> (rhs_fn, keys)`.** Flat by design — operates on a 1-D array in `store_keys()` order so JAX traces a single array under JIT/grad. That order is a **natural sort** (digit runs compare numerically, so `node2` precedes `node10`). Align externally-built node-indexed arrays via `composite.store_index()`; re-deriving the order yourself misaligns silently. `proc_names=None` uses every CONTINUOUS process; an explicit list builds a partial RHS for operator splitting. State flows as a flat vector throughout; dict shape appears only at API boundaries and inside the per-process port view.
 
 **Process kinds drive scheduler dispatch:**
 - `CONTINUOUS` (default) — `derivative(t, state)`, solved by Diffrax.
@@ -82,9 +82,10 @@ These decide whether the framework is fast. Violating one is a performance bug, 
 
 ## Where to add things
 
-- **New model**: `src/hallsim/models/<name>.py`. Subclass `Process`, declare `ports_schema()`, implement `derivative` (or `update` / `condition`+`handler`). Provide a `build_<name>_composite()` factory — the pattern in `eriq.py` and `stem_cell_niche.py`.
+- **New reusable primitive** (coupling edge, clamp, event, integrator — no domain content): `src/hallsim/models/<name>.py`. Subclass `Process`, declare `ports_schema()`, implement `derivative` (or `update` / `condition`+`handler`).
+- **New domain model** (a specific biology): `demos/models/<name>.py`, never `src/hallsim/`. Provide a `build_<name>_composite()` factory. **Do not take `eriq.py`, `multi_hallmark.py` or the vendored SBML papers as templates** — they are transient-response models of aging, the wrong shape for sustained-perturbation endpoint data, and every one of them is FLAG under `intake.triage_sbml`. They are worked examples of the framework's mechanics, not exemplars of good models.
 - **Multiplicative coupling**: effects are summed via EVOLVED ports. For multiplicative coupling, route the modulating variable through a separate store path and read it via an `INPUT` port.
-- **SBML model**: `hallsim.sbml_import.process_from_sbml(...)`. Pre-imported BioModels live under `src/hallsim/models/sbml/<author><year>/`.
+- **SBML model**: `hallsim.sbml_import.process_from_sbml(...)`; discover candidates with `hallsim.discovery.search_for_model`. Vendored SBML lives under `demos/models/sbml/<author><year>/` — it is data for the examples, not part of the package.
 - **Hallmark mapping**: `hallsim.hallmarks.apply_hallmarks`.
 - **Tests**: `tests/unit/test_composition.py` (Process/Port/Topology contracts), `test_multiscale.py` (Scheduler), `test_validation.py` (semantic layer), `test_models.py` (per-model regression), `test_performance.py` (JAX invariants above).
 
@@ -100,6 +101,7 @@ These decide whether the framework is fast. Violating one is a performance bug, 
 - The repo is about modularity, composability, JAX-based speedups and backprop. If something makes things slow, uncomposable, monolithic, or non-differentiable, we don't go that route.
 - End-to-end differentiability is a must. A break in it is solved, never circumvented.
 - **Performance is a first-class citizen.** JAX was the choice *because* of it. Correct-but-slow is not done: measure it, and if something got slower that is a bug. Compile and dispatch overhead count.
+- **Generality must never be overhead — it must reduce for the trivial case.** A general solver on an easy problem has to cost what the easy problem costs: linear systems solve in one step, sparse couplings never materialise a dense Jacobian, a single-group composite skips orchestration. If a user is faster hand-rolling the reduced case, that is a defect in the general path, not their shortcut. Composites are expected to be **large and programmatically generated** — hundreds to thousands of ports — so any per-port cost, per-port annotation, or *n*-forward-pass derivative is a scaling bug.
 - Avoid wrappers that just rename another function.
 - The framework must be easy for AI agents to use to compose many models into digital twins.
 - The Scheduler is THE default handler of everything. Calling `dfx.diffeqsolve` directly and bypassing it is a mistake — if tempted, ask what would make the Scheduler appealing enough to use, then implement that.

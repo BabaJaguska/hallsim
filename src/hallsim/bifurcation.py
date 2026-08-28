@@ -25,11 +25,16 @@ unstable one (subcritical).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from hallsim.steady_state import leaf_basis, pin_conserved
+
+log = logging.getLogger(__name__)
 
 _IMAG_TOL = 1e-9
 
@@ -74,51 +79,88 @@ def jacobian(f, x):
     return jnp.asarray(jax.jacfwd(f)(jnp.asarray(x, float)))
 
 
-def spectrum(f, x):
-    """Jacobian eigenvalues at ``x``, ordered by descending real part."""
-    ev = np.linalg.eigvals(np.asarray(jacobian(f, x)))
+def spectrum(f, x, laws=None):
+    """Jacobian eigenvalues at ``x``, ordered by descending real part.
+
+    With ``laws`` the spectrum is taken on the leaf tangent space, dropping
+    the one exact zero each conservation law contributes — read the raw
+    spectrum of a conserved model and its leading eigenvalue is a zero that
+    says nothing about stability.
+    """
+    a = np.asarray(jacobian(f, x))
+    if laws is not None:
+        v = leaf_basis(laws)
+        a = v.T @ a @ v
+    ev = np.linalg.eigvals(a)
     return ev[np.argsort(-ev.real)]
 
 
-def leading_complex_pair_re(f, x):
+def leading_complex_pair_re(f, x, laws=None):
     """Real part of the complex-conjugate eigenvalue pair with the largest
     real part; ``nan`` if the spectrum at ``x`` is entirely real. This is
     the quantity whose zero-crossing marks a Hopf bifurcation."""
-    ev = np.linalg.eigvals(np.asarray(jacobian(f, x)))
+    ev = spectrum(f, x, laws)
     cx = ev[np.abs(ev.imag) > _IMAG_TOL]
     return float(cx[np.argmax(cx.real)].real) if len(cx) else np.nan
 
 
-def equilibrium(f, x0, *, tol=1e-11, maxiter=100):
+def equilibrium(f, x0, *, laws=None, y_ref=None, tol=1e-11, maxiter=100):
     """Damped Newton to a fixed point ``f(x)=0`` from seed ``x0``; returns
-    the equilibrium as a numpy array, or ``None`` if it fails to converge."""
+    the equilibrium as a numpy array, or ``None`` if it fails to converge.
+
+    ``laws`` — the orthonormal conservation-law matrix from
+    :func:`hallsim.steady_state.conservation_laws` — switches the solve to
+    the pinned residual, which is what a model with a conserved moiety needs:
+    without it the Jacobian is singular at every state and the search
+    reports no equilibrium for a model that has one. The totals are held at
+    ``y_ref`` (default ``x0``), so the point returned is the fixed point on
+    that leaf.
+    """
     x = jnp.asarray(x0, float)
+    g = f
+    if laws is not None:
+        ref = x if y_ref is None else jnp.asarray(y_ref, float)
+        g = pin_conserved(f, jnp.asarray(laws, float), ref)
     for _ in range(maxiter):
-        fx = f(x)
+        fx = g(x)
         if not bool(jnp.all(jnp.isfinite(fx))):
             return None
         nrm = float(jnp.linalg.norm(fx))
         if nrm < tol:
             return np.asarray(x)
-        try:
-            step = jnp.linalg.solve(jax.jacfwd(f)(x), fx)
-        except Exception:
+        step = jnp.linalg.solve(jax.jacfwd(g)(x), fx)
+        if not bool(jnp.all(jnp.isfinite(step))):
+            log.warning(
+                "equilibrium: singular Jacobian at %s. A conserved moiety "
+                "does this at every state — pass laws=conservation_laws("
+                "composite, y0) to pin the totals.",
+                np.asarray(x),
+            )
             return None
         a = 1.0
         for _ in range(20):  # backtrack until the residual decreases
-            if float(jnp.linalg.norm(f(x - a * step))) < nrm:
+            if float(jnp.linalg.norm(g(x - a * step))) < nrm:
                 break
             a *= 0.5
         x = x - a * step
-    return np.asarray(x) if float(jnp.linalg.norm(f(x))) < 1e-7 else None
+    return np.asarray(x) if float(jnp.linalg.norm(g(x))) < 1e-7 else None
 
 
-def first_lyapunov_coefficient(f, x0):
+def first_lyapunov_coefficient(f, x0, laws=None):
     """First Lyapunov coefficient ``l1`` of a Hopf point at equilibrium
     ``x0`` (Kuznetsov projection). ``l1 < 0`` supercritical, ``l1 > 0``
     subcritical. Requires the Jacobian at ``x0`` to have a complex pair
-    near the imaginary axis; raises ``ValueError`` otherwise."""
+    near the imaginary axis; raises ``ValueError`` otherwise.
+
+    With ``laws`` the coefficient is computed for the dynamics restricted to
+    the leaf — the projection inverts ``A``, which is singular in the full
+    space whenever a moiety is conserved."""
     x0 = jnp.asarray(x0, float)
+    if laws is not None:
+        v = jnp.asarray(leaf_basis(laws), float)
+        return first_lyapunov_coefficient(
+            lambda z: v.T @ f(x0 + v @ z), jnp.zeros(v.shape[1])
+        )
     A = np.asarray(jax.jacfwd(f)(x0))
     ev, V = np.linalg.eig(A)
     k = int(np.argmax(ev.imag))  # the +i*omega eigenvector
@@ -152,13 +194,17 @@ def first_lyapunov_coefficient(f, x0):
     return float(l1)
 
 
-def _refine_re0(field_of_param, a, b, seed, iters=40):
+def _refine_re0(field_of_param, a, b, seed, iters=40, laws=None, y_ref=None):
     """Bisect ``param in [a, b]`` toward the exact Re=0 crossing."""
 
     def re(p):
         f = field_of_param(p)
-        eqp = equilibrium(f, seed)
-        return leading_complex_pair_re(f, eqp) if eqp is not None else np.nan
+        eqp = equilibrium(f, seed, laws=laws, y_ref=y_ref)
+        return (
+            leading_complex_pair_re(f, eqp, laws)
+            if eqp is not None
+            else np.nan
+        )
 
     ra = re(a)
     for _ in range(iters):
@@ -180,6 +226,8 @@ def hopf_scan(
     *,
     lyapunov=True,
     refine=True,
+    laws=None,
+    y_ref=None,
 ):
     """Locate Hopf bifurcations as ``param`` sweeps ``params``.
 
@@ -191,20 +239,27 @@ def hopf_scan(
     (``lyapunov``). Equilibria are tracked by continuation — each seed is
     the previous converged fixed point — so a single ``x0_guess`` at the
     first ``param`` suffices. Returns ``list[HopfPoint]`` ordered by param.
+
+    ``laws`` pins the conserved totals at ``y_ref`` (default ``x0_guess``)
+    for every equilibrium, spectrum and Lyapunov coefficient in the scan;
+    without it a model with a conserved moiety yields no equilibria and the
+    scan returns empty. The laws are structural, so one matrix covers the
+    whole sweep.
     """
     params = np.asarray(params, float)
     guess = np.asarray(x0_guess, float)
+    y_ref = guess if y_ref is None else np.asarray(y_ref, float)
     xs, re = [], []
     for p in params:
         f = field_of_param(float(p))
-        eqp = equilibrium(f, guess)
+        eqp = equilibrium(f, guess, laws=laws, y_ref=y_ref)
         if eqp is None:
             xs.append(None)
             re.append(np.nan)
             continue
         guess = eqp  # continuation
         xs.append(eqp)
-        re.append(leading_complex_pair_re(f, eqp))
+        re.append(leading_complex_pair_re(f, eqp, laws))
     re = np.asarray(re)
 
     out: list[HopfPoint] = []
@@ -223,13 +278,18 @@ def hopf_scan(
         pc = float(params[i])
         if refine:
             pc = _refine_re0(
-                field_of_param, float(params[i - 1]), float(params[i]), seed
+                field_of_param,
+                float(params[i - 1]),
+                float(params[i]),
+                seed,
+                laws=laws,
+                y_ref=y_ref,
             )
         f = field_of_param(pc)
-        eqp = equilibrium(f, seed)
+        eqp = equilibrium(f, seed, laws=laws, y_ref=y_ref)
         if eqp is None:
             continue
-        ev = np.linalg.eigvals(np.asarray(jacobian(f, eqp)))
+        ev = spectrum(f, eqp, laws)
         cx = ev[np.abs(ev.imag) > _IMAG_TOL]
         w = (
             float(abs(cx[np.argmax(cx.real)].imag))
@@ -239,7 +299,7 @@ def hopf_scan(
         l1 = None
         if lyapunov:
             try:
-                l1 = first_lyapunov_coefficient(f, eqp)
+                l1 = first_lyapunov_coefficient(f, eqp, laws)
             except Exception:
                 l1 = None
         out.append(HopfPoint(param=pc, x=eqp, omega=w, lyapunov1=l1))

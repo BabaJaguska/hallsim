@@ -96,6 +96,15 @@ Per-reporter summaries and rationale are in
 
 ## Caveat
 
+**There is no time-matched untreated arm.** Etoposide is sampled D00/D07/D14
+and RAS D00/D04/D07, each arm normalised to its own day 0; no untreated culture
+is measured at D07 or D14. Nothing in this dataset can distinguish a trigger-
+driven trajectory from one a culture would have followed anyway, which is the
+same missing measurement that let DallePezze 2014's spontaneous senescence go
+unnoticed — see [senescence-model-rebuild.md](senescence-model-rebuild.md) §6.
+A dataset with a time-matched untreated arm is a prerequisite for any
+concordance number that claims the perturbation caused the change.
+
 Two biological replicates and 2–3 timepoints per arm is thin — it
 constrains rather than fully resolves the dynamics. Single-cell RNA-seq
 would be the preferred modality for mechanistic inference of this kind;

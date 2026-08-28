@@ -285,6 +285,34 @@ class TestComposite:
         y0 = composite.initial_state()
         assert "pool/x" in y0
 
+    def test_store_keys_order_is_numeric_not_lexical(self):
+        """Generated port names keep their numbering: node2 before node10.
+
+        Discriminates against a plain string sort, under which a caller
+        building a node-indexed array in generator order misaligns with the
+        flat state and produces wrong numbers rather than an error.
+        """
+        n = 12
+        composite = Composite(
+            processes={f"p{i}": Production() for i in range(n)},
+            topology={f"p{i}": {"x": f"net/node{i}"} for i in range(n)},
+        )
+        assert composite.store_keys() == [f"net/node{i}" for i in range(n)]
+
+    def test_store_index_matches_flat_layout(self):
+        n = 12
+        composite = Composite(
+            processes={f"p{i}": Production() for i in range(n)},
+            topology={f"p{i}": {"x": f"net/node{i}"} for i in range(n)},
+        )
+        index = composite.store_index()
+        keys = composite.store_keys()
+        vec = composite.flatten(
+            {k: jnp.asarray(float(i)) for i, k in enumerate(keys)}
+        )
+        for path, col in index.items():
+            assert vec[col] == pytest.approx(float(keys.index(path)))
+
     def test_rhs_additive(self):
         """Two processes with EVOLVED ports on the same path → additive."""
         prod = Production(rate=0.1)

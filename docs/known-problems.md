@@ -23,6 +23,8 @@ does not survive their next pull and the next user repeats it. Instances so far:
 | `screen_sensitivity` would not take a `registry=`, so a model could not ship its own hallmark mappings | fixed |
 | `_same_default` broke the trace, so a calibration loss could not run | fixed, and guarded by `tests/unit/test_trace_safety.py` |
 | no public parameter setter (P0.9) | open |
+| `steady_state` was intractable at 910 nodes × 300 conditions, so the inner solve was replaced by a hand-written linear solve (P3.10) | open |
+| semantic validation had to be switched off wholesale to compose 910 generated ports (P3.11) | open |
 
 The guard for the second one is the pattern to repeat: reachability under trace
 is a whole-call-graph property, so the test traces the public entry points and
@@ -244,24 +246,39 @@ The framework returns a plausible number and nothing indicates it is wrong.
   constant achieves. Open question whether changing the model between arms is
   defensible. Until then no flagship concordance number means anything.
 
-- [ ] **P0.15 — `conservation_laws` returns rows that are not normalised, so
-  `LᵀL` is not a projector.** Rows are mutually orthogonal but have squared
-  norms `L Lᵀ = diag(2,2,2,3,2,1)`, and projecting with `LᵀL` — the obvious
-  use, and the documented one — silently leaves the conservation leaf. Cost a
-  reviewer a basin scan that looked multistable and was not. Nothing warns.
-  *Fix:* normalise each row at construction; assert `L Lᵀ = I` in a test, and
-  a second test that a projected step stays on the leaf.
+- [x] **P0.15 — `conservation_laws` returns rows that are not normalised, so
+  `LᵀL` is not a projector.** *Fixed 2026-08-25, in the commit that filed it —
+  the checkbox was missed.* Rows come back **orthonormal** via
+  `_orthonormal_rows`, on both the declared-stoichiometry and the inferred
+  path, and the docstring now states `LᵀL` is the projector onto the conserved
+  directions. Guarded by the two tests the fix line asked for:
+  `test_laws_are_orthonormal` and `test_projector_step_stays_on_the_leaf`
+  (`tests/unit/test_steady_state.py:116,126`), both passing.
+  What it replaces: rows mutually orthogonal but with squared norms
+  `L Lᵀ = diag(2,2,2,3,2,1)`, so projecting with `LᵀL` — the obvious use, and
+  the documented one — silently left the conservation leaf. Cost a reviewer a
+  basin scan that looked multistable and was not.
 
-- [ ] **P0.16 — `bifurcation.equilibrium` and `hopf_scan` report zero equilibria
-  for any model with a conserved moiety.** Both call `linalg.solve` on the raw
-  Jacobian, which is singular whenever a conservation law exists (DallePezze has
-  five, plus an inert sink). They returned **no fixed points** for a model that
-  has one — and "no equilibria found" reads as a result, not a failure.
-  `steady_state` already carries the leaf projector that fixes it. Separately,
-  every eigenvalue crossing in that model is real, so a scan looking only for
-  complex pairs would have seen nothing either.
-  *Fix:* route both through the same projected solve `steady_state` uses, and
-  report real crossings alongside Hopf pairs.
+- [~] **P0.16 — `bifurcation.equilibrium` and `hopf_scan` report zero equilibria
+  for any model with a conserved moiety.** *Solve fixed 2026-08-28; the
+  real-crossing half is open.* `equilibrium`, `spectrum`,
+  `leading_complex_pair_re`, `first_lyapunov_coefficient` and `hopf_scan` all
+  take `laws=`. With it the Newton runs on the pinned residual
+  (`steady_state.pin_conserved`, one definition shared with `steady_state`) and
+  the spectrum is read on the leaf tangent space (`steady_state.leaf_basis`).
+  Without it a singular Newton step now logs what is wrong instead of returning
+  `None` in silence.
+  On DallePezze (6 laws over 23 states) the search returns the
+  late-senescence fixed point — SA-β-gal 9.0315, DNA_damage 7.2781, ROS 19.9426
+  — and the spectrum splits into the 6 conserved zeros and 17 real modes at
+  max Re λ = −0.072969, reproducing the referee's hand-derived −0.0730.
+  Regression: `test_bifurcation.py`, an analytic two-state moiety plus the
+  DallePezze endpoint.
+  **Still open:** every eigenvalue crossing in that model is real, so a scan
+  looking only for complex pairs still sees nothing. Phase 2 of
+  [senescence-model-rebuild.md](senescence-model-rebuild.md) needs folds, not
+  Hopfs — a bistable switch is born at a saddle-node.
+  *Fix:* detect and report real crossings alongside Hopf pairs.
 
 ## P1 — cannot tell whether a result is trustworthy
 
@@ -433,3 +450,31 @@ The check that would catch a mistake does not exist, does not run, or fails open
 - [ ] **P3.8 — No observable layer.** Nothing carries assay, unit, normaliser
   or transducer, so a millivolt is compared to a ratiometric dye reading.
 - [ ] **P3.9 — No uncertainty.** Outputs are lines; a lab needs bands.
+- [ ] **P3.10 — `steady_state` has no reduced path, so generality is paid as
+  overhead on problems that do not need it.** ✓ External project, 2026-08-28: a
+  910-node linear signalling composite × 300 clamp conditions was intractable
+  under `steady_state` (damped Newton + `jacfwd`) on CPU, and was finished only
+  by replacing the inner solve with a hand-written linear solve — validated
+  bit-exact against `steady_state` (max diff 0.0) on a 40-node subgraph, then
+  vmapped over 300 conditions in ~8 s. Two independent reductions are missing,
+  and neither costs the nonlinear general case:
+  - **Linear fast path.** For an affine RHS, Newton converges in one step and
+    the Jacobian is constant, yet it is re-derived per condition and iterated.
+    Detect (or let a Process declare) linearity and go straight to one solve.
+  - **Sparse Jacobian.** `jacfwd` materialises a dense Jacobian — *n* forward
+    passes then a dense factorisation — for a topology whose coupling graph is
+    sparse and already known from the topology dict. Sparsity is derivable from
+    wiring, not something the user should have to supply.
+  *Rule this is an instance of: generality must never be overhead; it must
+  reduce for the trivial case.* Until both land, the framework loses any
+  large-but-easy problem to fifteen lines of `jnp.linalg.solve`.
+- [ ] **P3.11 — Port semantics cannot be declared per Process, only per port,
+  so generated composites switch validation off.** ✓ Same project: 910
+  programmatically generated ports, each semantically identical (a protein
+  activity, dimensionless), could not be annotated one at a time, so
+  `semantic_validation=False` was set for the whole composite — losing unit and
+  ontology checking on the *hand-written* processes too, which is where it pays.
+  The validation layer assumes annotation is cheap because it was written for
+  hand-assembled composites; it becomes all-or-nothing the moment ports are
+  generated. Needed: a Process-level declaration (one port class inherited by
+  every port it emits) and a per-process, rather than per-composite, opt-out.

@@ -22,7 +22,15 @@ end-to-end differentiability, JIT, and native batched populations — see
 | **Process** | `eqx.Module` — declares typed ports and a `kind` (CONTINUOUS / DISCRETE / EVENT). Parameters are JAX arrays: differentiable, JIT-compilable, vmappable. |
 | **Port** | Named connection point with a role, default value, units, description, and ontology annotation. |
 | **Topology** | Static wiring map `{proc_name: {port_name: store_path}}`, defined at composition time — not inside processes. |
-| **Composite** | Bundles processes + topology. `build_rhs()` returns a JAX-compatible flat ODE right-hand side. Auto-groups continuous processes by timescale. |
+| **Composite** | Bundles processes + topology. `build_rhs()` returns a JAX-compatible flat ODE right-hand side over `store_keys()` order. Auto-groups continuous processes by timescale. |
+
+**Flat-state order.** `store_keys()` is natural-sorted — digit runs compare
+numerically, so `net/node2` precedes `net/node10` and a generator's own
+numbering survives into the state vector. Align any externally-built,
+node-indexed array (a weight matrix, a mask, an observation vector) through
+`store_index()`, which maps store path → column. Re-deriving the order instead
+misaligns silently: with generated port names there is no error, only wrong
+numbers.
 | **Scheduler** | The unified runner for every composite shape — multi-rate orchestration (timescale groups, discrete dispatch, event firing), single-group fast path, shape-polymorphic state (single or batched `y0`). See [scheduler design](design-multiscale-scheduler.md). |
 | **Store** | Flat `dict[str, jnp.ndarray]` with path-like keys (`"cytoplasm/ROS"`). A valid JAX PyTree. |
 
@@ -226,7 +234,7 @@ flows through every group's Diffrax solve as one batched computation, no
 ```python
 y0 = comp.initial_state_vec()                        # (n_vars,)
 y0 = jnp.broadcast_to(y0, (1024, y0.shape[0]))       # (1024, n_vars)
-y0 = y0.at[..., comp.store_keys().index("dp14/DNA_damage")].set(
+y0 = y0.at[..., comp.store_index()["dp14/DNA_damage"]].set(
     jnp.linspace(0.0, 10.0, 1024))
 result = Scheduler().run(comp, t_span=(0.0, 50.0), macro_dt=5.0, y0=y0)
 result.get("dp14/CDKN1A").shape                      # (n_time, 1024)

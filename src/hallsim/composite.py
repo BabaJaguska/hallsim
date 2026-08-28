@@ -23,6 +23,7 @@ Example
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import equinox as eqx
@@ -33,6 +34,21 @@ from hallsim.store import build_initial_store, validate_topology
 from hallsim.units import canonical_units, conversion_factor
 
 log = logging.getLogger(__name__)
+
+_DIGIT_RUN = re.compile(r"(\d+)")
+
+
+def _natural_key(path: str) -> tuple[Any, ...]:
+    """Sort key where digit runs compare numerically, so ``node2`` sorts
+    before ``node10``.
+
+    ``re.split`` on a capturing group alternates text/digits from index 0,
+    so element types line up positionally and tuples stay comparable.
+    """
+    return tuple(
+        int(part) if part.isdigit() else part
+        for part in _DIGIT_RUN.split(path)
+    )
 
 
 def _flatten_subcomposites(
@@ -270,8 +286,15 @@ class Composite(eqx.Module):
     # -----------------------------------------------------------------
 
     def store_keys(self) -> list[str]:
-        """Sorted list of all store paths — deterministic key order."""
-        return sorted(self.store_paths())
+        """All store paths, in flat-state order. Natural-sorted, so
+        ``net/node2`` precedes ``net/node10``."""
+        return sorted(self.store_paths(), key=_natural_key)
+
+    def store_index(self) -> dict[str, int]:
+        """Store path → its column in the flat state vector. Align any
+        externally-built node-indexed array through this, not by re-deriving
+        the order."""
+        return {k: i for i, k in enumerate(self.store_keys())}
 
     def flatten(
         self,
@@ -381,7 +404,7 @@ class Composite(eqx.Module):
 
     def build_rhs(self, proc_names: list[str] | None = None):
         """Flat ``f(t, y_vec, args=None) -> dy_vec`` over a 1-D array indexed
-        by ``sorted(store_paths())``, plus that key list.
+        by :meth:`store_keys`, plus that key list.
 
         Index maps are precomputed here, so each process contributes via one
         batched ``.at[idxs].add(vals)`` scatter. ``proc_names`` selects a

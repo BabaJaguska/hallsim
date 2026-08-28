@@ -402,6 +402,32 @@ def _orthonormal_rows(rows, n_state: int) -> jnp.ndarray:
     return jnp.asarray(q * sign[:, None])
 
 
+def pin_conserved(residual, laws, y_ref):
+    """``g(y) = f(y) + LᵀL·(y − y_ref)`` — the full-rank Newton residual.
+
+    ``L`` is orthonormal and ``L·f = 0``, so the terms are on complementary
+    subspaces: ``g = 0`` iff ``f = 0`` and the conserved totals match
+    ``y_ref``. Solving ``f`` alone is singular along every conserved
+    direction, for every seed.
+    """
+
+    def g(y):
+        return residual(y) + laws.T @ (laws @ (y - y_ref))
+
+    return g
+
+
+def leaf_basis(laws) -> np.ndarray:
+    """Orthonormal basis ``V`` (``n × (n − n_laws)``) of the leaf tangent
+    space. ``VᵀJV`` holds the real modes; the raw spectrum adds one exact
+    zero per conservation law, which is bookkeeping, not marginal stability.
+    """
+    laws = np.asarray(laws, dtype=float)
+    if not laws.size:
+        raise ValueError("leaf_basis needs at least one conservation law")
+    return np.linalg.svd(laws)[2][len(laws) :].T
+
+
 def _verified(laws, jac, keys, rtol: float = 1e-8):
     """Drop candidate laws the composite's own Jacobian contradicts.
 
@@ -453,8 +479,7 @@ def steady_state(
     y_ref = ic if y_ref is None else y_ref
     laws = conservation_laws(composite, y0, mask) if laws is None else laws
 
-    def g(y):
-        return residual(y) + laws.T @ (laws @ (y - y_ref))
+    g = pin_conserved(residual, laws, y_ref)
 
     def solve(fn, guess):
         def body(state):

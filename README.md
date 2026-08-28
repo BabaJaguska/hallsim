@@ -5,6 +5,7 @@
 
 - **End-to-end differentiable.** The entire composite — multiple stiff SBML models, operator-split across timescales — is a single differentiable function. Mechanism parameters spread across separate publications are fit with the same reverse-mode autodiff that trains neural networks, *through* the stiff ODE solve. GPU-friendly, with held-out validation. See [docs/calibration.md](docs/calibration.md).
 - **Agent-friendly by construction.** A published model becomes a `Process` in one call — `process_from_sbml` for SBML from any source, `process_from_xpp` for XPP — wired by a plain `{process: {port: path}}` topology dict, with its fittable parameters self-documenting via `Composite.calibration_targets()`. Typed ports carry units and ontology; `analyze_composability` proposes how to merge overlapping models. Meant for an LLM agent to assemble and calibrate a digital twin without bespoke glue. See [docs/architecture.md](docs/architecture.md).
+- **Scale is the point, not an edge case.** The reason to hand assembly to an agent is to go past what a person wires by hand, so composites are expected to be **generated** — hundreds to thousands of ports, built from a network file rather than typed out. Everything downstream is built for that shape: one flat state vector, batched scatter-adds instead of per-process Python, `store_index()` to align externally-built node-indexed arrays, and natural-sorted keys so generated names keep their numbering. Where a reduced path is still missing, it is tracked as a defect, not a limit — see [docs/known-problems.md](docs/known-problems.md).
 
 ## Why
 
@@ -17,7 +18,7 @@ HallSim is a **composition framework** — you bring the modules (hand-written, 
 - A composable, differentiable, multi-scale simulator for aging biology — bring your own modules (hand-written, SBML-imported, or learned via `NeuralODE`).
 - High-level severity handles for the 12 hallmarks of aging [2] (4 mapped today; each new one a single handle away).
 - Calibrate interventions and emergent phenotypes against real data, with held-out validation.
-- Make multi-model composition tractable for AI agents building digital twins.
+- Make multi-model composition tractable for AI agents building digital twins — at a scale no one assembles by hand.
 - Serve as an educational in-silico testbed for perturbations (rapamycin, caloric restriction, …).
 
 ## Architecture
