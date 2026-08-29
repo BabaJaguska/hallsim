@@ -31,6 +31,15 @@ from hallsim.config import DEFAULT_MAX_EXPLICIT_SUBSTEPS
 if TYPE_CHECKING:
     from hallsim.composite import Composite
 
+
+class StiffnessNotConcrete(RuntimeError):
+    """Reached under a trace, so there is no spectrum to analyse.
+
+    Distinct from a device or resource failure, which is also a
+    ``RuntimeError`` (``jax.errors.JaxRuntimeError``) and must not be
+    mistaken for a cold trace.
+    """
+
 # A dissipative eigenvalue is "active" (counts toward the stiffness ratio)
 # only if its decay rate is a non-negligible fraction of the fastest one;
 # this drops the numerically-zero / conserved-quantity modes (Re λ ≈ 0)
@@ -114,7 +123,7 @@ def _restricted_jacobian(rhs, y0: jnp.ndarray, idxs: np.ndarray, t0: float):
         jax.errors.TracerArrayConversionError,
         jax.errors.ConcretizationTypeError,
     ) as exc:  # pragma: no cover - defensive
-        raise RuntimeError(
+        raise StiffnessNotConcrete(
             "stiffness analysis needs a concrete Jacobian but got JAX "
             "tracers — run it eagerly, outside grad/jvp/vmap."
         ) from exc
@@ -191,7 +200,7 @@ def analyze_groups(
     is measured against, typically the Scheduler's ``macro_dt``.
     """
     if isinstance(y0, jax.core.Tracer):
-        raise RuntimeError(
+        raise StiffnessNotConcrete(
             "analyze_groups needs a concrete y0 — it was given a JAX "
             "tracer. Run stiffness analysis eagerly, outside "
             "grad/jvp/vmap."

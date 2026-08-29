@@ -223,3 +223,25 @@ def test_parameter_change_does_not_recompile():
         for c in swept[1:]:
             jax.block_until_ready(_run(sched, c))
     assert n[0] == 0, f"parameter sweep recompiled {n[0]}x"
+
+
+def test_with_params_yields_a_traced_array():
+    """The supported setter coerces, as construction does: ``eqx.tree_at``
+    rebuilds through ``tree_unflatten``, which skips ``__check_init__``."""
+    comp = _composite().with_params({"decay.rate": 0.25})
+    assert eqx.is_array(comp.processes["decay"].rate)
+
+
+def test_with_params_sweep_does_not_recompile():
+    """The same guarantee as ``test_parameter_change_does_not_recompile``, over
+    the *public* route and a plain Python float — what a caller actually writes.
+    Hand-rolling ``jnp.asarray`` in the test hides the defect it exists to
+    catch."""
+    comp, sched = _composite(), Scheduler()
+    swept = [comp.with_params({"decay.rate": r}) for r in (0.2, 0.3, 0.4)]
+    jax.block_until_ready(_run(sched, swept[0]))
+
+    with count_compiles() as n:
+        for c in swept[1:]:
+            jax.block_until_ready(_run(sched, c))
+    assert n[0] == 0, f"with_params sweep recompiled {n[0]}x"

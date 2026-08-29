@@ -49,6 +49,7 @@ from hallsim.config import (
 from hallsim.process import PortRole
 from hallsim.stiffness import (
     GroupStiffness,
+    StiffnessNotConcrete,
     analyze_groups,
 )
 
@@ -1069,7 +1070,9 @@ class Scheduler:
                 schema = composite.processes[pname].ports_schema()
                 for port, path in topo_p.items():
                     if path not in key_to_idx:
-                        continue
+                        raise KeyError(
+                            f"{pname}.{port} wired to unknown path {path!r}"
+                        )
                     r.add(key_to_idx[path])
                     p = schema.get(port)
                     if p is not None and p.role == PortRole.EVOLVED:
@@ -1487,7 +1490,7 @@ class Scheduler:
                 dt=macro_dt,
                 max_explicit_substeps=self.max_explicit_substeps,
             )
-        except RuntimeError:
+        except StiffnessNotConcrete:
             report = None  # tracers in the RHS — same cold-trace situation
         except np.linalg.LinAlgError:
             # A deterministic property of the composite, not a trace artifact,

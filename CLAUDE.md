@@ -4,7 +4,7 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## Environment
 
-- Project venv is `.venv_hallsim/` (non-standard name). Use `.venv_hallsim/bin/python` for ad-hoc runs.
+- Project venv is `.venv/`. Use `.venv/bin/python` for ad-hoc runs.
 - Python >=3.11. Core stack: JAX + Equinox + Diffrax + Optax. Validation uses `pint` (units) and `networkx` (graph analysis). SBML import uses `sbmltoodejax`.
 - `pyproject.toml` is the single source of truth for dependencies. No lockfiles — `make install` / `make install-dev` editable-install directly from pyproject.
 - `cd` into the project before running scripts.
@@ -18,7 +18,7 @@ make install-dev    # dev deps + editable install
 
 make test           # CI subset: not slow, not network, not demo
 make test-all       # everything except network
-.venv_hallsim/bin/python -m pytest tests/unit/test_multiscale.py -v -k scheduler
+.venv/bin/python -m pytest tests/unit/test_multiscale.py -v -k scheduler
 
 make format         # black, line length 79
 make lint           # flake8, ignores E501,E402,W504,W503,E226,E203
@@ -97,12 +97,24 @@ These decide whether the framework is fast. Violating one is a performance bug, 
 - `NeuralODE` ships with training infrastructure, not just a dynamics module — see `hallsim.models.neuralode`.
 - Adding a demo means adding a `@simulate.command()` in `cli.py`.
 
+## The stop rule
+
+**If hand-rolling beats the framework, stop working and fix that.**
+
+The moment you — or any subagent — find that writing it directly in JAX / Diffrax is faster, simpler, or easier than doing it through HallSim's proper architecture, that is not a shortcut to take and note. It is a halt condition. Abandon the task in flight, characterise the gap, and fix the framework. Then come back.
+
+This holds whatever the task was, including throwaway probes and work for another project that merely uses HallSim. A hand-rolled path that outperforms the composed one is the single most informative signal this repo can produce about itself, and it is worthless if it is worked around instead of reported.
+
+"Beats" is measured, not felt: fewer lines, less trace time, less compile time, less memory, less wall clock, or fewer concepts to hold. Any one of them counts. Record the comparison — both sides, same maths, same hardware — in `docs/diary.md`, and the defect in `docs/known-problems.md`.
+
+The framework exists to be worth using. Every instance of this is evidence it currently is not, in that spot.
+
 ## Design principles
 
 - The repo is about modularity, composability, JAX-based speedups and backprop. If something makes things slow, uncomposable, monolithic, or non-differentiable, we don't go that route.
 - End-to-end differentiability is a must. A break in it is solved, never circumvented.
 - **Performance is a first-class citizen.** JAX was the choice *because* of it. Correct-but-slow is not done: measure it, and if something got slower that is a bug. Compile and dispatch overhead count.
-- **Generality must never be overhead — it must reduce for the trivial case.** A general solver on an easy problem has to cost what the easy problem costs: linear systems solve in one step, sparse couplings never materialise a dense Jacobian, a single-group composite skips orchestration. If a user is faster hand-rolling the reduced case, that is a defect in the general path, not their shortcut. Composites are expected to be **large and programmatically generated** — hundreds to thousands of ports — so any per-port cost, per-port annotation, or *n*-forward-pass derivative is a scaling bug.
+- **Generality must never be overhead — it must reduce for the trivial case.** A general solver on an easy problem has to cost what the easy problem costs: linear systems solve in one step, sparse couplings never materialise a dense Jacobian, a single-group composite skips orchestration. If a user is faster hand-rolling the reduced case, that is a defect in the general path, not their shortcut — see **The stop rule** above, which says what to do the moment you notice it. Composites are expected to be **large and programmatically generated** — hundreds to thousands of ports — so any per-port cost, per-port annotation, or *n*-forward-pass derivative is a scaling bug.
 - Avoid wrappers that just rename another function.
 - The framework must be easy for AI agents to use to compose many models into digital twins.
 - The Scheduler is THE default handler of everything. Calling `dfx.diffeqsolve` directly and bypassing it is a mistake — if tempted, ask what would make the Scheduler appealing enough to use, then implement that.
@@ -123,7 +135,7 @@ These decide whether the framework is fast. Violating one is a performance bug, 
 - **Minimal comments.** Comment only the genuinely non-obvious. The code should read for itself; variable names carry the explanation.
 - **Docstrings are forward-facing.** Describe what the thing IS and how to USE it — not what it replaced or what mistakes led here. No "previously we did X" narratives. A 1–2 sentence "why this approach" is fine when it clarifies design intent.
 - **Am I writing diary, or code?** Rationale, measurements, dead ends, and "we used to do X" belong in `docs/diary.md`. Code says what the thing IS plus the one line that stops someone re-breaking it.
-- **Never leak the local environment into public-facing text.** No venv names (`.venv_hallsim/bin/python`), no absolute paths, no machine-specific dirs — not in the README, demo docstrings (they surface in `--help`), docs/, or error messages. Public invocations use `simulate <command>` or plain `python demos/x.py`. The local venv belongs in this file and nowhere else.
+- **Never leak the local environment into public-facing text.** No venv names (`.venv/bin/python`), no absolute paths, no machine-specific dirs — not in the README, demo docstrings (they surface in `--help`), docs/, or error messages. Public invocations use `simulate <command>` or plain `python demos/x.py`. The local venv belongs in this file and nowhere else.
 - The README is user-facing. No developer-only notes there.
 - **We have a click CLI — use it.** A capability worth showing a user gets a `simulate` command, and that is what the README quotes. Don't document `python demos/x.py` when the CLI covers it.
 
@@ -158,7 +170,7 @@ A composite is only as trustworthy as its parts, and the most dangerous failures
 4. **Not at rest** — the published initial condition is a fitted experimental starting point, not a steady state, so the run is mostly relaxation. `ScreenReport.rest_tau` is how long the fastest state takes to change by 100% of itself; below the save interval, the saved trajectory never contains the declared IC. Composition makes it worse — that transient is injected into every process downstream through the coupling edges. Advisory, because a stimulus at t=0 is *supposed* to move the state: the flag tells you to decide whether to equilibrate, not that the model is wrong. Canonical case: DallePezze 2014 reports τ = 13 s on `Mitophagy` against a 14-day horizon, and its IC is provably not a rest state of the model at all.
 
 **How to screen — use the tooling, don't eyeball:**
-- `hallsim.diagnostics.screen_process(proc, t_end)` / `screen_composite(comp, t_end)` — returns a pass/flag `ScreenReport`; `assert all(r.ok for r in reports)` in a test.
+- `hallsim.diagnostics.screen_process(proc, t_end)` / `screen_composite(comp, t_ends)` — returns a pass/flag `ScreenReport`; `assert all(r.ok for r in reports)` in a test.
 - `demos/subsystem_diagnostics.py` — the visual version.
 
 **Numerical screening is not scientific review.** A model can pass every check above and still be wrong: parameters invented rather than measured, a citation that does not say what it is cited for, a sign error, units that only appear consistent. Peer review is not a guarantee — assume nothing about an imported model because it was published.

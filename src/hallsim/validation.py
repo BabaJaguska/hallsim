@@ -565,14 +565,17 @@ class GraphAnalyzer:
         results: list[ValidationResult] = []
         G = self.build_graph(processes, topology)
 
-        # 1. Feedback cycles
-        for cycle in nx.simple_cycles(G):
-            path_str = " -> ".join(cycle + [cycle[0]])
+        # 1. Feedback, per strongly-connected component. Enumerating simple
+        # cycles is exponential in coupling density; an SCC is O(V+E).
+        for scc in nx.strongly_connected_components(G):
+            if len(scc) < 2:
+                continue
+            members = " -> ".join(sorted(scc))
             results.append(
                 ValidationResult(
                     Severity.WARNING,
                     "graph",
-                    f"Feedback loop: {path_str}. "
+                    f"Feedback loop among {len(scc)} processes: {members}. "
                     f"Verify this is intentional and numerically stable.",
                 )
             )
@@ -785,7 +788,7 @@ class CompositeValidator:
     check_redundancy:
         Run cross-model entity-redundancy analysis (ortholog-normalized).
     check_graph:
-        Run interaction graph analysis (cycles, fan-in, density).
+        Run interaction graph analysis (feedback, fan-in, density).
     check_coupling:
         Run description-overlap coupling auditor.
     strict:

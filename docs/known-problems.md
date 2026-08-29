@@ -33,7 +33,7 @@ does not survive their next pull and the next user repeats it. Instances so far:
 | `_same_default` broke the trace, so a calibration loss could not run | fixed, and guarded by `tests/unit/test_trace_safety.py` |
 | no public parameter setter (P0.9) | open |
 | `steady_state` was intractable at 910 nodes × 300 conditions, so the inner solve was replaced by a hand-written linear solve (P3.10) | open |
-| semantic validation had to be switched off wholesale to compose 910 generated ports (P3.11) | open |
+| semantic validation had to be switched off wholesale to compose 910 generated ports (P3.11) | cost fixed 2026-08-29 (SCC); annotation granularity open |
 
 The guard for the second one is the pattern to repeat: reachability under trace
 is a whole-call-graph property, so the test traces the public entry points and
@@ -295,6 +295,62 @@ The framework returns a plausible number and nothing indicates it is wrong.
   no change; tracing a full hysteresis loop needs a multi-seed sweep per
   parameter value.
 
+- [x] **P0.17 — `write_param` undid the array coercion, so every parameter
+  value recompiled.** ✓ External project, 2026-08-29. `write_param`
+  (`process.py:82`) is `eqx.tree_at` throughout, and equinox skips
+  `__check_init__` on `tree_unflatten` — which `__check_init__`'s own docstring
+  states. So construction coerced floats to arrays and the *supported setter*
+  handed them straight back as Python floats: static leaves, one compile per
+  distinct value. Measured 2.5–2.7 s per `with_params` call at N=1,000 under
+  `jax.log_compiles`; compile counts for values 0.02/0.05/0.02 were 1/1/0 with a
+  float and 0/0/0 with `jnp.asarray`. This is the exact invariant CLAUDE.md's
+  "structure is static, values are traced" exists to protect, on the route P0.9
+  added to be the one supported way to set a parameter.
+  **Why the guard missed it:** `test_parameter_change_does_not_recompile` built
+  its sweep with `eqx.tree_at(..., jnp.asarray(r))` — applying the coercion
+  inside the test, so it exercised the hand-rolled route `write_param`'s
+  docstring tells callers not to use, with the defect pre-fixed.
+  *Fixed 2026-08-29:* `write_param` coerces through `_as_traced`;
+  `test_with_params_yields_a_traced_array` and
+  `test_with_params_sweep_does_not_recompile` go through the public route with a
+  plain Python float, and both fail without the fix.
+
+- [x] **P0.18 — An unrecognised topology entry is skipped silently, and it
+  decides splitting order.** ✓ External project, 2026-08-29, found by running
+  rather than by grep. `scheduler.py:1068` passes over a topology entry it does
+  not recognise without warning, and that loop determines group ordering and
+  frozen-vs-interpolated coupling. A composite half-migrated to any new port
+  form therefore runs, returns finite numbers, and has mis-ordered its
+  operator splitting. *Fixed 2026-08-29:* raises on an unrecognised entry, which also makes a
+  port-representation migration safe to do incrementally.
+
+- [x] **P0.19 — A device OOM is reported as a tracing failure and answered by
+  choosing the wrong solver.** ✓ External project, 2026-08-29.
+  `scheduler.py:1490` catches bare `RuntimeError`, and
+  `issubclass(JaxRuntimeError, RuntimeError)` is `True`. An OOM inside
+  `stiffness.py:112` at 10,001 store paths was swallowed and
+  `scheduler.py:1503-1518` logged *"cannot measure group stiffness under tracing
+  (grad/jvp/vmap)"* with no tracing in progress, then degraded every group to
+  `Kvaerno5` — routing the composite onto a dense 10,001×10,001 Newton solve it
+  had just proved it could not allocate. The measured spectral abscissa is flat
+  at 20 (pure neural) / 70 (mixed) across N=100…3,000, so `Tsit5` is correct at
+  every N. The remedy the message suggests, `warm_up`, is the call that failed.
+  *Fixed 2026-08-29:* `stiffness.py` raises a named `StiffnessNotConcrete`
+  (a `RuntimeError` subclass) at both sites and the scheduler catches that, so
+  resource errors propagate. Narrowing the `except` by ordering would have kept
+  the discrimination-by-coincidence: in JAX 0.10 every *tracer* error is a
+  `TypeError`, and the `RuntimeError` the scheduler wanted was one
+  `stiffness.py` raises deliberately.
+
+- [ ] **P0.20 — A batched `y0` writing an ASSIGNED path is silently ignored.**
+  ✓ External project, 2026-08-29. Four distinct per-member setpoints written
+  into a batched `y0` produced an endpoint spread of exactly 0.0 with no
+  warning: the path was ASSIGNED, so `composite.py:169` overwrites the column
+  from the process parameter on every RHS call. A population study that varies
+  an assigned quantity per member therefore returns one repeated trajectory that
+  looks like a legitimate null result. *Fix:* raise when a batched initial
+  condition writes an ASSIGNED path.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -493,3 +549,70 @@ The check that would catch a mistake does not exist, does not run, or fails open
   hand-assembled composites; it becomes all-or-nothing the moment ports are
   generated. Needed: a Process-level declaration (one port class inherited by
   every port it emits) and a per-process, rather than per-composite, opt-out.
+  **Measured correction, 2026-08-29 — port count is not the driver, and the
+  wholesale switch-off was broader than the problem required.** `Composite()`
+  with validation on costs 2.28 / 2.85 / 4.82 s at 100 / 1,000 / 10,000 ports:
+  ports are cheap. The cost is `nx.simple_cycles` at `validation.py:569`, which
+  enumerates every simple cycle and emits one WARNING each. Cycle count is
+  exponential in coupling density and `GraphAnalyzer`'s nodes are *processes*,
+  not ports — warnings are flat at 47 from N=100 to N=3,000 ports, and go
+  47 → 15,661 as processes go 11 → 31; at 200 genes, 32 modules produced
+  3,218,727 warning lines in 36.8 s. Two consequences. Capping the output is not
+  the fix — the enumeration is the cost; strongly-connected components answer
+  "where is the feedback" in O(V+E) and report a mutually-coupled block instead
+  of every loop through it, which is the more useful answer for a composite
+  whose feedback is the point. And `composite.py:274` forwards a dict to
+  `CompositeValidator(**kwargs)`, so `semantic_validation={"check_graph": False}`
+  already drops just the exploding checker and keeps units, ontology and
+  redundancy — the checks that are the actual argument against hand-rolling.
+  *Cost fixed 2026-08-29:* `validation.py` now reports one warning per
+  non-trivial strongly-connected component instead of one per simple cycle.
+  A/B on one graph (200 genes, M modules, circulant): 196 / 25,860 / >=500,000
+  cycles at M = 8 / 16 / 24 against 1 SCC throughout, 2.06 s -> 0.4 ms. Naming
+  the mutually-coupled block once is also the more useful report. **The
+  annotation-granularity half of this entry is still open** — there is still no
+  per-Process port declaration and no per-process opt-out.
+
+- [ ] **P3.12 — A port is structurally a scalar store path, so an N-dimensional
+  field costs N ports.** ✓ External project, 2026-08-29. `Port`
+  (`process.py:176-215`) has no shape field, so a Process writing a 10,000-gene
+  field declares 10,000 ports and `_port_view` (`composite.py:159`) rebuilds them
+  as 10,000 traced scalars on every RHS call. Measured RHS jaxpr size grows at
+  **6.00 equations per gene** — 1,631 / 2,831 / 7,031 / 19,031 / 61,031 at
+  N = 100 / 300 / 1,000 / 3,000 / 10,000 — against **54, flat at every N**, for
+  hand-rolled JAX/Diffrax doing identical maths. At N=1,000 the graph is ~96 %
+  `slice` + `squeeze` + `mul`. The whole slope comes from one process; the cost
+  is trace and compile, not run (at N=3,000 the reverse pass is 244× on compile
+  and 5.9× on run, and the run ratio *falls* with N).
+  The per-port work carries real semantics — `idx`, and the `rf`/`wf` unit
+  conversion factors — but all three are `eqx.field(static=True)` and therefore
+  known at build time, so this is a static contract being re-enforced as traced
+  graph nodes on every call.
+  *Fix — array-valued ports, prototyped 2026-08-29 in a patched copy:* **243
+  jaxpr equations at every N from 100 to 10,000**; at N=10,000 the reverse pass
+  goes 304.6 s of trace+compile → 1.13 s (269×), `Scheduler.warm_up` 15.6 → 2.8 s,
+  and the endpoint is **bit-exact** through a full Diffrax solve
+  (`max_abs_diff = 0.0`). Write semantics survive by measurement: a duplicate
+  index inside a block still sums, vector∩vector and vector∩scalar overlaps sum,
+  and an EXCLUSIVE clash one element deep raises and names the element —
+  provided validation iterates `(port, path)` pairs.
+  Two constraints on doing it:
+  - **One `ontology` ID for a block breaks merge-or-couple.**
+    `analyze_composability` would propose merging two unrelated 10,000-element
+    blocks annotated with the same SBO term. Either exclude array ports from
+    ontology matching or add an `element_ontology`.
+  - **The migration is not incremental until P0.18 is fixed**, because a
+    half-migrated composite silently mis-orders its splitting rather than
+    failing.
+  *Partially addressed 2026-08-29 — the multiply half.* Port maps are now
+  `(ports, indices, factors)` and `_port_view` does one gather plus one
+  elementwise multiply per *process*; the write side stacks once before one
+  vector multiply. Framework multiplies went from 2N to **2, independent of N**.
+  The residual per-gene framework cost is `slice` + `squeeze` — the
+  dict-of-scalars interface itself — which only array ports remove. The factor
+  arrays this builds are what an array port consumes, so it is a step in, not
+  work to unwind.
+  Refuted alternative: keeping scalar ports and grouping contiguous index runs
+  inside `_port_view` measures 9 equations *worse* than the free fix of eliding
+  the identity unit multiply, with an identical slope and `slice` unchanged at
+  2,203 — it cannot work while `derivative` receives `dict[str, scalar]`.

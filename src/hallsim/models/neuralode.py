@@ -83,8 +83,8 @@ class NeuralODEProcess(Process):
         PRNG key for weight init.
     """
 
-    fields: tuple[str, ...] = ("x", "y")
-    input_fields: tuple[str, ...] = ()
+    fields: tuple[str, ...] = eqx.field(static=True, default=("x", "y"))
+    input_fields: tuple[str, ...] = eqx.field(static=True, default=())
     field_defaults: tuple[float, ...] = eqx.field(static=True, default=())
     mlp: eqx.Module = eqx.field(default=None)
     # The (normalised) vector field is ``out_scale ⊙ tanh(in_scale · MLP(ŷ))``

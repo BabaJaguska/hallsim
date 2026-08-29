@@ -91,6 +91,10 @@ def write_param(proc, field: str, value):
     the next substitution, and an ablation that silently does nothing looks
     exactly like an edge with no influence.
     """
+    # tree_at rebuilds via tree_unflatten, which skips __check_init__.
+    coerced = _as_traced(value)
+    if coerced is not None:
+        value = coerced
     if "." in field:
         field_name, key = field.split(".", 1)
         current = getattr(proc, field_name)

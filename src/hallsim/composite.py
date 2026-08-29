@@ -118,19 +118,19 @@ def _order_assignments(assign_procs: list) -> list:
     """Topologically order algebraic-assignment processes so any that reads a
     path another *assigns* runs after it.
 
-    ``assign_procs`` is a list of ``(proc, read_pairs, assign_pairs)`` where
-    each ``*_pairs`` element is ``(port, store_index, factor)``. Raises on an
-    algebraic cycle (an ASSIGNED path that depends on itself through others).
+    ``assign_procs`` is a list of ``(proc, read_map, assign_map)`` where each
+    ``*_map`` is ``(ports, store_indices, factors)``. Raises on an algebraic
+    cycle (an ASSIGNED path that depends on itself through others).
     """
     writer_of = {
         idx: i
         for i, (_, _, assigns) in enumerate(assign_procs)
-        for _, idx, _ in assigns
+        for idx in assigns[1]
     }
     deps = {
         i: {
             writer_of[idx]
-            for _, idx, _ in reads
+            for idx in reads[1]
             if idx in writer_of and writer_of[idx] != i
         }
         for i, (_, reads, _) in enumerate(assign_procs)
@@ -153,20 +153,41 @@ def _order_assignments(assign_procs: list) -> list:
     return order
 
 
-def _port_view(y_vec, read_pairs):
+def _as_port_map(triples):
+    """``(port, index, factor)`` triples as three parallel tuples.
+
+    Hashable, so it stays on the static side of the trace.
+    """
+    items = tuple(triples)
+    if not items:
+        return ((), (), ())
+    ports, idxs, factors = zip(*items)
+    return (tuple(ports), tuple(idxs), tuple(factors))
+
+
+def _port_view(y_vec, read_map):
     """The ``{port_name: value}`` dict a Process's ``derivative``/``assign``
-    consumes, gathered from the flat state and converted to port units."""
-    return {port: y_vec[..., idx] * rf for port, idx, rf in read_pairs}
+    consumes, gathered from the flat state and converted to port units.
+
+    One gather and one elementwise multiply for the whole process, rather than
+    a slice and a multiply per port.
+    """
+    ports, idxs, factors = read_map
+    if not ports:
+        return {}
+    vals = y_vec[..., jnp.asarray(idxs)] * jnp.asarray(factors)
+    return {port: vals[..., i] for i, port in enumerate(ports)}
 
 
 def _apply_assignments(assign_pre, t, y_vec):
     """Inject each ASSIGNED path's algebraic value into ``y_vec`` (returns a
     new array; JAX-functional). Shared by the RHS and materialization."""
-    for proc, read_pairs, assign_pairs in assign_pre:
-        raw = proc.assign(t, _port_view(y_vec, read_pairs))
-        for port, idx, wf in assign_pairs:
+    for proc, read_map, assign_map in assign_pre:
+        raw = proc.assign(t, _port_view(y_vec, read_map))
+        ports, idxs, factors = assign_map
+        for i, port in enumerate(ports):
             if port in raw:
-                y_vec = y_vec.at[..., idx].set(raw[port] * wf)
+                y_vec = y_vec.at[..., idxs[i]].set(raw[port] * factors[i])
     return y_vec
 
 
@@ -199,19 +220,19 @@ class _FlatRHS(eqx.Module):
             y_vec,
         )
         accum = jnp.zeros_like(y_vec)
-        for proc, read_pairs, write_pairs in zip(
+        for proc, read_map, write_map in zip(
             self.procs, self.read_maps, self.write_maps
         ):
-            raw = proc.derivative(t, _port_view(y_vec, read_pairs))
-            out = [
-                (idx, raw[port] * wf)
-                for port, idx, wf in write_pairs
-                if port in raw
-            ]
-            if out:
-                idxs = jnp.array([i for i, _ in out])
-                vals = jnp.stack([v for _, v in out], axis=-1)
-                accum = accum.at[..., idxs].add(vals)
+            raw = proc.derivative(t, _port_view(y_vec, read_map))
+            ports, idxs, factors = write_map
+            sel = [i for i, port in enumerate(ports) if port in raw]
+            if sel:
+                vals = jnp.stack(
+                    [raw[ports[i]] for i in sel], axis=-1
+                ) * jnp.asarray([factors[i] for i in sel])
+                accum = accum.at[..., jnp.asarray([idxs[i] for i in sel])].add(
+                    vals
+                )
         return accum
 
 
@@ -347,7 +368,7 @@ class Composite(eqx.Module):
             proc = self.processes[proc_name]
             proc_topo = self.topology[proc_name]
             schema = proc.ports_schema()
-            read_pairs = tuple(
+            read_pairs = _as_port_map(
                 (
                     port,
                     key_to_idx[sp],
@@ -355,7 +376,7 @@ class Composite(eqx.Module):
                 )
                 for port, sp in proc_topo.items()
             )
-            assign_pairs = tuple(
+            assign_pairs = _as_port_map(
                 (
                     port,
                     key_to_idx[proc_topo[port]],
@@ -364,7 +385,7 @@ class Composite(eqx.Module):
                 for port, p in schema.items()
                 if p.role == PortRole.ASSIGNED
             )
-            if assign_pairs:
+            if assign_pairs[0]:
                 assign_procs.append((proc, read_pairs, assign_pairs))
         # Dependency-order so an assignment reading a path another assigns runs
         # after it (SBML/DAE assignment-rule semantics).
@@ -430,7 +451,7 @@ class Composite(eqx.Module):
             proc = self.processes[proc_name]
             proc_topo = self.topology[proc_name]
             schema = proc.ports_schema()
-            read_pairs = tuple(
+            read_pairs = _as_port_map(
                 (
                     port,
                     key_to_idx[sp],
@@ -438,7 +459,7 @@ class Composite(eqx.Module):
                 )
                 for port, sp in proc_topo.items()
             )
-            write_pairs = tuple(
+            write_pairs = _as_port_map(
                 (
                     port,
                     key_to_idx[proc_topo[port]],
@@ -447,7 +468,7 @@ class Composite(eqx.Module):
                 for port, p in schema.items()
                 if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
             )
-            if write_pairs:
+            if write_pairs[0]:
                 pre.append((proc, read_pairs, write_pairs))
         assign_pre = self._assignment_pre(proc_names, keys, key_to_idx, canon)
 
