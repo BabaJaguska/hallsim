@@ -5,12 +5,21 @@ Defects found by review, ordered by priority. Distinct from
 that is wrong now. Each entry carries the evidence that established it, so
 nothing has to be re-argued.
 
-Evidence sources: the mitochondrial stress test (2026-08-18), the flagship
-review (2026-08-19), and the DallePezze 2014 referee pass (2026-08-25) — all by
-the review panel in `.claude/agents/` — plus two outside models calibrated
-against GSE248823 by agents who did not have this list. Findings confirmed by
-two independent reviewers are marked ✓✓. The panel's raw reports are gitignored;
-what survived review is here.
+Evidence sources: the mitochondrial stress test (2026-08-18), the
+multi-hallmark demo review (2026-08-19), and the DallePezze 2014 referee pass
+(2026-08-25) — all by the review panel in `.claude/agents/` — plus two outside
+models calibrated against GSE248823 by agents who did not have this list.
+Findings confirmed by two independent reviewers are marked ✓✓. The panel's raw
+reports are gitignored; what survived review is here.
+
+**On the multi-hallmark demo.** Several entries below are stated against it,
+because it is the largest composite on hand and therefore the one that
+exercises the most framework surface. That makes it a *test workload*, not a
+result. It is known-broken as biology — P0.14: its control arm is not a
+control, so its concordance number means nothing and a constant null beats it
+(P1.6). Read every demo number here as a diagnostic of the framework path it
+exercised. Nothing about HallSim's value depends on that model being right,
+and no entry should be read as if it did.
 
 ## The standing criterion
 
@@ -42,7 +51,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   now analysed at the composite's concrete initial state (no fallback needed —
   the cache signature already declares the verdict state-independent), and a
   traced composite degrades to the **implicit** solver rather than the explicit
-  one. Flagship: max|g| 270591 cold = 270591 warmed, against 6.19×10²³⁶ before.
+  one. Multi-hallmark demo: max|g| 270591 cold = 270591 warmed, against 6.19×10²³⁶ before.
   **Still open:** `test_batched_matches_solo` — a batched run (traced →
   implicit, `Kvaerno5`) and a solo run (eager → measured, `Tsit5`) pick
   different solvers, so batched ≠ solo when the cache is cold; worst
@@ -71,7 +80,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `design-multiscale-scheduler.md:445` has said "Measure first" since day one
   and no order test exists.
   *Fix:* withdraw `splitting="strang"` until an order test passes; add that
-  test; set `macro_dt ≤ 0.875` for the flagship meanwhile.
+  test; set `macro_dt ≤ 0.875` for the multi-hallmark demo meanwhile.
 
 - [ ] **P0.3 — The fold-change reference is an acausal filter of the whole
   trajectory.** ✓✓ Summaries are forward–backward EMAs, so the value at index 0
@@ -103,7 +112,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   parameter, fitted or not, by fittable name or by `<process>.<field>` address.
   Overrides are applied last, so they outrank both the fitted iterate and the
   composite's own value; no caller has to know which list a parameter is in.
-  Verified on the flagship: zeroing `mtor_nfkb.k_act` — one of the three edges
+  Verified on the multi-hallmark demo: zeroing `mtor_nfkb.k_act` — one of the three edges
   the review ablated — raises when edited in the pytree, and via `with_overrides`
   moves the control arm 0.924 relative against the review's 2.7×10⁻¹³. Editing a
   field nobody fits is untouched and still reaches the solver.
@@ -117,7 +126,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   ran backwards and interpolated coupling was unreachable.** *Fixed
   2026-08-25.* `auto_groups` still clusters by timescale; `_order_by_coupling`
   then topologically sorts the groups so one runs after whatever drives it,
-  keeping timescale order on a cycle. The flagship's dp14/gz06 group now
+  keeping timescale order on a cycle. The multi-hallmark demo's dp14/gz06 group now
   precedes nfkb, `_effective_coupling` returns `interpolated`, and NF-κB reads
   an interpolant of its driver instead of a staircase.
 
@@ -207,7 +216,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   in a prose document.
 
 - [ ] **P0.10 — The default `macro_dt = 5.0` carries material splitting error,
-  unwarned.** Lie splitting was measured at 17% error on the flagship at
+  unwarned.** Lie splitting was measured at 17% error on the multi-hallmark demo at
   `macro_dt = 3.5`; the shipped default is larger still, and nothing reports it.
   `CalibrationProblem` defaults to it (`calibration.py:787`).
   *Fix:* report the splitting-error estimate at construction, or default to a
@@ -221,7 +230,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   (`DEFAULT_NEWTON_ATOL`); the class is not audited. `rtol` still feeds both.
   *Fix:* audit every solver parameter for double duty and split each one.
 
-- [ ] **P0.14 — The flagship's control arm is not a control.** ✓✓ DallePezze
+- [ ] **P0.14 — The multi-hallmark demo's control arm is not a control.** ✓✓ DallePezze
   2014 is monostable: 512 leaf-preserving Newton seeds and 2001 projected seeds
   each find exactly **one** non-negative fixed point, stable at max Re λ
   = −0.0730/day, and 64 random ICs integrated 200 days all land on it (spread
@@ -244,7 +253,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `AMPK_T172_phos × 10` breaks the loop at its hinge and gives an unirradiated
   rest state (SA-β-gal 1.30, γH2A.X 1.05, ROS 2.88), the best any single
   constant achieves. Open question whether changing the model between arms is
-  defensible. Until then no flagship concordance number means anything.
+  defensible. Until then no multi-hallmark demo concordance number means anything.
 
 - [x] **P0.15 — `conservation_laws` returns rows that are not normalised, so
   `LᵀL` is not a projector.** *Fixed 2026-08-25, in the commit that filed it —
@@ -314,7 +323,7 @@ The check that would catch a mistake does not exist, does not run, or fails open
   but the two parameters governing that loop were never fitted. A report cannot
   be expected to notice three unmoved parameters among sixteen; the problem
   construction can, in one pass, for free.
-- [ ] **P1.6 — No null-model baseline is reported.** The flagship scores 19/36
+- [ ] **P1.6 — No null-model baseline is reported.** The multi-hallmark demo scores 19/36
   signs (52.8%); "every reporter rises" scores 30/36 (83.3%).
 - [ ] **P1.7 — No parameter provenance.** Nothing distinguishes measured from
   fitted from invented, so a benchmark can be scored against a parameter fitted
@@ -418,7 +427,7 @@ The check that would catch a mistake does not exist, does not run, or fails open
   in there: `dataset.md` described the held-out arm as `RAPA_vs_DDIS` against a
   time-matched comparator, where the code runs `RAPA_vs_ctrl` normalised within
   the arm to `ETOPOSIDE_D00`; `calibration.md`'s worked example said the same
-  and described summaries as co-solved `RunningIntegral`s, which the flagship
+  and described summaries as co-solved `RunningIntegral`s, which the multi-hallmark demo
   stopped using in favour of post-hoc zero-phase filters.
   **Found while fixing, not fixed:** `demos/multi_hallmark_hybrid.py:492` reads
   `gz06/x2_integral`, a store path the composite no longer has — that demo

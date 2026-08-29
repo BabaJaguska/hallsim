@@ -1,6 +1,6 @@
 """Run-output and report helpers, now that they ship in ``src/``.
 
-These moved out of the flagship demo, so they went from "whatever that one
+These moved out of the demo, so they went from "whatever that one
 script needed" to framework surface: ``make_run_dir`` removes a directory, and
 ``format_table`` decides which arms are labelled FIT from a parameter rather
 than a hardcoded arm name.

@@ -85,7 +85,7 @@ def test_observer_hop_resolves_to_annotated_source():
 
 @pytest.mark.demo
 @pytest.mark.slow
-def test_flagship_reporter_verdicts(composite):
+def test_multi_hallmark_reporter_verdicts(composite):
     from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
 
     valid = {
@@ -102,7 +102,7 @@ def test_flagship_reporter_verdicts(composite):
         r.gene_symbol: classify_reporter(r, composite, ontmap).status
         for r in MULTI_HALLMARK_REPORTERS
     }
-    # Central: every flagship reporter classifies to a known status.
+    # Central: every demo reporter classifies to a known status.
     for gene, s in status.items():
         assert s in valid, (gene, s)
     # Anchored cases with an unambiguous wiring interpretation:

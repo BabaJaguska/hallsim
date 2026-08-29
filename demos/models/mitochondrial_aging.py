@@ -1015,11 +1015,12 @@ def mito_hallmark_registry(registry: dict | None = None) -> dict:
     """``HALLMARK_REGISTRY`` with Genomic Instability wired to this composite.
 
     The global handle drives exogenous damage through ERiQ's ``damage_repair``
-    or through the flagship's ``irradiation_pulse`` amplitude; neither exists
+    or through the demo's ``irradiation_pulse`` amplitude; neither exists
     here, so severity would be silently inert. This composite carries the dose
     on DallePezze's ``DNA_damaged_by_irradiation`` rate constant instead
     (``floor=0`` — severity 0 really is unirradiated). Model-local so the
-    flagship, which holds that constant fixed and doses through the pulse, is
+    multi-hallmark demo, which holds that constant fixed and doses through
+    the pulse, is
     untouched: pass it as ``with_hallmarks(..., registry=...)`` or
     ``CalibrationProblem(hallmark_registry=...)``.
     """
@@ -1050,7 +1051,7 @@ MITO_PREFIX = "mito"
 # Prior scale for the mitochondrial-ROS → DallePezze-ROS edge. DallePezze's ROS
 # pool sits at 10 and turns over per day, so an edge able to move it by ~10% of
 # its own pool per day is the host-module scale — the Occam anchor
-# docs/coupling-edge-priors.md uses for the flagship's IKK edges. The data sets
+# docs/coupling-edge-priors.md uses for the demo's IKK edges. The data sets
 # the value within that scale.
 MITO_ROS_EDGE_STRENGTH = 1.0
 

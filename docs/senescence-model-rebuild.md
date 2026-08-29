@@ -98,7 +98,7 @@ initial conditions.
 
 ## 4. Accepted structural diagnosis — what is missing
 
-Accepted as listed. What the flagship composite already supplies is recorded
+Accepted as listed. What the multi-hallmark composite already supplies is recorded
 here so the plan does not rebuild it:
 
 | missing module | review is right that dp14 lacks it | already in the composite | still needed |

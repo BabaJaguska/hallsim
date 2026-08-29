@@ -1,4 +1,4 @@
-"""Figures for the multi-hallmark flagship composite — one CLI, many panels.
+"""Figures for the multi-hallmark composite — one CLI, many panels.
 
 Consolidates the per-figure scripts into subcommands (pick with the first arg):
 
@@ -10,7 +10,7 @@ Consolidates the per-figure scripts into subcommands (pick with the first arg):
   before-after   each constituent standalone vs inside the composite.
 
 Run: python demos/multi_hallmark_figures.py <figure>   (or `all`)
-Calibration itself lives in multi_hallmark_calibrate.py; the flagship
+Calibration itself lives in multi_hallmark_calibrate.py; the demo
 NeuralODE-hybrid swap in multi_hallmark_hybrid.py.
 """
 

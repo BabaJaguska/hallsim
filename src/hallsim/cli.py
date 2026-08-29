@@ -621,7 +621,8 @@ def info():
         "  simulate stiffness        — per-group Jacobian-spectrum solver verdict"
     )
     click.echo(
-        "  simulate multi-hallmark   — run / calibrate / sweep the flagship composite"
+        "  simulate multi-hallmark   — demo: three published SBML models,"
+        " composed and calibrated"
     )
     click.echo("  simulate mito-aging       — mitochondrial decline with age")
     click.echo(

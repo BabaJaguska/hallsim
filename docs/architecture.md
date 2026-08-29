@@ -207,23 +207,38 @@ models (a foot-gun the framework deliberately doesn't expose).
 ## Example composites
 
 HallSim is a *framework*, not a model library — bring your own Processes
-(hand-written, SBML-imported, or a `NeuralODE`). Examples ship under
-[`src/hallsim/models/`](../src/hallsim/models/):
+(hand-written, SBML-imported, or a `NeuralODE`).
 
-- **DP14-anchored multi-hallmark composite**
-  ([`multi_hallmark.py`](../src/hallsim/models/multi_hallmark.py)) — three
-  BioModels SBML imports (DallePezze 2014 + Geva-Zatorsky 2006 + Ihekwaba
-  2004) plus two literature-grounded cross-publication edges into the NF-κB
-  module's IKK: `MtorNFkBActivator` (DP14 mTORC1 → IKK; the rapamycin channel)
-  and `DamageNFkBActivator` (DP14 DNA_damage → IKK; the genomic-instability /
-  ATM→NEMO channel). Spans Cellular Senescence, Deregulated Nutrient Sensing,
-  Genomic Instability, and Inflammaging. The current validation composite.
-- Hand-written references:
-  [`saturating_removal.py`](../src/hallsim/models/saturating_removal.py) (Uri
-  Alon damage motif), [`kick_event.py`](../src/hallsim/models/kick_event.py)
-  (one-shot EVENT perturbation), the
-  [ERiQ](../src/hallsim/models/eriq.py) decomposition, and
-  [`neuralode.py`](../src/hallsim/models/neuralode.py).
+Reusable primitives — no domain content, and the part that is under test —
+ship under [`src/hallsim/models/`](../src/hallsim/models/):
+[`saturating_removal.py`](../src/hallsim/models/saturating_removal.py) (Uri
+Alon damage motif), [`hill_edge.py`](../src/hallsim/models/hill_edge.py),
+[`clamp_edge.py`](../src/hallsim/models/clamp_edge.py),
+[`kick_event.py`](../src/hallsim/models/kick_event.py) (one-shot EVENT
+perturbation), [`forcing.py`](../src/hallsim/models/forcing.py),
+[`running_integral.py`](../src/hallsim/models/running_integral.py),
+[`bistable_latch.py`](../src/hallsim/models/bistable_latch.py) and
+[`neuralode.py`](../src/hallsim/models/neuralode.py).
+
+Specific biology lives in [`demos/models/`](../demos/models/) and is **not**
+part of the package. The largest is the multi-hallmark demo
+([`multi_hallmark.py`](../demos/models/multi_hallmark.py)) — three BioModels
+SBML imports (DallePezze 2014 + Geva-Zatorsky 2006 + Ihekwaba 2004) plus two
+cross-publication edges into the NF-κB module's IKK: `MtorNFkBActivator`
+(DP14 mTORC1 → IKK; the rapamycin channel) and `DamageNFkBActivator` (DP14
+DNA_damage → IKK; the ATM→NEMO channel). Alongside it,
+[`eriq.py`](../demos/models/eriq.py),
+[`mitochondrial_aging.py`](../demos/models/mitochondrial_aging.py) and
+[`stem_cell_niche.py`](../demos/models/stem_cell_niche.py).
+
+**These are exercises of the framework's mechanics, not results.** The
+multi-hallmark demo in particular is known-broken as biology — its control arm
+is not a control (P0.14), and every one of its constituents is FLAG under
+`intake.triage_sbml`. It is useful for what it stresses: three time bases
+reconciled onto one clock, cross-publication coupling edges, a stiff
+multi-group solve, held-out arms, and end-to-end gradients through all of it.
+No claim about the framework rests on its concordance score, and none should
+be built on it as biology.
 
 ## Population studies via batched `y0`
 

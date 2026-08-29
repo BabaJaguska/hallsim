@@ -4,7 +4,7 @@ Reference note for the preprint: how the strengths of the composite's
 literature-derived coupling edges are bounded, and why they have no direct
 off-the-shelf literature value.
 
-The flagship has two `HillActivationEdge`s that inject a Hill-gated source
+The multi-hallmark demo has two `HillActivationEdge`s that inject a Hill-gated source
 into the Ihekwaba 2004 NF-κB module's IKK pool:
 
 - **`mtor_nfkb`** (`mtor_nfkb.k_act`): DP14 `mTORC1_pS2448` → `nfkb/IKK`.

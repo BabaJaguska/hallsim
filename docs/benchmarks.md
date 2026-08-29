@@ -165,7 +165,7 @@ footnote, see item 6.
 
 ## 6. Where the time goes now: the one-time cost dominates
 
-Full audit in [performance-audit.md](performance-audit.md). On the flagship:
+Full audit in [performance-audit.md](performance-audit.md). On the multi-hallmark demo:
 
 | stage | wall |
 |---|---|

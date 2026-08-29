@@ -1,9 +1,15 @@
 # Calibration dataset — GSE248823
 
-The transcriptomic dataset the flagship composite is calibrated and
-evaluated against. Loaded by
+The dataset the multi-hallmark **demo** is calibrated and evaluated against.
+Loaded by
 [`demos/multi_hallmark_calibrate.py`](../demos/multi_hallmark_calibrate.py)
 from `data/FibroblastsDNA_dmg_Rapamycin/`.
+
+The demo exists to exercise the calibration machinery — held-out arms,
+fold-change loss, gene reporters, gradients through a stiff multi-group solve
+— on real published models and a real public dataset. It is not a senescence
+result, and its concordance score is not a claim about HallSim; see the caveat
+at the end and P0.14 in [known-problems.md](known-problems.md).
 
 ## Source
 
@@ -51,7 +57,7 @@ replicates for one condition.
 | 16, 17 | `WI38_…_RAS_DMOG_D04`             | RAS+DMOG · D04 *(unused)* |
 | 18, 19 | `WI38_…_RAS_DMOG_D07`             | RAS+DMOG · D07 *(unused)* |
 
-## What the flagship uses
+## What the multi-hallmark demo uses
 
 | Composite arm | Definition (condition vs reference) | Role |
 |---------------|-------------------------------------|------|

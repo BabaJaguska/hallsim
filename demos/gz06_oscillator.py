@@ -3,7 +3,7 @@
 Runs the bare GZ06 SBML model (BIOMD157) on its native hourly clock and
 plots p53 and Mdm2 over time — the undamped, out-of-phase pulses (period
 ~5.5 h) that are the model's signature. Shown at the basal and full-damage
-psi the flagship interpolates between.
+psi the multi-hallmark demo interpolates between.
 
     python demos/gz06_oscillator.py
 """

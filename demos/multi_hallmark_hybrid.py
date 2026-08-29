@@ -1,7 +1,7 @@
-"""Hybrid flagship: a learned p53 block that captures GZ06's bifurcations.
+"""Hybrid composite: a learned p53 block that captures GZ06's bifurcations.
 
 The §3.3 demonstration. Replace the mechanistic Geva-Zatorsky 2006 p53–Mdm2
-oscillator in the multi-hallmark flagship with a NeuralODE block trained to
+oscillator in the multi-hallmark demo with a NeuralODE block trained to
 reproduce it, then compose and differentiate as if it were the original.
 
 The block is conditioned on two inputs — the damage stimulus ψ and the Mdm2
@@ -21,10 +21,10 @@ stages are plotted against the mechanistic model so the correction is visible.
 Writes to ``outputs/multi_hallmark_hybrid/``:
 - ``bifurcation_recovery.png/.pdf`` — p53 amplitude across α_y and ψ:
   mechanistic vs derivative-only vs shooting-refined.
-- ``flagship_ddb2.png/.pdf`` — DDB2 vs genomic-instability severity,
+- ``ddb2_severity.png/.pdf`` — DDB2 vs genomic-instability severity,
   mechanistic vs hybrid, in the pulsatile and calibrated-sustained regimes.
 - ``provenance.json`` / ``provenance.md`` — the full run record: config, both
-  stages' recovery numbers, flagship tables, gradients, and motivation.
+  stages' recovery numbers, DDB2 tables, gradients, and motivation.
 - ``gz06_neural_block.eqx`` — the trained block.
 
     python demos/multi_hallmark_hybrid.py
@@ -440,7 +440,7 @@ def bifurcation_figure(mech, deriv, shoot):
     log.info("wrote bifurcation_recovery.png/.pdf")
 
 
-# ── flagship swap: DDB2 across severities + gradient through the block ────
+# ── block swap: DDB2 across severities + gradient through the block ──
 
 TOPOLOGY = build_multi_hallmark_composite(validate=False).topology
 
@@ -493,7 +493,7 @@ def _ddb2_for_severity(comp_processes, severity):
 
 
 def _procs_at(alpha_y, block, fitted):
-    """Mechanistic and hybrid flagship process dicts at one α_y setting."""
+    """Mechanistic and hybrid process dicts at one α_y setting."""
     mech = build_multi_hallmark_composite(validate=False).processes
     mech = {
         **mech,
@@ -514,7 +514,7 @@ def _procs_at(alpha_y, block, fitted):
     return mech, {**mech, "gz06": neural_gz}
 
 
-def flagship_results(block, fitted):
+def ddb2_results(block, fitted):
     out = {}
     for alpha_y in (0.8, ALPHA_Y_SUSTAINED):
         mech_p, hyb_p = _procs_at(alpha_y, block, fitted)
@@ -537,7 +537,7 @@ def flagship_results(block, fitted):
     return out
 
 
-def flagship_figure(results):
+def ddb2_figure(results):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -583,13 +583,13 @@ def flagship_figure(results):
     fig.tight_layout()
     for ext in ("png", "pdf"):
         fig.savefig(
-            OUT / f"flagship_ddb2.{ext}",
+            OUT / f"ddb2_severity.{ext}",
             dpi=160,
             bbox_inches="tight",
             facecolor="white",
         )
     plt.close(fig)
-    log.info("wrote flagship_ddb2.png/.pdf")
+    log.info("wrote ddb2_severity.png/.pdf")
 
 
 # ── provenance ───────────────────────────────────────────────────────────
@@ -605,12 +605,12 @@ def write_provenance(prov):
     (OUT / "provenance.json").write_text(json.dumps(prov, indent=2))
     r = prov["recovery"]
     md = [
-        "# Hybrid flagship — run provenance\n",
+        "# Hybrid composite — run provenance\n",
         f"_{prov['timestamp']}_\n",
         "## What this run did\n",
         "Recovered the Geva-Zatorsky 2006 p53–Mdm2 oscillator as a "
         "(ψ, α_y)-conditioned NeuralODE, swapped it into the multi-hallmark "
-        "flagship, and checked bifurcation capture, DDB2 reproduction, and "
+        "composite, and checked bifurcation capture, DDB2 reproduction, and "
         "end-to-end gradient flow.\n",
         "## Recovery (held-out amplitude error)\n",
         "Both blocks are scored only on (ψ, α_y) points held out of "
@@ -650,8 +650,8 @@ def write_provenance(prov):
             f"{prov['bifurcation']['deriv']['psi'][i]:.3f} | "
             f"{prov['bifurcation']['shoot']['psi'][i]:.3f} |"
         )
-    md.append("\n## Flagship DDB2 vs severity (shooting block)\n")
-    for k, fr in prov["flagship"].items():
+    md.append("\n## Multi-hallmark DDB2 vs severity (shooting block)\n")
+    for k, fr in prov["ddb2"].items():
         md.append(
             f"\n**α_y={fr['alpha_y']:g} — {fr['regime']}**  "
             f"(∂DDB2/∂severity: autodiff={fr['grad_autodiff']:+.5f}, "
@@ -683,7 +683,7 @@ def _load_block():
 
 def _load_flag():
     with open(OUT / "provenance.json") as f:
-        return json.load(f)["flagship"]
+        return json.load(f)["ddb2"]
 
 
 # ψ=1.0 (held out); α_y picks one regime on each side of the two Hopfs.
@@ -826,8 +826,8 @@ def main():
     time_domain_figure(best)
 
     fitted = _load_fitted_dp14()
-    flag = flagship_results(best, fitted)
-    flagship_figure(flag)
+    flag = ddb2_results(best, fitted)
+    ddb2_figure(flag)
     combined_figure(best, flag)
 
     prov = {
@@ -841,7 +841,7 @@ def main():
             "held_out_deriv": held_out_recovery(deriv),
             "held_out_shoot": held_out_recovery(shoot),
         },
-        "flagship": flag,
+        "ddb2": flag,
     }
     write_provenance(prov)
 
@@ -857,7 +857,7 @@ def main():
         )
     print(
         f"outputs → {OUT.relative_to(ROOT)}/ "
-        "(bifurcation_recovery, flagship_ddb2, provenance.md)"
+        "(bifurcation_recovery, ddb2_severity, provenance.md)"
     )
 
 
