@@ -40,6 +40,7 @@ class StiffnessNotConcrete(RuntimeError):
     mistaken for a cold trace.
     """
 
+
 # A dissipative eigenvalue is "active" (counts toward the stiffness ratio)
 # only if its decay rate is a non-negligible fraction of the fastest one;
 # this drops the numerically-zero / conserved-quantity modes (Re λ ≈ 0)

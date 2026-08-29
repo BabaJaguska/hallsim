@@ -351,6 +351,28 @@ The framework returns a plausible number and nothing indicates it is wrong.
   looks like a legitimate null result. *Fix:* raise when a batched initial
   condition writes an ASSIGNED path.
 
+- [ ] **P0.21 — An affine unit yields a garbage multiplier, silently.**
+  `conversion_factor` (`units.py:25`) returns
+  `parse_expression(from).to(to).magnitude`, which is **f(1)**. That is the
+  scale only for a linear (ratio-scale) unit; for an affine one, f(x) = ax + b,
+  it returns a + b, which is not a scale at all. Measured:
+  `degC -> kelvin` returns **274.15** (so 0 degC maps to 0 K rather than 273.15,
+  and 100 degC to 27,415 K); `degF -> degC` returns **-17.22**, a negative
+  multiplier that flips the sign of every value. The RHS then applies it per
+  port on every call, with no warning — `except Exception: return 1.0` catches
+  only unparseable units, not this.
+  Latent today because concentrations, rates and amounts are all ratio-scale.
+  It fires the moment a model declares a temperature (Arrhenius kinetics,
+  thermal stress) or a clinical scale such as HbA1c NGSP% <-> IFCC mmol/mol.
+  *Fix, minimum:* detect non-multiplicative units and raise. Linearity is
+  testable without library internals — f(2) == 2*f(1) for a linear unit — and
+  the same two probes give the real pair, scale `f(2) - f(1)` and offset `f(0)`.
+  *Fix, full:* carry `(scale, offset)` per port instead of a scalar. Note the
+  offset is **role-dependent**: an EVOLVED port carries a derivative, and
+  d/dt(ax + b) = a dx/dt, so the offset must be applied on reads and on
+  ASSIGNED/LATCHED/INPUT values but **never** on an EVOLVED write. Applying it
+  there is a second silent-wrong.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
