@@ -228,7 +228,8 @@ def plot(runs, sweep_k, residuals, flux, placed, cfg, path):
     return fig
 
 
-def main(argv=(), **overrides):
+def run_demo(argv=(), **overrides):
+    """Solve, sweep and plot; the entry point `simulate clamp` calls."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = dict(DEFAULTS)
     if argv:
@@ -242,4 +243,4 @@ def main(argv=(), **overrides):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    run_demo(sys.argv[1:])

@@ -198,6 +198,149 @@ def triage_sbml(
     )
 
 
+@dataclass(frozen=True)
+class FitReport:
+    """How well a model reproduces the dataset its own paper fitted."""
+
+    chi2: float
+    n_points: int
+    per_path: dict[str, float] = field(default_factory=dict)
+    reported: float | None = None
+    rtol: float = 0.01
+
+    @property
+    def reduced_chi2(self) -> float:
+        return self.chi2 / self.n_points if self.n_points else float("nan")
+
+    @property
+    def relative_error(self) -> float | None:
+        """|χ² − reported| / reported, or None when nothing was claimed."""
+        if self.reported is None or not self.reported:
+            return None
+        return abs(self.chi2 - self.reported) / abs(self.reported)
+
+    @property
+    def reproduces(self) -> bool | None:
+        """Whether the deposit reproduces its paper's stated χ² within
+        ``rtol``. ``None`` when the paper states none — then the χ² is a
+        goodness-of-fit number and not a reproduction check."""
+        rel = self.relative_error
+        return None if rel is None else rel <= self.rtol
+
+    def __str__(self) -> str:
+        head = f"chi2 {self.chi2:.4f} over {self.n_points} points"
+        head += f" (reduced {self.reduced_chi2:.4f})"
+        if self.reported is not None:
+            verdict = "REPRODUCES" if self.reproduces else "DIVERGES"
+            head += (
+                f" vs reported {self.reported:.4f} "
+                f"— {self.relative_error:.2%}, {verdict}"
+            )
+        worst = sorted(self.per_path.items(), key=lambda kv: -kv[1])[:3]
+        tail = ", ".join(f"{k} {v:.3g}" for k, v in worst)
+        return f"{head}\n  worst: {tail}" if tail else head
+
+
+def published_fit_chi2(
+    composite,
+    observations: dict,
+    *,
+    scales: dict | None = None,
+    reported: float | None = None,
+    rtol: float = 0.01,
+    save_dt: float | None = None,
+    y0=None,
+    scheduler=None,
+) -> FitReport:
+    """``χ² = Σ ((sim − obs) / sd)²`` against the data the model was fitted to.
+
+    ``observations`` maps an observable to ``(times, values, sds)``. The key is
+    a store path, or a tuple of store paths that are **summed** — a measured
+    quantity is often a total over states the model keeps apart (free + bound,
+    new + old). ``scales`` optionally multiplies an observable after summing,
+    for the fitted observable-scaling factors a fit deposits alongside its rate
+    constants. The run spans ``[0, max(times)]`` through the Scheduler and each
+    observable is sampled at its own times by linear interpolation.
+
+    ``reported`` is the paper's own stated χ², which turns the number into a
+    **reproduction check**: does this deposit still produce the fit its
+    publication claims?
+
+    That question is the one to ask first of any curated model, and asking it
+    is what licenses everything after. A deposit that reproduces its paper's χ²
+    is the object the paper analysed, so any defect found later belongs to the
+    paper rather than to the deposition or to the import. A deposit that does
+    not is a broken artefact, and no finding against it means anything.
+    """
+    import numpy as np
+
+    from hallsim.scheduler import Scheduler
+
+    if not observations:
+        raise ValueError("published_fit_chi2 needs at least one observed path")
+    scales = scales or {}
+    known = set(composite.store_keys())
+
+    def _paths(key):
+        return (key,) if isinstance(key, str) else tuple(key)
+
+    missing = sorted(
+        {p for key in observations for p in _paths(key) if p not in known}
+    )
+    if missing:
+        raise KeyError(
+            f"observed paths absent from the composite: {missing}. "
+            "Map the paper's observable names onto store paths first."
+        )
+
+    t_end = max(
+        float(np.max(np.asarray(t))) for t, _, _ in observations.values()
+    )
+    if t_end <= 0:
+        raise ValueError("observation times must span a positive interval")
+    dt = save_dt if save_dt is not None else t_end / 400.0
+    y0 = composite.initial_state_vec() if y0 is None else y0
+    result = (scheduler or Scheduler()).run(
+        composite, t_span=(0.0, t_end), macro_dt=t_end, y0=y0, save_dt=dt
+    )
+    ts = np.asarray(result.ts)
+
+    per_path: dict[str, float] = {}
+    total, n = 0.0, 0
+    for key, (obs_t, obs_y, obs_sd) in observations.items():
+        obs_t = np.asarray(obs_t, float)
+        obs_y = np.asarray(obs_y, float)
+        obs_sd = np.asarray(obs_sd, float)
+        if np.any(obs_sd <= 0):
+            raise ValueError(f"non-positive sd in observations for {key!r}")
+        paths = _paths(key)
+        traj = sum(np.asarray(result.get(p)) for p in paths)
+        sim = float(scales.get(key, 1.0)) * np.interp(obs_t, ts, traj)
+        contrib = float(np.sum(((sim - obs_y) / obs_sd) ** 2))
+        per_path[" + ".join(paths)] = contrib
+        total += contrib
+        n += len(obs_t)
+
+    report = FitReport(
+        chi2=total,
+        n_points=n,
+        per_path=per_path,
+        reported=reported,
+        rtol=rtol,
+    )
+    if report.reproduces is False:
+        log.warning(
+            "published_fit_chi2: %s does not reproduce its reported fit "
+            "(chi2 %.4f vs %.4f, %.1f%%). A finding against a deposit that "
+            "does not reproduce its own paper is a finding about the deposit.",
+            getattr(composite, "name", "composite"),
+            report.chi2,
+            reported,
+            100 * report.relative_error,
+        )
+    return report
+
+
 def triage_batch(model_ids, t_end: float = 10.0) -> list[TriageVerdict]:
     """Triage a candidate list, keeping order. Never raises on one bad model."""
     verdicts = [triage_sbml(m, t_end=t_end) for m in model_ids]

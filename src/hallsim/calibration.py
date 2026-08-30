@@ -774,6 +774,7 @@ class CalibrationProblem:
         equilibrate: bool = False,
         equilibration_condition: str | None = None,
         t_end: float = 25.0,
+        t_start: float = 0.0,
         macro_dt: float = 5.0,
         n_save: int = 6,
         prior_weight: float = 1.0,
@@ -969,6 +970,9 @@ class CalibrationProblem:
         self.fit_arms = fit_arms
         self.held_out_arms = held_out_arms or []
         self.t_end = t_end
+        # Negative = pre-roll: sources are off before 0, so query time 0 is
+        # read from a settled state rather than the IC.
+        self.t_start = t_start
         self.macro_dt = macro_dt
         self.n_save = n_save
         # Stiffness routing is a Scheduler default, and `warm_up` below
@@ -1222,7 +1226,7 @@ class CalibrationProblem:
         # (e.g. a leaky reporter's √τ) then cancels in the log2 ratio by
         # construction — no "readout == source at the fixed point" assumption to
         # break, whatever the readout.
-        const_ts = jnp.linspace(0.0, self.t_end, 16)
+        const_ts = jnp.linspace(self.t_start, self.t_end, 16)
         obs = jnp.stack(
             [
                 jnp.full((const_ts.size,), y0[self._store_idx[r.observable]])
@@ -1258,10 +1262,11 @@ class CalibrationProblem:
         )
         if y0 is None:
             y0 = comp.initial_state_vec()
-        save_dt = max(1e-6, self.t_end / max(1, self.n_save - 1))
+        span = self.t_end - self.t_start
+        save_dt = max(1e-6, span / max(1, self.n_save - 1))
         res = self._scheduler.run(
             comp,
-            t_span=(0.0, self.t_end),
+            t_span=(self.t_start, self.t_end),
             macro_dt=self.macro_dt,
             y0=y0,
             save_dt=save_dt,
@@ -1616,7 +1621,7 @@ class CalibrationProblem:
             substituted, any_cond, registry=registry
         )
         self._scheduler.warm_up(
-            comp, (0.0, self.t_end), macro_dt=self.macro_dt
+            comp, (self.t_start, self.t_end), macro_dt=self.macro_dt
         )
         # Conservation laws (structural) are computed eagerly here — they can't
         # be recovered from tracers once the loss is under autodiff.
@@ -1774,7 +1779,7 @@ class CalibrationProblem:
         registry = self._registry(param_values)
         y0, _ = self._equilibrate(substituted, registry=registry)
         n = n_save if n_save is not None else self.n_save
-        save_dt = max(1e-6, self.t_end / max(1, n - 1))
+        save_dt = max(1e-6, (self.t_end - self.t_start) / max(1, n - 1))
         results: dict = {}
         for cond_name, cond in self.conditions.items():
             comp = self._condition_composite(
@@ -1782,7 +1787,7 @@ class CalibrationProblem:
             )
             results[cond_name] = self._scheduler.run(
                 comp,
-                t_span=(0.0, self.t_end),
+                t_span=(self.t_start, self.t_end),
                 macro_dt=self.macro_dt,
                 y0=y0,
                 save_dt=save_dt,

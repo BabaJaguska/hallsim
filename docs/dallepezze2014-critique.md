@@ -366,6 +366,18 @@ at its hinge. **A control arm in this model is a parameter change, not an
 unexposed cell**, and that is itself a substantive claim the paper could have
 made and did not.
 
+**And that change does not create a second basin — it moves the only one.**
+Seeded at the original senescent attractor, the ×10 model relaxes *back* to the
+young fixed point: SA-β-gal 9.03 → 8.85 (1 d) → 4.16 (21 d) → 1.303 (400 d),
+with Newton from the day-400 endpoint returning the same point. So the ×10
+model is monostable-**young**, exactly as the published model is
+monostable-senescent. Neither has a switch. The same holds along the nutrient
+axis: sweeping the `Amino_Acids` drive from 1.0 to 0.05 moves the attractor
+monotonically from senescent to young with no bifurcation anywhere and one
+fixed point at every level. **No single parameter or input change in this model
+produces bistability**; the hysteresis a commitment claim needs has to come from
+a mechanism the model does not contain.
+
 **What would settle it experimentally.** An unirradiated MRC5 time course over
 the same 21 days, on the same 14 readouts. If the untreated cells do not
 approach the late-senescence state, the model is falsified as written and the

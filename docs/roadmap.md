@@ -85,5 +85,12 @@ the JAX-native execution model. Designed as a natural follow-up.
   ~10–20% of curated BioModels) become importable. Diffrax 0.5+ already supports
   events natively; HallSim already has `ProcessKind.EVENT`. The missing piece is
   parsing SBML event MathML (trigger expressions, assignments, delays, persistence)
-  and emitting the corresponding `condition` / `handler` methods. Most useful
-  long-term enhancement to the SBML pipeline.
+  and emitting the corresponding `condition` / `handler` methods.
+  **Promoted to the critical path 2026-08-29.** Yao 2008 (BIOMD0000000318), the
+  arrest switch Phase 2 of [senescence-model-rebuild.md](senescence-model-rebuild.md)
+  is built on, has its serum steps as events `e1`/`e2` that assign to the
+  **parameter** `S`, not to a species. `sbml_events` skips both, so the model's
+  own published experiment cannot be run and the constituent cannot be validated
+  against its source — which the intake protocol requires before composing.
+  Parameter-target assignments need LATCHED param promotion, which is a smaller
+  job than the full translator and unblocks Phase 2 on its own.

@@ -111,6 +111,24 @@ unnoticed — see [senescence-model-rebuild.md](senescence-model-rebuild.md) §6
 A dataset with a time-matched untreated arm is a prerequisite for any
 concordance number that claims the perturbation caused the change.
 
+**Candidates located (2026-08-29), none yet ingested or verified:**
+
+| accession | contrast | why it matters |
+|---|---|---|
+| GSE63577 + GSE77682 (Marthandan) | MRC-5 and HFF, young (PD32/PD16) **vs 20 Gy at 120 h** | MRC-5 at 20 Gy is DallePezze's *own* cell line and *own* dose — the closest external check on DP14 that exists |
+| GSE63577 | MRC-5 PD32 **vs** PD72 | replicative senescence, a second route to the same phenotype |
+| GSE222400 | WI-38, doxorubicin, D0/1/2/3/4/6/8/16 vs untreated control | same cell line as GSE248823, eight timepoints, and a control arm |
+
+Two reality checks land immediately and both cut against DP14: at 120 h after
+20 Gy, MRC-5 `GLB1` moves **+0.16 log2** where the model has SA-β-gal rising
+about tenfold, and `CDKN2A` moves **−0.94**, down.
+
+**Verify before use.** In GSE222400 the per-sample files are already
+differential tables, and the `Untreated-control_1` file is *not* a self-contrast
+of zero — it reports `MKI67` −5.51 at `padj` 0.000. Whatever those log2FCs are
+referenced to, it is not what the filename says, and the contrast structure has
+to be established before any of it is fitted against.
+
 Two biological replicates and 2–3 timepoints per arm is thin — it
 constrains rather than fully resolves the dynamics. Single-cell RNA-seq
 would be the preferred modality for mechanistic inference of this kind;

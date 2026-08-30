@@ -26,10 +26,17 @@ dependencies    = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "black", "pre-commit", "flake8"]
+# xlrd reads the legacy .xls a paper's deposited fitting data arrives as
+# (DallePezze 2014's PottersWheel export); needed to verify a deposit against
+# its own published fit — see hallsim.intake.published_fit_chi2.
+dev = ["pytest", "black", "pre-commit", "flake8", "xlrd>=2.0"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+# `demos` ships too: the `simulate` entry point below imports it, so it cannot
+# live outside the distribution. Include-filtered so nothing else at the repo
+# root is picked up.
+where   = ["src", "."]
+include = ["hallsim*", "demos*"]
 
 [tool.setuptools.package-data]
 hallsim = [
@@ -37,6 +44,7 @@ hallsim = [
   "reference/**/*.tsv",
   "reference/**/*.md",
 ]
+"demos.models" = ["sbml/**/*.xml"]
 
 [project.urls]
 Documentation = "https://github.com/BabaJaguska/HallSim#readme"

@@ -450,16 +450,12 @@ def clamp(level, t1, rel_error, k_clamps):
     rate against its residual offset, and writes the three-panel figure to
     ``outputs/clamp_setpoint/``.
     """
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos"))
-    from clamp_setpoint import main
+    from demos.clamp_setpoint import run_demo
 
     overrides = {"level": level, "t1": t1, "rel_error": rel_error}
     if k_clamps:
         overrides["k_clamps"] = list(k_clamps)
-    main(**overrides)
+    run_demo(**overrides)
 
 
 @simulate.command("stiffness")
@@ -545,12 +541,9 @@ def multi_hallmark(
       calibrate  fit the mechanism parameters, evaluate on held-out arms
       sweep      two-hallmark severity sweep
     """
-    import sys
-    from pathlib import Path
     from types import SimpleNamespace
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "demos"))
-    from multi_hallmark_calibrate import _COMMANDS
+    from demos.multi_hallmark_calibrate import cmd_run, cmd_sweep
 
     # Fitting is the out-of-the-box run continued: cmd_run scores every arm,
     # then fits when args.calibrate is set, reusing that score as the baseline.
@@ -564,7 +557,7 @@ def multi_hallmark(
         no_plateau=no_plateau,
         equilibrate=equilibrate,
     )
-    _COMMANDS["run" if command == "calibrate" else command](args)
+    (cmd_sweep if command == "sweep" else cmd_run)(args)
 
 
 @simulate.command("info")

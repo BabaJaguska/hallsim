@@ -117,6 +117,9 @@ SAMPLE_POSITION_GROUPS = {
 # nothing for that arm to test.
 ARMS = ["DDIS_vs_ctrl", "RAPA_vs_ctrl"]
 
+# GZ06 starts at p53 x=0; without this the day-0 reference sits in its startup.
+PREROLL_DAYS = 1.0
+
 # "baseline" = each arm vs its own day 0; "paired" = vs its reference arm at
 # the same day, which needs that arm to exist in the data.
 NORMALIZATION = "baseline"
@@ -270,6 +273,7 @@ def build_problem(
         held_out_arms=["RAPA_vs_ctrl"],
         prior_weight=0.03,
         t_end=14.0,
+        t_start=-PREROLL_DAYS,
         macro_dt=3.5,
         # The oscillating reporters (DDB2/MDM2/NFKBIA) read raw p53 / Mdm2 /
         # IκBα-transcript and take a zero-phase RMS/mean post-hoc, so the save

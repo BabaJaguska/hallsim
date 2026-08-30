@@ -404,8 +404,34 @@ The check that would catch a mistake does not exist, does not run, or fails open
   but the two parameters governing that loop were never fitted. A report cannot
   be expected to notice three unmoved parameters among sixteen; the problem
   construction can, in one pass, for free.
+- [ ] **P1.5b — Two GZ06 reporters score ~0 for a reason that is not the
+  reporters.** DDB2 and MDM2 come back at −0.027 and +0.025 log2 on every
+  arm-day. Both readouts are live: measured on GZ06 alone at ψ 0.3 → 1.0,
+  `rms(x)` moves **+0.416** and `mean(y)` moves **+1.801**. Two separate
+  defects produce the zero, and they need separating:
+  1. **Identical between arms** — ψ does not differ between ctrl and DDIS,
+     because `psi_bridge` gates on `dp14/DNA_damage` and dosed-minus-undosed
+     damage at day 14 is −0.753 (P0.14 reaching the p53 axis).
+  2. **Flat within an arm** — normalization is `baseline`, so the scored
+     quantity is the day-0-to-day-14 fold change *inside* one arm. A ψ(t) that
+     is constant over the run gives a constant oscillation amplitude and
+     log2(RMS₁₄/RMS₀) ≈ 0. This survives even if the arms did differ.
+  There is 1.8 log2 of signal available on the MDM2 axis that the composite
+  fails to deliver.
+  *Fix:* measure ψ(t) per arm and check `psi_bridge`'s Hill against the
+  driver's real operating range — a gate placed off it pins ψ at basal or at
+  `hi` for the whole trajectory, which is the placement error CLAUDE.md warns
+  about. Distinct from P1.5: nothing here is a zero *gradient*, the readouts
+  and the module both work.
+
 - [ ] **P1.6 — No null-model baseline is reported.** The multi-hallmark demo scores 19/36
   signs (52.8%); "every reporter rises" scores 30/36 (83.3%).
+  **An outside notebook (2026-08-29) implemented the check and reports the
+  answer: the model beats the constant null on 0 of 4 arm-days**, emitted per
+  run as `oob_null_baseline.csv` / `postfit_null_baseline.csv`, pre- and
+  post-fit. That work is uncommitted in a sandbox tree, so the number is not
+  reproducible here yet — porting the reporter is the actionable, and it should
+  land before any concordance number is quoted again.
 - [ ] **P1.7 — No parameter provenance.** Nothing distinguishes measured from
   fitted from invented, so a benchmark can be scored against a parameter fitted
   to it — which happened in both models reviewed.
@@ -517,6 +543,22 @@ The check that would catch a mistake does not exist, does not run, or fails open
 ---
 
 ## P3 — capability gaps
+
+- [ ] **P3.0 — SBML events that assign to a parameter are silently skipped,
+  so a constituent cannot run its own published experiment.** `sbml_events`
+  warns `assigns to non-species 'S' (parameter target) — skipped` and continues.
+  The model then imports, screens and composes while the experiment it was
+  published to reproduce is unreachable, so the intake protocol's
+  constituents-first rule cannot actually be satisfied for it. Hit on Yao 2008
+  (BIOMD0000000318), whose serum steps `e1`/`e2` both target the parameter `S`
+  — the arrest switch Phase 2 of
+  [senescence-model-rebuild.md](senescence-model-rebuild.md) depends on.
+  Distinct from the general event translator in [roadmap.md](roadmap.md): this
+  is one narrow case (parameter-target assignment → LATCHED param promotion)
+  and it blocks a live piece of work.
+  *Fix:* promote parameter targets to LATCHED and emit the handler; failing
+  that, refuse the import rather than warning past it, since a model that
+  cannot run its own experiment should not silently reach a composite.
 
 - [ ] **P3.1 — Severity cannot be a state.** A hallmark dial is a constant set
   before the run, so aging is imposed as an initial condition. For an attractor

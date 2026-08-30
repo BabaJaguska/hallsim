@@ -308,6 +308,16 @@ imports it.
 2. Refit the basal state as a **fitted** rest state instead of 23 hand-pinned
    ICs, via `CalibrationProblem` with a rest residual over the *fast* states
    only (§5.1). The slow ratchet states stay at their young IC.
+   **A candidate exists (outside notebook, 2026-08-29):** constrained
+   fast-subsystem stationarity with each conserved moiety total pinned at its
+   young-IC value, `max |f_fast| = 7.3e-12`, emitted as
+   `data/dallepezze2014/dallepezze2014_basal_state.csv` with a per-state
+   `fast` / `ratchet` / `static` class column. Pinning the totals is the
+   load-bearing part: the unconstrained solve drifts along the moiety manifold
+   and returned JNK 24.7 → 645.6, Akt 14.1 → 27.8. **To do:** import the CSV,
+   re-derive it through `CalibrationProblem` rather than a bare
+   `least_squares`, and check the class column against
+   `diagnostics.rest_timescale` rather than against the hand list.
 3. Report identifiability jointly, not by sequential freezing — the protocol
    that let an exactly collinear pair look identifiable.
 4. Re-run `intake.triage_sbml` and the review panel. Acceptance: `rest_residual`
@@ -323,12 +333,25 @@ no amount of repair inside it produces a young state.
 The p16INK4a–CDK4/6–Rb–E2F axis, as a bistable switch with a proliferating
 branch and an arrested branch.
 
-- Source it, do not invent it. Run `hallsim.discovery.search_for_model` for
-  restriction-point / Rb–E2F switch models; the Yao et al. 2008 bistable Rb–E2F
-  switch is the primary candidate to look for, and whatever is found goes
-  through `triage_sbml` and the three-agent panel before composition.
+- Source it, do not invent it. **Found and measured (outside notebook,
+  2026-08-29): Yao et al. 2008, BIOMD0000000318.** At serum `S = 1` it has
+  three non-negative fixed points with `unstable_dim` 0 / **1** / 0 — a real
+  saddle — and the folds bracket to `S ∈ (1.0, 1.2)` upper and `(0.1, 0.3)`
+  lower. That is the measured hysteresis window DP14 could never supply.
 - Requirement: **two stable states separated by a separatrix**, confirmed on
-  the projected leaf with the Phase-0 bifurcation tools, not asserted.
+  the projected leaf with the Phase-0 bifurcation tools, not asserted. *Met*
+  for the switch in isolation; **not yet met for the coupled composite.*
+- **Blocked on the SBML event translator (P3.0).** `sbml_events` skips Yao's
+  `e1`/`e2` because they assign to the parameter `S`, not to a species. The
+  model's own published serum-step experiment therefore cannot be run, so the
+  constituent has never been validated against its source — which the intake
+  protocol requires before composing. Fix the translator, reproduce Yao's
+  figure, *then* compose.
+- Note the basin asymmetry before anyone claims reversibility: from the deep
+  OFF fixed point a 5-unit `S = 20` pulse does **not** latch ON (EF 0.0087 →
+  0.0020); it takes ~20 units. The 5-unit pulse works only from BioModels'
+  curated IC. OFF→ON is much harder to reach than the curated condition
+  suggests.
 - Add a slow p16 / chromatin state coupled to Rb–E2F. This is what supplies
   history dependence.
 - `models/bistable_latch.py` exists and is phenomenological. Use it only if no
@@ -338,7 +361,18 @@ branch and an arrested branch.
   institutionalised.
 - Ship the cell-cycle observables with it: E2F activity, Rb phosphorylation,
   and a proliferation readout that maps to EdU incorporation. Without these
-  there is no way to distinguish arrest from marker accumulation.
+  there is no way to distinguish arrest from marker accumulation. **Caveat on
+  the one wired so far:** `MKI67` is not a direct CollecTRI E2F1 target, so an
+  `MKI67 → yao08/EF` reporter is a proliferation *proxy*, not the
+  one-observable-one-canonical-gene edge that makes a gene reporter unfittable.
+  Score it separately from the anchored reporters or replace it.
+- **Open, and it decides whether the coupling is sound:** is the ON state a
+  rest state of the *coupled* composite, or only of Yao alone at basal `S`? The
+  wiring so far passes it in as an explicit initial condition. Run
+  `diagnostics.rest_timescale` on the composite before trusting any arrest
+  result. Second open item: run `ctrl` well past 14 days and confirm p21 never
+  crosses the gate — DP14's ctrl drift is still live, so an arrest that is
+  merely *late* in ctrl would look like a control at day 14.
 
 ### Phase 3 — damage that persists
 
