@@ -338,9 +338,12 @@ The framework returns a plausible number and nothing indicates it is wrong.
   had just proved it could not allocate. The measured spectral abscissa is flat
   at 20 (pure neural) / 70 (mixed) across N=100…3,000, so `Tsit5` is correct at
   every N. The remedy the message suggests, `warm_up`, is the call that failed.
-  *Fixed 2026-08-29:* `stiffness.py` raises a named `StiffnessNotConcrete`
-  (a `RuntimeError` subclass) at both sites and the scheduler catches that, so
-  resource errors propagate. Narrowing the `except` by ordering would have kept
+  *Fixed 2026-08-29, verified by measurement:* `stiffness.py` raises a named
+  `StiffnessNotConcrete` (a `RuntimeError` subclass) at both sites and the
+  scheduler catches that, so resource errors propagate. Re-running the N=10,000
+  probe, the same `RESOURCE_EXHAUSTED` now surfaces from `analyze_groups`,
+  `scheduler_warm_up` and `scheduler_run_eager` instead of being reported as a
+  cold trace, and solver routing is absent rather than a wrong `Kvaerno5`. Narrowing the `except` by ordering would have kept
   the discrimination-by-coincidence: in JAX 0.10 every *tracer* error is a
   `TypeError`, and the `RuntimeError` the scheduler wanted was one
   `stiffness.py` raises deliberately.
@@ -588,8 +591,16 @@ The check that would catch a mistake does not exist, does not run, or fails open
 - [ ] **P3.8 — No observable layer.** Nothing carries assay, unit, normaliser
   or transducer, so a millivolt is compared to a ratiometric dye reading.
 - [ ] **P3.9 — No uncertainty.** Outputs are lines; a lab needs bands.
-- [ ] **P3.10 — `steady_state` has no reduced path, so generality is paid as
-  overhead on problems that do not need it.** ✓ External project, 2026-08-28: a
+- [ ] **P3.10 — Dense Jacobians are materialised where the topology already
+  declares sparsity — in `steady_state` *and* in stiffness analysis.**
+  **Second code path confirmed 2026-08-29.** `stiffness.py`'s `jacfwd` builds a
+  dense N x N Jacobian, so a 10,001-state composite dies in `analyze_groups`
+  with `RESOURCE_EXHAUSTED` (763 MiB allocation, 7.8 GB peak) on a 15 GB card —
+  at 381.7 s before the graph shrank and 145.9 s after, i.e. the shrink bought
+  time, not headroom. This is now **the** blocker at 10k: N=100 and N=1,000 run
+  end to end including gradients, N=10,000 does not. Sparsity is derivable from
+  the topology dict, and a matrix-free Jacobian-vector product needs no matrix at
+  all. Original entry, on `steady_state`: ✓ External project, 2026-08-28: a
   910-node linear signalling composite × 300 clamp conditions was intractable
   under `steady_state` (damped Newton + `jacfwd`) on CPU, and was finished only
   by replacing the inner solve with a hand-written linear solve — validated
@@ -675,10 +686,18 @@ The check that would catch a mistake does not exist, does not run, or fails open
   `(ports, indices, factors)` and `_port_view` does one gather plus one
   elementwise multiply per *process*; the write side stacks once before one
   vector multiply. Framework multiplies went from 2N to **2, independent of N**.
+  Re-measured on the same probe: **slope 6.00 -> 4.00 eqns/gene** (1,631->1,342,
+  7,031->4,942, 61,031->40,942 at N = 100 / 1,000 / 10,000 — exactly 2N at each).
+  At N=1,000 the full gradient path is **107 s -> 70 s** (grad trace 73.71->39.82,
+  batch_grad_compile 66.46->51.57). **Run time is unchanged** — XLA already folded
+  the identity multiplies — so this is trace/compile only.
   The residual per-gene framework cost is `slice` + `squeeze` — the
   dict-of-scalars interface itself — which only array ports remove. The factor
   arrays this builds are what an array port consumes, so it is a step in, not
   work to unwind.
+  **Priority note:** array ports buy throughput but do not change what gets
+  allocated, so they no longer head the queue — P3.10's dense Jacobian is what
+  blocks N=10,000 outright.
   Refuted alternative: keeping scalar ports and grouping contiguous index runs
   inside `_port_view` measures 9 equations *worse* than the free fix of eliding
   the identity unit multiply, with an identical slope and `slice` unchanged at

@@ -48,6 +48,14 @@ class StiffnessNotConcrete(RuntimeError):
 # conservation law or an oscillator sitting near the imaginary axis.
 _ACTIVE_FLOOR_FRAC = 1e-9
 
+#: Group dimension up to which the Jacobian is formed densely. Above it the
+#: spectrum's extremes are estimated matrix-free, and ``eigenvalues`` on the
+#: verdict is that subset rather than the full spectrum.
+DENSE_JACOBIAN_MAX_DIM = 512
+
+#: Extremal eigenvalues requested from the iterative solver.
+ITERATIVE_EIGS_K = 32
+
 
 @dataclass
 class GroupStiffness:
@@ -110,16 +118,10 @@ class GroupStiffness:
         )
 
 
-def _restricted_jacobian(rhs, y0: jnp.ndarray, idxs: np.ndarray, t0: float):
-    """Jacobian ``∂rhs/∂y`` at ``(t0, y0)`` restricted to ``idxs``.
-
-    Returns a concrete ``np.ndarray``. Raises if ``rhs``/``y0`` carry JAX
-    tracers (i.e. this was called inside a transform) — the caller is
-    expected to run eagerly.
-    """
-    jac = jax.jacfwd(lambda y: rhs(t0, y))(y0)
+def _concrete(value):
+    """``value`` as a NumPy array, or raise if it is still a tracer."""
     try:
-        jac_np = np.asarray(jac)
+        return np.asarray(value)
     except (
         jax.errors.TracerArrayConversionError,
         jax.errors.ConcretizationTypeError,
@@ -128,7 +130,61 @@ def _restricted_jacobian(rhs, y0: jnp.ndarray, idxs: np.ndarray, t0: float):
             "stiffness analysis needs a concrete Jacobian but got JAX "
             "tracers — run it eagerly, outside grad/jvp/vmap."
         ) from exc
-    return jac_np[np.ix_(idxs, idxs)]
+
+
+def _restricted_fn(rhs, y0: jnp.ndarray, idxs: np.ndarray, t0: float):
+    """``rhs`` as a function of the group's own evolving states alone."""
+
+    def g(v):
+        return rhs(t0, y0.at[idxs].set(v))[idxs]
+
+    return g
+
+
+def _restricted_jacobian(rhs, y0: jnp.ndarray, idxs: np.ndarray, t0: float):
+    """Dense ``(len(idxs), len(idxs))`` Jacobian at ``(t0, y0)``.
+
+    Differentiates the restricted function, so the cost scales with the
+    group's dimension rather than the whole store's.
+    """
+    g = _restricted_fn(rhs, y0, idxs, t0)
+    return _concrete(jax.jacfwd(g)(y0[idxs]))
+
+
+def _extremal_eigenvalues(
+    rhs, y0: jnp.ndarray, idxs: np.ndarray, t0: float, k: int
+) -> np.ndarray:
+    """The ``k`` largest-magnitude eigenvalues of the restricted Jacobian,
+    without forming it.
+
+    Arnoldi over a JVP operator: each matrix-vector product costs one
+    directional derivative of the RHS, so the spectrum's extremes come out in
+    tens of RHS evaluations and O(k·n) memory instead of n forward passes and
+    an n×n matrix. The stiffness verdict reads only the spectral abscissa, and
+    the fastest-decaying mode of a dissipative system is a largest-magnitude
+    eigenvalue.
+    """
+    from scipy.sparse.linalg import LinearOperator, eigs
+
+    g = _restricted_fn(rhs, y0, idxs, t0)
+    v0 = y0[idxs]
+    n = int(idxs.size)
+
+    jvp = jax.jit(lambda v: jax.jvp(g, (v0,), (v,))[1])
+    _concrete(jvp(jnp.zeros_like(v0)))  # surface a traced RHS before ARPACK
+
+    def matvec(v):
+        return np.asarray(jvp(jnp.asarray(v, dtype=v0.dtype)))
+
+    op = LinearOperator((n, n), matvec=matvec, dtype=np.asarray(v0).dtype)
+    return np.asarray(
+        eigs(
+            op,
+            k=max(1, min(k, n - 2)),
+            which="LM",
+            return_eigenvectors=False,
+        )
+    )
 
 
 def classify_spectrum(
@@ -237,12 +293,18 @@ def analyze_groups(
             )
             continue
         rhs, _ = composite.build_rhs(proc_names)
-        jac = _restricted_jacobian(rhs, state, idxs, t0)
-        eig = np.linalg.eigvals(jac)
-        try:
-            cond = float(np.linalg.cond(jac))
-        except np.linalg.LinAlgError:
-            cond = float("inf")
+        if idxs.size <= DENSE_JACOBIAN_MAX_DIM:
+            jac = _restricted_jacobian(rhs, state, idxs, t0)
+            eig = np.linalg.eigvals(jac)
+            try:
+                cond = float(np.linalg.cond(jac))
+            except np.linalg.LinAlgError:
+                cond = float("inf")
+        else:
+            # cond needs the smallest singular value, which no extremal
+            # method gives cheaply; it is diagnostic, so it abstains.
+            eig = _extremal_eigenvalues(rhs, state, idxs, t0, ITERATIVE_EIGS_K)
+            cond = float("nan")
         mags = np.abs(np.asarray(state)[idxs])
         nz = mags[mags > 0]
         spread = float(mags.max() / nz.min()) if nz.size else float("inf")
