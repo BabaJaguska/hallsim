@@ -109,12 +109,14 @@ than a dead sink or an unbounded accumulator.
 
 An imported model exposes three kinds of target, and each has its own
 primitive. Reaching for the wrong one is how a hand-authored one-off gets
-written:
+written — and a *parameter* change where an *input* change belongs is how an
+arm stops being a condition a culture could be in:
 
 | Target | Primitive |
 | --- | --- |
 | a constant (SBML parameter) | `ImportedODEProcess.with_param_input` — read a store path as the parameter's value each step |
-| a boundary input (`boundaryCondition` species) | `models.forcing.drive_pulse` — a `PulseSource` on `[t_start, t_end)`, or `t_end=None` to sustain |
+| a boundary input (`boundaryCondition` species), dosed then withdrawn | `models.forcing.drive_pulse` — a `PulseSource` on `[t_start, t_end)`, or `t_end=None` to sustain |
+| a boundary input held at one level, then another | `models.forcing.drive_step` — a `StepSource`, `before` until `t_step` then `after`; `before == after` is a constant drive |
 | a species the model **integrates** | `models.clamp_edge.clamp_species` — a `ClampEdge` holding it at a setpoint |
 
 The third is the one with no obvious workaround: an integrated species is

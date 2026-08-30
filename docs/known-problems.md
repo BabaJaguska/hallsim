@@ -103,6 +103,9 @@ The framework returns a plausible number and nothing indicates it is wrong.
   Documented as "sustained drive". `drive_pulse` is skipped, the pulse process
   never exists, and `HallmarkHandle.apply` skips mappings whose target is
   absent. Sweeping severity 0→50 returns the identical attractor to 4 s.f.
+  **The exposed surface doubled on 2026-08-29:** Deregulated Nutrient Sensing
+  now targets `nutrient_drive.after` the same way, so a composite built without
+  that source silently loses the mTOR dial too.
   *Fix:* raise when every mapping of an applied hallmark misses its target.
 
 - [x] **P0.5 — `_substitute` overwrites `eqx.tree_at` edits on fitted

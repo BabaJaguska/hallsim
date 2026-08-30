@@ -51,7 +51,7 @@ which moves inversely to it.
 from __future__ import annotations
 
 from hallsim.composite import Composite
-from hallsim.models.forcing import drive_pulse
+from hallsim.models.forcing import drive_pulse, drive_step
 from hallsim.models.hill_edge import HillActivationEdge, HillSignalEdge
 from demos.models.sbml import sbml_source
 from hallsim.sbml_import import process_from_sbml
@@ -88,8 +88,13 @@ DDIS_ETOPOSIDE_DOSE_WINDOW = (0.0, 2.0)
 DP14_IRRADIATION_INPUT_NAME = "Irradiation"
 
 # Rapamycin enters the fresh medium at washout, so the rapa arm is identical to
-# DDIS until this day; a calibration ParamStep delivers the timed mTOR drop.
+# DDIS until this day; the nutrient drive's StepSource switches level there.
 RAPA_INTERVENTION_DAY = DDIS_ETOPOSIDE_DOSE_WINDOW[1]
+
+# DP14 pins `Amino_Acids` (and `Insulin`, not driven here) at 1 for all time,
+# so no arm can lower mTOR drive without driving the input.
+DP14_NUTRIENT_INPUT_NAME = "Amino_Acids"
+DP14_NUTRIENT_BASAL = 1.0
 
 # GZ06 p53 production is entirely ψ-driven (alpha_x=0), so ψ=0 forces p53→0 —
 # wrong for unstressed cells, which hold a low basal p53 (docs/gz06-basal-p53.md).
@@ -245,6 +250,18 @@ def build_multi_hallmark_composite(
             source_name="irradiation_pulse",
             hallmark="Genomic Instability",
         )
+    # severity=0 leaves before == after, so ctrl/DDIS keep the deposit's drive.
+    drive_step(
+        processes,
+        topology,
+        target="dp14",
+        input_name=DP14_NUTRIENT_INPUT_NAME,
+        t_step=RAPA_INTERVENTION_DAY,
+        before=DP14_NUTRIENT_BASAL,
+        after=DP14_NUTRIENT_BASAL,
+        source_name="nutrient_drive",
+        hallmark="Deregulated Nutrient Sensing",
+    )
     return Composite(
         processes=processes,
         topology=topology,

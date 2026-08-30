@@ -199,6 +199,57 @@ This is not a solver artefact. The 21-day endpoint is converged to eight
 digits at rtol=1e-9, and loose (1e-3) versus tight (1e-11) tolerances differ
 by at most 0.7% on any state.
 
+### 5.1 What does drive it: a nutrient stimulus that can never switch off
+
+If the dose is a brake, something else is the accelerator. It is the model's
+own growth stimulus, held at maximum for all time by construction.
+
+`Insulin` and `Amino_Acids` are boundary species whose assignment rules are
+piecewise expressions with the **same value in every branch**:
+
+```
+Insulin     = piecewise(1 if t < -1, else 1 if t < 0, else 1)   ≡ 1
+Amino_Acids = piecewise(1 if t < -1, else 1 if t < 0, else 1)   ≡ 1
+Irradiation = piecewise(0 if t < -1, 0 if t < 0, 1 if t < 0.003472, else 0)
+```
+
+Irradiation uses that PottersWheel template as a real switch; the two growth
+inputs use it as a constant. Insulin drives `Akt_S473_phos_by_insulin`
+(reaction 1); Amino_Acids drives all three mTORC1-S2448 phosphorylation
+routes (reactions 6, 7, 41). Neither `mTORC1` nor `Akt` has any turnover —
+the paper says so, and uses the fact to simulate Torin1 by lowering their
+*initial levels*. So mTOR drive is pinned at full stimulus in every condition
+the model can express, including the untreated one.
+
+Zeroing the four rate constants those two inputs act through, untreated,
+collapses the entire senescence arm at day 21:
+
+| untreated, 21 d | SA-β-gal | DNA_damage | ROS | Mito_mass_old |
+|---|---|---|---|---|
+| published | 9.810 | 7.391 | 19.345 | 9.907 |
+| AA routes = 0 | 7.387 | 0.0015 | 0.0000 | 0.0000 |
+| insulin = 0 | 0.141 | 0.0041 | 0.0005 | 0.0000 |
+| AA + insulin = 0 | 13.963 | 0.0015 | 0.0000 | 0.0000 |
+
+**Read this as a causal route, not as a healthy cell.** The ablated model is
+divergent — `Mitophagy` reaches 3.1×10⁶ because mTORC1 is its only brake and
+is now identically zero — and `screen_composite` returns `exploding=True`.
+It is *not* tolerance-sensitive (relative difference 4.2×10⁻⁶ between loose
+and tight), so the divergence is structural rather than numerical, and the
+bounded readouts above are readable. What the ablation establishes is that
+ROS, DNA damage and old mitochondrial mass have no source once the growth
+stimulus is removed: the spontaneous senescence of the untreated arm is fed
+by nutrient signalling, not by anything intrinsic to damage.
+
+The structural consequence needs no simulation at all: **this model cannot
+represent a quiescent cell.** Quiescence is arrest with *low* mTOR, and low
+mTOR is unreachable here — the input is a boundary condition, the pools have
+no turnover, and the only route to it is changing a parameter. That is the
+geroconversion dichotomy (arrest + active mTOR → senescence; arrest + low
+mTOR → reversible quiescence) with one branch deleted by construction, and it
+is a mechanistic reason for Finding B: a model whose growth drive cannot fall
+has no reversible arrested state to be an alternative attractor.
+
 ---
 
 ## 6. Finding D — the evidence base contains no control

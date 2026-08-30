@@ -102,6 +102,7 @@ STRUCTURAL_NUMERIC_FIELDS = {
     # target_default defaults to None (abstains), so it is not numeric here.
     "HillActivationEdge": set(),
     "PulseSource": {"t_start", "t_end"},
+    "StepSource": {"t_step", "signal_default"},
 }
 
 

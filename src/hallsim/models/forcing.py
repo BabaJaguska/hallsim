@@ -135,3 +135,88 @@ def drive_pulse(
             ratio,
         )
     return processes, topology, src
+
+
+class StepSource(Process):
+    """Two-level forcing signal — emits ``before`` while ``t < t_step`` and
+    ``after`` from ``t_step`` on, to its ``signal`` ASSIGNED port.
+
+    The shape of a drug added partway through, which :class:`PulseSource`
+    cannot express because its off-level is 0 rather than a baseline. Both
+    levels are calibratable; ``before == after`` is a constant drive.
+    """
+
+    timescale: float | None = None
+    after: float = calibratable(
+        1.0, description="level from t_step onward (treated level)."
+    )
+    before: float = calibratable(
+        1.0, description="level before t_step (untreated level)."
+    )
+    t_step: float = eqx.field(static=True, default=0.0)
+    # A port default is structure and must stay static; `before` is traced.
+    signal_default: float = eqx.field(static=True, default=0.0)
+    signal_units: str = eqx.field(static=True, default="dimensionless")
+    signal_ontology: dict | None = eqx.field(static=True, default=None)
+    hallmark: str | None = eqx.field(static=True, default=None)
+    description: str | None = eqx.field(static=True, default=None)
+
+    def ports_schema(self):
+        return {
+            "signal": Port(
+                role=PortRole.ASSIGNED,
+                default=self.signal_default,
+                units=self.signal_units,
+                description="two-level forcing: before | after at t_step",
+                ontology=self.signal_ontology or {},
+            )
+        }
+
+    def assign(self, t, state):
+        return {"signal": jnp.where(t >= self.t_step, self.after, self.before)}
+
+    def discontinuity_times(self):
+        return (self.t_step,)
+
+
+def drive_step(
+    processes,
+    topology,
+    *,
+    target,
+    input_name,
+    t_step,
+    after=1.0,
+    before=1.0,
+    source_name=None,
+    signal_ontology=None,
+    hallmark=None,
+):
+    """Drive ``target``'s boundary input ``input_name`` with a two-level step
+    at ``t_step``, composed from the same port path as :func:`drive_pulse`:
+    adds a :class:`StepSource` and wires it via
+    :meth:`SBMLProcess.with_input_driver`. ``before == after`` gives a
+    sustained constant drive at the model's own level. Mutates
+    ``processes``/``topology`` in place; returns
+    ``(processes, topology, source_name)``.
+
+    No exposure check: a step has no finite window to integrate, and holding
+    an input at its native level is by construction on-calibration.
+    """
+    src = source_name or f"{input_name.lower()}_step"
+    port = f"{input_name.lower()}_in"
+    path = f"{src}/signal"
+
+    processes[src] = StepSource(
+        timescale=getattr(processes[target], "timescale", None),
+        after=after,
+        before=before,
+        t_step=float(t_step),
+        signal_default=float(before),
+        signal_ontology=signal_ontology,
+        hallmark=hallmark,
+    )
+    processes[target] = processes[target].with_input_driver(input_name, port)
+    topology[src] = {"signal": path}
+    topology.setdefault(target, {})[port] = path
+    return processes, topology, src

@@ -115,6 +115,73 @@ no representation of the cell cycle, so it has neither a mechanism for
 committed arrest nor an observable that would show arrest was escaped. That is
 why a senescence claim made with it cannot be checked.
 
+**A third state is missing, and the review does not name it: quiescence.**
+DP14's growth stimulus is welded on — `Insulin` and `Amino_Acids` are boundary
+species pinned at 1 for all time, and neither mTORC1 nor Akt has turnover, so
+mTOR drive cannot fall in any condition the model can express (critique §5.1).
+Arrest with low mTOR is therefore unreachable. Since geroconversion is exactly
+the fork between arrest-with-active-mTOR (senescence) and arrest-with-low-mTOR
+(reversible quiescence), a model that can only take one branch cannot be asked
+which branch a cell takes. The successor needs nutrient input as a *condition*
+that can be varied — serum, amino acids, rapamycin — not a constant, and
+quiescence as a state the model can occupy and leave. That is also what makes
+"is this reversible?" a question with two possible answers rather than one.
+
+**A sustained input change is a real field change; a pulse is not.** This is
+the distinction the irradiation finding turns on, and it decides how the
+nutrient arm must be built. A pulse ends, after which the vector field is
+bit-identical to the unperturbed one — it can only move the state inside a
+field it does not alter, which in a monostable model is inert. An input *held*
+at a new level changes `f(x)` for as long as it is held: different field,
+different fixed point. So a nutrient arm is a **sustained lower drive**, never
+a pulse; a transient starvation would be as inert as the 5-minute dose.
+
+Measured, untreated, following the fixed point down `Amino_Acids = c`
+(equivalent to scaling the three AA rate constants by `c`, each law being
+linear in it):
+
+| AA | SA-β-gal | DNA_damage | ROS | Mito_mass_old | Mitophagy | max Re λ |
+|---|---|---|---|---|---|---|
+| 1.00 | 9.0315 | 7.2781 | 19.9426 | 8.8607 | 15.0 | −0.0730 |
+| 0.60 | 5.8425 | 4.7082 | 12.9009 | 4.0407 | 16.1 | −0.0266 |
+| 0.40 | 1.5396 | 1.2406 | 3.3993 | 0.1669 | 29.0 | −0.0369 |
+| 0.20 | 0.3371 | 0.2713 | 0.7434 | 0.0022 | 63.8 | −0.0769 |
+| 0.05 | 0.0361 | 0.0281 | 0.0770 | 0.0000 | 187.3 | −0.0723 |
+
+The attractor moves monotonically from fully senescent to young. **It never
+splits.** `codim1_scan` over the nutrient axis returns no bifurcation, and
+every level has exactly one fixed point with zero unstable modes. Sustained
+nutrient reduction relocates the single attractor; it does not create a second
+basin. A young *state*, not a young *basin* — so this is a legitimate control
+arm (arms differing only in `u(t)`, acceptance test 5) and **not** a substitute
+for the Phase-2 switch. Note also that the young end buys its youth partly with
+an unopposed mitophagy flux, mTOR being that pool's only brake; at `AA = 0` it
+diverges outright.
+
+This also closes Finding A. Every row satisfies `SA_beta_gal = 0.45287·ROS`
+and `DNA_damage = 0.36495·ROS` exactly, and those ratios carry no nutrient
+term, so they hold at every input level. The level that puts ROS at the
+published 10.0 lies between `AA` 0.5 and 0.6, where SA-β-gal is 4.53 rather
+than 0.81. No parameterisation makes the published basal state a rest state,
+and no input level does either.
+
+**The lever is now wired (2026-08-29).** `Amino_Acids` is driven by a
+`StepSource` (`nutrient_drive`), held at DP14's own basal 1.0 and stepping to
+the Deregulated-Nutrient-Sensing level at the intervention day; the hallmark
+targets that level rather than the mTORC1 phosphorylation rate it used to
+scale. Arms differ only in `u(t)` — acceptance test 5, which the old
+rate-constant mapping violated. Measured on the composite: RAPA is identical to
+DDIS to 0.000e+00 before day 2 and separates by 4.212 on `mTORC1_pS2448`
+after it.
+
+Still to do here: `Insulin` is exposed the same way and is not driven, so
+serum is not yet a condition; and the asymmetry stands — `Irradiation` is
+overridden to a 2-day pulse delivering 21-day exposure 2.0 against a native
+0.0039 (593×, the P1.8 warning), while the nutrient input now runs at the
+paper's own level. Note also that DP14 cannot tell nutrient withdrawal from
+mTOR inhibition — both scale the same flux linearly — so rapamycin rides this
+axis until the successor carries a drug species.
+
 ---
 
 ## 5. Qualified or rejected

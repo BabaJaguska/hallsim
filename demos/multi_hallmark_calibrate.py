@@ -40,7 +40,6 @@ from hallsim.calibration import (  # noqa: E402
     CalibrationProblem,
     Condition,
     HallmarkCoeffRef,
-    ParamStep,
     ParameterRef,
 )
 from hallsim.calibration_report import (  # noqa: E402
@@ -58,7 +57,6 @@ from hallsim.gene_reporters import (  # noqa: E402
 )
 from demos.models.multi_hallmark import (  # noqa: E402
     build_multi_hallmark_composite,
-    DP14_MTOR_PHOS_RATE_NAME,
     RAPA_INTERVENTION_DAY,
     DDIS_ETOPOSIDE_DOSE_WINDOW,
 )
@@ -155,32 +153,20 @@ def build_problem(
             ),
             "DDIS": Condition(
                 "DDIS",
-                # DDIS = control + genomic instability only; nutrient sensing is
-                # untouched (no DNS key = homeostasis). Etoposide perturbs DNA
-                # damage, not nutrient sensing directly — any mTOR change must
-                # emerge from the damage→senescence dynamics, not an imposed
-                # severity.
+                # No DNS key: etoposide perturbs DNA damage, not nutrient
+                # sensing, so any mTOR change must emerge from the dynamics.
+                # Homeostasis is not "mTOR off" — DP14's drive stays at basal.
                 {"Genomic Instability": 1.0},
             ),
-            # Etoposide + rapamycin: identical to DDIS (GI=1, DNS→mTOR at
-            # native base) until rapamycin is added at washout (day 2), when the
-            # mTOR rate steps down to the DNS=-1 rapamycin-suppressed level. The
-            # severity sets that post-step level; the ParamStep supplies the
-            # untreated pre-step level (the DDIS mTOR rate) and the switch time.
+            # Rapamycin at washout: the nutrient_drive StepSource carries the
+            # switch time, the severity the post-step level. Arms differ only
+            # in u(t) — no rate constant, no timed parameter intervention.
             "RAPA": Condition(
                 "RAPA",
                 {
                     "Genomic Instability": 1.0,
                     "Deregulated Nutrient Sensing": -1.0,
                 },
-                interventions=(
-                    ParamStep(
-                        process_name="dp14",
-                        param_name=DP14_MTOR_PHOS_RATE_NAME,
-                        t_step=RAPA_INTERVENTION_DAY,
-                        value_before=None,
-                    ),
-                ),
             ),
         },
         # Samples per arm per day. `arm_deltas` picks the reference from
@@ -267,12 +253,11 @@ def build_problem(
                 prior=0.1,
                 prior_sigma=0.5,
             ),
-            # DNS→mTOR affine slope: mTOR suppression gain toward rapamycin.
-            # At severity=-1 (rapamycin) mTOR = (1-gain)*base, so gain=0.7
-            # leaves a 30% residual — the one free parameter on this edge.
+            # At severity=-1 the drive is (1-gain)x basal; the one free
+            # parameter on this axis.
             "dns_mtor_gain": HallmarkCoeffRef(
                 hallmark="Deregulated Nutrient Sensing",
-                param_name=f"parameters.{DP14_MTOR_PHOS_RATE_NAME}",
+                param_name="after",
                 coeff="slope",
                 init=0.7,
                 clamp=(0.05, 0.95),

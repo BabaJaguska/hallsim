@@ -326,31 +326,27 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
                 slope=0.5,
                 description="Glycolytic flux scales 1x→1.5x with nutrient dysregulation (ERiQ-based composites)",
             ),
-            # DP14-based composites: scale the mTORC1 phosphorylation rate
-            # around the (fitted) untreated base. severity=0 → base (untreated
-            # homeostasis), severity=-1 → (1-slope)*base (rapamycin-suppressed
-            # residual), severity=+1 → (1+slope)*base (hyperactivation). The
-            # slope is the mTOR suppression gain toward rapamycin — a real
-            # biological quantity, fitted like GZ06's basal ψ rather than
-            # frozen. It sets the DDIS:control mTOR contrast the EIF4EBP1
-            # reporter reads.
+            # DP14-based composites: severity is the nutrient/mTOR drive
+            # level on DP14's `Amino_Acids` input (`forcing.drive_step` adds
+            # the "nutrient_drive" StepSource), never a rate constant — so
+            # arms differ only in u(t). The phosphorylation rate per unit
+            # drive stays a mechanism parameter Calibrator fits.
+            # Skipped for composites without the source.
             ParameterMapping(
-                process_name="dp14",
-                param_name=(
-                    "parameters." "mTORC1_S2448_phos_by_AA_n_Akt_pS473"
-                ),
+                process_name="nutrient_drive",
+                param_name="after",
                 floor=1.0,
                 slope=FittableCoeff(
                     init=0.7,
                     clamp=(0.05, 0.95),
                     prior=0.7,
                     prior_sigma=0.3,
-                    description="mTOR suppression gain (severity=-1 → (1-gain)*base under rapamycin)",
+                    description="mTOR/nutrient suppression gain (severity=-1 → (1-gain)x basal drive under rapamycin)",
                 ),
                 description=(
-                    "mTORC1 S2448 phosphorylation rate (DP14): "
-                    "base at severity=0 (untreated), "
-                    "(1-gain)*base at severity=-1 (rapa-suppressed)"
+                    "Nutrient/mTOR drive level (DP14 Amino_Acids input): "
+                    "basal at severity=0, (1-gain)x basal at severity=-1 "
+                    "(rapa-suppressed), (1+gain)x at severity=+1"
                 ),
             ),
         ],
