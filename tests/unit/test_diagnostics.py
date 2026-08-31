@@ -20,7 +20,7 @@ from hallsim.diagnostics import (
 from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
 from hallsim.models.hill_edge import HillActivationEdge
 from demos.models.multi_hallmark import (
-    GZ06_PSI_DEFAULT,
+    GZ06_PSI_PUBLISHED,
     GZ06_PSI_NAME,
     GZ06_SBML_PATH,
     build_multi_hallmark_composite,
@@ -74,7 +74,7 @@ def test_check_tunability_opt_out_skips_gradient():
     gz = process_from_sbml(
         str(GZ06_SBML_PATH),
         name="gz06",
-        parameters={GZ06_PSI_NAME: GZ06_PSI_DEFAULT},
+        parameters={GZ06_PSI_NAME: GZ06_PSI_PUBLISHED},
     )
     report = screen_process(gz, t_end=100.0, check_tunability=False)
     assert report.tunes is None
@@ -90,7 +90,7 @@ def test_bad_scheduler_kwarg_raises_instead_of_flagging_the_model():
     gz = process_from_sbml(
         str(GZ06_SBML_PATH),
         name="gz06",
-        parameters={GZ06_PSI_NAME: GZ06_PSI_DEFAULT},
+        parameters={GZ06_PSI_NAME: GZ06_PSI_PUBLISHED},
     )
     with pytest.raises(TypeError, match="scheduler_kwargs"):
         screen_process(
@@ -262,7 +262,7 @@ def test_gz06_flagged_tolerance_sensitive():
     gz = process_from_sbml(
         str(GZ06_SBML_PATH),
         name="gz06",
-        parameters={GZ06_PSI_NAME: GZ06_PSI_DEFAULT},
+        parameters={GZ06_PSI_NAME: GZ06_PSI_PUBLISHED},
     )
     report = screen_process(gz, t_end=100.0)  # native hours
     assert report.tolerance_sensitive, report

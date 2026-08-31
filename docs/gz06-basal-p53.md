@@ -1,5 +1,21 @@
 # Reading p53 damage from the Geva-Zatorsky 2006 oscillator
 
+> **Superseded 2026-08-30.** This note designs a damage input built on `psi`,
+> and the composite no longer has one. `psi` is the paper's **ξ**, a
+> multiplicative noise gain on protein production — it multiplies *both*
+> production terms and is not a damage variable at all; a basal of 0.3 is a
+> −3.0σ excursion on the paper's own noise distribution. Damage now enters on
+> **`alpha_x`**, the Mdm2-independent p53 degradation ATM blocks (Banin 1998),
+> whose supercritical Hopf at 0.1662 the damage direction crosses — the only
+> one of the three degradation channels that does. See the 2026-08-30 (night)
+> diary entry and `demos/gz06_damage_channel_scan.py`.
+>
+> What survives: §"GZ06 has no basal p53" (the model property is real, the
+> remedy is not), and the Purvis/Shi argument for a pulse-integrating readout.
+> What does not: the ψ-basal design, the ψ-cancellation premise behind the RMS
+> choice, and the retracted +0.43 below. MDM2 now reads `gz06/y0`, the paper's
+> Mdm2 precursor, rather than the protein `y`.
+
 Reference note for the preprint: how the composite reads the p53-target
 reporter (DDB2) off the Geva-Zatorsky 2006 (GZ06) p53–Mdm2 oscillator
 (BIOMD0000000157), why the obvious readout (the mean) is wrong, and the
@@ -102,6 +118,11 @@ pulse dynamics drive target-gene programs (Purvis 2012). That argument stands
 on its own; the number above never supported it.
 
 ## psi_basal and its prior
+
+> Retired with the ψ edge. The claim below that the *hallmark* interpolates
+> `psi` was stale even before that: no such mapping exists — `hallmarks.py`
+> says so explicitly, and Genomic Instability maps onto DP14's damage rate,
+> reaching GZ06 only through the coupling edge.
 
 The Genomic Instability hallmark interpolates `psi` from a basal level
 (control) to the full-dose reference at DDIS (`hallsim.hallmarks`, Genomic

@@ -4,12 +4,16 @@ The §3.3 demonstration. Replace the mechanistic Geva-Zatorsky 2006 p53–Mdm2
 oscillator in the multi-hallmark demo with a NeuralODE block trained to
 reproduce it, then compose and differentiate as if it were the original.
 
-The block is conditioned on two inputs — the damage stimulus ψ and the Mdm2
+The block is conditioned on two inputs — the production gain ψ and the Mdm2
 degradation rate α_y — so the *single* learned vector field represents GZ06's
 whole two-parameter family. That is what lets it reproduce GZ06's two
-bifurcations (α_y-Hopf: oscillation↔fixed point; ψ-onset: damage turning
-pulsing on), and it keeps α_y a live, differentiable parameter of the hybrid
-instead of freezing one operating point into the weights.
+bifurcations (α_y-Hopf and ψ-onset, both oscillation↔fixed point), and it keeps
+α_y a live, differentiable parameter of the hybrid instead of freezing one
+operating point into the weights.
+
+ψ is a bifurcation axis here, not a damage variable: it is the paper's ξ, a
+noise gain on protein production. The composite drives damage through
+``alpha_x`` instead (see ``demos/models/multi_hallmark.py``).
 
 Training is two-stage: derivative matching regresses the vector field, then a
 shooting fine-tune integrates the learned field and matches trajectories.
@@ -52,11 +56,14 @@ from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS  # noqa: E402
 from demos.models.multi_hallmark import (  # noqa: E402
     GZ06_SBML_PATH,
     CANONICAL_TIME_SECONDS,
-    GZ06_PSI_FULL,
-    GZ06_PSI_DRIVE_K,
-    GZ06_PSI_DRIVE_N,
     build_multi_hallmark_composite,
 )
+
+# The psi axis this demo sweeps. Local, because the composite no longer drives
+# psi — it is a bifurcation parameter here, not a coupling edge.
+GZ06_PSI_FULL = 1.0
+GZ06_PSI_DRIVE_K = 10.79
+GZ06_PSI_DRIVE_N = 2.0
 from hallsim.models.neuralode import (  # noqa: E402
     NeuralODEProcess,
     simulate_conditioned,

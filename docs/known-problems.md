@@ -440,6 +440,14 @@ The framework returns a plausible number and nothing indicates it is wrong.
   needing `n = 19` for a clean gate. No Hill gate on this driver can switch,
   because the model damages itself almost as hard as etoposide does.
 
+  *Superseded 2026-08-30 (night).* The ψ edge is gone: ψ is the paper's ξ, a
+  production-noise gain, and was never a damage variable. Damage now enters on
+  `alpha_x` via `damage_bridge` (K = 6.22), chosen by scanning all three
+  degradation channels for a Hopf — only `alpha_x`'s damage direction crosses
+  one. See the 2026-08-30 (night) diary entry. The r = 1.26 finding above
+  survives intact and still bounds the result: the admissible K window is
+  5.53–7.00, so the control arm sits only 12% clear of the Hopf.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -527,10 +535,12 @@ The check that would catch a mistake does not exist, does not run, or fails open
 - [ ] **P1.6 — No null-model baseline is reported.** Nothing in the run computes
   the constant null, so a concordance number is quoted with no floor to beat.
   Current state on the two-arm, 24-call configuration (2026-08-30, out of the
-  box, corrected dose, `psi_bridge` K = 10.79): the composite scores **17/24
-  (71%)** and "every reporter rises" scores **18/24 (75%)**. The model still
-  does not beat the null, though the margin is one call rather than five — at
-  K = 52 it was 13/24 against the same 18/24.
+  box, corrected dose, damage on `alpha_x`): the composite scores **19/24
+  (79%)** and "every reporter rises" scores **18/24 (75%)** — the **first time
+  the composite has beaten the null**, and by one call. The progression, same
+  data and dose throughout: 13/24 (ψ at K = 52) → 17/24 (ψ at K = 10.79) →
+  19/24 (`alpha_x`). Report the null alongside every one of these; a 79% that
+  clears a 75% floor is a different claim from a bare 79%.
   **An outside notebook (2026-08-29) implemented the check**, emitting
   `oob_null_baseline.csv` / `postfit_null_baseline.csv` per run. That work is
   uncommitted in a sandbox tree, so the reporter is not reproducible here yet —

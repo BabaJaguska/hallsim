@@ -13,11 +13,15 @@ downloads on first import.
 
 Cross-publication edges:
 
-- **DNA damage → p53**: ``psi_bridge`` Hill-interpolates GZ06's ψ input
-  between its fitted basal value and ``GZ06_PSI_FULL`` on DP14's accumulated
-  DNA_damage, so p53's damage input is *caused* by DP14 rather than set
-  independently. ATM/ATR → p53; ψ's range is anchored by GZ06's own
-  calibration, so the edge carries no free strength.
+- **DNA damage ⊣ p53 degradation**: ``damage_bridge`` Hill-interpolates GZ06's
+  ``alpha_x`` *downward* from a quiescent control value to the deposit's own
+  ``alpha_x = 0`` on DP14's accumulated DNA_damage. ATM phosphorylates p53
+  Ser15 and blocks its degradation (Banin 1998), and crossing the p53 Hopf at
+  ``alpha_x = 0.1662`` is what starts the pulses — so a damaged arm oscillates
+  and a control arm does not. GZ06 fitted *irradiated* cells, so its published
+  parameter set is the damaged end of this edge and the range carries no free
+  strength. ``psi`` is the paper's ξ, a production-noise gain, and is not a
+  damage variable; it stays at its published 1.0.
 - **IKKβ → IKK**: DP14's IKKβ is the same kinase (IKBKB) as Ihekwaba's
   signalosome pool, and activating NF-κB is its defining role (Karin &
   Ben-Neriah 2000). Genomic Instability reaches it because IKKβ is
@@ -40,7 +44,7 @@ to 1 (DallePezze's published irradiation dose) on its damage rate.
 
 Gene reporters (see :mod:`hallsim.gene_reporters`): CDKN1A → ``dp14/CDKN1A``,
 GLB1 → ``dp14/SA_beta_gal``, BNIP3 → ``dp14/FoxO3a``, DDB2 → ``gz06/x``
-(RMS amplitude), MDM2 → ``gz06/y``, and NFKBIA → ``nfkb/IkBat`` — the IκBα
+(RMS amplitude), MDM2 → ``gz06/y0``, and NFKBIA → ``nfkb/IkBat`` — the IκBα
 *transcript*, which rises with NF-κB activity, not the cytoplasmic protein,
 which moves inversely to it.
 
@@ -102,18 +106,22 @@ RAPA_INTERVENTION_DAY = DDIS_ETOPOSIDE_DOSE_WINDOW[1]
 DP14_NUTRIENT_INPUT_NAME = "Amino_Acids"
 DP14_NUTRIENT_BASAL = 1.0
 
-# GZ06 p53 production is entirely ψ-driven (alpha_x=0), so ψ=0 forces p53→0 —
-# wrong for unstressed cells, which hold a low basal p53 (docs/gz06-basal-p53.md).
-# ψ is therefore driven from DP14's DNA_damage via psi_bridge, Hill-interpolated
-# from a nonzero fitted basal floor up to GZ06_PSI_FULL.
+# GZ06's `psi` is the paper's ξ, a noise gain on protein production, and stays
+# at its published 1.0. Damage enters on `alpha_x`, the Mdm2-independent p53
+# degradation ATM blocks (Banin 1998) — the channel `simulate gz06-damage-scan`
+# picks: its Hopf is at 0.1662 and damage crosses it, where alpha_k's and
+# alpha_y's damage directions move away. GZ06 fitted irradiated cells, so the
+# published alpha_x = 0 IS the damaged state and the edge runs down to it.
 GZ06_PSI_NAME = "psi"
-GZ06_PSI_DEFAULT = 1.0  # full-damage reference (standalone screening)
-GZ06_PSI_BASAL_DEFAULT = 0.3  # control basal ψ; fitted in the composite
-GZ06_PSI_FULL = 1.0  # saturated ψ at full DDIS (the driver's `hi`)
-# Placed by suggest_hill_gate; inside the window where ψ crosses the p53 Hopf
-# under damage but not without it. Fitted, so the data decides where p53 fires.
-GZ06_PSI_DRIVE_K = 10.79
-GZ06_PSI_DRIVE_N = 2.0
+GZ06_PSI_PUBLISHED = 1.0
+GZ06_ALPHA_X_NAME = "alpha_x"
+GZ06_ALPHA_X_HOPF = 0.1662
+GZ06_ALPHA_X_CONTROL = 4 * GZ06_ALPHA_X_HOPF  # decay tau 5.5 h; fitted
+GZ06_ALPHA_X_DAMAGED = 0.0  # the deposit's own value
+# alpha_x crosses the Hopf at D = K*sqrt(3), so straddling the arms needs
+# 5.53 < K < 7.00 for a control ceiling of 9.59 and a DDIS mean of 12.13.
+GZ06_DAMAGE_DRIVE_K = 6.22
+GZ06_DAMAGE_DRIVE_N = 2.0
 
 # One t_span unit = one day, matching GSE248823's D00–D14 course. DP14 is
 # natively in days and runs unchanged; GZ06 (hours) and NFKB (seconds) are
@@ -141,10 +149,13 @@ def build_multi_hallmark_composite(
         process_from_sbml(
             str(GZ06_SBML_PATH),
             name="gz06",
-            parameters={GZ06_PSI_NAME: GZ06_PSI_BASAL_DEFAULT},
+            parameters={
+                GZ06_PSI_NAME: GZ06_PSI_PUBLISHED,
+                GZ06_ALPHA_X_NAME: GZ06_ALPHA_X_CONTROL,
+            },
         )
         .reconciled_to(CANONICAL_TIME_SECONDS)
-        .with_param_input(GZ06_PSI_NAME, "psi_in")
+        .with_param_input(GZ06_ALPHA_X_NAME, "alpha_x_in")
     )
     dp14 = process_from_sbml(
         str(DP14_SBML_PATH),
@@ -158,17 +169,17 @@ def build_multi_hallmark_composite(
         "dp14": dp14,
         "nfkb": nfkb,
         "gz06": gz06,
-        "psi_bridge": HillSignalEdge(
+        "damage_bridge": HillSignalEdge(
             timescale=gz06.timescale,
-            basal=GZ06_PSI_BASAL_DEFAULT,
-            hi=GZ06_PSI_FULL,
-            K=GZ06_PSI_DRIVE_K,
-            n=GZ06_PSI_DRIVE_N,
+            basal=GZ06_ALPHA_X_CONTROL,
+            hi=GZ06_ALPHA_X_DAMAGED,
+            K=GZ06_DAMAGE_DRIVE_K,
+            n=GZ06_DAMAGE_DRIVE_N,
             source_ontology={"go": "GO:0006974"},
             source_description="DP14 accumulated DNA damage",
             hallmark="Genomic Instability",
-            reference="Banin et al. 1998",
-            description="DNA damage → ψ (Geva-Zatorsky p53 input).",
+            reference="Banin et al. 1998, Science 281:1674–1677",
+            description="DNA damage ⊣ p53 degradation (GZ06 alpha_x).",
         ),
         # K=4.0 is the DP14 mTORC1 midpoint across the rapa→DDIS band;
         # k_act is the host IKK scale, as for ikkbeta_nfkb
@@ -225,12 +236,13 @@ def build_multi_hallmark_composite(
     # SBML processes carry no topology entries (each auto-prefixes to its own
     # ``<name>/`` namespace); only these edges cross namespaces.
     topology: dict = {
-        # DP14 DNA_damage → ψ (algebraic Hill edge) → GZ06 reads ψ as an input.
-        "psi_bridge": {
+        # DP14 DNA_damage ⊣ alpha_x (algebraic Hill edge) → GZ06 reads it as an
+        # input; crossing the Hopf at 0.1662 starts the p53 pulses.
+        "damage_bridge": {
             "source": "dp14/DNA_damage",
-            "signal": "gz06/psi_signal",
+            "signal": "gz06/alpha_x_signal",
         },
-        "gz06": {"psi_in": "gz06/psi_signal"},
+        "gz06": {"alpha_x_in": "gz06/alpha_x_signal"},
         "mtor_nfkb": {
             "source": "dp14/mTORC1_pS2448",
             "target": "nfkb/IKK",

@@ -23,7 +23,7 @@ multi-hallmark composite's reporters:
 | `GLB1` (SA-β-gal) | `dp14/SA_beta_gal` | zero-phase mean, τ=2.0 | the canonical senescence marker, which DP14 models directly |
 | `BNIP3` | `dp14/FoxO3a` | zero-phase mean, τ=2.0 | FoxO3 target; reads the FoxO-driven mitophagy arm downstream of nutrient sensing |
 | `DDB2` | `gz06/x` | zero-phase **RMS** `√⟨x²⟩`, τ=0.75 | p53 target; GZ06's mean p53 is analytically damage-blind, so DDB2 reads pulse amplitude — see [gz06-basal-p53.md](gz06-basal-p53.md) |
-| `MDM2` | `gz06/y` | zero-phase mean, τ=0.75 | p53 target; `⟨y⟩ ∝ ψ` in the p53–Mdm2 steady state, so it reads the damage grade directly |
+| `MDM2` | `gz06/y0` | zero-phase mean, τ=0.75 | p53 target; `y0` is the paper's Mdm2 precursor, "representing, for example, Mdm2 mRNA" — the transcript, not the protein `y` |
 | `NFKBIA` (IκBα) | `nfkb/IkBat` | zero-phase mean, τ=0.75 | IκBα *transcript* (an NF-κB target that rises with activity), not the protein |
 
 <!-- reporters:end -->

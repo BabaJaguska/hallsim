@@ -94,6 +94,10 @@ class HillSignalEdge(Process):
     transform is a first-class composable edge rather than baked into a
     driver. ``basal`` and ``K`` are the fittable pair; ``hi``/``n`` are traced
     too but stay off the calibration surface.
+
+    The edge interpolates from ``basal`` toward ``hi`` in either direction, so
+    ``hi < basal`` is an inhibitory edge — a source that suppresses its target,
+    which is as ordinary in biology as activation.
     """
 
     timescale: float | None = None
@@ -116,13 +120,13 @@ class HillSignalEdge(Process):
 
     def __check_init__(self):
         super().__check_init__()
-        if not is_traced(self.basal, self.hi) and float(self.basal) >= float(
+        if not is_traced(self.basal, self.hi) and float(self.basal) == float(
             self.hi
         ):
             raise ValueError(
-                f"{type(self).__name__}: basal={float(self.basal):g} must be "
-                f"below hi={float(self.hi):g}; the edge interpolates upward "
-                "from the floor."
+                f"{type(self).__name__}: basal == hi == {float(self.hi):g}, so "
+                "the edge assigns a constant and carries no signal. Separate "
+                "them; hi below basal is a valid inhibitory edge."
             )
 
     def ports_schema(self):

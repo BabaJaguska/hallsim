@@ -438,7 +438,7 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
             "the cycle-mean is phase-insensitive and matches bulk "
             "transcriptomics' implicit population averaging."
         ),
-        reference="Hwang et al. 1999, Nature 401:430–432",
+        reference="Hwang, Ford, Hanawalt & Chu 1999, PNAS 96:424–428",
         summary=cycle_average(0.25),
     ),
     GeneReporter(
@@ -547,19 +547,19 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
             "while the oscillation amplitude grows with damage. Post-hoc on the "
             "raw trajectory — no integral state to accumulate or lag."
         ),
-        reference="Hwang et al. 1999, Nature 401:430–432",
+        reference="Hwang, Ford, Hanawalt & Chu 1999, PNAS 96:424–428",
     ),
     GeneReporter(
-        observable="gz06/y",
+        observable="gz06/y0",
         gene_symbol="MDM2",
         sign=+1,
         summary=zerophase_mean(tau=0.75),
         description=(
-            "MDM2 — the canonical p53 transcriptional target; GZ06's Mdm2 (y). "
-            "Its time-mean encodes the damage signal directly (⟨y⟩ ∝ psi in "
-            "the p53–Mdm2 steady state), so it is the cleanest damage-graded "
-            "p53-axis readout. Read as the lag-free DC level (zero-phase mean) "
-            "of the raw Mdm2 trajectory."
+            "MDM2 — the canonical p53 transcriptional target, mapped to GZ06's "
+            "y0, which Table I defines as the 'Mdm2 precursor... representing, "
+            "for example, Mdm2 mRNA'. A transcript reporter reads the "
+            "transcript: y is the protein (UniProt Q00987). Read as the "
+            "lag-free DC level (zero-phase mean) of the raw trajectory."
         ),
         reference="Barak et al. 1993, EMBO J 12:461–468",
     ),

@@ -490,6 +490,21 @@ def stiffness(macro_dt):
     )
 
 
+@simulate.command("gz06-damage-scan")
+def gz06_damage_scan():
+    """Which Geva-Zatorsky 2006 parameter should carry DNA damage?
+
+    Scans the three degradation channels the DNA-damage literature implicates
+    for a Hopf bifurcation, and reports which one a damage-signed move
+    actually crosses. The pattern generalises: place a coupling edge on the
+    parameter whose bifurcation the perturbation reaches, not on whichever
+    parameter is exposed.
+    """
+    from demos.gz06_damage_channel_scan import main as run_scan
+
+    run_scan()
+
+
 @simulate.command("multi-hallmark")
 @click.argument(
     "command",

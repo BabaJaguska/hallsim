@@ -56,6 +56,7 @@ from hallsim.gene_reporters import (  # noqa: E402
 )
 from demos.models.multi_hallmark import (  # noqa: E402
     build_multi_hallmark_composite,
+    GZ06_ALPHA_X_CONTROL,
     RAPA_INTERVENTION_DAY,
     DDIS_ETOPOSIDE_DOSE_WINDOW,
 )
@@ -216,10 +217,10 @@ def build_problem(
             ),
             # mtor_phos_rate, alpha_y, mitophagy_inactiv frozen — non-identifiable
             # here (gain-degenerate / flat gradient); see diary.
-            "psi_basal": ParameterRef(
-                "psi_bridge",
+            "alpha_x_control": ParameterRef(
+                "damage_bridge",
                 "basal",
-                prior=0.3,
+                prior=GZ06_ALPHA_X_CONTROL,
                 prior_sigma=0.5,
             ),
             "mtor_to_nfkb": ParameterRef(

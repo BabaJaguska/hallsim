@@ -92,7 +92,7 @@ Six mechanistic observables ↔ six canonical reporter genes
 | `GLB1` | `dp14/SA_beta_gal` |
 | `BNIP3` | `dp14/FoxO3a` |
 | `DDB2` | `gz06/x` |
-| `MDM2` | `gz06/y` |
+| `MDM2` | `gz06/y0` |
 | `NFKBIA` | `nfkb/IkBat` |
 
 <!-- reporters:end -->

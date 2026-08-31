@@ -33,7 +33,7 @@ from demos.models.multi_hallmark import (  # noqa: E402
     DP14_MTOR_PHOS_RATE_DEFAULT,
     GZ06_SBML_PATH,
     GZ06_PSI_NAME,
-    GZ06_PSI_DEFAULT,
+    GZ06_PSI_PUBLISHED,
     NFKB_SBML_PATH,
 )
 
@@ -104,7 +104,7 @@ def main():
     gz06 = process_from_sbml(
         str(GZ06_SBML_PATH),
         name="gz06",
-        parameters={GZ06_PSI_NAME: GZ06_PSI_DEFAULT},
+        parameters={GZ06_PSI_NAME: GZ06_PSI_PUBLISHED},
     )
     ts, res = run_solo(gz06, t_end=100.0, n_save=600)
     plot_subsystem(
