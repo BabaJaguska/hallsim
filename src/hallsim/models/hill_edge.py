@@ -166,10 +166,108 @@ class HillGateSuggestion:
     on_occupancy: float
     ok: bool
     note: str
+    # Set by place_hill_gate_for_crossing: the driver level at which the signal
+    # reaches `critical`, the (lo, hi) K window straddling the conditions, and
+    # the fractional distance from the crossing to the nearer one.
+    crossing: float | None = None
+    window: tuple[float, float] | None = None
+    margin: float | None = None
 
 
 def _occ(x, K, n):
     return x**n / (K**n + x**n)
+
+
+def place_hill_gate_for_crossing(
+    off_level,
+    on_level,
+    *,
+    basal,
+    hi,
+    critical,
+    n: float = 2.0,
+) -> HillGateSuggestion:
+    """Hill ``K`` placing a gate so its *signal* crosses ``critical`` between
+    the driver's ``off_level`` and ``on_level``.
+
+    For an edge assigning ``signal = basal + (hi - basal)·H(source; K, n)``,
+    a downstream bifurcation at ``signal = critical`` is reached where
+    ``H = (critical - basal)/(hi - basal)``, i.e. at the driver level
+    ``D* = K·(H/(1-H))**(1/n)``. Straddling the conditions therefore needs
+    ``off/r < K < on/r`` with ``r = (H/(1-H))**(1/n)``; ``K`` is placed at the
+    geometric centre of that window. Works for ``hi`` above or below ``basal``.
+
+    Where :func:`place_hill_gate` asks for a clean 10/90 switch — and so needs
+    the levels well separated — this asks only that the crossing fall between
+    them, which needs ``off < on`` and nothing more. ``note`` carries the
+    window and the fractional margin to the nearer condition, because a
+    crossing placed in a narrow window is correct but fragile.
+    """
+    off, on, basal, hi = (
+        float(off_level),
+        float(on_level),
+        float(basal),
+        float(hi),
+    )
+    crit = float(critical)
+    span = hi - basal
+    h = (crit - basal) / span if span else float("nan")
+    if not 0.0 < h < 1.0:
+        return HillGateSuggestion(
+            max(on, 1e-9),
+            n,
+            off,
+            on,
+            float("nan"),
+            float("nan"),
+            False,
+            f"critical {crit:.4g} is outside the edge's range "
+            f"[{min(basal, hi):.4g}, {max(basal, hi):.4g}], so the signal "
+            "never reaches it at any K",
+        )
+    if off <= 0.0 or on <= 0.0:
+        return HillGateSuggestion(
+            max(on, 1e-9),
+            n,
+            off,
+            on,
+            float("nan"),
+            float("nan"),
+            False,
+            "non-positive operating level; cannot place a Hill gate",
+        )
+    r = (h / (1.0 - h)) ** (1.0 / n)
+    lo_K, hi_K = off / r, on / r
+    K = math.sqrt(lo_K * hi_K)
+    crossing = K * r
+    if on <= off:
+        return HillGateSuggestion(
+            K,
+            n,
+            off,
+            on,
+            _occ(off, K, n),
+            _occ(on, K, n),
+            False,
+            f"off ({off:.3g}) >= on ({on:.3g}): operating ranges overlap — "
+            "no monotone Hill gate separates these levels",
+        )
+    margin = min(crossing / off, on / crossing) - 1.0
+    return HillGateSuggestion(
+        K,
+        n,
+        off,
+        on,
+        _occ(off, K, n),
+        _occ(on, K, n),
+        True,
+        f"crosses {crit:.4g} at driver {crossing:.4g}; K window "
+        f"{lo_K:.4g}–{hi_K:.4g}, margin {100 * margin:.3g}% to the nearer "
+        "condition",
+        crossing=crossing,
+        window=(lo_K, hi_K),
+        margin=margin,
+    )
 
 
 def place_hill_gate(

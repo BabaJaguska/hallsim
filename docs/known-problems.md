@@ -430,10 +430,19 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `8.67 < K < 24.56` (ψ crosses at `x = 1.1069·K`). Out-of-the-box sign
   agreement **13/24 → 17/24**, gz06's two reporters **0/8 → 5/8**, DDIS@t7
   **4/6 → 6/6**; DDB2 now shows the p53 limit cycle days 3–9.
-  Still open: the `critical=` extension (solve for the driver level crossing a
-  named downstream bifurcation, warn when unreachable), which would have placed
-  this from the Hopf value directly rather than from a 10/90 switch criterion
-  that this driver cannot meet.
+  *`critical=` landed 2026-08-30 (night).*
+  `hill_edge.place_hill_gate_for_crossing(off, on, basal=, hi=, critical=)`
+  solves for the driver level at which the *signal* reaches a named downstream
+  value — `D* = K·(h/(1−h))^(1/n)` with `h = (critical−basal)/(hi−basal)` — and
+  returns the `K` window straddling the conditions plus the `margin` to the
+  nearer one. Reachable from the problem as
+  `suggest_hill_gate(..., critical=, basal=, hi=)`, and refuses a `critical`
+  outside the edge's own range. Works for `hi` above or below `basal`.
+  It succeeds exactly where the 10/90 criterion cannot: a crossing needs only
+  `off < on`, no separation, so it places a gate on the r = 1.26 driver that
+  `place_hill_gate` rejects with "needs n = 19". `GZ06_DAMAGE_DRIVE_K` is now
+  derived from it rather than a literal, and it re-derives the 12.5% control
+  margin independently of the trajectory measurement.
 
   The check's own finding outlives the fix and belongs to P0.14: **`DNA_damage`
   ceilings at 9.59 undosed and averages 12.13 dosed** — separation `r = 1.26`,
@@ -535,12 +544,28 @@ The check that would catch a mistake does not exist, does not run, or fails open
 - [ ] **P1.6 — No null-model baseline is reported.** Nothing in the run computes
   the constant null, so a concordance number is quoted with no floor to beat.
   Current state on the two-arm, 24-call configuration (2026-08-30, out of the
-  box, corrected dose, damage on `alpha_x`): the composite scores **19/24
-  (79%)** and "every reporter rises" scores **18/24 (75%)** — the **first time
-  the composite has beaten the null**, and by one call. The progression, same
-  data and dose throughout: 13/24 (ψ at K = 52) → 17/24 (ψ at K = 10.79) →
-  19/24 (`alpha_x`). Report the null alongside every one of these; a 79% that
-  clears a 75% floor is a different claim from a bare 79%.
+  box, corrected dose, damage on `alpha_x`): the composite scores **19/24** and
+  the best constant predictor also scores **19/24** — a tie, not a win. The
+  data is 19 up and 5 down, so "every reporter rises" is the *majority-class*
+  predictor. The progression, same data and dose throughout: 13/24 (ψ at
+  K = 52) → 17/24 (ψ at K = 10.79) → 19/24 (`alpha_x`), against a 19/24 null
+  the whole way.
+
+  **The deeper problem is the metric, not the missing baseline.** Sign
+  agreement is accuracy on a 19:5 imbalanced set, where the choice of null is
+  itself arbitrary — all-up is the best constant, all-down (5/24) the worst,
+  and neither is neutral. Metrics that need no null, on the same 24 calls:
+
+  | | model | any constant predictor |
+  |---|---|---|
+  | balanced accuracy | **0.868** | 0.500 |
+  | MCC | **+0.607** | 0.000 |
+
+  Confusion `TP=14 FP=0 FN=5 TN=5`: **zero false positives**, all 5 down-calls
+  correct (the all-up null gets 0/5), and all 5 errors the same failure — a
+  reporter the model relaxed and the data did not. Real skill, invisible in the
+  tie. *Actionable:* report MCC and balanced accuracy alongside sign agreement,
+  and stop quoting sign agreement alone.
   **An outside notebook (2026-08-29) implemented the check**, emitting
   `oob_null_baseline.csv` / `postfit_null_baseline.csv` per run. That work is
   uncommitted in a sandbox tree, so the reporter is not reproducible here yet —

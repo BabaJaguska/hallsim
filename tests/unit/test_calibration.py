@@ -896,18 +896,26 @@ class TestPriorStrength:
             fit_arms=["a_vs_a"],
         )
 
-    def test_sane_sigma_is_operative(self):
+    def test_sane_sigma_carries_real_precision(self):
         report = self._problem(0.5, (0.01, 100.0)).prior_report()
-        assert report[0]["operative"]
-        assert report[0]["max_penalty"] > 1.0
+        assert report[0]["precision"] == pytest.approx(2.0 / 0.25)
+        assert report[0]["share"] is None
+        assert report[0]["operative"] is None
+
+    def test_a_prior_is_judged_against_the_data(self):
+        problem = self._problem(0.5, (0.01, 100.0))
+        name = next(iter(problem.param_refs))
+        assert problem.prior_report({name: 1e9})[0]["operative"] is False
+        assert problem.prior_report({name: 1e-9})[0]["operative"] is True
 
     def test_linear_units_sigma_is_flagged(self, caplog):
         import logging
 
+        problem = self._problem(9000.0, (0.01, 100.0))
+        name = next(iter(problem.param_refs))
         with caplog.at_level(logging.WARNING, logger="hallsim.calibration"):
-            report = self._problem(9000.0, (0.01, 100.0)).prior_report()
-        assert not report[0]["operative"]
-        assert report[0]["max_penalty"] < 1e-6
+            problem._warn_inoperative_priors({name: 1.0})
+        assert problem.prior_report({name: 1.0})[0]["operative"] is False
         assert any("log10 decades" in r.message for r in caplog.records)
 
 

@@ -137,3 +137,99 @@ class TestGateEnumerationAndRange:
     def test_a_process_without_K_is_not_a_gate(self):
         comp = self._composite(5.0)
         assert "src" not in comp.hill_gates()
+
+
+class TestCrossingPlacement:
+    """Placing a gate so its signal crosses a downstream bifurcation, rather
+    than so it forms a clean on/off switch."""
+
+    def _place(self, **kw):
+        from hallsim.models.hill_edge import place_hill_gate_for_crossing
+
+        return place_hill_gate_for_crossing(**kw)
+
+    def test_reproduces_the_psi_hopf_window(self):
+        """GZ06's p53 Hopf at psi=0.685416, driven from basal 0.3 to hi 1.0
+        across a control ceiling of 9.59 and a DDIS peak of 27.18."""
+        s = self._place(
+            off_level=9.59,
+            on_level=27.18,
+            basal=0.3,
+            hi=1.0,
+            critical=0.685416,
+            n=2.0,
+        )
+        assert s.ok
+        assert s.K == pytest.approx(14.586, rel=1e-3)
+        assert s.window[0] == pytest.approx(8.664, rel=1e-3)
+        assert s.window[1] == pytest.approx(24.556, rel=1e-3)
+
+    def test_reproduces_the_alpha_x_hopf_window_on_an_inhibitory_edge(self):
+        """The shipped edge: hi (0.0) *below* basal (0.6648), Hopf at 0.1662."""
+        s = self._place(
+            off_level=9.59,
+            on_level=12.13,
+            basal=0.6648,
+            hi=0.0,
+            critical=0.1662,
+            n=2.0,
+        )
+        assert s.ok
+        assert s.K == pytest.approx(6.221, rel=1e-3)
+        assert s.window[0] == pytest.approx(5.537, rel=1e-3)
+        assert s.window[1] == pytest.approx(7.003, rel=1e-3)
+
+    def test_the_crossing_lands_where_the_signal_equals_critical(self):
+        from hallsim.models.hill_edge import hill_gate
+
+        basal, hi, crit, n = 0.6648, 0.0, 0.1662, 2.0
+        s = self._place(
+            off_level=9.59,
+            on_level=12.13,
+            basal=basal,
+            hi=hi,
+            critical=crit,
+            n=n,
+        )
+        signal = basal + (hi - basal) * float(
+            hill_gate(jnp.asarray(s.crossing), s.K, n)
+        )
+        assert signal == pytest.approx(crit, rel=1e-6)
+
+    def test_succeeds_where_a_clean_switch_cannot(self):
+        """r=1.26 needs n=19 for a 10/90 gate; a crossing needs only off<on."""
+        from hallsim.models.hill_edge import place_hill_gate
+
+        assert not place_hill_gate(9.59, 12.13).ok
+        assert self._place(
+            off_level=9.59,
+            on_level=12.13,
+            basal=0.6648,
+            hi=0.0,
+            critical=0.1662,
+            n=2.0,
+        ).ok
+
+    def test_unreachable_critical_is_refused(self):
+        s = self._place(
+            off_level=1.0,
+            on_level=27.18,
+            basal=0.3,
+            hi=1.0,
+            critical=1.5,
+            n=2.0,
+        )
+        assert not s.ok
+        assert "never reaches it" in s.note
+
+    def test_overlapping_ranges_are_refused(self):
+        s = self._place(
+            off_level=12.0,
+            on_level=9.0,
+            basal=0.3,
+            hi=1.0,
+            critical=0.685416,
+            n=2.0,
+        )
+        assert not s.ok
+        assert "overlap" in s.note

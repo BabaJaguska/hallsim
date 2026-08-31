@@ -77,7 +77,11 @@ def sensitivity_jacobian(problem, params: dict | None = None):
 
 @dataclasses.dataclass
 class IdentifiabilityReport:
-    """Local identifiability of a fit, from the Fisher information ``JᵀJ``."""
+    """Local identifiability of a fit, from the Fisher information ``JᵀJ``.
+
+    ``fisher_diag`` is ``diag(JᵀJ)`` per parameter — the log10-space precision
+    the data carries about it, and the scale a prior must reach to do anything.
+    """
 
     names: list[str]
     verdict: dict[
@@ -89,6 +93,7 @@ class IdentifiabilityReport:
     correlation: np.ndarray  # parameter correlation matrix (n × n)
     confounded: list[tuple[str, str, float]]  # (a, b, corr) with |corr|≥tol
     recommended_freeze: list[str]
+    fisher_diag: dict[str, float] = dataclasses.field(default_factory=dict)
 
     @property
     def condition_number(self) -> float:
@@ -236,6 +241,7 @@ def report_from_jacobian(
         correlation=corr,
         confounded=confounded,
         recommended_freeze=freeze,
+        fisher_diag={names[i]: float(fim[i, i]) for i in range(n)},
     )
 
 

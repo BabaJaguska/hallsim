@@ -54,9 +54,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Smallest prior penalty reachable in a clamp box that can still steer a fit;
-# below it the term is lost in the data loss.
-_MIN_OPERATIVE_PRIOR = 1e-2
+# Share of a parameter's posterior precision its prior must supply to be doing
+# anything, and the share above which the fitted value is just the prior again.
+_MIN_PRIOR_SHARE = 1e-3
+_MAX_PRIOR_SHARE = 0.99
 
 # Fisher condition number above which a fit is refused. float64 carries ~16
 # digits, so past this the flat directions are numerical noise.
@@ -1033,7 +1034,6 @@ class CalibrationProblem:
         self._all_refs = params
         self._base_registry = reg
         self.prior_weight = prior_weight
-        self._warn_inoperative_priors()
         self.fit_arms = fit_arms
         self.held_out_arms = held_out_arms or []
         self.t_end = t_end
@@ -1524,35 +1524,42 @@ class CalibrationProblem:
             param_values, self.fit_arms
         ) + self._prior_penalty(param_values)
 
-    def prior_report(self) -> list[dict]:
-        """Largest penalty each prior can reach inside its clamp box.
+    def prior_report(self, fisher_diag: dict | None = None) -> list[dict]:
+        """How much of each parameter's posterior precision its prior supplies.
 
-        ``prior_sigma`` is in log10 decades; one given in the parameter's own
-        units is no prior at all, and nothing in the loss shows it. Entries
-        carry ``name``, ``prior``, ``prior_sigma``, ``max_penalty``,
-        ``operative``.
+        A prior's penalty is ``prior_weight·((log10 p − log10 prior)/sigma)²``,
+        so its precision in log10 space is ``2·prior_weight/sigma²`` — and
+        whether that constrains anything is only answerable against the
+        precision the *data* carries, ``diag(JᵀJ)``. Pass ``fisher_diag`` from
+        an :class:`~hallsim.identifiability.IdentifiabilityReport` to get the
+        ``share`` each prior holds; without it the precision is still reported
+        and ``share``/``operative`` are ``None``.
+
+        Entries carry ``name``, ``prior``, ``prior_sigma``, ``precision``,
+        ``fisher``, ``share``, ``operative``.
         """
         out = []
-        starts = self.initial_params()
         for name, pref in self._all_refs.items():
             if pref.prior is None:
                 continue
-            target = math.log10(float(pref.prior))
-            start = float(starts[name])
-            lo, hi = pref.clamp or (start, start)
-            corners = [max(float(lo), 1e-30), max(float(hi), 1e-30)]
-            worst = max(
-                ((math.log10(c) - target) / pref.prior_sigma) ** 2
-                for c in corners
+            precision = 2.0 * self.prior_weight / float(pref.prior_sigma) ** 2
+            fisher = None if fisher_diag is None else fisher_diag.get(name)
+            share = (
+                None
+                if fisher is None
+                else precision / (precision + max(fisher, 0.0))
             )
-            penalty = self.prior_weight * worst
             out.append(
                 {
                     "name": name,
                     "prior": float(pref.prior),
                     "prior_sigma": float(pref.prior_sigma),
-                    "max_penalty": penalty,
-                    "operative": penalty >= _MIN_OPERATIVE_PRIOR,
+                    "precision": precision,
+                    "fisher": fisher,
+                    "share": share,
+                    "operative": (
+                        None if share is None else share >= _MIN_PRIOR_SHARE
+                    ),
                 }
             )
         return out
@@ -1613,10 +1620,15 @@ class CalibrationProblem:
                 )
 
     def _require_identifiable(self) -> None:
-        """Refuse to fit a problem whose Fisher information is singular."""
+        """Refuse to fit a problem whose Fisher information is singular.
+
+        Also reports each prior against that same Fisher information, which is
+        the only thing that says whether a prior is doing anything.
+        """
         from hallsim.identifiability import identifiability_report
 
         report = identifiability_report(self)
+        self._warn_inoperative_priors(report.fisher_diag)
         cond = report.condition_number
         if cond <= MAX_FIT_CONDITION_NUMBER:
             return
@@ -1632,22 +1644,33 @@ class CalibrationProblem:
             f"allow_unidentifiable=True to fit anyway.\n\n{report}"
         )
 
-    def _warn_inoperative_priors(self) -> None:
-        """Name any prior that cannot reach a penalty worth having."""
-        dead = [r for r in self.prior_report() if not r["operative"]]
-        if not dead:
-            return
-        for r in dead:
-            log.warning(
-                "prior on %r cannot constrain it: largest penalty reachable "
-                "in its clamp box is %.3g. prior_sigma is in log10 decades "
-                "(0.5 ~ a factor of 3), and %.3g decades constrains nothing "
-                "— a sigma set in the parameter's own units is the usual "
-                "cause.",
-                r["name"],
-                r["max_penalty"],
-                r["prior_sigma"],
-            )
+    def _warn_inoperative_priors(self, fisher_diag: dict) -> None:
+        """Name any prior the data overwhelms, and any that overwhelms it."""
+        for r in self.prior_report(fisher_diag):
+            if r["operative"] is None:
+                continue
+            if not r["operative"]:
+                log.warning(
+                    "prior on %r supplies %.2g%% of its posterior precision, "
+                    "so the fit is not seeing it: prior %.3g vs data %.3g. "
+                    "prior_sigma is in log10 decades (0.5 ~ a factor of 3); a "
+                    "sigma set in the parameter's own units is the usual "
+                    "cause.",
+                    r["name"],
+                    100 * r["share"],
+                    r["precision"],
+                    r["fisher"],
+                )
+            elif r["share"] >= _MAX_PRIOR_SHARE:
+                log.warning(
+                    "prior on %r supplies %.2g%% of its posterior precision, "
+                    "so the fitted value is the prior and not a measurement: "
+                    "prior %.3g vs data %.3g.",
+                    r["name"],
+                    100 * r["share"],
+                    r["precision"],
+                    r["fisher"],
+                )
 
     def _prior_penalty(self, param_values: dict) -> jnp.ndarray:
         """MAP log-normal prior penalty: prior_weight · Σ ((log10 p −
@@ -2018,6 +2041,10 @@ class CalibrationProblem:
         on_stat: str = "mean",
         off_occupancy: float = 0.1,
         n_save: int = 200,
+        critical: float | None = None,
+        basal: float | None = None,
+        hi: float | None = None,
+        n: float = 2.0,
     ):
         """Deterministically suggest a Hill gate's ``(K, n)`` for a coupling
         edge driven by ``source_path``, from the *measured* operating point.
@@ -2030,14 +2057,40 @@ class CalibrationProblem:
         :class:`hallsim.models.hill_edge.HillGateSuggestion` — ``ok=False`` with
         an explanatory ``note`` when the arms' operating ranges overlap or are
         too close for a clean gate. Deterministic: same params → same suggestion.
+
+        Give ``critical`` (with the edge's ``basal`` and ``hi``) to place the
+        gate so the *signal* crosses a named downstream value — a bifurcation
+        the coupling is meant to trigger — rather than forming a clean 10/90
+        switch. That is the placement to use when the edge exists to flip
+        something: it asks only that the crossing fall between the conditions,
+        so it succeeds on drivers too weakly separated for a clean gate. See
+        :func:`hallsim.models.hill_edge.place_hill_gate_for_crossing`.
         """
         rng = self.operating_ranges(param_values, [source_path], n_save=n_save)
-        return self._place_from_ranges(
-            rng,
-            source_path,
-            off_conditions,
-            on_conditions,
-            off_stat=off_stat,
-            on_stat=on_stat,
-            off_occupancy=off_occupancy,
+        if critical is None:
+            return self._place_from_ranges(
+                rng,
+                source_path,
+                off_conditions,
+                on_conditions,
+                off_stat=off_stat,
+                on_stat=on_stat,
+                off_occupancy=off_occupancy,
+            )
+        if basal is None or hi is None:
+            raise ValueError(
+                "critical= needs the edge's basal and hi: the driver level "
+                "that crosses it depends on the range the signal spans."
+            )
+        from hallsim.models.hill_edge import place_hill_gate_for_crossing
+
+        return place_hill_gate_for_crossing(
+            max(
+                getattr(rng[c][source_path], off_stat) for c in off_conditions
+            ),
+            max(getattr(rng[c][source_path], on_stat) for c in on_conditions),
+            basal=basal,
+            hi=hi,
+            critical=critical,
+            n=n,
         )

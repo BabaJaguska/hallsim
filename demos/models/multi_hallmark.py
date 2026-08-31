@@ -56,7 +56,11 @@ from __future__ import annotations
 
 from hallsim.composite import Composite
 from hallsim.models.forcing import drive_pulse, drive_step
-from hallsim.models.hill_edge import HillActivationEdge, HillSignalEdge
+from hallsim.models.hill_edge import (
+    HillActivationEdge,
+    HillSignalEdge,
+    place_hill_gate_for_crossing,
+)
 from demos.models.sbml import sbml_source
 from hallsim.sbml_import import process_from_sbml
 
@@ -118,10 +122,21 @@ GZ06_ALPHA_X_NAME = "alpha_x"
 GZ06_ALPHA_X_HOPF = 0.1662
 GZ06_ALPHA_X_CONTROL = 4 * GZ06_ALPHA_X_HOPF  # decay tau 5.5 h; fitted
 GZ06_ALPHA_X_DAMAGED = 0.0  # the deposit's own value
-# alpha_x crosses the Hopf at D = K*sqrt(3), so straddling the arms needs
-# 5.53 < K < 7.00 for a control ceiling of 9.59 and a DDIS mean of 12.13.
-GZ06_DAMAGE_DRIVE_K = 6.22
 GZ06_DAMAGE_DRIVE_N = 2.0
+# Measured DNA_damage: control ceiling and DDIS mean (operating_ranges).
+GZ06_DAMAGE_OFF_LEVEL = 9.59
+GZ06_DAMAGE_ON_LEVEL = 12.13
+# K placed so the signal crosses the Hopf between them — derived, not a
+# literal, so the placement moves with the levels it was placed from.
+GZ06_DAMAGE_GATE = place_hill_gate_for_crossing(
+    off_level=GZ06_DAMAGE_OFF_LEVEL,
+    on_level=GZ06_DAMAGE_ON_LEVEL,
+    basal=GZ06_ALPHA_X_CONTROL,
+    hi=GZ06_ALPHA_X_DAMAGED,
+    critical=GZ06_ALPHA_X_HOPF,
+    n=GZ06_DAMAGE_DRIVE_N,
+)
+GZ06_DAMAGE_DRIVE_K = GZ06_DAMAGE_GATE.K
 
 # One t_span unit = one day, matching GSE248823's D00–D14 course. DP14 is
 # natively in days and runs unchanged; GZ06 (hours) and NFKB (seconds) are
