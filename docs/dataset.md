@@ -75,12 +75,12 @@ replicates for one condition.
   recovered afterwards by differencing the two within-arm curves.
 - **Replicates are averaged** (mean of log2 intensities) into each
   condition *before* the fold-change, so every reporter contributes one
-  measured Δ per timepoint — concordance is over **n = 6 reporters**, not
+  measured Δ per timepoint — concordance is over **n = 5 reporters**, not
   the 2 replicates.
 
 ## Reporters
 
-Six mechanistic observables ↔ six canonical reporter genes
+Five mechanistic observables ↔ five canonical reporter genes
 ([`hallsim.gene_reporters.MULTI_HALLMARK_REPORTERS`](../src/hallsim/gene_reporters.py)):
 
 <!-- reporters:start — checked against MULTI_HALLMARK_REPORTERS by
@@ -93,7 +93,6 @@ Six mechanistic observables ↔ six canonical reporter genes
 | `BNIP3` | `dp14/FoxO3a` |
 | `DDB2` | `gz06/x` |
 | `MDM2` | `gz06/y0` |
-| `NFKBIA` | `nfkb/IkBat` |
 
 <!-- reporters:end -->
 

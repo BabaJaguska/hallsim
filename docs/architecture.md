@@ -223,24 +223,19 @@ perturbation), [`forcing.py`](../src/hallsim/models/forcing.py),
 [`neuralode.py`](../src/hallsim/models/neuralode.py).
 
 Specific biology lives in [`demos/models/`](../demos/models/) and is **not**
-part of the package. The largest is the multi-hallmark demo
-([`multi_hallmark.py`](../demos/models/multi_hallmark.py)) — three BioModels
-SBML imports (DallePezze 2014 + Geva-Zatorsky 2006 + Ihekwaba 2004) plus two
-cross-publication edges into the NF-κB module's IKK: `MtorNFkBActivator`
-(DP14 mTORC1 → IKK; the rapamycin channel) and `DamageNFkBActivator` (DP14
-DNA_damage → IKK; the ATM→NEMO channel). Alongside it,
+part of the package — [`multi_hallmark.py`](../demos/models/multi_hallmark.py),
 [`eriq.py`](../demos/models/eriq.py),
-[`mitochondrial_aging.py`](../demos/models/mitochondrial_aging.py) and
+[`mitochondrial_aging.py`](../demos/models/mitochondrial_aging.py),
 [`stem_cell_niche.py`](../demos/models/stem_cell_niche.py).
 
-**These are exercises of the framework's mechanics, not results.** The
-multi-hallmark demo in particular is known-broken as biology — its control arm
-is not a control (P0.14), and every one of its constituents is FLAG under
-`intake.triage_sbml`. It is useful for what it stresses: three time bases
-reconciled onto one clock, cross-publication coupling edges, a stiff
-multi-group solve, held-out arms, and end-to-end gradients through all of it.
-No claim about the framework rests on its concordance score, and none should
-be built on it as biology.
+**These are exercises of the framework's mechanics, not results.** They exist to
+stress the paths this document describes — several time bases reconciled onto
+one clock, cross-publication coupling edges, multi-group solves, held-out arms,
+and end-to-end gradients through all of it. No claim about the framework rests
+on a demo's concordance score, and none should be built on one as biology.
+Which models a demo currently composes, and why, belongs to that demo's own
+docstring and to `docs/known-problems.md` — not here, where it goes stale
+silently.
 
 ## Population studies via batched `y0`
 

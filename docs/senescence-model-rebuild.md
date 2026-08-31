@@ -105,7 +105,7 @@ here so the plan does not rebuild it:
 |---|---|---|---|
 | p16INK4a–CDK4/6–Rb–E2F arrest switch | yes — dp14 has p21/p27 and no Rb axis | nothing | **all of it.** This is the load-bearing gap |
 | DDR: ATM/ATR, p53–MDM2, pulses | partly — dp14 has one linear damage pool | GZ06 p53–Mdm2 supplies pulses on `gz06/x` | repairable vs persistent lesion split |
-| SASP / NF-κB / p38 / IL-6 / IL-8 / TGF-β | yes — the authors flag the abstraction themselves | Ihekwaba NF-κB module (`nfkb/`) | p38, the interleukins, autocrine feedback, cGAS–STING |
+| SASP / NF-κB / p38 / IL-6 / IL-8 / TGF-β | yes — the authors flag the abstraction themselves | **nothing** (Ihekwaba removed 2026-08-31; it emitted no SASP effector) | the whole axis: IL-6, IL-8, CCL2, CXCL1, p38, autocrine feedback, cGAS–STING |
 | Mitophagy as a flux, not a state | yes | nothing | flux formulation, lysosomal clearance, PINK1/Parkin |
 | Cell-cycle output (E2F, EdU, clonogenic recovery) | yes — no proliferation readout exists | nothing | **all of it.** Markers alone cannot establish arrest |
 | Population heterogeneity | yes — one deterministic average cell | nothing | queued in [roadmap.md](roadmap.md) |
@@ -391,7 +391,10 @@ cannot.
 
 ### Phase 4 — SASP
 
-Extend the existing `nfkb/` module rather than adding a parallel one: p38, IL-6
+A SASP module has to *emit* the effectors, which is why Ihekwaba was removed
+(its only NF-κB-inducible transcript was its own inhibitor). The data makes
+the target concrete: CCL2 +3.05, CXCL1 +2.68, ICAM1 +2.55, IL6 +1.73 log2FC
+at D14, all above the 99th percentile. Needed: p38, IL-6
 and IL-8, TGF-β, autocrine feedback, and cGAS–STING for the radiation route.
 Keep arrest, mitochondrial dysfunction and secretion **separable** — a
 senomorphic that suppresses secretion without restoring proliferation is a

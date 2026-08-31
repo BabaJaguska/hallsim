@@ -490,7 +490,7 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
 
 # ── Multi-hallmark composite reporters ─────────────────────────────
 #
-# These map directly to store paths in the DP14 + NFKB + GZ06 composite,
+# These map directly to store paths in the DP14 + GZ06 composite,
 # unlike CANONICAL_REPORTERS which routes through ERiQ algebraic helpers.
 
 MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
@@ -562,22 +562,6 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
             "lag-free DC level (zero-phase mean) of the raw trajectory."
         ),
         reference="Barak et al. 1993, EMBO J 12:461–468",
-    ),
-    GeneReporter(
-        observable="nfkb/IkBat",
-        gene_symbol="NFKBIA",
-        sign=+1,
-        summary=zerophase_mean(tau=0.75),
-        description=(
-            "IκBα transcript — direct NF-κB target via the autoregulatory "
-            "negative feedback loop. Maps to Ihekwaba 2004's IκBα mRNA "
-            "species (IkBat), which rises with NF-κB transcriptional activity. "
-            "Transcriptomic NFKBIA measures the transcript, not the cytoplasmic "
-            "protein (IkBa), whose abundance moves inversely to activity. Read "
-            "as the lag-free DC level (zero-phase mean) of the raw transcript — "
-            "no integral state."
-        ),
-        reference="Sun et al. 1993, Science 259:1912–1915",
     ),
 ]
 

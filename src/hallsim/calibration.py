@@ -1942,16 +1942,28 @@ class CalibrationProblem:
             out[cond] = row
         return out
 
-    def check_hill_gates(self, param_values: dict | None = None) -> list[dict]:
+    def check_hill_gates(
+        self,
+        param_values: dict | None = None,
+        *,
+        allow_dead_edges: bool = False,
+    ) -> list[dict]:
         """Warn for every Hill gate whose ``K`` lies outside the range its
         driver actually reaches across the conditions.
 
         A gate placed above its driver's ceiling never opens and the edge is
         dead; one below the floor is saturated and the edge is a constant. Both
-        look like a weak coupling and neither raises, so this runs at
-        construction. Returns one row per gate; rows with ``in_range=False``
-        are logged with the ``suggestion`` that would place them. One solve,
-        and only for composites that declare a gate.
+        look like a weak coupling downstream, so both **raise** — the answer is
+        definite, and a warning about a definite blocker is a warning nobody
+        acts on. Pass ``allow_dead_edges=True`` to continue anyway.
+
+        Also raises when an *activating* edge's driver is higher in the
+        reference conditions than in every perturbed one: the edge then
+        activates its target most where the perturbation is absent, which no
+        placement of ``K`` repairs.
+
+        Returns one row per gate, each carrying the ``suggestion`` that would
+        place it. One solve, and only for composites that declare a gate.
         """
         gates = self.composite.hill_gates()
         if not gates:
@@ -1961,14 +1973,18 @@ class CalibrationProblem:
         )
         paths = sorted({p for srcs, _ in gates.values() for p in srcs})
         rng = self.operating_ranges(params, paths)
+        off_conds, on_conds = self._reference_split()
 
-        rows = []
+        rows, blockers = [], []
         for name, (srcs, ks) in gates.items():
             for src, k in zip(srcs, ks):
                 lo = min(rng[c][src].lo for c in rng)
                 hi = max(rng[c][src].hi for c in rng)
                 ok = lo <= k <= hi
                 sug = None if ok else self._place_from_ranges(rng, src)
+                inverted = self._edge_is_inverted(
+                    rng, src, off_conds, on_conds
+                )
                 rows.append(
                     dict(
                         gate=name,
@@ -1977,24 +1993,57 @@ class CalibrationProblem:
                         lo=lo,
                         hi=hi,
                         in_range=ok,
+                        inverted=inverted,
                         suggestion=sug,
                     )
                 )
                 if not ok:
-                    log.warning(
-                        "Hill gate %s.K = %.4g on %r is %s everything its "
-                        "driver reaches ([%.4g, %.4g] across conditions), so "
-                        "the edge is %s. %s",
-                        name,
-                        k,
-                        src,
-                        "above" if k > hi else "below",
-                        lo,
-                        hi,
-                        "dead" if k > hi else "saturated",
-                        _placement_advice(sug),
+                    blockers.append(
+                        f"{name}.K = {k:.4g} on {src!r} is "
+                        f"{'above' if k > hi else 'below'} everything its "
+                        f"driver reaches ([{lo:.4g}, {hi:.4g}] across "
+                        f"conditions), so the edge is "
+                        f"{'dead' if k > hi else 'saturated'}. "
+                        f"{_placement_advice(sug)}"
                     )
+                if inverted:
+                    blockers.append(
+                        f"{name} activates on {src!r}, but that driver is "
+                        f"higher in every reference condition than in any "
+                        f"perturbed one, so the edge fires hardest where the "
+                        f"perturbation is absent. No K repairs a sign."
+                    )
+        if blockers and not allow_dead_edges:
+            raise ValueError(
+                "Coupling edges that cannot carry a signal:\n  - "
+                + "\n  - ".join(blockers)
+                + "\nEach is a definite defect, not a tuning choice. Fix the "
+                "wiring, or pass allow_dead_edges=True to run anyway."
+            )
+        for b in blockers:
+            log.warning("%s", b)
         return rows
+
+    def _reference_split(self) -> tuple[list[str], list[str]]:
+        """``(reference, perturbed)`` conditions — the ones only ever used as a
+        baseline, and the rest."""
+        on = {cond for cond, _ in self.arm_pairs.values()}
+        bases = {b for _, b in self.arm_pairs.values() if b is not None}
+        return sorted(bases - on), sorted(on)
+
+    def _edge_is_inverted(self, rng, src, off_conds, on_conds) -> bool:
+        if not off_conds or not on_conds:
+            return False
+
+        def seen(cs):
+            return [c for c in cs if src in rng.get(c, {})]
+
+        off, on = seen(off_conds), seen(on_conds)
+        if not off or not on:
+            return False
+        return min(rng[c][src].mean for c in off) > max(
+            rng[c][src].mean for c in on
+        )
 
     def _place_from_ranges(
         self,

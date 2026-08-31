@@ -72,15 +72,47 @@ The framework returns a plausible number and nothing indicates it is wrong.
   first eager call, or raise on a cold trace. Not: expect users to remember
   `warm_up`.
 
-- [ ] **P0.2 — Strang splitting attains no order and is sign-wrong at the
-  shipped `macro_dt`.** Refining 14→0.219: Lie converges at O(dt¹·⁰) as
-  advertised; Strang's error is 34× larger at the demo step, orders decaying
-  1.06 → 0.68 → 0.19 → 0.09. NFKBIA day 14: **+3.27** (Strang) vs −0.647 (Lie)
-  vs −0.535 (converged). Lie at `macro_dt=3.5` still carries 17% error.
-  `design-multiscale-scheduler.md:445` has said "Measure first" since day one
-  and no order test exists.
-  *Fix:* withdraw `splitting="strang"` until an order test passes; add that
-  test; set `macro_dt ≤ 0.875` for the multi-hallmark demo meanwhile.
+- [ ] **P0.2 — Strang splitting does not attain second order.** Re-measured
+  2026-08-31 on a forced two-group split (DP14 slow / GZ06 + edges fast),
+  against a 32×-refined Lie reference, four observables:
+
+  | scheme | macro_dt 3.5 | 1.75 | 0.875 |
+  |---|---|---|---|
+  | Lie | **36.3%** | 18.3% | 9.4% |
+  | Strang | **4.8%** | 2.1% | 1.4% |
+  | Lie + interpolated | 36.3% | 18.3% | 9.4% |
+
+  **This corrects the entry's previous headline.** It read "Strang's error is
+  34× larger at the demo step" and "sign-wrong"; Strang is in fact **7.6×
+  smaller** than Lie there and sign-correct on all four observables. What
+  survives is the order deficit: observed order decays 1.16 → 0.63 against the
+  2.0 Strang should attain. Lie is *worse* than previously recorded — 36% at
+  `macro_dt=3.5`, not 17% — though it converges cleanly at O(dt¹) (ratios 1.98,
+  1.96), so the scheme is fine and the 3.5-day step is not. CDKN1A is the
+  casualty: 30.98 against a reference 22.73.
+
+  The old numbers came from the three-group configuration containing NF-κB, so
+  the discrepancy is unseparated between (a) NF-κB's 1.6 h oscillation breaking
+  Strang specifically and (b) the P0.20 span-truncation fix repairing it — a
+  wrong window count would break Strang's forward-then-reversed symmetry
+  directly. Worth separating before designing around either.
+
+  *Usable today:* Strang at `macro_dt=1.75` gives 2.1%, at 0.875 gives 1.4% —
+  a defensible multi-group configuration without waiting for the fix.
+  *Fix:* find why Strang loses its second order; add the order test
+  `design-multiscale-scheduler.md:445` has called for since day one.
+
+- [ ] **P0.23 — `coupling_mode="interpolated"` may be a silent no-op.**
+  Measured 2026-08-31: bit-identical to `frozen` at `macro_dt` 3.5 / 1.75 /
+  0.875, five significant figures, all four observables.
+  `_effective_coupling` passes an explicit mode straight through and
+  `_run_scan_continuous` sets `interp = coupling == "interpolated" and
+  n_groups > 1`, which was true — so it was requested and enabled, and produced
+  no difference. Either the flag does not reach the coupling, or the interpolant
+  coincides with the frozen value to 5 s.f., which is not plausible.
+  Unconfirmed — the mechanism was not traced. *Fix:* establish which, with a
+  test that fails if interpolated and frozen agree on a problem with a forward
+  cross-group edge.
 
 - [ ] **P0.3 — The fold-change reference is an acausal filter of the whole
   trajectory.** ✓✓ Summaries are forward–backward EMAs, so the value at index 0
@@ -326,6 +358,95 @@ The framework returns a plausible number and nothing indicates it is wrong.
   form therefore runs, returns finite numbers, and has mis-ordered its
   operator splitting. *Fixed 2026-08-29:* raises on an unrecognised entry, which also makes a
   port-representation migration safe to do incrementally.
+
+- [x] **P0.21 — A coupling edge could be dead, saturated or sign-inverted and
+  only warn.** ✓✓✓ Found across all three NF-κB reviews, 2026-08-31, and the
+  fourth instance of the same pattern: the framework printed a correct warning
+  and nothing acted on it. `psi_bridge` sat at `K = 52` against a driver
+  reaching 27.18 for the whole of its life; `ikkbeta_nfkb` activated on
+  `dp14/IKKbeta`, which is **higher in control (33.65 / 22.3 / u=0.1106,
+  three reviewers) than in DDIS (22.44 / 18.0 / u=0.1038)**, so it fired
+  hardest where the perturbation was absent.
+
+  *Fixed 2026-08-31:* `check_hill_gates` now **raises**. A gate outside its
+  driver's realised range and an activating edge whose driver is higher in
+  every reference condition than in any perturbed one are both definite
+  defects — no value of `K` repairs a sign — and a warning about a definite
+  defect is a warning nobody acts on. `allow_dead_edges=True` is the hatch,
+  mirroring `allow_unidentifiable`. Both checks reuse the operating ranges
+  `check_hill_gates` already computes, so they cost nothing extra. The
+  composite as it stood on 2026-08-30 would now refuse to construct, twice.
+
+- [x] **P0.22 — Ihekwaba 2004 removed from the multi-hallmark composite.**
+  ✓✓✓ Refereed by all three panel agents (`docs/review-ihekwaba2004-wetlab.md`,
+  `docs/review-nfkb-maths.md`, `docs/review-nfkb-physics.md`). The deposit
+  itself is sound — maths returned "accept", and the undeclared time unit turned
+  out to be seconds, confirmed three ways (58/64 constants are Hoffmann 2002 ÷
+  60; period 98 min against a measured ~100). What failed was every seam:
+
+  - **Inert.** 19/24 with both edges live, ablated, or ×10; bit-identical arms
+    when ablated.
+  - **Driven, not perturbed.** `v64` is an IKK sink with no source anywhere, so
+    the edges supplied 100% of the module's IKK; solo it decays to 1.3e-14, and
+    `[IKK]* = u/10.368` predicts all three arms to <1%. A 24-state oscillator
+    collapsing to a one-dimensional static curve.
+  - **Backwards edge** (P0.21 above).
+  - **No SASP.** Its only NF-κB-inducible transcript is its own inhibitor — no
+    IL6, CXCL8, IL1A, CCL2 or MMP — so it could not emit what the data actually
+    moves: **CCL2 +3.05, CXCL1 +2.68, ICAM1 +2.55, IL8/IL6 +1.73** log2FC at
+    D14, nine SASP genes above the 96th percentile of 23,104.
+  - **Wrong reporter class.** NFKBIA flips sign (−0.36 at D07, +0.32 at D14) —
+    IκBα is the early, dose-independent, pulse-tracking target, while the SASP
+    genes are the late persistence-requiring class.
+
+  *Consequences of the removal, all measured:* the composite drops to
+  **16/20 against an 18/20 majority null** (it had tied at 19/24), because
+  NFKBIA had been supplying **3 of the 5 correct down-calls by predicting
+  "down" constantly** — scoring like a null while being one. Only **2 negative
+  calls remain in the whole evaluation set**, so specificity is estimated from
+  n=2 and the metric can no longer discriminate. Fixing that needs reporters
+  with real dynamic range in both directions; the data offers an obvious
+  down-program — **MKI67 −3.60, TOP2A −3.57, BUB1 −3.28, CCNA2 −3.10, LMNB1
+  −2.79**, nine cell-cycle genes below the 1st percentile.
+
+  *Unexpected and load-bearing:* dropping 24 states took the composite from
+  three timescale groups to **one**, so it now uses the single-group fast path.
+  No operator splitting, no `macro_dt` (verified: bit-identical across an 8×
+  refinement), and therefore **P0.2's 17% Lie error and P0.20's span truncation
+  no longer apply to it**. Every day-14 number produced while it had three
+  groups carries that splitting error.
+
+- [x] **P0.20 — The multi-group scan silently ran a shorter span than it was
+  asked for.** ✓✓ Found 2026-08-30 by the NF-κB physics review, reproduced on a
+  two-process toy. `scheduler.py:1121` sized the fixed-length `lax.scan` as
+  `int(round((t1 - t0) / macro_dt))`, i.e. the *nearest* whole number of macro
+  windows rather than enough to reach `t1`. The scan body already clamped its
+  last window (`jnp.minimum(t_start + macro_dt, t1)`), so a short final window
+  was supported — only the count was wrong. Nothing raised.
+
+  The multi-hallmark demo sat exactly on it: `t_start=-1.0`, `t_end=14.0`,
+  `macro_dt=3.5`, so `round(15/3.5) = 4` windows covered 14.0 of 15.0 and the
+  run **stopped at t = 13.0**. Every day-14 reporter was the day-13 value, read
+  by `jnp.interp` clamping to the last sample — and all five of the run's sign
+  errors were at day 14 while both day-7 panels scored 6/6. Rounding could
+  overshoot as easily as undershoot; only the sequential path was safe, because
+  it steps `while t < t1 - _TIME_EPS`.
+
+  *Fixed 2026-08-30:* add a window when the rounded count does not reach `t1`.
+  The three sibling `round()` sites are fine and were checked — `_save_grid`
+  uses `linspace(t0, t1, n)`, which pins both endpoints whatever `n` is; the
+  subsample stride re-appends `n_macro` explicitly; the discrete-firing check
+  floors with an exact-alignment branch. Guarded by
+  `TestSpanIsCoveredWhenMacroDtDoesNotDivideIt`, which asserts the *integrated
+  value* as well as the endpoint, since a run can label its last sample `t1`
+  while having integrated less.
+
+  **It did not change the headline.** Re-scored, the composite is still 19/24;
+  every day-14 value moved further in the relaxing direction and no sign
+  flipped, so "the model produces an acute response and no durable senescent
+  state" is reinforced rather than overturned. Day-7 values moved ≤0.4%, from
+  the macro-window boundaries shifting — which incidentally bounds the Lie
+  splitting error here at well under a percent.
 
 - [x] **P0.19 — A device OOM is reported as a tracing failure and answered by
   choosing the wrong solver.** ✓ External project, 2026-08-29.

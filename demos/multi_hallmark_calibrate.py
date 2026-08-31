@@ -1,14 +1,14 @@
 """Calibrate the multi-hallmark composite against GSE248823.
 
-The end-to-end calibration demo. Three published SBML models (DallePezze
-2014 + Geva-Zatorsky 2006 + Ihekwaba 2004), stitched by literature-grounded
-coupling edges, fit against etoposide-DDIS ± rapamycin transcriptomics.
+The end-to-end calibration demo. Two published SBML models (DallePezze 2014 +
+Geva-Zatorsky 2006), stitched by literature-grounded coupling edges, fit
+against etoposide-DDIS ± rapamycin transcriptomics.
 
 ``run`` evaluates the composite out-of-the-box against every arm and writes
 the OOB concordance table + trajectory figures — no fitting. ``--calibrate``
 continues into the fit: it reuses that OOB evaluation as the pre-fit baseline,
-fits the mechanism parameters (one per reporter axis, plus the two NF-κB IKK
-edge strengths and GZ06's basal-p53 ψ) on the DDIS-vs-control arm, evaluates
+fits the mechanism parameters (one per reporter axis, plus GZ06's control-side
+alpha_x) on the DDIS-vs-control arm, evaluates
 concordance on the held-out rapamycin arm with a magnitude-aware log2
 fold-change loss, and writes the before/after comparison figures.
 
@@ -223,12 +223,6 @@ def build_problem(
                 prior=GZ06_ALPHA_X_CONTROL,
                 prior_sigma=0.5,
             ),
-            "mtor_to_nfkb": ParameterRef(
-                "mtor_nfkb",
-                "k_act",
-                prior=0.1,
-                prior_sigma=0.5,
-            ),
             # p53 → CDKN1A edge (P53CDKN1AActivator.k_act) is fixed, not fitted.
         },
         fit_arms=["DDIS_vs_ctrl"],
@@ -237,7 +231,7 @@ def build_problem(
         t_end=14.0,
         t_start=-PREROLL_DAYS,
         macro_dt=3.5,
-        # The oscillating reporters (DDB2/MDM2/NFKBIA) read raw p53 / Mdm2 /
+        # The oscillating reporters (DDB2/MDM2) read raw p53 / Mdm2 /
         # IκBα-transcript and take a zero-phase RMS/mean post-hoc, so the save
         # grid must resolve the pulse: save_dt = 14/149 ≈ 0.094 d, under the
         # ~0.145 d Nyquist for the ~0.29 d p53 period. Cost is memory (more save
@@ -677,8 +671,6 @@ _CONSTITUENT_STATES = [
     ("dp14/FoxO3a", "DP14 FoxO3a"),
     ("dp14/mTORC1_pS2448", "DP14 mTORC1-P"),
     ("dp14/Mito_mass_new", "DP14 new mito mass"),
-    ("nfkb/NFkB", "NF-κB (free)"),
-    ("nfkb/IkBa", "IκBα protein"),
 ]
 
 
@@ -873,7 +865,7 @@ def cmd_sweep(args) -> None:
         "dp14/mTORC1_pS2448",
         "dp14/ROS",
         "dp14/Mitophagy",
-        "nfkb/IkBat",
+        "gz06/x",
     ]
     hdr = f"{'GI':>5} {'DNS':>5} | " + " ".join(
         f"{k.split('/')[-1]:>14}" for k in keys

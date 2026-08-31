@@ -22,7 +22,7 @@ src/hallsim/
   plotting.py          — plot_composite_run, plot_runs_comparison, draw_composite_graph, save_run_results
   cli.py               — CLI entry points (simulate command group)
   models/
-    multi_hallmark.py     — DP14 + GZ06 + Ihekwaba multi-publication composite (current validation substrate)
+    multi_hallmark.py     — DP14 + GZ06 multi-publication composite (current validation substrate)
     stem_cell_niche.py    — Niche deterioration + Sivakumar 2011 crosstalk
     eriq.py               — ERiQ Energy Restriction in Quiescence (3 Processes)
     saturating_removal.py — Uri Alon damage model

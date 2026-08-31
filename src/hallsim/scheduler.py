@@ -1118,7 +1118,13 @@ class Scheduler:
             composite.evolved_indices(p, keys) for p in groups.values()
         ]
 
+        # Enough windows to reach t1, not the nearest whole number of them:
+        # the body clamps the last one to t1, so a span that is not a multiple
+        # of macro_dt ends in a short window rather than stopping early.
         n_macro = int(round((t1 - t0) / macro_dt))
+        if n_macro * macro_dt < (t1 - t0) - _TIME_EPS:
+            n_macro += 1
+        n_macro = max(1, n_macro)
         t_starts = t0 + macro_dt * jnp.arange(n_macro)
 
         # n_save equally-spaced times per macro window, endpoints included so

@@ -24,7 +24,6 @@ multi-hallmark composite's reporters:
 | `BNIP3` | `dp14/FoxO3a` | zero-phase mean, τ=2.0 | FoxO3 target; reads the FoxO-driven mitophagy arm downstream of nutrient sensing |
 | `DDB2` | `gz06/x` | zero-phase **RMS** `√⟨x²⟩`, τ=0.75 | p53 target; GZ06's mean p53 is analytically damage-blind, so DDB2 reads pulse amplitude — see [gz06-basal-p53.md](gz06-basal-p53.md) |
 | `MDM2` | `gz06/y0` | zero-phase mean, τ=0.75 | p53 target; `y0` is the paper's Mdm2 precursor, "representing, for example, Mdm2 mRNA" — the transcript, not the protein `y` |
-| `NFKBIA` (IκBα) | `nfkb/IkBat` | zero-phase mean, τ=0.75 | IκBα *transcript* (an NF-κB target that rises with activity), not the protein |
 
 <!-- reporters:end -->
 
@@ -157,13 +156,13 @@ to be a specific pair of conditions rather than the driver's own extremes.
 parameter is fitted:
 
 ```python
-# Is the mTORC1 -> IKK edge load-bearing? Switch it off and re-score.
-off = problem.with_overrides({"mtor_to_nfkb": 0.0})
+# Is the p53 -> CDKN1A edge load-bearing? Switch it off and re-score.
+off = problem.with_overrides({"p53_cdkn1a.k_act": 0.0})
 ablated = off.evaluate(params)
 ```
 
 A key names either a fittable (whatever `params` calls it) or a process field
-in dotted form — `"mtor_nfkb.k_act"` and `"dp14.parameters.k"` address the same
+in dotted form — `"p53_cdkn1a.k_act"` and `"dp14.parameters.k"` address the same
 places `ParameterRef` does. Both spellings reach the same field, so which list a
 parameter happens to be in is not something you have to know. The call returns a
 new problem and leaves the original alone; overrides compose.

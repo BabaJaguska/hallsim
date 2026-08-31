@@ -1,5 +1,32 @@
 # Priors for the cross-model coupling-edge strengths
 
+> **Superseded 2026-08-31.** Both edges this note is about — `mtor_nfkb` and
+> `ikkbeta_nfkb` — were deleted with the Ihekwaba 2004 constituent. The refereed
+> findings against them, kept because they are the reason:
+>
+> - **The axis was inert.** 19/24 sign agreement whether both edges were live,
+>   ablated, or scaled ×10; with both at zero the module was bit-identical
+>   across all three arms.
+> - **The `ikkbeta_nfkb` edge ran backwards.** `dp14/IKKbeta` is *higher in
+>   control than in DDIS*, so it fired hardest where the perturbation was
+>   absent. Confirmed by all three reviewers.
+> - **§"Prior: anchored to the host module" is wrong twice.** IKK is not a
+>   conserved pool — `v64` removes it at `k61·IKK` (t½ 96 min) with no source
+>   anywhere, so `k_act` was the module's *entire* input rather than a
+>   perturbation of it. And the quoted IKKβ band (ctrl 11.9 → DDIS 16.5) is
+>   stale by ~5× and inverted.
+> - **`dp14/IKKbeta` is not a kinase reading.** Both its constants are 1 and
+>   marked "Assumed" in DallePezze's Table S4, making it a unity-gain low-pass
+>   of `dp14/ROS` — the edge was ROS→NF-κB wearing a kinase's name. Ihekwaba's
+>   `IKK` is `hasPart` {IKKβ, NEMO, IKKα} in µM; DP14's is `isVersionOf` IKBKB
+>   and dimensionless.
+>
+> What generalises, and is now enforced in code: a coupling edge whose gate sits
+> outside its driver's realised range, or whose driver is higher in the
+> reference conditions than in any perturbed one, **raises** at
+> `CalibrationProblem` construction (`check_hill_gates`). See
+> `docs/known-problems.md` P0.18 and the 2026-08-31 diary entry.
+
 Reference note for the preprint: how the strengths of the composite's
 literature-derived coupling edges are bounded, and why they have no direct
 off-the-shelf literature value.

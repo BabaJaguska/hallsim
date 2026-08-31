@@ -1,15 +1,20 @@
 """DP14-anchored multi-hallmark composite — three publications stitched.
 
-Spans four Hallmarks of Aging in one validation substrate: Cellular Senescence
+Spans three Hallmarks of Aging in one validation substrate: Cellular Senescence
 and Deregulated Nutrient Sensing (DallePezze 2014's CDKN1A / SA_beta_gal and
-mTORC1–AMPK–Akt–FoxO3a axes), Genomic Instability (DP14's DNA_damage feeding
-the Geva-Zatorsky 2006 p53–Mdm2 oscillator), and Altered Intercellular
-Communication (Ihekwaba 2004's NF-κB / IκBα module).
+mTORC1–AMPK–Akt–FoxO3a axes), and Genomic Instability (DP14's DNA_damage
+feeding the Geva-Zatorsky 2006 p53–Mdm2 oscillator).
 
-Constituents — DallePezze 2014 (BIOMD0000000582), Geva-Zatorsky 2006
-(BIOMD0000000157), Ihekwaba 2004 (BIOMD0000000230) — ship vendored under
-``demos/models/sbml/``; a missing file falls back to the BioModels id and
-downloads on first import.
+Constituents — DallePezze 2014 (BIOMD0000000582) and Geva-Zatorsky 2006
+(BIOMD0000000157) — ship vendored under ``demos/models/sbml/``; a missing file
+falls back to the BioModels id and downloads on first import.
+
+Altered Intercellular Communication has no module. Ihekwaba 2004 was removed on
+2026-08-31: refereed three ways, it contributed nothing (19/24 with both its
+edges ablated), the edges supplied 100% of its IKK rather than perturbing it,
+and its only NF-κB-inducible transcript was its own inhibitor — so it could not
+emit the SASP effectors the data actually moves (CCL2 +3.05, CXCL1 +2.68,
+IL6 +1.73 log2FC at D14). See docs/review-ihekwaba2004-wetlab.md.
 
 Cross-publication edges:
 
@@ -22,12 +27,6 @@ Cross-publication edges:
   parameter set is the damaged end of this edge and the range carries no free
   strength. ``psi`` is the paper's ξ, a production-noise gain, and is not a
   damage variable; it stays at its published 1.0.
-- **IKKβ → IKK**: DP14's IKKβ is the same kinase (IKBKB) as Ihekwaba's
-  signalosome pool, and activating NF-κB is its defining role (Karin &
-  Ben-Neriah 2000). Genomic Instability reaches it because IKKβ is
-  ROS-activated inside DP14, not through a phenomenological damage→IKK gate.
-- **mTORC1 → IKK**: the nutrient-sensing / rapamycin channel (Dan 2008,
-  Laberge 2015), distinct from the ROS→IKKβ path above.
 
 Conditions and drugs both enter through the hallmark layer::
 
@@ -44,9 +43,8 @@ to 1 (DallePezze's published irradiation dose) on its damage rate.
 
 Gene reporters (see :mod:`hallsim.gene_reporters`): CDKN1A → ``dp14/CDKN1A``,
 GLB1 → ``dp14/SA_beta_gal``, BNIP3 → ``dp14/FoxO3a``, DDB2 → ``gz06/x``
-(RMS amplitude), MDM2 → ``gz06/y0``, and NFKBIA → ``nfkb/IkBat`` — the IκBα
-*transcript*, which rises with NF-κB activity, not the cytoplasmic protein,
-which moves inversely to it.
+(RMS amplitude), and MDM2 → ``gz06/y0`` — the Mdm2 *precursor*, which GZ06's
+Table I defines as the transcript, not the protein ``y``.
 
 ``test_gene_reporters.py`` checks this list against
 ``MULTI_HALLMARK_REPORTERS``, so it fails rather than drifts.
@@ -72,10 +70,6 @@ DP14_SBML_PATH = sbml_source(
 GZ06_SBML_PATH = sbml_source(
     "zatorsky2006", "zatorsky2006_BIOMD0000000157.xml", "BIOMD0000000157"
 )
-NFKB_SBML_PATH = sbml_source(
-    "ihekwaba2004", "ihekwaba2004_BIOMD0000000230.xml", "BIOMD0000000230"
-)
-
 # SBML defaults, named at module level so hallsim.hallmarks can target the
 # same constants. DallePezze 2014 supplementary Table S2.
 DP14_MTOR_PHOS_RATE_DEFAULT = 162.471039450073
@@ -139,27 +133,23 @@ GZ06_DAMAGE_GATE = place_hill_gate_for_crossing(
 GZ06_DAMAGE_DRIVE_K = GZ06_DAMAGE_GATE.K
 
 # One t_span unit = one day, matching GSE248823's D00–D14 course. DP14 is
-# natively in days and runs unchanged; GZ06 (hours) and NFKB (seconds) are
-# rescaled onto this axis by reconciled_to, and settle to their cycle-average
-# on it — which is what per-day bulk transcriptomics samples.
+# natively in days and runs unchanged; GZ06 (hours) is rescaled onto this axis
+# by reconciled_to, and settles to its cycle-average on it — which is what
+# per-day bulk transcriptomics samples.
 CANONICAL_TIME_SECONDS = 86400.0
 
 
 def build_multi_hallmark_composite(
     *, validate: bool = True, dose_window=DDIS_ETOPOSIDE_DOSE_WINDOW
 ):
-    """Compose DP14 + GZ06 + Ihekwaba into one composite, namespaced
-    ``dp14/``, ``gz06/`` and ``nfkb/``; apply hallmarks for the treated and
-    control variants.
+    """Compose DP14 + GZ06 into one composite, namespaced ``dp14/`` and
+    ``gz06/``; apply hallmarks for the treated and control variants.
 
     ``dose_window`` is the ``(t_start, t_end)`` damage pulse; ``None`` holds
     ``Irradiation`` at its severity for the whole run instead of washing out.
     ``validate`` covers topology only — semantic validation is configured per
     sub-composite and at the merge.
     """
-    nfkb = process_from_sbml(str(NFKB_SBML_PATH), name="nfkb").reconciled_to(
-        CANONICAL_TIME_SECONDS
-    )
     gz06 = (
         process_from_sbml(
             str(GZ06_SBML_PATH),
@@ -182,7 +172,6 @@ def build_multi_hallmark_composite(
     ).reconciled_to(CANONICAL_TIME_SECONDS)
     processes: dict = {
         "dp14": dp14,
-        "nfkb": nfkb,
         "gz06": gz06,
         "damage_bridge": HillSignalEdge(
             timescale=gz06.timescale,
@@ -195,41 +184,6 @@ def build_multi_hallmark_composite(
             hallmark="Genomic Instability",
             reference="Banin et al. 1998, Science 281:1674–1677",
             description="DNA damage ⊣ p53 degradation (GZ06 alpha_x).",
-        ),
-        # K=4.0 is the DP14 mTORC1 midpoint across the rapa→DDIS band;
-        # k_act is the host IKK scale, as for ikkbeta_nfkb
-        # (docs/coupling-edge-priors.md).
-        "mtor_nfkb": HillActivationEdge(
-            timescale=nfkb.timescale,
-            k_act=0.1,
-            K=(4.0,),
-            n=(2.0,),
-            target_default=0.1,
-            target_ontology={"go": "GO:0008384"},
-            target_description="Ihekwaba IKK, receives mTORC1 activation",
-            source_ontology=({"go": "GO:0031931"},),
-            source_descriptions=("DP14 active mTORC1 (pS2448)",),
-            hallmark="Deregulated Nutrient Sensing",
-            reference="Dan et al. 2008; Laberge et al. 2015",
-            description="mTORC1 → IKK edge (DallePezze 2014 → Ihekwaba 2004).",
-        ),
-        # IKKβ's homeostatic band is narrow (ctrl 11.9 → DDIS 16.5), so K=25/n=4
-        # sits in its low-occupancy foot: near-silent at baseline (H≈0.05) and
-        # super-linear at DDIS (H≈0.16). A gate centred in the band (K≈14)
-        # leaves NF-κB half-driven at rest and blocks equilibration.
-        "ikkbeta_nfkb": HillActivationEdge(
-            timescale=nfkb.timescale,
-            k_act=0.1,
-            K=(25.0,),
-            n=(4.0,),
-            target_default=0.1,
-            target_ontology={"go": "GO:0008384"},
-            target_description="DP14 IKKβ activity summed into the NF-κB IKK pool",
-            source_ontology=({"uniprot": "O14920"},),
-            source_descriptions=("DP14 active IKKβ",),
-            hallmark="Genomic Instability",
-            reference="Karin & Ben-Neriah 2000",
-            description="IKKβ → IKK edge (DallePezze 2014 → Ihekwaba 2004).",
         ),
         # Oscillating reporters read their raw species and summarize post-hoc,
         # so no integral observer accumulates, lags, or stiffens the solve.
@@ -258,14 +212,6 @@ def build_multi_hallmark_composite(
             "signal": "gz06/alpha_x_signal",
         },
         "gz06": {"alpha_x_in": "gz06/alpha_x_signal"},
-        "mtor_nfkb": {
-            "source": "dp14/mTORC1_pS2448",
-            "target": "nfkb/IKK",
-        },
-        "ikkbeta_nfkb": {
-            "source": "dp14/IKKbeta",
-            "target": "nfkb/IKK",
-        },
         # p53 → CDKN1A: read GZ06 p53, add transcription flux to DP14's p21.
         "p53_cdkn1a": {"source": "gz06/x", "target": "dp14/CDKN1A"},
     }

@@ -1207,6 +1207,46 @@ class TestSchedulerMultiRate:
         assert result.get("pool/y")[-1] > 0.0
 
 
+class TestSpanIsCoveredWhenMacroDtDoesNotDivideIt:
+    """A span that is not a whole number of macro steps must still be run to
+    its end. The multi-group scan is fixed-length, so the window count has to
+    reach t1 rather than land on the nearest multiple."""
+
+    def _composite(self):
+        return Composite(
+            processes={
+                "fast": ConstantProduction(rate=1.0, timescale=1.0),
+                "slow": SlowGrowth(timescale=1000.0),
+            },
+            topology={"fast": {"x": "pool/x"}, "slow": {"y": "pool/y"}},
+        )
+
+    @pytest.mark.parametrize(
+        "t_span,macro_dt",
+        [
+            ((-1.0, 14.0), 3.5),  # the multi-hallmark demo's own configuration
+            ((0.0, 15.0), 3.5),
+            ((0.0, 10.0), 3.0),
+            ((0.0, 10.0), 2.0),  # divides exactly: must not gain a window
+        ],
+    )
+    def test_reaches_the_requested_end(self, t_span, macro_dt):
+        res = Scheduler().run(
+            self._composite(), t_span=t_span, macro_dt=macro_dt
+        )
+        assert float(res.ts[-1]) == pytest.approx(t_span[1], abs=1e-9)
+
+    def test_the_value_is_integrated_not_just_labelled(self):
+        """x grows at rate 1, so x(t1) reports the span actually integrated —
+        a truncated run lands short even if its last timestamp says t1."""
+        t_span, macro_dt = (-1.0, 14.0), 3.5
+        res = Scheduler().run(
+            self._composite(), t_span=t_span, macro_dt=macro_dt
+        )
+        span = t_span[1] - t_span[0]
+        assert float(res.get("pool/x")[-1]) == pytest.approx(span, abs=1e-6)
+
+
 class TestSchedulerFullIntegration:
     def test_continuous_discrete_event_together(self):
         """Full integration: continuous + discrete + event in one composite."""

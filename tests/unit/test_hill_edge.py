@@ -1,5 +1,7 @@
-"""Tests for HillActivationEdge and its wiring into the multi-hallmark
-composite (the mTORC1→IKK, DNA-damage→IKK, and p53→CDKN1A edges)."""
+"""Tests for the Hill coupling edges: port contract, gate arithmetic, gate
+enumeration, and placing a gate so its signal crosses a downstream critical
+value. Every case runs on a toy composite — what a *demo* happens to be wired
+to is not a property of the framework."""
 
 import jax
 import jax.numpy as jnp
@@ -72,31 +74,6 @@ class TestHillActivationEdge:
 
 @pytest.mark.demo
 @pytest.mark.network
-class TestMultiHallmarkWiring:
-    # Builds the full composite (downloads DP14/GZ06/Ihekwaba SBML on a
-    # clean checkout); deselected from `make test` via `-m "not network"`.
-    def test_edges_present_and_wired_generically(self):
-        from demos.models.multi_hallmark import (
-            build_multi_hallmark_composite,
-        )
-
-        comp = build_multi_hallmark_composite()
-        for name in ("mtor_nfkb", "ikkbeta_nfkb", "p53_cdkn1a"):
-            assert isinstance(comp.processes[name], HillActivationEdge), name
-        assert comp.topology["ikkbeta_nfkb"]["target"] == "nfkb/IKK"
-        assert comp.topology["p53_cdkn1a"]["target"] == "dp14/CDKN1A"
-
-    def test_ikk_receives_additive_contribution(self):
-        from demos.models.multi_hallmark import (
-            build_multi_hallmark_composite,
-        )
-
-        comp = build_multi_hallmark_composite(validate=False)
-        rhs, keys = comp.build_rhs()
-        dy = rhs(0.0, comp.initial_state_vec(), None)
-        assert jnp.isfinite(dy[keys.index("nfkb/IKK")])
-
-
 class TestGateEnumerationAndRange:
     """A gate placed outside its driver's realised range is dead or saturated,
     and both look like a weak coupling."""
