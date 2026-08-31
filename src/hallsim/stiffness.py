@@ -127,8 +127,8 @@ def _concrete(value):
         jax.errors.ConcretizationTypeError,
     ) as exc:  # pragma: no cover - defensive
         raise StiffnessNotConcrete(
-            "stiffness analysis needs a concrete Jacobian but got JAX "
-            "tracers — run it eagerly, outside grad/jvp/vmap."
+            "stiffness analysis needs concrete values but got JAX tracers — "
+            "call Scheduler.warm_up(y0) once eagerly before differentiating."
         ) from exc
 
 
@@ -277,7 +277,7 @@ def analyze_groups(
 
     out: dict[str, GroupStiffness] = {}
     for gname, proc_names in groups.items():
-        idxs = np.asarray(composite.evolved_indices(proc_names, keys))
+        idxs = _concrete(composite.evolved_indices(proc_names, keys))
         if idxs.size == 0:
             out[gname] = GroupStiffness(
                 name=gname,

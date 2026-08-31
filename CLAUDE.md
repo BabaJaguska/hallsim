@@ -72,6 +72,8 @@ These decide whether the framework is fast. Violating one is a performance bug, 
 
 **Structure is static; values are traced.** A Process field that is a name, index map, or port default must be `eqx.field(static=True)`. A field that is a fitted parameter must be a traced array — `Process.__check_init__` coerces floats to arrays so a value change is data, not a recompile. Get this backwards and either `ports_schema()` breaks under trace, or every parameter value recompiles.
 
+**A dimension you sweep belongs in a traced array, never in the topology.** Topology is static, so wiring a process to the thing being varied — the perturbed gene, the dosed species, the genotype — makes every arm a fresh treedef and a fresh compile. Give one process the whole panel and select with a traced vector instead; the topology is then identical across arms and `vmap` maps over them. Measured: 0 recompiles after the first arm, against one compile each.
+
 **Tracing is not compilation.** The XLA compile cache is keyed *on the trace*, so an unjitted function reuses the compiled executable but must re-trace to look it up. "0 recompiles" is necessary, not sufficient — a re-traced `lax.scan` of N `diffeqsolve` bodies costs hundreds of ms per call with zero recompiles. Measure trace cost, not just `jax.log_compiles`.
 
 **`_FlatRHS` is an `eqx.Module`, not a closure.** A closure inside `ODETerm` is a static leaf: a fresh one per `build_rhs` hashes differently and every solve misses the cache.

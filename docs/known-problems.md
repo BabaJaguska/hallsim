@@ -578,6 +578,28 @@ The framework returns a plausible number and nothing indicates it is wrong.
   survives intact and still bounds the result: the admissible K window is
   5.53–7.00, so the control arm sits only 12% clear of the Hopf.
 
+- [x] **P0.22 — A cold stiffness cache under `jit`/`grad`/`vmap` crashed with a
+  numpy message instead of degrading.** Found 2026-08-30 taking a gradient
+  through a perturbation sweep — the first time `Scheduler.run` was called
+  inside a transform with an unresolved cache. `stiffness.py:280` did
+  `np.asarray(composite.evolved_indices(...))`, and under a transform those
+  indices arrive traced, so it raised
+  `TracerArrayConversionError: The numpy.ndarray conversion method __array__()
+  was called on traced array with shape int32[200]` — uncaught, because it is a
+  `TypeError` and the scheduler catches `StiffnessNotConcrete`. The degradation
+  path that P0.19 established existed but was unreachable: the raise happens one
+  site *earlier* than `_restricted_jacobian`, which is where P0.19 put the
+  named exception.
+  *Fixed 2026-08-30:* that conversion goes through `_concrete`, so it raises
+  `StiffnessNotConcrete` and the scheduler degrades as designed. The shared
+  message now names the remedy (`call Scheduler.warm_up(y0) once eagerly before
+  differentiating`) rather than describing a Jacobian, since it covers both
+  sites.
+  **What it cost, measured on the same sweep:** degraded (all groups
+  `Kvaerno5`) 571.5 ms/arm; after an eager `warm_up` resolving to `Tsit5`,
+  **22.5 ms/arm — 19x.** That is the practical price of P0.1's open half, on a
+  real workload rather than the demo.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -843,8 +865,26 @@ The check that would catch a mistake does not exist, does not run, or fails open
 - [ ] **P3.5 — No quasi-steady-state / DAE facility.**
 - [ ] **P3.6 — No stochastic support.** Batched `y0` pushes a distribution
   through one deterministic flow onto one attractor; that is not a population.
-- [ ] **P3.7 — No batched parameter sweeps.** Severity varies the pytree, not
+- [~] **P3.7 — No batched parameter sweeps.** Severity varies the pytree, not
   the state, so a sweep is a Python loop.
+  **Re-scoped 2026-08-30 — this is a convenience, not a blocker, and the
+  headline cost was a modelling error.** The "~3.6 s rebuild+recompile per
+  perturbation, ~2.5 h across 2,500 CRISPRi arms" figure was measured with
+  P0.17 live *and* with the swept dimension encoded in the **topology** (a
+  `ClampEdge` wired to the knocked-down gene). Topology is static, so each arm
+  was a new treedef. Encode the arm as data instead — one clamp over the whole
+  panel with traced `(N,)` strength and setpoint vectors, zero except at the
+  perturbed gene — and the topology is identical across arms. Measured
+  (`scratch/2026-08-30_vcc-perturbation-axis/`), 16 arms, CPU: **0 recompiles
+  after the first arm**, and `vmap` over arms warm at **2.1 ms/arm (N=200)** and
+  **7.8 ms/arm (N=1,000)**. A 300-arm sweep projects to 0.6 s + 4 s compile at
+  N=200 and 2.3 s + 20 s compile at N=1,000. `vmap` over a traced parameter
+  already does the job; a `param_batch` argument would only spare the user
+  writing it.
+  *What is actually missing is guidance:* nothing in the docs says that a
+  dimension varied across runs belongs in a traced array rather than the
+  topology, and the natural way to write a perturbation puts it in the topology.
+  That is the defect worth fixing here.
 - [ ] **P3.8 — No observable layer.** Nothing carries assay, unit, normaliser
   or transducer, so a millivolt is compared to a ratiometric dye reading.
 - [ ] **P3.9 — No uncertainty.** Outputs are lines; a lab needs bands. Options,
