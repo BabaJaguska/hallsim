@@ -90,11 +90,13 @@ problem = CalibrationProblem(
                          14.0: ds.delta("RAPA_D14", "ETOP_D00")},
     },
     params={
+        # No starting value: the fit begins at the composite's own value for
+        # the field, so there is nowhere to declare one that could disagree.
         "CDKN1A_transcr": ParameterRef(
             "dp14", "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
-            init=0.085, clamp=(0.001, 5.0), prior=0.085, prior_sigma=0.5),
+            clamp=(0.001, 5.0), prior=0.085, prior_sigma=0.5),
         "alpha_y": ParameterRef(
-            "gz06", "parameters.alpha_y", init=0.8, clamp=(0.01, 10.0),
+            "gz06", "parameters.alpha_y", clamp=(0.01, 10.0),
             prior=0.8, prior_sigma=0.5),
     },
     fit_arms=["DDIS_vs_ctrl"],       # in the loss
@@ -114,6 +116,40 @@ results = problem.evaluate(history.final_params)
 - **Parameter discovery is self-documenting** via `calibration_targets()`.
 - **Held-out splits are mandatory** — calibrate on one arm, report concordance
   on another. Same-data fit-and-evaluate is curve-fitting, not concordance.
+- **Hill gates are checked where they are declared** — see below.
+
+### Hill gate placement
+
+A coupling edge gated on `xⁿ/(Kⁿ+xⁿ)` is silent when misplaced: a `K` above
+everything its driver reaches never opens, one below the floor is always open,
+and both read downstream as a weak coupling rather than as an error.
+`CalibrationProblem.__init__` therefore runs `check_hill_gates()` — it compares
+every gate `Composite.hill_gates()` finds against the range its driver reaches,
+warns when `K` is outside, and reports the replacement:
+
+```
+Hill gate psi_bridge.K = 52 on 'dp14/DNA_damage' is above everything its driver
+reaches ([1, 27.18] across conditions), so the edge is dead. K=10.79 would open
+it, but needs n=19 (>8); the driver's low and high levels differ by only
+r=1.26, too little for a Hill gate to resolve at any plausible cooperativity
+```
+
+`n` is the required cooperativity, and it is a pure function of the separation
+ratio `r` between the driver's low and high levels:
+`n = ln((1−p)/p) / (½·ln r)` for an off-occupancy `p` (default 0.1). It reads as
+a difficulty score — real cooperativity tops out near 4, and `n_max` is 8, so a
+large `n` says the driver does not separate its own regimes and no gate on it
+will switch.
+
+The check needs a trajectory, hence a horizon, which is why it lives on the
+calibration problem rather than on `Composite` — the problem has a horizon
+because its data was measured at particular times. It costs one condition-set
+solve, and `hill_gates()` is structural, so a composite declaring no gate pays
+nothing.
+
+`suggest_hill_gate(params, path, off_conditions, on_conditions)` is the same
+placement with the two levels named explicitly, for when you want the contrast
+to be a specific pair of conditions rather than the driver's own extremes.
 
 ### Changing a parameter for a run — ablations
 
@@ -173,6 +209,11 @@ unphysical rail. `ParameterRef.prior` / `prior_sigma` (log10) plus
 literature/derived value. Coupling-edge strengths, which have no direct
 literature value, are anchored to their host-module scale; see
 [coupling-edge-priors.md](coupling-edge-priors.md).
+
+The penalty is a MAP regularizer, not a calibrated log prior — `prior_weight` is
+a free multiplier and the data term is a mean, so the fit's *width* has no scale
+even though its mode does. What that costs and how to fix it:
+[uncertainty-quantification.md](uncertainty-quantification.md).
 
 ### Optimizer
 

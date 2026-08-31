@@ -11,8 +11,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import jax.numpy as jnp
-
 
 def save_outputs(
     problem,
@@ -47,7 +45,7 @@ def save_outputs(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    init = {k: jnp.asarray(p.init) for k, p in problem._all_refs.items()}
+    init = problem.initial_params()
     final = history.best_params or init
 
     # Densely-sampled trajectories at both ends of the fit.
@@ -107,7 +105,6 @@ def save_outputs(
             k: {
                 "process_name": p.process_name,
                 "field": p.field,
-                "init": p.init,
                 "clamp": list(p.clamp) if p.clamp else None,
                 "description": p.description,
             }
@@ -118,7 +115,6 @@ def save_outputs(
                 "hallmark": c.hallmark,
                 "param_name": c.param_name,
                 "coeff": c.coeff,
-                "init": c.init,
                 "clamp": list(c.clamp) if c.clamp else None,
                 "description": c.description,
             }

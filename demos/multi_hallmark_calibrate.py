@@ -39,7 +39,6 @@ import matplotlib.pyplot as plt  # noqa: E402
 from hallsim.calibration import (  # noqa: E402
     CalibrationProblem,
     Condition,
-    HallmarkCoeffRef,
     ParameterRef,
 )
 from hallsim.calibration_report import (  # noqa: E402
@@ -199,22 +198,19 @@ def build_problem(
         # Each fit param is read by ≥1 reporter and has a log-normal MAP prior.
         # See docs/coupling-edge-priors.md, docs/gz06-basal-p53.md.
         params={
-            # DNA damage per unit irradiation — DallePezze's fitted value, with
-            # a wide prior so the calibrator sets it from the damage-arm data.
-            "etoposide_potency": ParameterRef(
+            # SA-beta-gal decay: the GLB1 reporter's only lever. Its production
+            # constant is not fitted — the pair sets a level, which cancels in a
+            # fold change; the decay sets track-vs-accumulate, which does not.
+            "sa_beta_gal_decay": ParameterRef(
                 "dp14",
-                "parameters.DNA_damaged_by_irradiation",
-                init=9237.7,
-                clamp=(0.01, 20000.0),
-                prior=9237.7,
-                prior_sigma=9000.0,
+                "parameters.sen_ass_beta_gal_dec",
+                prior=0.1548,
+                prior_sigma=0.5,
             ),
             # ROS pair frozen — no ROS reporter (see diary).
             "CDKN1A_transcr": ParameterRef(
                 "dp14",
                 "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
-                init=0.085,
-                clamp=(0.001, 5.0),
                 prior=0.085,
                 prior_sigma=0.5,
             ),
@@ -223,49 +219,14 @@ def build_problem(
             "psi_basal": ParameterRef(
                 "psi_bridge",
                 "basal",
-                init=0.3,
-                clamp=(0.02, 0.95),
                 prior=0.3,
-                prior_sigma=0.5,
-            ),
-            # psi-bridge threshold: the DNA_damage level at which p53 fires.
-            # Started at the operating-point placement and fitted so the data
-            # sets it (CDKN1A pins potency; DDB2 then pins this); the wide prior
-            # lets it move, and identifiability reports if it's data-pinned.
-            "psi_K": ParameterRef(
-                "psi_bridge",
-                "K",
-                init=52.0,
-                clamp=(1.0, 5000.0),
-                prior=52.0,
-                prior_sigma=200.0,
-            ),
-            "ikkbeta_to_nfkb": ParameterRef(
-                "ikkbeta_nfkb",
-                "k_act",
-                init=0.1,
-                clamp=(1e-4, 1.0),
-                prior=0.1,
                 prior_sigma=0.5,
             ),
             "mtor_to_nfkb": ParameterRef(
                 "mtor_nfkb",
                 "k_act",
-                init=0.1,
-                clamp=(1e-4, 1.0),
                 prior=0.1,
                 prior_sigma=0.5,
-            ),
-            # At severity=-1 the drive is (1-gain)x basal; the one free
-            # parameter on this axis.
-            "dns_mtor_gain": HallmarkCoeffRef(
-                hallmark="Deregulated Nutrient Sensing",
-                param_name="after",
-                coeff="slope",
-                init=0.7,
-                clamp=(0.05, 0.95),
-                prior=0.7,
-                prior_sigma=0.3,
             ),
             # p53 → CDKN1A edge (P53CDKN1AActivator.k_act) is fixed, not fitted.
         },
@@ -868,7 +829,7 @@ def cmd_run(args) -> None:
     fig_constituents(problem, init, history.best_params, out_dir)
     # Calibrated reporter figures on the fit just written, so the time-domain
     # trajectories and concordance dumbbells never lag behind the checkpoint.
-    from multi_hallmark_figures import (
+    from demos.multi_hallmark_figures import (
         fig_concordance,
         fig_temporal,
         fig_temporal_compare,

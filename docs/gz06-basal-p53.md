@@ -79,11 +79,27 @@ Simulation vs data (etoposide DDIS vs control):
 |---|---|---|
 | mean | ~0.02 | far under (buffering) |
 | amplitude (std) | ~10+ | far over (divergence) |
-| **RMS √⟨x²⟩** | **+0.43** | close ✓ |
+| **RMS √⟨x²⟩** | ~~+0.43~~ **retracted** | see below |
+
+> **Retracted 2026-08-30.** The +0.43 was produced at an etoposide potency of
+> 9237.72, a **593× overdose**: the exposure-corrected value is 15.5887, and a
+> `freeze=` list meant the declared `init` never reached the composite. Two
+> reviewers reproduced +0.43 only under that overdose (+0.42224, +0.4267);
+> under the shipped bridge at the correct dose it is **+1.6e-4**. The
+> duplication that caused it is gone — `ParameterRef.init` is deleted and
+> starting values are read from the model (2026-08-30 diary entry).
+>
+> RMS was never the load-bearing quantity anyway. `psi_bridge` was gated at
+> `K = 52` against a driver reaching 27.18, so ψ never crossed the p53 Hopf
+> (ψ_H = 0.685416) and `gz06/x` did not oscillate at all — the RMS of a
+> constant is that constant. With `K = 10.79` (P0.18) the limit cycle appears
+> in the damaged conditions and DDB2's out-of-the-box log2FC is **+0.163 at
+> day 7** against a measured +0.202, at the correct dose and with no fitting.
 
 Biologically RMS is defensible: a p53 target integrates pulsatile p53
 weighted toward peaks (⟨x²⟩ weights high-p53 excursions), which is how
-pulse dynamics drive target-gene programs (Purvis 2012).
+pulse dynamics drive target-gene programs (Purvis 2012). That argument stands
+on its own; the number above never supported it.
 
 ## psi_basal and its prior
 

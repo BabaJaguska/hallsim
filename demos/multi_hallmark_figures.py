@@ -343,7 +343,7 @@ def fig_trajectories(args):
 
 # ── reporter-levels ──────────────────────────────────────────────────────
 def fig_reporter_levels(args):
-    from multi_hallmark_calibrate import build_problem
+    from demos.multi_hallmark_calibrate import build_problem
 
     conds = {
         "ctrl": ("control", "#9a9a95"),
@@ -439,7 +439,7 @@ def fig_concordance(args):
     conditions.
     """
     from matplotlib.lines import Line2D
-    from multi_hallmark_calibrate import build_problem, _rows_by_gene
+    from demos.multi_hallmark_calibrate import build_problem, _rows_by_gene
 
     C_DATA, C_MODEL, INK, DIM, BAND = (
         "#2563eb",
@@ -590,7 +590,10 @@ def fig_concordance(args):
 
 # ── temporal (oob → calibrated log2FC vs data) ───────────────────────────
 def fig_temporal(args):
-    from multi_hallmark_calibrate import build_problem, _annotate_interventions
+    from demos.multi_hallmark_calibrate import (
+        build_problem,
+        _annotate_interventions,
+    )
 
     C_OOB, C_FIT, C_DATA, grid_c = "#9a9a95", "#2a78d6", "#0b0b0b", "#e6e6e2"
     arms = {
@@ -704,7 +707,10 @@ def fig_temporal_compare(args):
     """One panel per reporter overlaying the calibrated DDIS (etoposide) and
     RAPA (etoposide + rapamycin @ day 2) trajectories, with each arm's measured
     points. Directly visualizes the held-out rapamycin effect per reporter."""
-    from multi_hallmark_calibrate import build_problem, _annotate_interventions
+    from demos.multi_hallmark_calibrate import (
+        build_problem,
+        _annotate_interventions,
+    )
 
     arms = {
         "DDIS_vs_ctrl": ("DDIS", "#c0392b"),
@@ -815,7 +821,7 @@ def fig_before_after(args):
     actually calibrated. Constituent BEFORE ≈ composite AFTER means the
     coupling only adds the intended edges.
     """
-    from multi_hallmark_calibrate import build_problem
+    from demos.multi_hallmark_calibrate import build_problem
     from hallsim.sbml_import import process_from_sbml
     from demos.models.multi_hallmark import (
         CANONICAL_TIME_SECONDS,

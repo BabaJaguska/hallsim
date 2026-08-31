@@ -95,3 +95,45 @@ class TestMultiHallmarkWiring:
         rhs, keys = comp.build_rhs()
         dy = rhs(0.0, comp.initial_state_vec(), None)
         assert jnp.isfinite(dy[keys.index("nfkb/IKK")])
+
+
+class TestGateEnumerationAndRange:
+    """A gate placed outside its driver's realised range is dead or saturated,
+    and both look like a weak coupling."""
+
+    def _composite(self, K):
+        from hallsim.composite import Composite
+        from hallsim.models.hill_edge import HillActivationEdge
+        from hallsim.process import Port, PortRole, Process
+
+        class Source(Process):
+            rate: float = 1.0
+
+            def ports_schema(self):
+                return {"s": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"s": self.rate}
+
+        return Composite(
+            processes={
+                "src": Source(),
+                "gate": HillActivationEdge(
+                    k_act=0.1, K=(K,), n=(2.0,), target_default=0.0
+                ),
+            },
+            topology={
+                "src": {"s": "pool/s"},
+                "gate": {"source": "pool/s", "target": "pool/t"},
+            },
+            validate=False,
+            semantic_validation=False,
+        )
+
+    def test_enumerates_gates_without_a_solve(self):
+        gates = self._composite(5.0).hill_gates()
+        assert gates == {"gate": (["pool/s"], (5.0,))}
+
+    def test_a_process_without_K_is_not_a_gate(self):
+        comp = self._composite(5.0)
+        assert "src" not in comp.hill_gates()

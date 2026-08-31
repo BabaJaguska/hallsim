@@ -732,6 +732,36 @@ class Composite(eqx.Module):
                 placed.add(g)
         return {g: groups[g] for g in ordered}
 
+    def hill_gates(self) -> dict:
+        """``{process_name: ([source_path, ...], (K, ...))}`` for every
+        Hill-gated coupling edge — a process carrying a ``K`` whose INPUT ports
+        are wired to store paths.
+
+        Structure only, no solve. A gate placed outside the range its driver
+        actually reaches is dead (above) or saturated (below), and both look
+        like a weak coupling;
+        :meth:`hallsim.calibration.CalibrationProblem.check_hill_gates`
+        compares these against the measured operating range.
+        """
+        import numpy as np
+
+        out: dict = {}
+        for name, proc in self.processes.items():
+            K = getattr(proc, "K", None)
+            if K is None:
+                continue
+            wiring = self.topology.get(name, {})
+            ports = [
+                p
+                for p, port in proc.ports_schema().items()
+                if port.role == PortRole.INPUT and p in wiring
+            ]
+            if not ports:
+                continue
+            ks = tuple(float(k) for k in np.atleast_1d(np.asarray(K)))
+            out[name] = ([wiring[p] for p in ports], ks)
+        return out
+
     def calibration_targets(
         self,
         *,

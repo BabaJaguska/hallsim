@@ -17,6 +17,30 @@ analysis behind the Scheduler items.
 * [ ] IFT-based adjoint at sync boundaries (for gradient-based optimization)
 * [ ] IMEX (implicit-explicit) solver for stiff multi-scale systems
 
+## Calibration & Uncertainty
+
+Rationale, measured costs and what each step buys:
+[uncertainty-quantification.md](uncertainty-quantification.md). In order — each
+step is the prerequisite for the next.
+
+* [ ] **Make the loss a proper log density.** `gaussian_nll` means over entries
+  and drops the ½, `data_loss` means again over arms, `prior_weight` is a free
+  multiplier. The MAP is unaffected; every reported *width* is scaled by an
+  unknown factor. Needs a residual σ — real precision weights where the data has
+  them, else σ̂ from the MAP residuals.
+* [ ] **Laplace / delta-method bands** — `(JᵀJ/σ̂² + Π_prior)⁻¹` off the Jacobian
+  `identifiability.py` already builds, and `sqrt(diag(J Σ Jᵀ))` on any
+  prediction. Closes P3.9 for the common case at the cost of one Jacobian
+  (~41 s on the multi-hallmark demo, one fit step). Also fixes the same module's
+  σ=1 covariance and its missing prior-precision term.
+* [ ] **Profile likelihood** (Raue 2009) — the nonlinear check on the ellipse,
+  and the way to report a fit above `MAX_FIT_CONDITION_NUMBER` instead of
+  refusing it. Batched over the profile grid; unverified whether the
+  equilibration Newton solve survives `vmap` over the parameter axis.
+* [ ] **NUTS on a single constituent** (blackjax; DP14 against its deposited fit)
+  to measure how wrong the Laplace ellipse is on a real posterior. Not on a
+  composite — one gradient is 26 s there, so a chain is ~40 days.
+
 ## Models & Validation
 
 * [ ] **Lipid-metabolism extension** — Tighanimine et al. 2024 (*Nat Metab*, the paper behind GSE248823) identified a G3P/PEtn homeostatic switch as *causal* for senescence (p53 → glycerol kinase activation drives G3P↑; PCYT2 post-translational inactivation drives PEtn↑; lipid droplet biogenesis is the downstream effect). Adding a `LipidMetabolism` Process (states: G3P, PEtn; inputs: `p53_activity`, a PCYT2-PTM proxy; outputs: a senescence-amplifying signal that feeds back into the SASP axis) would let HallSim test their causal claim *in silico* — and the GSE248824 SuperSeries includes the paired metabolomics needed to validate it. HallSim recapitulates the G3P/PEtn → senescence amplification loop and predicts G3PP/ETNPPL overexpression as senomorphic.

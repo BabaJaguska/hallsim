@@ -112,7 +112,7 @@ def _toy_problem():
         arm_pairs={"hi_vs_ctrl": ("hi", "ctrl")},
         params={
             "rate": ParameterRef(
-                process_name="decay", field="rate", init=0.2, clamp=(1e-3, 5.0)
+                process_name="decay", field="rate", clamp=(1e-3, 5.0)
             )
         },
         fit_arms=["hi_vs_ctrl"],

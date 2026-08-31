@@ -55,8 +55,8 @@ def calibratable(
         K_mtor: float = 4.0  # measurement-grounded — stays fixed
 
     Marked fields surface through :meth:`Composite.calibration_targets`; plain
-    defaults stay out of the calibration surface. ``clamp`` defaults to two
-    orders of magnitude around the current value.
+    defaults stay out of the calibration surface. Set ``clamp`` only for a real
+    bound — a fit runs in log space, so positivity needs no rail.
     """
     return eqx.field(
         default=default,
@@ -339,7 +339,7 @@ class Process(eqx.Module):
         constants dict) extend this. Safe to expose a hallmark target too:
         :meth:`Composite.calibration_targets` subtracts those.
         """
-        from hallsim.calibration import CalibratableParam, default_clamp
+        from hallsim.calibration import CalibratableParam
 
         out: list = []
         for f in dataclasses.fields(self):
@@ -351,7 +351,7 @@ class Process(eqx.Module):
                     process_name="",
                     field=f.name,
                     default=value,
-                    clamp=f.metadata.get("clamp") or default_clamp(value),
+                    clamp=f.metadata.get("clamp"),
                     description=f.metadata.get("description", ""),
                 )
             )

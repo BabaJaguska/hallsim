@@ -27,6 +27,7 @@ import jax.numpy as jnp
 
 from hallsim.kinetics import hill_gate
 from hallsim.process import Port, PortRole, Process, calibratable
+from hallsim.tracing import is_traced
 
 
 class HillActivationEdge(Process):
@@ -113,6 +114,17 @@ class HillSignalEdge(Process):
     reference: str | None = eqx.field(static=True, default=None)
     description: str | None = eqx.field(static=True, default=None)
 
+    def __check_init__(self):
+        super().__check_init__()
+        if not is_traced(self.basal, self.hi) and float(self.basal) >= float(
+            self.hi
+        ):
+            raise ValueError(
+                f"{type(self).__name__}: basal={float(self.basal):g} must be "
+                f"below hi={float(self.hi):g}; the edge interpolates upward "
+                "from the floor."
+            )
+
     def ports_schema(self):
         return {
             "signal": Port(
@@ -194,7 +206,7 @@ def place_hill_gate(
             _occ(on, K, 2.0),
             False,
             f"off ({off:.3g}) >= on ({on:.3g}): operating ranges overlap — "
-            "no monotone Hill gate separates the arms at these parameters",
+            "no monotone Hill gate separates these levels",
         )
     r = on / off
     need = math.log((1.0 - off_occupancy) / off_occupancy) / (
@@ -205,8 +217,9 @@ def place_hill_gate(
     note = (
         "ok"
         if ok
-        else f"needs n={n:.0f} (>{n_max:.0f}); off/on separation r={r:.2f} "
-        "is too small for a clean gate — the driver barely distinguishes the arms"
+        else f"needs n={n:.0f} (>{n_max:.0f}); the driver's low and high "
+        f"levels differ by only r={r:.2f}, too little for a Hill gate to "
+        "resolve at any plausible cooperativity"
     )
     return HillGateSuggestion(
         K, float(n), off, on, _occ(off, K, n), _occ(on, K, n), ok, note

@@ -136,7 +136,7 @@ class ImportedODEProcess(Process):
         Exposing all of them is safe —
         :meth:`Composite.calibration_targets` filters hallmark-controlled
         knobs."""
-        from hallsim.calibration import CalibratableParam, default_clamp
+        from hallsim.calibration import CalibratableParam
 
         out = super().calibratable_params()
         for name, value in self.parameters.items():
@@ -146,7 +146,7 @@ class ImportedODEProcess(Process):
                     process_name="",
                     field=f"parameters.{name}",
                     default=v,
-                    clamp=default_clamp(v),
+                    clamp=None,
                     description=f"{self._param_label} {name!r} on {self._name}",
                 )
             )

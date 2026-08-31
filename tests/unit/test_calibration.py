@@ -203,7 +203,7 @@ class TestCalibrationProblemValidation:
         arm_pairs = {"DDIS_vs_ctrl": ("DDIS", "ctrl")}
         data = {"DDIS_vs_ctrl": pd.Series({"GENE_X": -0.5})}
         params = {
-            "rate": ParameterRef(process_name="decay", field="rate", init=0.1),
+            "rate": ParameterRef(process_name="decay", field="rate"),
         }
         return comp, reporters, conditions, data, arm_pairs, params
 
@@ -292,9 +292,7 @@ class TestCalibrationProblemValidation:
                 data={"a_vs_a": pd.Series({"GX": 0.0})},
                 arm_pairs={"a_vs_a": ("a", "a")},
                 params={
-                    "dial": ParameterRef(
-                        process_name="k", field="knob", init=1.0
-                    ),
+                    "dial": ParameterRef(process_name="k", field="knob"),
                 },
                 fit_arms=["a_vs_a"],
                 hallmark_registry=custom_reg,
@@ -353,9 +351,7 @@ class TestCalibrationProblemValidation:
             data={"a_vs_a": pd.Series({"GX": 0.0})},
             arm_pairs={"a_vs_a": ("a", "a")},
             params={
-                "magnitude": ParameterRef(
-                    process_name="k", field="knob", init=1.0
-                ),
+                "magnitude": ParameterRef(process_name="k", field="knob"),
             },
             fit_arms=["a_vs_a"],
             hallmark_registry=custom_reg,
@@ -379,7 +375,6 @@ class TestCalibrationProblemValidation:
                     "bad": ParameterRef(
                         process_name="nonexistent",
                         field="rate",
-                        init=0.1,
                     ),
                 },
                 fit_arms=[],
@@ -447,7 +442,6 @@ class TestCalibrationProblemEndToEnd:
                 "rate": ParameterRef(
                     process_name="decay",
                     field="rate",
-                    init=0.2,
                     clamp=(0.001, 5.0),
                 ),
             },
@@ -531,9 +525,7 @@ class TestCalibrationProblemEndToEnd:
             },
             arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
             params={
-                "rate": ParameterRef(
-                    process_name="decay", field="rate", init=0.2
-                ),
+                "rate": ParameterRef(process_name="decay", field="rate"),
             },
             fit_arms=["high_vs_ctrl"],
             t_end=5.0,
@@ -592,11 +584,7 @@ class TestParameterOverrides:
             },
             data={"high_vs_ctrl": pd.Series({"GENE_X": -0.5})},
             arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
-            params={
-                "rate": ParameterRef(
-                    process_name="decay", field="rate", init=0.2
-                )
-            },
+            params={"rate": ParameterRef(process_name="decay", field="rate")},
             fit_arms=["high_vs_ctrl"],
             t_end=5.0,
             macro_dt=1.0,
@@ -734,11 +722,7 @@ class TestNormalizationModes:
             },
             data={"high_vs_ctrl": {5.0: pd.Series({"GENE_X": -0.5})}},
             arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
-            params={
-                "rate": ParameterRef(
-                    process_name="decay", field="rate", init=0.2
-                )
-            },
+            params={"rate": ParameterRef(process_name="decay", field="rate")},
             fit_arms=["high_vs_ctrl"],
             normalization=normalization,
             t_end=5.0,
@@ -832,7 +816,7 @@ class TestEquilibrationBaselineMatchesReadout:
             conditions=conditions,
             data=data,
             arm_pairs={"DDIS_vs_ctrl": ("DDIS", "ctrl")},
-            params={"k": ParameterRef(process_name="sp", field="k", init=1.0)},
+            params={"k": ParameterRef(process_name="sp", field="k")},
             fit_arms=["DDIS_vs_ctrl"],
             normalization="baseline",
             equilibrate=True,
@@ -904,7 +888,6 @@ class TestPriorStrength:
                 "knob": ParameterRef(
                     process_name="k",
                     field="knob",
-                    init=1.0,
                     clamp=clamp,
                     prior=1.0,
                     prior_sigma=sigma,
@@ -926,3 +909,71 @@ class TestPriorStrength:
         assert not report[0]["operative"]
         assert report[0]["max_penalty"] < 1e-6
         assert any("log10 decades" in r.message for r in caplog.records)
+
+
+class TestStartingValueComesFromTheModel:
+    """A fitted parameter starts at the composite's own value, always, so a
+    declaration cannot contradict the model."""
+
+    def _problem(self, rate):
+        import pandas as pd
+
+        from hallsim.calibration import (
+            CalibrationProblem,
+            Condition,
+            ParameterRef,
+        )
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter
+        from hallsim.process import Port, PortRole, Process
+
+        class Decay(Process):
+            rate: float = 0.1
+
+            def ports_schema(self):
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=1.0, units="uM")
+                }
+
+            def derivative(self, t, state):
+                return {"x": -self.rate * state["x"]}
+
+        comp = Composite(
+            processes={"decay": Decay(rate=rate)},
+            topology={"decay": {"x": "pool/x"}},
+            validate=False,
+            semantic_validation=False,
+        )
+        return CalibrationProblem(
+            composite=comp,
+            reporters=[
+                GeneReporter(observable="pool/x", gene_symbol="GX", sign=+1)
+            ],
+            conditions={"ctrl": Condition("ctrl", {})},
+            data={"ctrl_vs_ctrl": pd.Series({"GX": 0.0})},
+            arm_pairs={"ctrl_vs_ctrl": ("ctrl", "ctrl")},
+            params={"rate": ParameterRef(process_name="decay", field="rate")},
+            fit_arms=["ctrl_vs_ctrl"],
+        )
+
+    @pytest.mark.parametrize("rate", [0.1, 0.37, 15.6])
+    def test_start_tracks_the_composite(self, rate):
+        from hallsim.process import read_param
+
+        problem = self._problem(rate)
+        start = float(problem.initial_params()["rate"])
+        assert start == pytest.approx(rate)
+        assert start == pytest.approx(
+            float(read_param(problem.composite.processes["decay"], "rate"))
+        )
+
+    def test_no_declared_starting_value_exists(self):
+        """There is nowhere to write a start that could contradict the model."""
+        import dataclasses
+
+        from hallsim.calibration import HallmarkCoeffRef, ParameterRef
+
+        for cls in (ParameterRef, HallmarkCoeffRef):
+            assert "init" not in {
+                f.name for f in dataclasses.fields(cls)
+            }, f"{cls.__name__} regained a declared starting value"

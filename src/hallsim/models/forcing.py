@@ -76,6 +76,7 @@ def drive_pulse(
     source_name=None,
     signal_ontology=None,
     hallmark=None,
+    driven_rate=None,
     warn_factor=3.0,
 ):
     """Drive ``target``'s boundary input ``input_name`` with a rectangular
@@ -85,10 +86,12 @@ def drive_pulse(
     (no washout). Mutates ``processes``/``topology`` in place and returns
     ``(processes, topology, source_name)``.
 
-    Warns when the pulse's integrated exposure differs from the input's native
-    SBML drive by more than ``warn_factor``× — the driven rate (e.g. potency)
-    is calibrated to the native exposure, so a large mismatch runs the model
-    off calibration (a 2-day window on a 5-min pulse ≈ 576×)."""
+    Warns when the **delivered dose** differs from the model's native one by
+    more than ``warn_factor``×. Dose is exposure × the rate the input drives,
+    so a window change that is compensated by rescaling that rate is not a
+    mismatch. Pass ``driven_rate=(param_name, native_value)`` to be scored on
+    the product; without it only exposure is compared, which flags a
+    compensated setup as if it were off-calibration."""
     src = source_name or f"{input_name.lower()}_pulse"
     port = f"{input_name.lower()}_in"
     path = f"{src}/signal"
@@ -117,21 +120,33 @@ def drive_pulse(
         input_name, t_start, t_end
     )
     imposed = float(amplitude) * (float(t_end) - float(t_start))
+    quantity = "exposure"
+    if driven_rate is not None:
+        rate_name, native_rate = driven_rate
+        params = getattr(processes[target], "parameters", {}) or {}
+        if rate_name not in params:
+            raise KeyError(
+                f"driven_rate names {rate_name!r}, which is not a parameter "
+                f"of {target!r}"
+            )
+        native *= float(native_rate)
+        imposed *= float(params[rate_name])
+        quantity = f"dose (exposure x {rate_name})"
+
     ratio = imposed / max(abs(native), 1e-12)
     if native > 0 and (ratio > warn_factor or ratio < 1.0 / warn_factor):
         log.warning(
-            "%s/%s pulse [%.4g, %.4g] delivers exposure %.4g vs the native SBML "
-            "drive's %.4g (%.3gx). The rate driven by %r (e.g. potency) is "
-            "calibrated to the native exposure — rescale it by ~1/%.3g or match "
-            "the native window.",
+            "%s/%s pulse [%.4g, %.4g] delivers %s %.4g vs the model's native "
+            "%.4g (%.3gx) — rescale the driven rate by ~1/%.3g or match the "
+            "native window.",
             target,
             input_name,
             t_start,
             t_end,
+            quantity,
             imposed,
             native,
             ratio,
-            input_name,
             ratio,
         )
     return processes, topology, src

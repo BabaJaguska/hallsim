@@ -73,19 +73,25 @@ NFKB_SBML_PATH = sbml_source(
 DP14_MTOR_PHOS_RATE_DEFAULT = 162.471039450073
 DP14_MTOR_PHOS_RATE_NAME = "mTORC1_S2448_phos_by_AA_n_Akt_pS473"
 
-# DP14's `Irradiation` input is a time-piecewise assignmentRule, not a settable
-# knob, so the experimental dose is driven through this rate constant instead.
-# The SBML value is DallePezze's γ-irradiation calibration; the DDIS-equivalent
-# dose is fit by CalibrationProblem, so this is a starting point only.
-DP14_IRRADIATION_RATE_DEFAULT = 9237.72311545872
-DP14_IRRADIATION_RATE_NAME = "DNA_damaged_by_irradiation"
-
 # GSE248823: etoposide 20µM for 2 days, then washout — a dose pulse, not a
 # sustained 14-day exposure. Days count from experiment start; if the source
 # paper counts from washout instead, shift the *read* timepoints +2 and leave
 # this window alone.
 DDIS_ETOPOSIDE_DOSE_WINDOW = (0.0, 2.0)
 DP14_IRRADIATION_INPUT_NAME = "Irradiation"
+
+# DP14's `Irradiation` input is a time-piecewise assignmentRule, not a settable
+# knob, so the experimental dose is driven through this rate constant instead.
+# The SBML value is calibrated to a 5-minute pulse, so it is rescaled to the
+# dose window's exposure — without this the composite delivers 593x the dose.
+DP14_SBML_IRRADIATION_RATE = 9237.72311545872
+DP14_NATIVE_IRRADIATION_EXPOSURE = 0.003375
+DP14_IRRADIATION_RATE_DEFAULT = (
+    DP14_SBML_IRRADIATION_RATE
+    * DP14_NATIVE_IRRADIATION_EXPOSURE
+    / (DDIS_ETOPOSIDE_DOSE_WINDOW[1] - DDIS_ETOPOSIDE_DOSE_WINDOW[0])
+)
+DP14_IRRADIATION_RATE_NAME = "DNA_damaged_by_irradiation"
 
 # Rapamycin enters the fresh medium at washout, so the rapa arm is identical to
 # DDIS until this day; the nutrient drive's StepSource switches level there.
@@ -104,9 +110,9 @@ GZ06_PSI_NAME = "psi"
 GZ06_PSI_DEFAULT = 1.0  # full-damage reference (standalone screening)
 GZ06_PSI_BASAL_DEFAULT = 0.3  # control basal ψ; fitted in the composite
 GZ06_PSI_FULL = 1.0  # saturated ψ at full DDIS (the driver's `hi`)
-# K sits at the damage operating point separating control from DDIS (placed via
-# suggest_hill_gate) and is fitted, so the data decides where p53 fires.
-GZ06_PSI_DRIVE_K = 52.0
+# Placed by suggest_hill_gate; inside the window where ψ crosses the p53 Hopf
+# under damage but not without it. Fitted, so the data decides where p53 fires.
+GZ06_PSI_DRIVE_K = 10.79
 GZ06_PSI_DRIVE_N = 2.0
 
 # One t_span unit = one day, matching GSE248823's D00–D14 course. DP14 is
@@ -164,10 +170,12 @@ def build_multi_hallmark_composite(
             reference="Banin et al. 1998",
             description="DNA damage → ψ (Geva-Zatorsky p53 input).",
         ),
-        # K=4.0 is the DP14 mTORC1 midpoint across the rapa→DDIS band.
+        # K=4.0 is the DP14 mTORC1 midpoint across the rapa→DDIS band;
+        # k_act is the host IKK scale, as for ikkbeta_nfkb
+        # (docs/coupling-edge-priors.md).
         "mtor_nfkb": HillActivationEdge(
             timescale=nfkb.timescale,
-            k_act=0.02,
+            k_act=0.1,
             K=(4.0,),
             n=(2.0,),
             target_default=0.1,
@@ -249,6 +257,10 @@ def build_multi_hallmark_composite(
             amplitude=1.0,
             source_name="irradiation_pulse",
             hallmark="Genomic Instability",
+            driven_rate=(
+                DP14_IRRADIATION_RATE_NAME,
+                DP14_SBML_IRRADIATION_RATE,
+            ),
         )
     # severity=0 leaves before == after, so ctrl/DDIS keep the deposit's drive.
     drive_step(

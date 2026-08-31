@@ -18,7 +18,7 @@ calibration); ``"reverse"`` is one VJP and wins for many parameters
         reporters=MULTI_HALLMARK_REPORTERS,
         conditions={"ctrl": Condition(...), "DDIS": Condition(...)},
         data={"DDIS_vs_ctrl": ds.delta(...)},
-        params={"rate": ParameterRef("dp14", "parameters.k", init=1.0)},
+        params={"rate": ParameterRef("dp14", "parameters.k")},
         fit_arms=["DDIS_vs_ctrl"],
     )
     history = problem.fit(steps=40)
@@ -157,6 +157,7 @@ class Calibrator:
         *,
         loss_fn: Callable[[ParamPytree], jnp.ndarray],
         init_params: ParamPytree,
+        log_params: "bool | set[str]" = False,
         clamps: dict[str, tuple[float, float]] | None = None,
         val_loss_fn: Callable[[ParamPytree], jnp.ndarray] | None = None,
         checkpoint_path: str | Path | None = None,
@@ -178,12 +179,24 @@ class Calibrator:
             raise ValueError(
                 f"mode must be 'forward' or 'reverse', got {mode!r}"
             )
-        self.loss_fn = loss_fn
-        self.init_params = init_params
-        self.clamps = clamps or {}
+        # log10 inside; everything outside this class stays linear — the
+        # loss's argument, history, best params, checkpoints.
+        self._log_keys = _log_keys(init_params, log_params)
+        self.loss_fn = self._in_linear(loss_fn)
+        self.init_params = self._to_opt(init_params)
+        self.clamps = {
+            k: (
+                (math.log10(lo), math.log10(hi))
+                if k in self._log_keys
+                else (lo, hi)
+            )
+            for k, (lo, hi) in (clamps or {}).items()
+        }
         # When set, best-params / early-stop watch this held-out loss instead
         # of the training loss.
-        self.val_loss_fn = val_loss_fn
+        self.val_loss_fn = (
+            self._in_linear(val_loss_fn) if val_loss_fn else None
+        )
         # When set, the best params so far are written here (atomically) on
         # every improvement, so a killed run keeps its best.
         self.checkpoint_path = (
@@ -262,6 +275,33 @@ class Calibrator:
         self._vg = eqx.filter_jit(vg)
         return self._vg
 
+    # ── Log-space reparameterization ───────────────────────────
+
+    def _to_opt(self, params: ParamPytree) -> ParamPytree:
+        """Linear → optimizer space."""
+        if not self._log_keys or not isinstance(params, dict):
+            return params
+        return {
+            k: jnp.log10(v) if k in self._log_keys else v
+            for k, v in params.items()
+        }
+
+    def _to_model(self, params: ParamPytree) -> ParamPytree:
+        """Optimizer space → linear. Everything a caller sees goes through
+        here: the loss's argument, history, best params, checkpoints."""
+        if not self._log_keys or not isinstance(params, dict):
+            return params
+        return {
+            k: 10.0**v if k in self._log_keys else v for k, v in params.items()
+        }
+
+    def _in_linear(self, fn):
+        """Wrap a linear-space callable so it can be handed optimizer-space
+        params. Gradients flow through the transform."""
+        if not self._log_keys:
+            return fn
+        return lambda p: fn(self._to_model(p))
+
     # ── Clamping ───────────────────────────────────────────────
 
     def _clamp(self, params: ParamPytree) -> ParamPytree:
@@ -329,7 +369,7 @@ class Calibrator:
         val_fn = eqx.filter_jit(self.val_loss_fn) if self.val_loss_fn else None
         history = CalibrationHistory()
         best_loss = float("inf")
-        best_params = params
+        best_params = self._to_model(params)
         no_improve = 0
         t0 = time.time()
         for s in range(steps):
@@ -348,12 +388,13 @@ class Calibrator:
             # scale-invariant, so it can't fire mid-descent regardless of the
             # loss magnitude (an absolute gradient threshold could).
             if monitored < best_loss * (1.0 - self.early_stop_tol):
-                best_loss, best_params, no_improve = monitored, params, 0
+                best_loss, no_improve = monitored, 0
+                best_params = self._to_model(params)
                 self._save_checkpoint(best_params, best_loss, s)
             else:
                 no_improve += 1
             history.losses.append(lf)
-            history.param_history.append(params)
+            history.param_history.append(self._to_model(params))
             gnorm = float(optax.global_norm(grad))
             scale = self._plateau_scale(opt_state)
             lr_base = (
@@ -372,11 +413,12 @@ class Calibrator:
                 )
                 if val_fn:
                     msg += f"  val = {monitored:.4g}"
-                if isinstance(params, dict):
+                shown = self._to_model(params)
+                if isinstance(shown, dict):
                     # Show the first 4 scalar keys for compactness.
                     pieces = [
                         f"{k}={float(v):.3g}"
-                        for k, v in list(params.items())[:4]
+                        for k, v in list(shown.items())[:4]
                         if jnp.ndim(v) == 0
                     ]
                     if pieces:
@@ -435,18 +477,20 @@ class Calibrator:
             return self._clamp(optax.apply_updates(p, updates)), state
 
         history = CalibrationHistory()
-        best_loss, best_params, no_improve = float("inf"), params, 0
+        best_loss, no_improve = float("inf"), 0
+        best_params = self._to_model(params)
         t0 = time.time()
         for s in range(steps):
             value, grad = value_grad(params, opt_state)
             lf = float(value)  # loss of current params (pre-update)
             if lf < best_loss - self.early_stop_tol:
-                best_loss, best_params, no_improve = lf, params, 0
+                best_loss, no_improve = lf, 0
+                best_params = self._to_model(params)
                 self._save_checkpoint(best_params, best_loss, s)
             else:
                 no_improve += 1
             history.losses.append(lf)
-            history.param_history.append(params)
+            history.param_history.append(self._to_model(params))
             if self.verbose and (s % self.log_every == 0 or s == steps - 1):
                 msg = f"  [{s+1:3d}/{steps}] loss = {lf:.4g}"
                 if isinstance(params, dict):
@@ -513,19 +557,19 @@ class CalibratableParam:
     description: str = ""
 
 
-def default_clamp(value: float) -> tuple[float, float]:
-    """Two-order-of-magnitude box around a parameter's current value.
-
-    The convention used when a Process doesn't supply an explicit clamp:
-    a wide span is harmless because Calibrator's step size controls
-    actual exploration. Handles positive, negative, and zero values.
-    """
-    v = float(value)
-    if v > 0:
-        return (v / 100.0, v * 100.0)
-    if v < 0:
-        return (-abs(v) * 100.0 - 10.0, abs(v) * 100.0 + 10.0)
-    return (0.0, 10.0)
+def _log_keys(init_params, log_params) -> set:
+    """Which parameters to optimize as ``log10(p)``. A non-positive value has
+    no log, so it is refused rather than silently fitted in linear space."""
+    if log_params is False or not isinstance(init_params, dict):
+        return set()
+    keys = set(init_params) if log_params is True else set(log_params)
+    bad = sorted(k for k in keys if float(init_params[k]) <= 0)
+    if bad:
+        raise ValueError(
+            f"log_params includes non-positive parameters {bad}; log10 is "
+            "undefined there. Fit them in linear space instead."
+        )
+    return keys
 
 
 @dataclass(frozen=True)
@@ -595,8 +639,11 @@ class ParameterRef:
     process_name, field:
         Where to substitute — a key into ``composite.processes``, and the
         attribute or dotted path on it.
-    init, clamp:
-        Optimizer start, and an optional ``(lo, hi)`` box applied each step.
+    clamp:
+        Optional ``(lo, hi)`` box applied each step. The optimizer *starts*
+        at the composite's own value for ``field`` — there is no separate
+        starting value to declare, and so none that can disagree with the
+        model.
     prior:
         Log-normal prior *center* for a MAP penalty; ``None`` leaves the
         parameter unregularized. Set it to the literature value the fit should
@@ -608,7 +655,6 @@ class ParameterRef:
 
     process_name: str
     field: str
-    init: float
     clamp: tuple[float, float] | None = None
     prior: float | None = None
     prior_sigma: float = 0.5
@@ -622,8 +668,8 @@ class HallmarkCoeffRef:
     Points at an affine coefficient (``floor`` or ``slope``) of the
     :class:`hallsim.hallmarks.ParameterMapping` identified by
     ``(hallmark, param_name)``. The Calibrator fits it exactly like a
-    :class:`ParameterRef` (same ``init`` / ``clamp`` / ``prior`` /
-    ``prior_sigma`` surface), but instead of substituting into a process it
+    :class:`ParameterRef` (same ``clamp`` / ``prior`` / ``prior_sigma``
+    surface, and the same read-from-the-model start), but instead of substituting into a process it
     overrides the coefficient in a per-evaluation hallmark registry — so the
     severity map ``base * (floor + slope * h)`` calibrates end to end. This is
     the home for a coefficient that has no SBML-parameter host (the mTOR
@@ -637,7 +683,6 @@ class HallmarkCoeffRef:
 
     hallmark: str
     param_name: str
-    init: float
     clamp: tuple[float, float] | None = None
     prior: float | None = None
     prior_sigma: float = 0.5
@@ -653,6 +698,14 @@ def _substitute_param(proc, field: str, value: Any):
     and the write cannot drift apart in their dotted-field convention.
     """
     return write_param(proc, field, value)
+
+
+def _placement_advice(sug) -> str:
+    if sug is None:
+        return "Place it with suggest_hill_gate."
+    if sug.ok:
+        return f"Place it at K={sug.K:.4g}, n={sug.n:g}."
+    return f"K={sug.K:.4g} would open it, but {sug.note}"
 
 
 def _reject_overwritten_edit(pname: str, pref, proc, baseline) -> None:
@@ -866,7 +919,9 @@ class CalibrationProblem:
                 )
 
         # Validate each HallmarkCoeffRef resolves to a real affine mapping
-        # with a fittable floor — fail early on a typo, not mid-trace.
+        # with a fittable floor — fail early on a typo, not mid-trace — and
+        # record the mapping's own value as the optimizer's start.
+        coeff_baseline: dict = {}
         for cname, cref in coeff_params.items():
             handle = reg.get(cref.hallmark)
             if handle is None:
@@ -891,6 +946,17 @@ class CalibrationProblem:
                     f"fittable affine floor/slope on {cref.hallmark!r}."
                     f"{cref.param_name!r}."
                 )
+            # `_registry` overrides every hit, so they must already agree —
+            # otherwise the start value depends on which one we happen to read.
+            values = {float(getattr(m, f"{cref.coeff}_value")) for m in hits}
+            if len(values) > 1:
+                raise ValueError(
+                    f"params[{cname!r}] matches {len(hits)} mappings on "
+                    f"{cref.hallmark!r}.{cref.param_name!r} whose "
+                    f"{cref.coeff} values disagree ({sorted(values)}); the "
+                    "starting value would depend on which is read."
+                )
+            coeff_baseline[cname] = values.pop()
         if offenders:
             msgs = []
             for pname, pref, hmarks in offenders:
@@ -963,6 +1029,7 @@ class CalibrationProblem:
         self._override_params: dict = {}
         self._override_fields: dict = {}
         self._coeffs = coeff_params
+        self._coeff_baseline = coeff_baseline
         self._all_refs = params
         self._base_registry = reg
         self.prior_weight = prior_weight
@@ -1044,6 +1111,10 @@ class CalibrationProblem:
 
         self._scheduler = Scheduler(**self.scheduler_kwargs)
         self._warmed_up = False
+        try:
+            self.check_hill_gates()
+        except Exception as exc:
+            log.debug("hill-gate check skipped: %s", exc)
 
     # ── Internal: per-condition simulation ────────────────────────
 
@@ -1056,9 +1127,22 @@ class CalibrationProblem:
         return self._all_refs
 
     def initial_params(self) -> dict:
-        """``{name: init}`` for every fittable reference — the optimizer's
-        starting vector, exactly what :meth:`fit` packs internally."""
-        return {k: jnp.asarray(p.init) for k, p in self._all_refs.items()}
+        """``{name: value}`` for every fittable reference — the optimizer's
+        starting vector, exactly what :meth:`fit` packs internally.
+
+        Read from the model, never declared: a :class:`ParameterRef` starts at
+        the composite's value for its field, a :class:`HallmarkCoeffRef` at its
+        mapping's coefficient. There is nowhere to write a starting value that
+        the model would then contradict.
+        """
+        return {
+            k: jnp.asarray(
+                self._param_baseline[k]
+                if k in self._param_baseline
+                else self._coeff_baseline[k]
+            )
+            for k in self._all_refs
+        }
 
     def with_overrides(self, overrides: dict) -> "CalibrationProblem":
         """A copy of this problem with parameters pinned to given values.
@@ -1449,11 +1533,13 @@ class CalibrationProblem:
         ``operative``.
         """
         out = []
+        starts = self.initial_params()
         for name, pref in self._all_refs.items():
             if pref.prior is None:
                 continue
             target = math.log10(float(pref.prior))
-            lo, hi = pref.clamp or (float(pref.init), float(pref.init))
+            start = float(starts[name])
+            lo, hi = pref.clamp or (start, start)
             corners = [max(float(lo), 1e-30), max(float(hi), 1e-30)]
             worst = max(
                 ((math.log10(c) - target) / pref.prior_sigma) ** 2
@@ -1663,7 +1749,7 @@ class CalibrationProblem:
         """
         if not allow_unidentifiable:
             self._require_identifiable()
-        init = {k: jnp.asarray(p.init) for k, p in self._all_refs.items()}
+        init = self.initial_params()
         clamps = {
             k: p.clamp
             for k, p in self._all_refs.items()
@@ -1686,6 +1772,7 @@ class CalibrationProblem:
         cal = Calibrator(
             loss_fn=self.loss,
             init_params=init,
+            log_params=True,  # every fittable here is a positive constant
             clamps=clamps or None,
             val_loss_fn=val_loss_fn,
             mode=mode,
@@ -1832,6 +1919,94 @@ class CalibrationProblem:
             out[cond] = row
         return out
 
+    def check_hill_gates(self, param_values: dict | None = None) -> list[dict]:
+        """Warn for every Hill gate whose ``K`` lies outside the range its
+        driver actually reaches across the conditions.
+
+        A gate placed above its driver's ceiling never opens and the edge is
+        dead; one below the floor is saturated and the edge is a constant. Both
+        look like a weak coupling and neither raises, so this runs at
+        construction. Returns one row per gate; rows with ``in_range=False``
+        are logged with the ``suggestion`` that would place them. One solve,
+        and only for composites that declare a gate.
+        """
+        gates = self.composite.hill_gates()
+        if not gates:
+            return []
+        params = (
+            self.initial_params() if param_values is None else param_values
+        )
+        paths = sorted({p for srcs, _ in gates.values() for p in srcs})
+        rng = self.operating_ranges(params, paths)
+
+        rows = []
+        for name, (srcs, ks) in gates.items():
+            for src, k in zip(srcs, ks):
+                lo = min(rng[c][src].lo for c in rng)
+                hi = max(rng[c][src].hi for c in rng)
+                ok = lo <= k <= hi
+                sug = None if ok else self._place_from_ranges(rng, src)
+                rows.append(
+                    dict(
+                        gate=name,
+                        source=src,
+                        K=k,
+                        lo=lo,
+                        hi=hi,
+                        in_range=ok,
+                        suggestion=sug,
+                    )
+                )
+                if not ok:
+                    log.warning(
+                        "Hill gate %s.K = %.4g on %r is %s everything its "
+                        "driver reaches ([%.4g, %.4g] across conditions), so "
+                        "the edge is %s. %s",
+                        name,
+                        k,
+                        src,
+                        "above" if k > hi else "below",
+                        lo,
+                        hi,
+                        "dead" if k > hi else "saturated",
+                        _placement_advice(sug),
+                    )
+        return rows
+
+    def _place_from_ranges(
+        self,
+        rng: dict,
+        source_path: str,
+        off_conditions: list[str] | None = None,
+        on_conditions: list[str] | None = None,
+        *,
+        off_stat: str = "hi",
+        on_stat: str = "mean",
+        off_occupancy: float = 0.1,
+    ):
+        """Place a gate on ``source_path`` from operating ranges already
+        solved. With no conditions named, the levels are the driver's own
+        extremes — the lowest ceiling it settles to and the highest level it
+        sustains — so placement needs no experimental design."""
+        from hallsim.models.hill_edge import place_hill_gate
+
+        seen = [c for c in rng if source_path in rng[c]]
+        if not seen:
+            return None
+        if off_conditions is None:
+            off = min(rng[c][source_path].hi for c in seen)
+        else:
+            off = max(
+                getattr(rng[c][source_path], off_stat) for c in off_conditions
+            )
+        if on_conditions is None:
+            on = max(rng[c][source_path].mean for c in seen)
+        else:
+            on = max(
+                getattr(rng[c][source_path], on_stat) for c in on_conditions
+            )
+        return place_hill_gate(off, on, off_occupancy=off_occupancy)
+
     def suggest_hill_gate(
         self,
         param_values: dict,
@@ -1856,11 +2031,13 @@ class CalibrationProblem:
         an explanatory ``note`` when the arms' operating ranges overlap or are
         too close for a clean gate. Deterministic: same params → same suggestion.
         """
-        from hallsim.models.hill_edge import place_hill_gate
-
         rng = self.operating_ranges(param_values, [source_path], n_save=n_save)
-        off = max(
-            getattr(rng[c][source_path], off_stat) for c in off_conditions
+        return self._place_from_ranges(
+            rng,
+            source_path,
+            off_conditions,
+            on_conditions,
+            off_stat=off_stat,
+            on_stat=on_stat,
+            off_occupancy=off_occupancy,
         )
-        on = max(getattr(rng[c][source_path], on_stat) for c in on_conditions)
-        return place_hill_gate(off, on, off_occupancy=off_occupancy)

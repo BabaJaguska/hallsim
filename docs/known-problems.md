@@ -379,6 +379,67 @@ The framework returns a plausible number and nothing indicates it is wrong.
   ASSIGNED/LATCHED/INPUT values but **never** on an EVOLVED write. Applying it
   there is a second silent-wrong.
 
+- [ ] **P0.17 — `atol_scale` freezes the tolerance on a decaying state, and the
+  solve returns 10⁵⁷ with `ok=True`.** ✓✓ From an off-attractor IC on GZ06,
+  HallSim returns **−1.53e57** where scipy Radau / LSODA / DOP853 at rtol 1e-10
+  all return **+9.9584e-6**, at every horizon ≥ 100 with `macro_dt ≥ 100`:
+
+  ```
+  t_end ≤  50   HallSim  9.98e-06   scipy 9.9584e-06   agree
+  t_end = 100   HallSim -4.749e+03  scipy 9.9584e-06   ok=True
+  t_end = 2000  HallSim -1.530e+57  scipy 9.9584e-06   ok=True
+  macro_dt 10 or 1 → correct;  macro_dt 100+ → diverged, ok=True
+  ```
+
+  Cause: `scheduler.py:1566`, `atol_vec = max(atol, atol_scale·|y₀|)` with
+  `DEFAULT_ATOL_SCALE = 1e-6`. At `x(0) = 13.57` the tolerance on x freezes at
+  1.357e-5 for the whole solve — larger than the value x decays to, and 14% of
+  the distance to that model's pole at `x = −k = −1e-4`. Confounds separated:
+  rtol ±6 orders, `newton_atol` ±8 orders, `dt0` and `max_steps` change nothing;
+  pinning `Kvaerno5` fixes it; `atol_scale ≤ 1e-7` is correct.
+  **The failure is tolerance-insensitive**, so the loose-vs-tight screen calls it
+  converged, and `_guard_result` inspects only diffrax's RESULTS code, never the
+  values.
+  Not currently active: the composite starts from the deposit's own IC, which is
+  bounded at 600 / 2000 / 5000 d. It bites a basin scan, a heterogeneous-IC
+  population sweep, or an equilibration probe.
+  *Fix:* scale `atol` to the state's running magnitude rather than freezing it at
+  `|y₀|`, or check the returned values against a bound rather than trusting the
+  solver's status code.
+
+- [ ] **P0.18 — `suggest_hill_gate` exists and no one runs it, so a coupling
+  edge can be placed outside its driver's entire range.** ✓✓ `psi_bridge` gates
+  GZ06's ψ on `dp14/DNA_damage` at `K = 52`, `n = 2`. Crossing the p53 Hopf
+  (ψ_H = 0.685416) needs `DNA_damage > 57.557`. Measured maxima: **9.6 control,
+  25.97 at the published DDIS dose, 48.8 at 2× dose** — ψ tops out at 0.4397,
+  36% short, so `gz06/x` is constant to 1e-4 in every arm and DDB2's arm-to-arm
+  log2FC is −0.0004. K also sits **4.28σ above the largest γH2A.X count in
+  DP14's own calibration data** (34.17 ± 4.17 foci). Working range is
+  **7 < K < 23.5**. `screen_sensitivity` already reports
+  `DDB2 ← Genomic Instability: FLAT (dead in this regime)`; nothing runs it
+  either.
+  *Fixed 2026-08-30.* `Composite.hill_gates()` enumerates every gate
+  structurally; `CalibrationProblem.check_hill_gates()` runs at the end of
+  `__init__`, comparing each `K` against its driver's realised range and
+  reporting the replacement from the *same* operating ranges (one solve, not
+  two). It cannot live on `Composite`: the range is a trajectory, a trajectory
+  needs a horizon, and a composite has none — the calibration problem is the
+  first object with one honestly. Cost is one condition-set solve and only for
+  composites that declare a gate, so the unit suite is unchanged.
+  `psi_bridge` was reset to **K = 10.79**, inside the Hopf-crossing window
+  `8.67 < K < 24.56` (ψ crosses at `x = 1.1069·K`). Out-of-the-box sign
+  agreement **13/24 → 17/24**, gz06's two reporters **0/8 → 5/8**, DDIS@t7
+  **4/6 → 6/6**; DDB2 now shows the p53 limit cycle days 3–9.
+  Still open: the `critical=` extension (solve for the driver level crossing a
+  named downstream bifurcation, warn when unreachable), which would have placed
+  this from the Hopf value directly rather than from a 10/90 switch criterion
+  that this driver cannot meet.
+
+  The check's own finding outlives the fix and belongs to P0.14: **`DNA_damage`
+  ceilings at 9.59 undosed and averages 12.13 dosed** — separation `r = 1.26`,
+  needing `n = 19` for a clean gate. No Hill gate on this driver can switch,
+  because the model damages itself almost as hard as etoposide does.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -427,14 +488,54 @@ The check that would catch a mistake does not exist, does not run, or fails open
   about. Distinct from P1.5: nothing here is a zero *gradient*, the readouts
   and the module both work.
 
-- [ ] **P1.6 — No null-model baseline is reported.** The multi-hallmark demo scores 19/36
-  signs (52.8%); "every reporter rises" scores 30/36 (83.3%).
-  **An outside notebook (2026-08-29) implemented the check and reports the
-  answer: the model beats the constant null on 0 of 4 arm-days**, emitted per
-  run as `oob_null_baseline.csv` / `postfit_null_baseline.csv`, pre- and
-  post-fit. That work is uncommitted in a sandbox tree, so the number is not
-  reproducible here yet — porting the reporter is the actionable, and it should
-  land before any concordance number is quoted again.
+- [ ] **P1.14 — The tolerance screen tests a tolerance nobody uses, and files
+  the guaranteed disagreement as a blocker.** `screen_process` compares
+  `rtol_loose = 1e-3` against `rtol_tight = 1e-7`; the Scheduler runs at
+  `DEFAULT_RTOL = 1e-6`. `diagnostics.py:8-10` already documents that GZ06
+  diverges at 1e-4 and is bounded from 1e-5 down — so the screen tests two
+  decades past the known-bad point, gets the disagreement it was guaranteed, and
+  returns `[REJECT] ... escalate=False`. The composite runs at 1e-6, inside the
+  converged range. **Enforcing that verdict would have blocked a model that is
+  correct where it actually runs.** Tolerance sensitivity is not a property of a
+  broken model; it means use the right tolerance.
+  *Fix:* ask whether the result is converged **at the operating tolerance**
+  (1e-6 vs something tighter), not at a fixed pair. Better: bisect for the
+  loosest rtol at which the trajectory is converged and report *that* — a model
+  then carries "needs rtol ≤ 1e-5" as a property the Scheduler can check, which
+  keeps the anti-damping purpose and makes the verdict actionable instead of a
+  rejection. Note P0.17 is invisible to this screen either way: that failure is
+  tolerance-*insensitive*.
+
+- [ ] **P1.15 — An unweighted MSE lets one badly-fit reporter monopolise the
+  fit.** The 2026-08-30 calibration dropped the loss 43% while making five of six
+  reporters slightly *worse*:
+
+  ```
+  squared error    before → after
+  GLB1 (d7+d14)     2.862 → 0.833     67% of the objective
+  everything else   1.377 → 1.382     net worse
+  ```
+
+  GLB1 accounts for 2.03 of the 2.02 total reduction. Least squares behaving as
+  specified — GLB1 was off by 1.14/1.25 against 0.02–0.59 elsewhere, so all four
+  parameters went to it. Log-space fitting does not help: it reparameterises the
+  *parameters*, not the residuals.
+  *Fix:* pass the per-entry `weight` (precision) argument `gaussian_nll` already
+  accepts, so a reporter's contribution reflects its measurement precision rather
+  than the magnitude of the model's error on it.
+
+- [ ] **P1.6 — No null-model baseline is reported.** Nothing in the run computes
+  the constant null, so a concordance number is quoted with no floor to beat.
+  Current state on the two-arm, 24-call configuration (2026-08-30, out of the
+  box, corrected dose, `psi_bridge` K = 10.79): the composite scores **17/24
+  (71%)** and "every reporter rises" scores **18/24 (75%)**. The model still
+  does not beat the null, though the margin is one call rather than five — at
+  K = 52 it was 13/24 against the same 18/24.
+  **An outside notebook (2026-08-29) implemented the check**, emitting
+  `oob_null_baseline.csv` / `postfit_null_baseline.csv` per run. That work is
+  uncommitted in a sandbox tree, so the reporter is not reproducible here yet —
+  porting it is the actionable, and it should land before any concordance number
+  is quoted again.
 - [ ] **P1.7 — No parameter provenance.** Nothing distinguishes measured from
   fitted from invented, so a benchmark can be scored against a parameter fitted
   to it — which happened in both models reviewed.
@@ -590,7 +691,16 @@ The check that would catch a mistake does not exist, does not run, or fails open
   the state, so a sweep is a Python loop.
 - [ ] **P3.8 — No observable layer.** Nothing carries assay, unit, normaliser
   or transducer, so a millivolt is compared to a ratiometric dye reading.
-- [ ] **P3.9 — No uncertainty.** Outputs are lines; a lab needs bands.
+- [ ] **P3.9 — No uncertainty.** Outputs are lines; a lab needs bands. Options,
+  costs and gains ranked in
+  [uncertainty-quantification.md](uncertainty-quantification.md). Two blockers
+  named there are defects in their own right: the loss is not a log density
+  (`gaussian_nll` means over entries and drops the ½, `data_loss` means over
+  arms, `prior_weight` is a free multiplier), so any reported width is scaled by
+  an unknown factor; and `identifiability.py`'s `pinv(JᵀJ)` is the MAP
+  covariance with the noise scale set to 1 and the prior precision omitted, so
+  `std_decades` overstates the spread and `std_tol` files parameters as
+  `practical` too readily.
 - [ ] **P3.10 — Dense Jacobians are materialised where the topology already
   declares sparsity — in `steady_state` *and* in stiffness analysis.**
   **Second code path confirmed 2026-08-29.** `stiffness.py`'s `jacfwd` builds a
