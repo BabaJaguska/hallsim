@@ -8,9 +8,11 @@ nothing has to be re-argued.
 Evidence sources: the mitochondrial stress test (2026-08-18), the
 multi-hallmark demo review (2026-08-19), and the DallePezze 2014 referee pass
 (2026-08-25) — all by the review panel in `.claude/agents/` — plus two outside
-models calibrated against GSE248823 by agents who did not have this list.
-Findings confirmed by two independent reviewers are marked ✓✓. The panel's raw
-reports are gitignored; what survived review is here.
+models calibrated against GSE248823 by agents who did not have this list, and an
+external systems-design review of the framework itself (2026-08-31) which read
+this file first and reported against it. Findings confirmed by two independent
+reviewers are marked ✓✓. The panel's raw reports are gitignored; what survived
+review is here.
 
 **On the multi-hallmark demo.** Several entries below are stated against it,
 because it is the largest composite on hand and therefore the one that
@@ -102,17 +104,70 @@ The framework returns a plausible number and nothing indicates it is wrong.
   *Fix:* find why Strang loses its second order; add the order test
   `design-multiscale-scheduler.md:445` has called for since day one.
 
-- [ ] **P0.23 — `coupling_mode="interpolated"` may be a silent no-op.**
+- [ ] **P0.23 — `coupling_mode="interpolated"` interpolates only the
+  *immediately preceding* group; every earlier group stays frozen while the mode
+  reports as interpolated.**
   Measured 2026-08-31: bit-identical to `frozen` at `macro_dt` 3.5 / 1.75 /
   0.875, five significant figures, all four observables.
   `_effective_coupling` passes an explicit mode straight through and
   `_run_scan_continuous` sets `interp = coupling == "interpolated" and
   n_groups > 1`, which was true — so it was requested and enabled, and produced
-  no difference. Either the flag does not reach the coupling, or the interpolant
-  coincides with the frozen value to 5 s.f., which is not plausible.
-  Unconfirmed — the mechanism was not traced. *Fix:* establish which, with a
-  test that fails if interpolated and frozen agree on a problem with a forward
-  cross-group edge.
+  no difference.
+
+  *Mechanism traced 2026-08-31 (external systems review), and it is one line.*
+  `scheduler.py:1253-1262`, inside `_run_scan_continuous`'s `body`, builds
+  `_InterpFill(..., idx=write_idxs[gi - 1])` and reassigns `prev = (t_start,
+  t_next, gy)` every iteration. So `_InterpFill` (`scheduler.py:248-261`) only
+  ever carries group `gi-1`'s trajectory and only re-fills group `gi-1`'s
+  columns; groups `0 .. gi-2` are supplied by `_FrozenFill`'s constant. The
+  eager path has the identical defect — `prev_idxs = group_write_idxs[gname]`
+  is reassigned per group at `scheduler.py:810`.
+
+  Three continuous processes; A a 6 rad/s oscillator, C integrates A, B
+  independent. Same composite, same `macro_dt=2.0`, only the *grouping* differs;
+  reference is a `macro_dt=10/2048` solve, y(10) = -0.0576600435:
+
+  ```
+  grouping                                    frozen y(10)     interp y(10)     identical?  interp err
+  {gA:[drv], gC:[dvn]}       edge adjacent    -1.722649856820  -0.051501993040  no          10.68 %
+  {gA:[drv], gB:[mid], gC:[dvn]} non-adjacent -1.722649856820  -1.722649856820  bit-identical 2887.60 %
+  ```
+
+  Inserting one *unrelated* group between the driver and the driven turns
+  interpolated coupling into a bit-exact no-op and multiplies the error by 270×.
+  That reproduces this entry's original signature exactly, and it is consistent
+  with P0.6 having measured interpolated working (1.7% vs 20.9%) on a
+  configuration where the driving edge happened to be adjacent.
+
+  **A design defect, not just a bug.** `auto_groups` clusters by timescale and
+  `_order_by_coupling` topologically sorts, but nothing ties *adjacency in the
+  group order* to *where the coupling edges are*. The coupling representation
+  was written as if the group sequence were a chain; it is a DAG. A topologically
+  valid ordering can place any number of groups between a driver and its
+  consumer, so adding a fourth model to a working three-model composite can
+  silently switch a previously-interpolated edge to frozen, with no diagnostic.
+  *Fix:* (1) keep **one interpolant per group**, not one for `gi-1` — accumulate
+  `prev` into a list and build the fill from every already-solved group's samples
+  this window; the samples are already computed and already a static shape
+  (`n_save`), so this costs memory, not compile shape (~1 day including the eager
+  path). (2) Make `_effective_coupling`'s verdict **per edge**, not per run
+  (`scheduler.py:1074` decides for the whole run from the existence of *any*
+  forward cross-group edge), and put the resolved per-edge mode into
+  `SchedulerResult.stats` so "interpolated" is an observable fact rather than a
+  requested flag. (3) Regression test: insert an inert group between a driver and
+  its consumer and assert the interpolated result is unchanged. Today it fails.
+  **Bears on P0.2.** That entry calls the Strang/Lie order study "unseparated"
+  between NF-κB's oscillation breaking Strang and the P0.20 span-truncation fix.
+  There is a third candidate it does not list — whether the NF-κB edge was
+  adjacent in the group order in each configuration. Separate it before designing
+  around either.
+  **Side effect worth knowing.** `coupling_mode="interpolated"` also silently
+  changes the output grid: `n_save = max(base_out + 1,
+  self.coupling_interp_points)` (`scheduler.py:1170-1172`), so an interpolated
+  run returns `coupling_interp_points` samples per macro window regardless of
+  `save_dt`. In the measurement above, `macro_dt=save_dt=2.0` gave 6 points
+  frozen and 76 interpolated over the same span. A coupling knob should not
+  change the shape of the answer.
 
 - [ ] **P0.3 — The fold-change reference is an acausal filter of the whole
   trajectory.** ✓✓ Summaries are forward–backward EMAs, so the value at index 0
@@ -609,6 +664,178 @@ The framework returns a plausible number and nothing indicates it is wrong.
   **22.5 ms/arm — 19x.** That is the practical price of P0.1's open half, on a
   real workload rather than the demo.
 
+- [ ] **P0.29 — `Scheduler`'s three caches are keyed on a signature that does
+  not identify the composite, so a reused `Scheduler` returns another
+  composite's answer.** Found 2026-08-31 (external systems review).
+  `_integrator_cache` / `_omega_cache` / `_core_cache` (`scheduler.py:460-464`)
+  are process-lifetime dicts on a mutable `Scheduler`.
+  `_integrator_signature` (`scheduler.py:1315-1322`) is
+  `(group_name -> sorted(process_names), int(state.shape[-1]), float(macro_dt))`;
+  `_continuous_core`'s signature (`scheduler.py:948-971`) adds
+  coupling/splitting/t-span/solver-class-names/dtype/jump_ts. **Neither carries
+  any identity of the composite** — not topology, not process classes, not
+  parameter values — while the cached core closes over the *first* composite
+  (`own = composite.evolved_indices(...)`, `scheduler.py:981`; scaled tolerances
+  at `:985-987`) and is later invoked with the second.
+
+  *Measured, two independent failures.* Same `Scheduler`, two composites
+  differing only in one rate constant, signature identical
+  `((('default', ('p',)),), 2, 1.0)`:
+
+  ```
+  k       fresh Scheduler/arm     one shared Scheduler    rel. diff
+  1e0     -5.518204e-01           -5.518193e-01           2.0e-06
+  1e3     -3.686172e-07           -3.677230e-07           2.4e-03
+  1e5     -3.678876e-11           +1.419227e-09           4.0e+01
+  1e6     -3.678810e-13           +2.955381e-10           8.0e+02
+  ```
+
+  The gradient **changes sign** at k ≥ 1e5; the stiff arm inherits the soft
+  arm's `Tsit5` verdict and goes 32 steps → **362,761 steps, 78,238 rejected**,
+  well inside `DEFAULT_MAX_STEPS` so nothing raises. Second failure, wrong
+  dynamics outright: two composites both `{"p": <Process>}`, `n_vars=2`, group
+  `"default"`, but A evolves `a/x` while B evolves `a/y` — identical signature.
+  Run A then B on one `Scheduler` and B's state never moves
+  (`a/x = 1.0, a/y = 1.0` against a correct `1.0 / 0.36787948959`), a flat
+  plausible trajectory with no warning and `len(_core_cache) == 1`.
+
+  **Worse than P0.1, which it is not.** P0.1 is the *cold* cache: it warns and
+  degrades toward the implicit solver, i.e. toward correctness. This is the
+  *hot but wrong* cache — no warning at all, degrading toward the explicit
+  solver, the direction P0.1's own text calls "finite, plausible and wrong".
+  `warm_up()` makes it worse: it pins the first composite's verdict.
+
+  **Live in the repo, verified.** `diagnostics.py:914-935` — `screen_sensitivity`
+  builds one `sched` and calls `sched.run` on a new `Composite` per severity
+  vector (`_build(hm)` at `:917`), so every arm after the first inherits arm 0's
+  verdict. That is the framework's own sensitivity screener.
+  `calibration.py:1105-1112` — `self._scheduler` is deliberately persistent so
+  the verdict is "resolved once and reused under tracing"; the unstated
+  assumption is that the stiffness verdict is invariant over the whole parameter
+  search space, and nothing checks it. `docs/architecture.md` (Population
+  studies) tells users a sweep "is not a `y0` batch; build one composite per
+  arm", which produces exactly the loop that triggers this.
+
+  **Design decision, 2026-08-31: `Scheduler` is a stateless runner.** The
+  composite is an argument to `run()`, not to `__init__`, and that is intended —
+  so the fix is not "bind one composite at construction". Four things contradict
+  it today: the three caches above, plus `self._jump_ts` (`scheduler.py:476,
+  544`) assigned per `run()` on a shared object, which also makes `Scheduler`
+  non-reentrant and not thread-safe and feeds `_continuous_core`'s signature;
+  and `self._warned_save_res` (see P0.30).
+  *Fix:* the derived artefacts move off the runner and become a value.
+  `Scheduler` keeps policy only (tolerances, splitting, coupling mode, solver
+  classes); a plan object built per `(composite, t_span, macro_dt)` carries the
+  resolved integrators, the traced core and the jump times. A plan carries the
+  composite it was built for, so there is no key to get wrong and the collision
+  class closes by construction. `Composite` cannot host this — it is a frozen
+  `eqx.Module` (`composite.py:342`) that round-trips through pytree
+  flatten/unflatten. Cheaper interim, not the target: put a real composite
+  fingerprint in both signatures —
+  `(tuple(sorted(composite.store_keys())), tuple((n, type(p).__name__) for n, p
+  in sorted(composite.processes.items())), sorted topology triples)` — which
+  closes the wrong-dynamics failure but **not** the gradient one, since those two
+  arms are structurally identical and differ only in traced values. A stiffness
+  verdict is a function of parameter values and cannot be cached on structure at
+  all.
+  *Missing test, by construction:* every scheduler test in
+  `tests/unit/test_multiscale.py` constructs a fresh `Scheduler()` per assertion,
+  so the reuse contract is never exercised and no test can fail on it. Generic
+  form: run each scheduler test twice on one instance, the second against a
+  differently-wired composite of the same width, and assert equality with the
+  fresh-instance results.
+
+- [ ] **P0.30 — `save_dt` means two different things on two of the three
+  execution paths, and the anti-aliasing guardrail logs that it fired on the
+  path that discards it.** Found 2026-08-31 (external systems review).
+  `Scheduler.run` has three implementations of "advance the composite": the fast
+  path (`scheduler.py:640-665`), the `lax.scan` path (`_run_scan_continuous`,
+  `:1121`), and the eager `while t < t1` loop (`:763-905`), selected implicitly
+  at `:625-638`. The eager loop — taken whenever the composite has a DISCRETE or
+  EVENT process, `adaptive_dt=True`, or `debug=True` — saves at `:899-902` on
+  macro-step values only, so the effective resolution is
+  `max(save_dt, macro_dt)` and dense output is not used. The public docstring
+  (`scheduler.py:516-520`) says the opposite: *"Output density, decoupled from
+  `macro_dt` via dense output — it costs memory, not ODE steps."*
+
+  *Measured.* `t_span=(0,10)`, `macro_dt=2.0`, `save_dt=0.1`, one 20 rad/s
+  oscillator; the only difference is one added DISCRETE process:
+
+  ```
+  continuous only (scan/fast path)  save_dt=0.1 -> n_saved=319  actual dt=0.0314
+  +1 DISCRETE proc (eager path)     save_dt=0.1 -> n_saved=  6  actual dt=2.0000
+  ```
+
+  **Both runs logged** `auto-reduced save_dt 0.1 -> 0.03142 (fastest oscillation
+  period 0.3142; ~10 samples/period so raw-state readouts don't alias)`. On the
+  eager path that refinement is computed, logged as applied, and thrown away —
+  the trajectory returns 64× coarser than the grid the log line promised,
+  against a 0.314 s period. A diagnostic asserting a property the code does not
+  deliver removes the reason to check.
+  *Blast radius:* everything reading the trajectory as the trajectory —
+  `gene_reporters` summaries, `calibration`'s fold-change loss, every demo plot,
+  `diagnostics.screen_*`. It hits exactly the mixed continuous/discrete/event
+  composites the framework is named for, while the continuous-only composites the
+  tests use are fine; that asymmetry is why it survived.
+  *Two more divergences on the same seam, same root cause (three
+  implementations, no equivalence test):* `self._warned_save_res`
+  (`scheduler.py:465, 1448`) fires the auto-reduction notice **once per
+  `Scheduler` instance, ever**, at `log.info` — invisible under the default
+  config, and silent by construction on runs 2..N of a reused instance, so a
+  change to the output grid every downstream number depends on is unannounced.
+  And `Scheduler(debug=True)` moves execution from the scan path to the eager
+  loop (`scan_eligible` requires `not self.debug`, `:637`) — a debug flag that
+  changes the numerical path. They agreed to 1.1e-16 on a two-group frozen/Lie
+  problem, but nothing pins that.
+  *Fix:* (1) make the eager loop use `dfx.SaveAt(ts=...)` per macro step — the
+  machinery exists, `_solve_group` already gets a `SaveAt` on the scan path — and
+  concatenate, so `save_dt` has one meaning (~1 day). (2) Until then, **raise**
+  when `save_dt < macro_dt` selects the eager path (~1 h). (3) Promote the
+  auto-reduction notice to `log.warning`, drop the once-per-instance latch, and
+  put the *resolved* `save_dt` into `SchedulerResult.stats` so it lands in the
+  artefact rather than a log line no handler is listening for (~2 h).
+  (4) The structural fix is the equivalence test in P1.16.
+
+- [ ] **P0.31 — `derivative()` or `assign()` returning an undeclared port is
+  silently dropped.** Found 2026-08-31 (external systems review).
+  `_FlatRHS.__call__` (`composite.py:325-331`) iterates `write_map.ports` and
+  does `if port not in raw: continue`; nothing checks the converse.
+  `assign()` has the same shape at `composite.py:262-264`. Measured — a process
+  declaring only `x` and returning `{"x": -s["x"], "typo_port": 99.0}` gives
+  `rhs(0, y0) == [-1.]`, the 99.0 contribution gone with no warning. A renamed
+  or mistyped port name is the single most likely authoring error and the one a
+  generated `Process` will make.
+  **Free to fix.** `_FlatRHS.__call__` runs in Python at *trace* time, so a set
+  comparison there never enters the jaxpr and costs nothing at runtime:
+  `extra = raw.keys() - set(write_map.ports)` → raise naming the undeclared
+  ports and the declared set. ~10 lines across `derivative` and `assign`, 1 hour.
+  Same rule as P0.4 (`dose_window=None` silently deleting a hallmark dial):
+  **an operation that resolves to nothing must say so.** Worth fixing as one
+  rule rather than two instances.
+  *Related but not a raise:* omitting a *declared* EVOLVED port from
+  `derivative()` silently freezes that state (a process declaring `x` and `z`
+  but returning only `x` gives `[-1., 0.]`). That is legitimately allowed — a
+  process may contribute conditionally — so the answer is the per-path
+  contributor report in P2.7, not an error.
+
+- [ ] **P0.32 — `semantic_validation={}` silently disables the entire
+  validation layer.** Found 2026-08-31 (external systems review).
+  `composite.py:400` is `if semantic_validation:`, and `{}` is falsy. Measured
+  on a composite with a genuine `uM` vs `mol` conflict at a shared path:
+
+  ```
+  semantic_validation=True (default)    -> ValueError: Semantic validation failed
+  semantic_validation={'strict': True}  -> ValueError: Semantic validation failed
+  semantic_validation={}                -> CONSTRUCTED (no error)
+  semantic_validation=False             -> CONSTRUCTED (no error)
+  ```
+
+  `docs/architecture.md` teaches the dict form ("opt out per subsystem with
+  `semantic_validation={...}`"), so `{}` reads as "dict form, no overrides, i.e.
+  defaults" and means the opposite.
+  *Fix:* `if semantic_validation is not False and semantic_validation is not
+  None:`. 15 minutes.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -793,6 +1020,115 @@ The check that would catch a mistake does not exist, does not run, or fails open
   *Fix:* a collinearity pass over declared rate laws / stoichiometry at
   `Process` construction, naming the redundant group.
 
+- [ ] **P1.16 — The multi-group scheduler has no in-repo workload, so every
+  defect in it was found by hand-forcing a configuration.** Found 2026-08-31
+  (external systems review). The largest composite in the repository resolves to
+  **6 processes, 29 store paths, 35 ports — and `auto_groups()` returns a single
+  group** (`{'group_0': 6}`), so it takes the `fast_path_eligible` branch: one
+  `diffeqsolve` over the whole span. (Counting only; no number from that demo is
+  cited as evidence about the framework.) Consequently
+  `_run_scan_continuous` (`scheduler.py:1121-1310`, ~190 lines) and the eager
+  `while` loop (`:763-905`, ~140 lines) are exercised only by unit tests, and
+  `splitting="strang"`, `coupling_mode="interpolated"`, `adaptive_dt=True` and
+  the whole `_InterpFill` / `_FrozenFill` machinery have no standing workload at
+  all.
+  **P0.2, P0.6, P0.10, P0.13, P0.20, P0.23, P0.29 and P0.30 are all in those
+  ~330 lines.** They are not eight independent defects; they are one coverage
+  gap producing defects at a steady rate, which is why several are still open
+  as "unconfirmed" / "not yet understood" / "unseparated". Fixing them one at a
+  time will keep producing new ones.
+  *Fix:* not a bigger biological demo — CLAUDE.md is explicitly against that.
+  A **synthetic multi-group conformance workload in `tests/`, run in CI**: a
+  parametrized fixture over the cross-product of {1, 2, 3, 5 groups} × {lie,
+  strang} × {frozen, interpolated, auto} × {adjacent, non-adjacent driving edge}
+  × {with/without a DISCRETE process}, built from `hallsim.models` primitives
+  only, against an analytic or refined reference. Assert (a) convergence order in
+  `macro_dt` per scheme, (b) equivalence across all three execution paths — the
+  structural half of P0.30's fix — and (c) that structurally irrelevant
+  perturbations (inserting an inert group) do not change the answer. That single
+  fixture would have caught P0.23 and P0.30, settles P0.2's order deficit with a
+  number instead of an argument, and turns P0.23 from an argument into a failing
+  test. 3-5 days. Highest-leverage test in the repo that does not exist.
+
+- [ ] **P1.17 — Nothing checks HallSim against an established simulator; the
+  instrument exists and is not a test.** Found 2026-08-31 (external systems
+  review). `misc/tellurium_compare.py` builds the same SBML models in
+  libRoadRunner/CVODE and compares per-species trajectories, describing
+  RoadRunner as "the trusted stiff integrator; this is our ground-truth check" —
+  precisely the right instrument. It is a one-off script in `misc/`, its
+  docstring points at a wrong path (`demos/tellurium_compare.py`) and leaks a
+  venv name into public-facing text against the repo's own rule, and
+  `grep -rn "tellurium\|roadrunner\|copasi\|amici" tests/` returns nothing.
+  HallSim re-implements a large amount of SBML semantics on top of
+  `sbmltoodejax` — event translation (`sbml_events.py`, 358 lines),
+  assignment-rule ordering (`_order_assignments`), `functionDefinition`
+  inlining, port-boundary unit conversion (`units.py`), time-unit reconciliation
+  (`reconciled_to`) — and every one is a place that can produce a
+  plausible-but-wrong trajectory. **The entire correctness argument for all of it
+  is currently internal consistency.**
+  *Fix:* promote it to `tests/conformance/`, marked `slow` and gated on
+  `pytest.importorskip("roadrunner")`, asserting a per-species relative-deviation
+  bound on the bundled offline SBML. 2-3 days to make deterministic and bounded;
+  it is ~80% written. Highest-value test asset available.
+
+- [ ] **P1.18 — The validation layer emits 3 warnings and 3 false positives on
+  the framework's own two-process example.** Found 2026-08-31 (external systems
+  review). `simulate compose` — the README quickstart composite, the smallest
+  thing the framework can build — emits:
+
+  ```
+  (graph)    Feedback loop among 2 processes: antioxidant -> ros_prod.
+  (graph)    High coupling density: 100% (2/2 possible edges). Consider decomposing.
+  (coupling) Potential duplication at 'cytoplasm/ROS': ros_prod.ros and antioxidant.ros
+             share description terms: {'oxygen','concentration','reactive','species'}
+  ```
+
+  The feedback loop *is* the model (production and removal on one pool); the
+  density advice is to decompose a two-process composite; the duplication
+  heuristic fired on two processes sharing the words "reactive oxygen species".
+  P3.11 diagnoses the wholesale `semantic_validation=False` as a *cost* problem
+  (`nx.simple_cycles`, fixed via SCCs) and an *annotation-granularity* problem.
+  Both are real, but the behavioural driver is under-measured: **a checker whose
+  smallest possible input yields 3/3 false positives trains its users to switch
+  it off**, and making it faster does not change that.
+  *Fix:* measure precision first — what fraction of emitted warnings correspond
+  to a defect a reviewer agrees with, across the composites on hand — and rank
+  that above further cost work on this checker.
+
+- [ ] **P1.19 — A composite is not bit-reproducible across a JAX pytree
+  round-trip.** Found 2026-08-31 (external systems review).
+  `store.build_initial_store` (`store.py:119-123`) documents this hazard and
+  guards it: *"The tie-break is by name rather than by dict order on purpose:
+  JAX sorts dict keys when it flattens a pytree, so `processes` comes back
+  sorted from any `jax.jit` / `vmap` / `eqx.tree_at` round-trip."* The same
+  hazard is unguarded in `build_rhs` (`composite.py:558`), `_assignment_pre`
+  (`:479`), `auto_groups` (`:748`) and `evolved_indices` (`:600`), all of which
+  iterate `self.processes` / `continuous_processes()` in dict order. Measured,
+  six processes inserted unsorted, all writing one EVOLVED path:
+
+  ```
+  insertion order         : ['zeta','alpha','mu','beta','omega','gamma']
+  after eqx.tree_at       : ['alpha','beta','gamma','mu','omega','zeta']
+  after eqx.filter_jit    : ['alpha','beta','gamma','mu','omega','zeta']
+  RHS at y0: orig = -0.600000015  roundtrip = -0.600000014  bit-identical = False
+  ```
+
+  The scatter-add accumulation order changes, so the RHS differs in the last ULP.
+  Through a full solve on a six-oscillator composite the divergence stayed
+  bounded — 4.8e-15 relative at t=50, 1.8e-14 at t=200, 1.2e-14 at t=1000 — so
+  on this evidence it is a **reproducibility** defect, not a correctness one. No
+  case was found where the adaptive controller amplified it into a step-sequence
+  divergence, and none is claimed to exist.
+  Why it matters anyway: `Composite.with_params` (`composite.py:875-899`) is
+  implemented with `eqx.tree_at`, so *every ablation and every sweep arm* is a
+  round-tripped composite compared against a non-round-tripped baseline — and
+  the diary's several "bit-exact" / "max_abs_diff = 0.0" verifications depend on
+  which side of a round-trip each ran on, which nothing records.
+  *Fix:* iterate `sorted(self.processes)` at the four sites. One line each, no
+  behaviour change beyond making the order canonical, matching the precedent
+  `build_initial_store` already sets. 1 hour including a test that round-trips
+  through `filter_jit` and asserts `build_rhs` is bit-identical.
+
 ---
 
 ## P2 — cannot see what was built
@@ -830,6 +1166,42 @@ The check that would catch a mistake does not exist, does not run, or fails open
   **Found while fixing, not fixed:** `demos/multi_hallmark_hybrid.py:492` reads
   `gz06/x2_integral`, a store path the composite no longer has — that demo
   cannot run.
+
+- [ ] **P2.7 — The `ValidationReport` is computed on every construction and
+  thrown away, including the interaction graph P2.1 is asking for.** Found
+  2026-08-31 (external systems review). `Composite.__init__` builds a full
+  `ValidationReport` including `interaction_graph` (`composite.py:407`,
+  `validation.py:849-855`), then either raises or `log.warning`s its string
+  form. `Composite` is an `eqx.Module` with exactly three fields (`processes,
+  topology, initial`), so there is nowhere to put it and nothing attaches it.
+  Consequences: there is no programmatic way to ask a constructed composite what
+  its validator said (you must re-run
+  `CompositeValidator().validate(comp.processes, comp.topology)` — a second full
+  pass); no way to ask whether validation ran at all or with which subsystems
+  enabled, since `semantic_validation` is a constructor argument leaving no trace
+  on the object; and the interaction graph is rebuilt and discarded every time.
+  *Fix:* add `report: ValidationReport | None = eqx.field(static=True,
+  default=None)` to `Composite` and populate it — static, so it stays off the
+  traced pytree. **P2.1 and P2.2 then become a formatting exercise over data
+  already in hand rather than new analysis.** ~4 hours.
+  Same seam as P0.31's second half: which declared writers actually contributed
+  on the first trace is known at trace time and currently discarded. Recording
+  it per store path is what turns "a declared EVOLVED port silently frozen" into
+  something visible, and it is the same report.
+
+- [ ] **P2.8 — The CLI configures no logging, so every `log.info` in the
+  framework is invisible from the documented entry point.** Found 2026-08-31
+  (external systems review). `src/hallsim/cli.py` contains **zero** `logging`
+  references, while CLAUDE.md insists `simulate <command>` is *the* way to invoke
+  anything. So: every `log.info` is dropped — including the auto-reduced
+  `save_dt` notice (P0.30), the per-group stiffness verdicts under `debug=True`,
+  and the group-ordering decisions; every `log.warning` surfaces through
+  `logging.lastResort` as bare stderr text with no level prefix, logger name or
+  timestamp, and no way to filter or redirect; and there is no `--verbose` /
+  `--quiet` on any command.
+  *Fix:* `logging.basicConfig` plus `-v/-q` on the `simulate` group callback.
+  ~1 hour, and it converts a large amount of already-written diagnostic text
+  from invisible to usable.
 
 ---
 
@@ -1029,3 +1401,188 @@ The check that would catch a mistake does not exist, does not run, or fails open
   inside `_port_view` measures 9 equations *worse* than the free fix of eliding
   the identity unit multiply, with an identical slope and `slice` unchanged at
   2,203 — it cannot work while `derivative` receives `dict[str, scalar]`.
+
+- [ ] **P3.13 — P3.12 flattened the per-*port* slope; the per-*process* slope is
+  still there, unmeasured, and superlinear in compile.** Found 2026-08-31
+  (external systems review). P3.12's result — jaxpr "871 equations at N=300,
+  3,000 and 10,000 alike" — is flatness in *port count within one process*, and
+  it reproduces. The composition axis, **process count**, which is the
+  framework's whole reason to exist, is linear in jaxpr and superlinear in
+  compile, and was not measured anywhere in this file or in `diary.md`.
+  Identical mathematics (a ring of N first-order decays with nearest-neighbour
+  coupling) spelled two ways — N single-port processes vs one process with an
+  N-wide block port. CPU, `HALLSIM_COMPILATION_CACHE_DIR=off`:
+
+  ```
+  N     spelling      Composite()  build_rhs  RHS trace   jaxpr eqns   jit compile
+  100   N processes   0.305 s      8.5 ms     155 ms       2,701        0.67 s
+  100   1 block port  0.001 s      0.5 ms       5 ms           24        0.03 s
+  400   N processes   0.148 s     31.9 ms     682 ms      10,801        4.01 s
+  400   1 block port  0.003 s      1.3 ms      11 ms           24        0.04 s
+  800   N processes   0.298 s     64.9 ms   1,339 ms      21,601       11.66 s
+  800   1 block port  0.005 s      2.5 ms      20 ms           24        0.04 s
+  1600  N processes   0.600 s    131.9 ms   3,131 ms      43,201       38.33 s
+  1600  1 block port  0.014 s      4.9 ms      39 ms           24        0.04 s
+  ```
+
+  jaxpr is exactly **27 equations per process** (`27N + 1`), flat at 24 for the
+  block. Compile grows as roughly **N^1.7** (100→400 is 6.0× for 4× N; 800→1600
+  is 3.3× for 2× N) — **38 s to compile a single RHS evaluation at N=1600**,
+  before any solve, ~1000× the block spelling and widening.
+  *Where the 27 come from* (measured per-process primitive counts): `4
+  convert_element_type, 4 mul, 3 broadcast_in_dim, 3 add, 2 device_put, 2 lt,
+  2 select_n, 2 slice, 2 squeeze, 1 gather`, plus the scatter. `slice` +
+  `squeeze` are `_port_view` (`composite.py:243-252`) unpacking one gather into
+  per-port scalars — P3.12 identified this as "the dict-of-scalars interface
+  itself" but scoped it to ports; for a composite of scalar-ported processes it
+  is also the per-process cost. `lt` + `select_n` + `add` + `device_put` are
+  **one `.at[cols].add(vals)` scatter per process** (`composite.py:346`) plus its
+  `np.concatenate` of static index/factor arrays at `composite.py:334-335`, done
+  inside the traced `__call__`, per process, per trace.
+  *Fix, available and cheap:* `_FlatRHS.__call__` (`composite.py:317-348`)
+  already holds every process's `cols`/`facs` as static numpy. Concatenate all
+  processes' index arrays **once at build time** and emit a **single** scatter
+  over the concatenated contribution vector instead of N scatters. That collapses
+  `lt`/`select_n`/`device_put`/scatter-`add` from 4N to 4 and hoists the two
+  `np.concatenate` calls out of the traced body. Write semantics are unchanged —
+  duplicate indices in one `.at[].add` still sum, which is EVOLVED's contract,
+  as P3.12's own migration notes established. Estimated: removes ~10 of the 27
+  eqns/process and, more importantly, N separate scatters from the XLA graph,
+  the likeliest source of the N^1.7. 1-2 days including a bit-exactness test
+  against the current path and a `jaxpr_eqns(N)` **slope** test alongside
+  `test_block_port_rhs_is_flat_in_width`. The slope test is the important half:
+  without it the next refactor re-introduces the per-process scatter unnoticed.
+  *Not measured, wanted:* the same sweep with a full `Scheduler.run` compile
+  rather than a bare RHS trace, and with reverse-mode. Both run well past a
+  minute at N≥800; the RHS is the inner loop of both, so the N^1.7 is expected to
+  carry through and be worse.
+
+- [ ] **P3.14 — The module layering is acyclic by static import order and a
+  14-module cycle by actual dependency; the base abstraction imports the
+  optimizer.** Found 2026-08-31 (external systems review). Measured over the 40
+  modules under `src/hallsim/`: **top-level imports are 57 edges with zero
+  cycles** — the static layering is clean. Counting function-local imports it is
+  **98 edges and one strongly-connected component of 14 modules**: `calibration,
+  composite, coupling_wiring, hallmarks, models.hill_edge,
+  models.running_integral, process, reporter_wiring, scheduler, steady_state,
+  stiffness, store, units, validation`. Nineteen modules carry deferred
+  `hallsim` imports specifically to break a cycle. The lazy imports make Python
+  happy; they do not make the design acyclic, and none of it is visible in the
+  import graph a reader sees at the top of a file — so a contract change in any
+  of the 14 can require edits in the other 13.
+  Sharpest instance, one line: **`process.py:354` — `Process.calibratable_params`
+  does `from hallsim.calibration import CalibratableParam`.** The base
+  abstraction of the framework imports the optimizer module to construct its
+  return value. `process` has fan-in 20, the highest in the repo; `calibration`
+  is the largest file (2,147 lines) and the most likely to change.
+  *Fix:* move `CalibratableParam` (and `ParameterRef`'s pure-data half) into a
+  leaf module — `hallsim/params.py`, or `process.py` itself, since that is where
+  it is produced. Same for `composite.py:875` (`from hallsim.calibration import
+  CalibratableParam`) and `composite.py:876` (`from hallsim.hallmarks import
+  HALLMARK_REGISTRY`, a module-level mutable registry read from inside a
+  `Composite` method — already overridable via `registry=`, so the default lookup
+  could move to the caller). Half a day, and it shrinks the SCC materially.
+
+- [ ] **P3.15 — Three modules build what an established tool already solved.**
+  Found 2026-08-31 (external systems review), against the repo's own principle
+  "if COPASI / Tellurium / AMICI solved a problem, borrow it".
+  - **`bifurcation.py` (459 lines) — push hardest.** It hand-rolls Newton
+    continuation, and its own docstring names the limitation that
+    pseudo-arclength continuation exists to remove: *"a branch is followed only
+    until it folds — tracing both arms of a hysteresis loop needs a multi-seed
+    sweep."* That is the defining feature of AUTO-07p, MatCont, BifurcationKit
+    and PyDSTool. **P3.2 ("no real-eigenvalue continuation") is a symptom of
+    building rather than borrowing.** The autodiff-through-JAX argument is
+    genuine for the *normal-form coefficients*; the continuation stepper itself
+    is undifferentiated.
+  - **`steady_state.conservation_laws` — borrow.** P1.9 already records that
+    moieties are inferred numerically. Exact structural conservation from the
+    stoichiometry matrix null space is what COPASI/libRoadRunner ship and what
+    `Process.stoichiometry()` was added to enable; finish wiring it rather than
+    improving the numerical inference.
+  - **`identifiability.py` (270 lines) — borrow the method, keep the code.**
+    P1.13's own note says `pinv(JᵀJ)` omits the prior precision and the noise
+    scale. pyPESTO / dMod solved this; copying the formulation is cheaper than
+    rediscovering it.
+  *Justified builds, explicitly not on this list:* `xpp_import.py` (no library
+  does this well), `_interp_uniform` (static shape is a hard `lax.scan`
+  requirement and the docstring says so), `_ReducedRHS` (nothing off the shelf
+  gives a group-restricted implicit solve), `_per_member` batching.
+
+---
+
+## Review notes — 2026-08-31 external systems review
+
+Where the reviewer thought this document's own priorities disagree with its
+stated rules. Recorded rather than acted on; triage decisions are the
+maintainer's.
+
+- **P3.10 and P3.11 are filed P3 while both appear in the standing-criterion
+  table**, which says an edit a user was forced to make is "a P0 regardless of
+  how small the edit was". P3.10's own text calls itself "**the** blocker at
+  10k" and records a user replacing the inner solve with a hand-written one. By
+  this document's own rule they are P0s. The scheme disagrees with itself in
+  writing, which will cost the next person triaging by number.
+- **P1.1 (no `check_gradient`) should be P0.** End-to-end differentiability is
+  stated as a must; P0.1 shows gradients can be finite garbage and P0.29 is a
+  second, silent route to the same outcome. `check_gradient` is not a
+  nice-to-have validator — it is the **detector** for the highest-severity
+  failure class in the system, and the only item on this list that would have
+  caught both P0.1 and P0.29 without anyone suspecting them first. Build the
+  instrument before the next bug.
+- **P1.2 + P1.14 together are a documentation-code disagreement on a safety
+  gate, and neither says so.** CLAUDE.md's intake protocol calls tolerance
+  sensitivity "the load-bearing check" and makes screening mandatory; P1.2 says
+  `screen_process` never varies `atol`; P1.14 says the `rtol` pair it does vary
+  is two decades past the known-bad point and produces a guaranteed false
+  REJECT. So the mandatory gate does not perform the check the protocol calls
+  load-bearing, and performs a different one calibrated wrong. That is a P0 in
+  the "config silently disagrees with the code" sense — the protocol document is
+  the config.
+- **P0.4 and P0.31 are one rule, not two instances.** "If every mapping of an
+  applied hallmark misses its target, raise" and "if a returned port name matches
+  nothing, raise" are both *an operation that resolves to nothing must say so*.
+  Worth generalising.
+- **P0.2, P0.6, P0.10, P0.13, P0.20, P0.23, P0.29, P0.30 are one coverage gap**,
+  not eight defects — see P1.16.
+
+### Open questions the review could not settle from the code
+
+1. *Answered 2026-08-31:* **is a `Scheduler` reusable across composites?** Yes —
+   it is a stateless runner. See P0.29 for what that decision implies.
+2. **What is the intended shape of a "thousand-port" generated composite — one
+   block-ported process, or a thousand processes?** P3.13's answer differs by
+   1000× in compile. If the former, the README should say so and
+   `docs/architecture.md` should show the generator pattern; if the latter,
+   per-process scatter fusion is a prerequisite, not an optimisation.
+3. **Is the stiffness verdict assumed invariant over a calibration's parameter
+   search space?** `calibration.py:1105-1112` depends on it; nothing checks it.
+   If unsafe, the fit needs a periodic re-verdict; if safe, assert it — measure
+   the verdict at the final parameters and fail the run if it moved.
+4. **Why do `adaptive_dt` and the eager loop still exist?** The diary records
+   `adaptive_dt` as Pareto-dominated. Deleting it removes a 7-parameter cluster,
+   one of three execution paths, and one of three implicit path selectors.
+5. **What is the acceptance test for "the composition is correct"?** Today it is
+   internal consistency plus review panels. `misc/tellurium_compare.py` implies
+   the intended answer is RoadRunner/CVODE — see P1.17. Whether cost, flakiness
+   or dependency weight is what keeps it out of `tests/` decides whether that is
+   a 2-day job or a blocked one.
+6. **Is `Composite` intended to stay a three-field frozen module?** Several
+   things want to live on it — validation report, interaction graph, resolved
+   stiffness verdict, cached `store_keys` — and all are hashable-or-static. A
+   deliberate "no, it stays minimal" is a fine answer; an accidental one is
+   costing observability (P2.7, P0.29).
+7. **Who is the first real user, and what is their first composite?** Everything
+   here ranks differently depending on whether that composite is three published
+   SBML models on one clock (P0.30, P0.23, P1.16 barely matter; P3.13 not at all)
+   or a generated network of hundreds of nodes (P3.13 and P0.29 dominate; the
+   SBML path barely matters). The repo currently invests in both and has a
+   workload for neither.
+8. **Is `demos/` shipped in the distribution on purpose?** `pyproject.toml`
+   includes `demos*` because the `simulate` entry point imports it, which makes
+   example biology part of the public artefact — against `docs/architecture.md`'s
+   own "specific biology is **not** part of the package". Worth deciding whether
+   the CLI should live behind an extra.
+
+The full report, including what the reviewer judged well designed and should not
+be broken, is the gitignored `docs/review-architecture-systems.md`.
