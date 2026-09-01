@@ -1,12 +1,10 @@
 .PHONY: install install-dev format lint check test test-all run run-compose run-validate help all
 
 install:
-	pip install --upgrade pip
-	pip install -e .
+	uv pip install -e .
 
 install-dev:
-	pip install --upgrade pip
-	pip install -e ".[dev]"
+	uv pip install -e ".[dev]"
 
 format:
 	black --line-length 79 src/

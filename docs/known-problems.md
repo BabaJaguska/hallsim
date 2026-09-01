@@ -330,7 +330,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   no change; tracing a full hysteresis loop needs a multi-seed sweep per
   parameter value.
 
-- [x] **P0.17 — `write_param` undid the array coercion, so every parameter
+- [x] **P0.24 — `write_param` undid the array coercion, so every parameter
   value recompiled.** ✓ External project, 2026-08-29. `write_param`
   (`process.py:82`) is `eqx.tree_at` throughout, and equinox skips
   `__check_init__` on `tree_unflatten` — which `__check_init__`'s own docstring
@@ -350,7 +350,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `test_with_params_sweep_does_not_recompile` go through the public route with a
   plain Python float, and both fail without the fix.
 
-- [x] **P0.18 — An unrecognised topology entry is skipped silently, and it
+- [x] **P0.25 — An unrecognised topology entry is skipped silently, and it
   decides splitting order.** ✓ External project, 2026-08-29, found by running
   rather than by grep. `scheduler.py:1068` passes over a topology entry it does
   not recognise without warning, and that loop determines group ordering and
@@ -469,16 +469,25 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `TypeError`, and the `RuntimeError` the scheduler wanted was one
   `stiffness.py` raises deliberately.
 
-- [ ] **P0.20 — A batched `y0` writing an ASSIGNED path is silently ignored.**
+- [x] **P0.26 — A batched `y0` writing an ASSIGNED path is silently ignored.**
   ✓ External project, 2026-08-29. Four distinct per-member setpoints written
   into a batched `y0` produced an endpoint spread of exactly 0.0 with no
   warning: the path was ASSIGNED, so `composite.py:169` overwrites the column
   from the process parameter on every RHS call. A population study that varies
   an assigned quantity per member therefore returns one repeated trajectory that
-  looks like a legitimate null result. *Fix:* raise when a batched initial
-  condition writes an ASSIGNED path.
+  looks like a legitimate null result.
+  *Fixed 2026-08-31.* Reproduced first — four members given setpoints
+  0.1/0.4/0.7/1.0 all ended at the process's own 0.5, spread exactly 0.0, no
+  warning. `Scheduler.run` now refuses, as one more entry in the existing
+  `is_batched` blockers so a caller with several batching problems gets one
+  message, and it names the offending path. It fires only when the column
+  actually *varies* across members; a uniform value is just the default.
+  Regressions in `test_multiscale.py::TestBatchedAssignedPaths`.
+  **Known hole:** the check reads concrete values, so it is a no-op when `y0`
+  is traced under `vmap`/`jit` — it guards the eager path only, the same shape
+  of gap as P0.1.
 
-- [ ] **P0.21 — An affine unit yields a garbage multiplier, silently.**
+- [ ] **P0.27 — An affine unit yields a garbage multiplier, silently.**
   `conversion_factor` (`units.py:25`) returns
   `parse_expression(from).to(to).magnitude`, which is **f(1)**. That is the
   scale only for a linear (ratio-scale) unit; for an affine one, f(x) = ax + b,
@@ -578,7 +587,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   survives intact and still bounds the result: the admissible K window is
   5.53–7.00, so the control arm sits only 12% clear of the Hopf.
 
-- [x] **P0.22 — A cold stiffness cache under `jit`/`grad`/`vmap` crashed with a
+- [x] **P0.28 — A cold stiffness cache under `jit`/`grad`/`vmap` crashed with a
   numpy message instead of degrading.** Found 2026-08-30 taking a gradient
   through a perturbation sweep — the first time `Scheduler.run` was called
   inside a transform with an unresolved cache. `stiffness.py:280` did
@@ -870,7 +879,7 @@ The check that would catch a mistake does not exist, does not run, or fails open
   **Re-scoped 2026-08-30 — this is a convenience, not a blocker, and the
   headline cost was a modelling error.** The "~3.6 s rebuild+recompile per
   perturbation, ~2.5 h across 2,500 CRISPRi arms" figure was measured with
-  P0.17 live *and* with the swept dimension encoded in the **topology** (a
+  P0.24 live *and* with the swept dimension encoded in the **topology** (a
   `ClampEdge` wired to the knocked-down gene). Topology is static, so each arm
   was a new treedef. Encode the arm as data instead — one clamp over the whole
   panel with traced `(N,)` strength and setpoint vectors, zero except at the
@@ -957,8 +966,8 @@ The check that would catch a mistake does not exist, does not run, or fails open
   annotation-granularity half of this entry is still open** — there is still no
   per-Process port declaration and no per-process opt-out.
 
-- [ ] **P3.12 — A port is structurally a scalar store path, so an N-dimensional
-  field costs N ports.** ✓ External project, 2026-08-29. `Port`
+- [x] **P3.12 — A port is structurally a scalar store path, so an N-dimensional
+  field costs N ports.** *Closed 2026-08-31.* ✓ External project, 2026-08-29. `Port`
   (`process.py:176-215`) has no shape field, so a Process writing a 10,000-gene
   field declares 10,000 ports and `_port_view` (`composite.py:159`) rebuilds them
   as 10,000 traced scalars on every RHS call. Measured RHS jaxpr size grows at
@@ -985,10 +994,22 @@ The check that would catch a mistake does not exist, does not run, or fails open
     `analyze_composability` would propose merging two unrelated 10,000-element
     blocks annotated with the same SBO term. Either exclude array ports from
     ontology matching or add an `element_ontology`.
-  - **The migration is not incremental until P0.18 is fixed**, because a
+  - **The migration is not incremental until P0.25 is fixed**, because a
     half-migrated composite silently mis-orders its splitting rather than
     failing.
-  *Partially addressed 2026-08-29 — the multiply half.* Port maps are now
+  **Closed 2026-08-31.** A port binds a *list* of store paths:
+  `topology[proc][port]` is always a tuple, normalised once in
+  `Composite.__init__`, and `Port(elements=...)` declares a block gathered and
+  scattered as one slice. Measured on the VCC composite, CPU, against the CPU
+  baseline: **871 jaxpr equations at N=300, 3,000 and 10,000 alike**, against
+  2,831 / 7,031 / 61,031 — slope 6.00 -> 0.00. At N=1,000 the gradient path is
+  **85.2 s -> 8.95 s (9.5x)**, RHS trace 11.8x, grad trace 11.3x. Block and
+  scalar spellings agree to exactly 0.0 on store order, initial state and RHS
+  output. The LLVM compile wall at N=10,000 is structurally gone. Guarded by
+  `test_block_port_rhs_is_flat_in_width` and — because the first scatter
+  rewrite silently cost the *scalar* path a broadcast per port —
+  `test_scalar_port_cost_per_port_does_not_regress`.
+  *Superseded detail — partially addressed 2026-08-29, the multiply half.* Port maps are now
   `(ports, indices, factors)` and `_port_view` does one gather plus one
   elementwise multiply per *process*; the write side stacks once before one
   vector multiply. Framework multiplies went from 2N to **2, independent of N**.

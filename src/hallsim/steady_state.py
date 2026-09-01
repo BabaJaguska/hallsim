@@ -39,6 +39,7 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
 
+from hallsim.store import as_paths
 from hallsim.tracing import is_traced
 
 log = logging.getLogger(__name__)
@@ -53,11 +54,13 @@ def accumulator_mask(composite, keys: list[str]) -> jnp.ndarray:
     from hallsim.models.running_integral import RunningIntegral
 
     positions = [
-        keys.index(composite.topology[name]["integral"])
+        keys.index(path)
         for name, proc in composite.processes.items()
-        if isinstance(proc, RunningIntegral)
-        and proc.tau is None
-        and composite.topology.get(name, {}).get("integral") in keys
+        if isinstance(proc, RunningIntegral) and proc.tau is None
+        for path in as_paths(
+            composite.topology.get(name, {}).get("integral", ())
+        )
+        if path in keys
     ]
     mask = jnp.zeros(len(keys), dtype=bool)
     return mask.at[jnp.asarray(positions)].set(True) if positions else mask
@@ -188,8 +191,9 @@ def composite_stoichiometry(composite, keys: list[str] | None = None):
             return None
         topo = composite.topology.get(name, {})
         rows = [
-            row_of.get(topo.get(species, species))
+            row_of.get(path)
             for species in declared["species"]
+            for path in as_paths(topo.get(species, species))
         ]
         covered.update(r for r in rows if r is not None)
         for c in range(len(declared["reactions"])):

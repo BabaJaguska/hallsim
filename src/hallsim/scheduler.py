@@ -37,6 +37,8 @@ import numpy as np
 import optimistix as optx
 
 from hallsim.composite import Composite
+from hallsim.store import as_paths, read_write_paths
+from hallsim.tracing import is_traced
 from hallsim.config import (
     DEFAULT_ATOL,
     DEFAULT_ATOL_SCALE,
@@ -163,6 +165,24 @@ class SchedulerResult:
         return key in self._index
 
 
+def _varying_assigned_paths(composite, state, keys) -> list[str]:
+    """ASSIGNED paths whose batched initial values differ between members.
+
+    Such a value never survives the first RHS call, so a population varying
+    one is really a population of identical members — silently, which is what
+    makes it worth refusing.
+    """
+    if is_traced(state):
+        return []
+    assigned = composite.assigned_paths()
+    cols = [i for i, k in enumerate(keys) if k in assigned]
+    if not cols:
+        return []
+    flat = np.asarray(state).reshape(-1, np.shape(state)[-1])[:, cols]
+    spread = flat.max(axis=0) - flat.min(axis=0)
+    return [keys[cols[j]] for j in range(len(cols)) if spread[j] != 0.0]
+
+
 def _build_proc_index_maps(
     proc, proc_topo: dict[str, str], key_to_idx: dict[str, int]
 ) -> tuple[tuple, tuple]:
@@ -170,13 +190,16 @@ def _build_proc_index_maps(
     port view from state, scatter LATCHED writes back. Each is
     ``((port_name, store_idx), ...)``."""
     read_pairs = tuple(
-        (port, key_to_idx[sp]) for port, sp in proc_topo.items()
+        (port, key_to_idx[sp])
+        for port, entry in proc_topo.items()
+        for sp in as_paths(entry)
     )
     schema = proc.ports_schema()
     write_pairs = tuple(
-        (port, key_to_idx[proc_topo[port]])
+        (port, key_to_idx[sp])
         for port, p in schema.items()
         if p.role == PortRole.LATCHED
+        for sp in as_paths(proc_topo[port])
     )
     return read_pairs, write_pairs
 
@@ -553,6 +576,15 @@ class Scheduler:
                 blockers.append(
                     "adaptive_dt=True (coupling residual is a single dt "
                     "for the whole batch and reduces via Python float)"
+                )
+            varying = _varying_assigned_paths(composite, state, keys)
+            if varying:
+                blockers.append(
+                    f"per-member values on ASSIGNED paths {varying} "
+                    "(an assignment is recomputed from its own process "
+                    "every step, so those values are overwritten before "
+                    "anything reads them and every member would run "
+                    "identically)"
                 )
             if blockers:
                 raise ValueError(
@@ -1068,15 +1100,16 @@ class Scheduler:
             for pname in procs:
                 topo_p = composite.topology[pname]
                 schema = composite.processes[pname].ports_schema()
-                for port, path in topo_p.items():
-                    if path not in key_to_idx:
-                        raise KeyError(
-                            f"{pname}.{port} wired to unknown path {path!r}"
-                        )
-                    r.add(key_to_idx[path])
-                    p = schema.get(port)
-                    if p is not None and p.role == PortRole.EVOLVED:
-                        w.add(key_to_idx[path])
+                for port, entry in topo_p.items():
+                    for path in as_paths(entry):
+                        if path not in key_to_idx:
+                            raise KeyError(
+                                f"{pname}.{port} wired to unknown path "
+                                f"{path!r}"
+                            )
+                p_reads, p_writes = read_write_paths(schema, topo_p)
+                r |= {key_to_idx[p] for p in p_reads}
+                w |= {key_to_idx[p] for p in p_writes}
             writes.append(w)
             reads.append(r)
         for a in range(len(items)):

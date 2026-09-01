@@ -874,3 +874,160 @@ class TestParameterOverrides:
             macro_dt=1.0,
         ).get("pool/x")
         assert abs(float(base[-1]) - float(off[-1])) > 1e-6
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Block ports — one port binding several store paths
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _Block(Process):
+    """N paths through one port, as ``-k * value`` on each."""
+
+    n: int = 3
+    k: float = 0.3
+
+    def ports_schema(self):
+        return {
+            "b": Port(
+                role=PortRole.EVOLVED,
+                default=1.0,
+                elements=tuple(f"e{i}" for i in range(self.n)),
+            )
+        }
+
+    def derivative(self, t, state):
+        return {"b": -self.k * state["b"]}
+
+
+class _Scalars(Process):
+    """The same maths spelled as N one-path ports."""
+
+    n: int = 3
+    k: float = 0.3
+
+    def ports_schema(self):
+        return {
+            f"g{i}": Port(role=PortRole.EVOLVED, default=1.0)
+            for i in range(self.n)
+        }
+
+    def derivative(self, t, state):
+        return {f"g{i}": -self.k * state[f"g{i}"] for i in range(self.n)}
+
+
+class TestBlockPorts:
+    """A block is a view over paths, not a new kind of state."""
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 17])
+    def test_block_matches_scalar_spelling_exactly(self, n):
+        paths = tuple(f"c/g{i}" for i in range(n))
+        blk = Composite(
+            processes={"f": _Block(n=n)},
+            topology={"f": {"b": paths}},
+            semantic_validation=False,
+        )
+        sca = Composite(
+            processes={"f": _Scalars(n=n)},
+            topology={"f": {f"g{i}": paths[i] for i in range(n)}},
+            semantic_validation=False,
+        )
+        assert blk.store_keys() == sca.store_keys()
+        yb, ys = blk.initial_state_vec(), sca.initial_state_vec()
+        assert float(jnp.max(jnp.abs(yb - ys))) == 0.0
+        rb, _ = blk.build_rhs()
+        rs, _ = sca.build_rhs()
+        diff = jnp.max(jnp.abs(rb(0.0, yb) - rs(0.0, ys)))
+        assert float(diff) == 0.0
+
+    def test_rhs_size_is_independent_of_block_width(self):
+        """The point of the feature: the graph stops growing with N."""
+
+        def eqns(n):
+            comp = Composite(
+                processes={"f": _Block(n=n)},
+                topology={"f": {"b": tuple(f"c/g{i}" for i in range(n))}},
+                semantic_validation=False,
+            )
+            rhs, _ = comp.build_rhs()
+            y = comp.initial_state_vec()
+            return len(jax.make_jaxpr(lambda v: rhs(0.0, v))(y).jaxpr.eqns)
+
+        assert eqns(4) == eqns(64)
+
+    def test_duplicate_path_inside_a_block_sums(self):
+        """EVOLVED is additive, and a block naming one path twice is two
+        contributions to it — the scatter accumulates rather than overwrites.
+        """
+        comp = Composite(
+            processes={"f": _Block(n=2)},
+            topology={"f": {"b": ("c/x", "c/x")}},
+            semantic_validation=False,
+        )
+        rhs, keys = comp.build_rhs()
+        y = comp.initial_state_vec()
+        dy = rhs(0.0, y)
+        col = keys.index("c/x")
+        assert float(dy[col]) == pytest.approx(2 * -0.3 * float(y[col]))
+
+    def test_overlapping_blocks_sum_on_the_shared_path(self):
+        comp = Composite(
+            processes={"a": _Block(n=2), "b": _Block(n=2)},
+            topology={
+                "a": {"b": ("c/x", "c/y")},
+                "b": {"b": ("c/y", "c/z")},
+            },
+            semantic_validation=False,
+        )
+        rhs, keys = comp.build_rhs()
+        y = comp.initial_state_vec()
+        dy = rhs(0.0, y)
+        shared, alone = keys.index("c/y"), keys.index("c/x")
+        assert float(dy[shared]) == pytest.approx(2 * float(dy[alone]))
+
+    def test_block_and_scalar_overlap_sums(self):
+        comp = Composite(
+            processes={"a": _Block(n=2), "s": Production()},
+            topology={"a": {"b": ("c/x", "c/y")}, "s": {"x": "c/y"}},
+            semantic_validation=False,
+        )
+        rhs, keys = comp.build_rhs()
+        y = comp.initial_state_vec()
+        dy = rhs(0.0, y)
+        # The block contributes -k*value to both paths; Production adds its
+        # rate to the shared one only.
+        blk_only = float(dy[keys.index("c/x")])
+        both = float(dy[keys.index("c/y")])
+        assert both == pytest.approx(blk_only + Production().rate)
+
+    def test_width_mismatch_between_elements_and_paths_raises(self):
+        with pytest.raises(ValueError, match="elements"):
+            Composite(
+                processes={"f": _Block(n=3)},
+                topology={"f": {"b": ("c/x", "c/y")}},
+                semantic_validation=False,
+            ).initial_state()
+
+    def test_per_element_defaults_seed_each_path(self):
+        class Seeded(Process):
+            def ports_schema(self):
+                return {
+                    "b": Port(
+                        role=PortRole.EVOLVED,
+                        default=(1.0, 2.0, 3.0),
+                        elements=("p", "q", "r"),
+                    )
+                }
+
+            def derivative(self, t, state):
+                return {"b": jnp.zeros_like(state["b"])}
+
+        comp = Composite(
+            processes={"f": Seeded()},
+            topology={"f": {"b": ("c/a", "c/b", "c/c")}},
+            semantic_validation=False,
+        )
+        store = comp.initial_state()
+        assert float(store["c/a"]) == 1.0
+        assert float(store["c/b"]) == 2.0
+        assert float(store["c/c"]) == 3.0

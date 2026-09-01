@@ -12,6 +12,7 @@ Internally everything runs on the flat vector returned by
 from __future__ import annotations
 
 import logging
+from difflib import get_close_matches
 from typing import Any
 
 import jax.numpy as jnp
@@ -21,6 +22,78 @@ from hallsim.process import PortRole, Process, ProcessKind
 from hallsim.tracing import is_traced
 
 log = logging.getLogger(__name__)
+
+
+def as_paths(entry) -> tuple[str, ...]:
+    """A topology entry as the store paths it binds.
+
+    A bare string is the one-path case. This is the only place that knows a
+    port may bind more than one path; every reader goes through it.
+    """
+    return (entry,) if isinstance(entry, str) else tuple(entry)
+
+
+def read_write_paths(schema, topo_p):
+    """Store paths a process reads and writes, as ``(reads, writes)``.
+
+    The one definition of "who drives whom", shared by group ordering and
+    coupling-mode resolution. A pure source (``reads_value=False``) writes
+    without reading, so it drives others and is driven by none.
+    """
+    reads, writes = set(), set()
+    for port, entry in topo_p.items():
+        spec = schema.get(port)
+        if spec is None:
+            continue
+        for path in as_paths(entry):
+            if spec.role in (
+                PortRole.EVOLVED,
+                PortRole.EXCLUSIVE,
+                PortRole.LATCHED,
+                PortRole.ASSIGNED,
+            ):
+                writes.add(path)
+            if spec.role is PortRole.INPUT or (
+                spec.role is PortRole.EVOLVED and spec.reads_value
+            ):
+                reads.add(path)
+    return reads, writes
+
+
+def port_defaults(port, paths, proc_name="", port_name=""):
+    """One initial value per path a port binds.
+
+    A block's ``default`` is either one value broadcast over its elements or
+    one per element, in element order. The number of bound paths must match
+    the number of declared elements — a mismatch means the topology and the
+    schema disagree about how wide the port is, which no later stage can
+    detect.
+    """
+    width = port.width
+    if width is None:
+        if len(paths) != 1:
+            raise ValueError(
+                f"{proc_name}.{port_name} binds {len(paths)} paths but "
+                f"declares no elements; give it elements=(...) to bind a block"
+            )
+        return (port.default,)
+    if len(paths) != width:
+        raise ValueError(
+            f"{proc_name}.{port_name} declares {width} elements "
+            f"{port.elements} but the topology binds {len(paths)} paths"
+        )
+    default = port.default
+    if default is None:
+        return (None,) * width
+    if np.ndim(default) == 0:
+        return (default,) * width
+    values = tuple(np.asarray(default).reshape(-1))
+    if len(values) != width:
+        raise ValueError(
+            f"{proc_name}.{port_name} has {len(values)} default values for "
+            f"{width} elements"
+        )
+    return values
 
 
 def build_initial_store(
@@ -61,14 +134,16 @@ def build_initial_store(
         proc = processes[proc_name]
         topo = topology.get(proc_name, {})
         for port_name, port in proc.ports_schema().items():
-            store_path = topo.get(port_name, port_name)
-            claims.setdefault(store_path, {})
-            if port.default is None:
-                continue  # writes here, claims nothing about where it starts
-            tier = 0 if port.role in writer_roles else 1
-            claims[store_path].setdefault(tier, []).append(
-                (proc_name, port.default)
-            )
+            paths = as_paths(topo[port_name])
+            defaults = port_defaults(port, paths, proc_name, port_name)
+            for store_path, value in zip(paths, defaults):
+                claims.setdefault(store_path, {})
+                if value is None:
+                    continue  # writes here, claims nothing about its start
+                tier = 0 if port.role in writer_roles else 1
+                claims[store_path].setdefault(tier, []).append(
+                    (proc_name, value)
+                )
 
     initial = dict(initial or {})
     store: dict[str, jnp.ndarray] = {}
@@ -95,6 +170,13 @@ def build_initial_store(
         # jax_enable_x64), so integration state matches the rtol=1e-6 solver
         # tolerance rather than the float32 floor.
         store[store_path] = jnp.asarray(default)
+    if initial:
+        unknown = sorted(initial)
+        near = get_close_matches(unknown[0], store, n=3)
+        raise KeyError(
+            f"Composite(initial=...) names paths no port claims: {unknown}"
+            + (f"; did you mean {near}?" if near else "")
+        )
     return store
 
 
@@ -150,30 +232,34 @@ def validate_topology(
         topo = topology.get(proc_name, {})
         for port_name, port in proc.ports_schema().items():
             if port.role in (PortRole.EXCLUSIVE, PortRole.ASSIGNED):
-                store_path = topo.get(port_name, port_name)
-                if store_path in exclusive_owners:
-                    errors.append(
-                        f"Sole-owner conflict: store path {store_path!r} claimed "
-                        f"by both {exclusive_owners[store_path]!r} and "
-                        f"{proc_name!r}"
-                    )
-                else:
-                    exclusive_owners[store_path] = proc_name
+                if port_name not in topo:
+                    continue
+                for store_path in as_paths(topo[port_name]):
+                    if store_path in exclusive_owners:
+                        errors.append(
+                            f"Sole-owner conflict: store path {store_path!r} "
+                            f"claimed by both "
+                            f"{exclusive_owners[store_path]!r} and "
+                            f"{proc_name!r}"
+                        )
+                    else:
+                        exclusive_owners[store_path] = proc_name
 
     # Check that exclusive store paths are not also evolved by other processes
     for proc_name, proc in processes.items():
         topo = topology.get(proc_name, {})
         for port_name, port in proc.ports_schema().items():
             if port.role == PortRole.EVOLVED:
-                store_path = topo.get(port_name, port_name)
-                if (
-                    store_path in exclusive_owners
-                    and exclusive_owners[store_path] != proc_name
-                ):
-                    errors.append(
-                        f"Exclusive conflict: store path {store_path!r} is EXCLUSIVE "
-                        f"in {exclusive_owners[store_path]!r} but EVOLVED in {proc_name!r}"
-                    )
+                if port_name not in topo:
+                    continue
+                for store_path in as_paths(topo[port_name]):
+                    owner = exclusive_owners.get(store_path)
+                    if owner is not None and owner != proc_name:
+                        errors.append(
+                            f"Exclusive conflict: store path {store_path!r} "
+                            f"is EXCLUSIVE in {owner!r} but EVOLVED in "
+                            f"{proc_name!r}"
+                        )
 
     # Check process kind / port role compatibility
     for proc_name, proc in processes.items():

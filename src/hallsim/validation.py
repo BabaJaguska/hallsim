@@ -34,7 +34,7 @@ import networkx as nx
 import pint
 
 from hallsim.process import Port, PortRole, Process
-from hallsim.store import validate_topology
+from hallsim.store import as_paths, read_write_paths, validate_topology
 
 log = logging.getLogger(__name__)
 
@@ -124,10 +124,12 @@ def _store_port_map(
     for proc_name, proc in processes.items():
         topo = topology.get(proc_name, {})
         for port_name, port in proc.ports_schema().items():
-            store_path = topo.get(port_name, port_name)
-            result.setdefault(store_path, []).append(
-                _PortEntry(proc_name, port_name, port)
-            )
+            if port_name not in topo:
+                continue
+            for path in as_paths(topo[port_name]):
+                result.setdefault(path, []).append(
+                    _PortEntry(proc_name, port_name, port)
+                )
     return result
 
 
@@ -467,8 +469,10 @@ class RedundancyChecker:
         # entity's pools is the coupling edge that wires them together.
         proc_paths = [
             {
-                topology.get(pn, {}).get(port, port)
+                path
                 for port in proc.ports_schema()
+                if port in topology.get(pn, {})
+                for path in as_paths(topology[pn][port])
             }
             for pn, proc in processes.items()
         ]
@@ -529,23 +533,11 @@ class GraphAnalyzer:
 
         for proc_name, proc in processes.items():
             topo = topology.get(proc_name, {})
-            for port_name, port in proc.ports_schema().items():
-                sp = topo.get(port_name, port_name)
-                if port.role in (
-                    PortRole.EVOLVED,
-                    PortRole.EXCLUSIVE,
-                    PortRole.LATCHED,
-                    PortRole.ASSIGNED,
-                ):
-                    path_writers.setdefault(sp, []).append(proc_name)
-                if port.role == PortRole.INPUT:
-                    path_readers.setdefault(sp, []).append(proc_name)
-                # EVOLVED ports usually read the current value too (their
-                # derivative can depend on it) — count as reader. A pure
-                # source (reads_value=False) writes but does not read, so it
-                # forms no feedback edge.
-                if port.role == PortRole.EVOLVED and port.reads_value:
-                    path_readers.setdefault(sp, []).append(proc_name)
+            reads, writes = read_write_paths(proc.ports_schema(), topo)
+            for sp in writes:
+                path_writers.setdefault(sp, []).append(proc_name)
+            for sp in reads:
+                path_readers.setdefault(sp, []).append(proc_name)
 
         # Edges: writer → reader (skip self-loops)
         all_paths = set(path_writers.keys()) | set(path_readers.keys())
@@ -625,20 +617,23 @@ class GraphAnalyzer:
                     PortRole.LATCHED,
                     PortRole.ASSIGNED,
                 ):
-                    all_written.add(topo.get(port_name, port_name))
+                    all_written.update(as_paths(topo[port_name]))
 
         for proc_name, proc in processes.items():
             topo = topology.get(proc_name, {})
             for port_name, port in proc.ports_schema().items():
                 if port.role == PortRole.INPUT:
-                    sp = topo.get(port_name, port_name)
-                    if sp not in all_written:
+                    if port_name not in topo:
+                        continue
+                    for sp in as_paths(topo[port_name]):
+                        if sp in all_written:
+                            continue
                         results.append(
                             ValidationResult(
                                 Severity.WARNING,
                                 "graph",
-                                f"Unfed input: {proc_name}.{port_name} reads from "
-                                f"{sp!r} but no process writes there. "
+                                f"Unfed input: {proc_name}.{port_name} reads "
+                                f"from {sp!r} but no process writes there. "
                                 f"Will use default value only.",
                             )
                         )

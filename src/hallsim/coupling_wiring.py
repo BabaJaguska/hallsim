@@ -199,6 +199,7 @@ def topology_writer_verdicts(processes: dict, topology: dict) -> list:
     """Verdicts for every topology wire that *writes* (EVOLVED/EXCLUSIVE) a
     derivative contribution into another model's namespace."""
     from hallsim.process import PortRole
+    from hallsim.store import as_paths
 
     out = []
     for writer_name, ports in topology.items():
@@ -206,16 +207,18 @@ def topology_writer_verdicts(processes: dict, topology: dict) -> list:
         if writer is None:
             continue
         schema = writer.ports_schema()
-        for port, path in ports.items():
-            # Only cross-namespace writes are coupling edges; a model writing
-            # its own states (path owned by the writer) is its own dynamics.
-            if path.split("/", 1)[0] == writer_name:
-                continue
+        for port, entry in ports.items():
             p = schema.get(port)
-            if p is not None and p.role in (
+            if p is None or p.role not in (
                 PortRole.EVOLVED,
                 PortRole.EXCLUSIVE,
             ):
+                continue
+            for path in as_paths(entry):
+                # Only cross-namespace writes are coupling edges; a model
+                # writing its own states is its own dynamics.
+                if path.split("/", 1)[0] == writer_name:
+                    continue
                 out.append(
                     classify_topology_edge(processes, writer_name, port, path)
                 )

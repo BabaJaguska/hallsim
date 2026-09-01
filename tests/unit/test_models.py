@@ -72,27 +72,36 @@ class TestNeuralODEProcess:
     def test_construction(self):
         from hallsim.models.neuralode import NeuralODEProcess
 
+        from hallsim.models.neuralode import STATE_PORT
+
         proc = NeuralODEProcess(fields=["a", "b", "c"], width=16, depth=1)
         schema = proc.ports_schema()
-        assert len(schema) == 3
-        assert all(v.role == PortRole.EVOLVED for v in schema.values())
+        # One block port over the three fields, not three ports.
+        assert set(schema) == {STATE_PORT}
+        assert schema[STATE_PORT].role == PortRole.EVOLVED
+        assert schema[STATE_PORT].elements == ("a", "b", "c")
+        assert schema[STATE_PORT].width == 3
 
     def test_derivative_shape(self):
         from hallsim.models.neuralode import NeuralODEProcess
 
+        from hallsim.models.neuralode import STATE_PORT
+
         proc = NeuralODEProcess(fields=["x", "y"], width=16, depth=1)
-        state = {"x": jnp.array(0.5), "y": jnp.array(-0.3)}
+        state = {STATE_PORT: jnp.array([0.5, -0.3])}
         dy = proc.derivative(0.0, state)
-        assert "x" in dy and "y" in dy
-        assert jnp.isfinite(dy["x"]) and jnp.isfinite(dy["y"])
+        assert dy[STATE_PORT].shape == (2,)
+        assert jnp.all(jnp.isfinite(dy[STATE_PORT]))
 
     def test_in_composite(self):
         from hallsim.models.neuralode import NeuralODEProcess
 
+        from hallsim.models.neuralode import STATE_PORT
+
         proc = NeuralODEProcess(fields=["x", "y"], width=16, depth=1)
         comp = Composite(
             processes={"neural": proc},
-            topology={"neural": {"x": "pool/x", "y": "pool/y"}},
+            topology={"neural": {STATE_PORT: ("pool/x", "pool/y")}},
             validate=False,
         )
         sched = Scheduler()
@@ -105,11 +114,13 @@ class TestNeuralODEProcess:
 
         proc = NeuralODEProcess(fields=["x"], width=8, depth=1)
 
+        from hallsim.models.neuralode import STATE_PORT
+
         @eqx.filter_grad
         def grad_fn(proc):
-            state = {"x": jnp.array(1.0)}
+            state = {STATE_PORT: jnp.array([1.0])}
             dy = proc.derivative(0.0, state)
-            return dy["x"] ** 2
+            return dy[STATE_PORT][0] ** 2
 
         grad = grad_fn(proc)
         # Should return gradient w.r.t. MLP weights
@@ -138,16 +149,19 @@ class TestNeuralODEProcess:
             basal=0.3,
         ).with_control_param("alpha_y", 1.0)
         schema = proc.ports_schema()
-        assert set(schema) == {"x", "y0", "y", "psi_source"}  # no psi/alpha_y
+        from hallsim.models.neuralode import STATE_PORT
+
+        # The evolved fields collapse to one block; INPUT ports stay named.
+        assert set(schema) == {STATE_PORT, "psi_source"}  # no psi/alpha_y
         assert schema["psi_source"].role == PortRole.INPUT
 
         state = {
-            "x": jnp.array(0.5),
-            "y0": jnp.array(0.1),
-            "y": jnp.array(0.8),
+            STATE_PORT: jnp.array([0.5, 0.1, 0.8]),
             "psi_source": jnp.array(30.0),
         }
-        g = eqx.filter_grad(lambda p: p.derivative(0.0, state)["x"])(proc)
+        g = eqx.filter_grad(lambda p: p.derivative(0.0, state)[STATE_PORT][0])(
+            proc
+        )
         assert jnp.isfinite(g.parameters["psi_basal"])
         assert jnp.isfinite(g.parameters["alpha_y"])
 

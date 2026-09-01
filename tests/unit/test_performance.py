@@ -246,3 +246,70 @@ def test_with_params_sweep_does_not_recompile():
         for c in swept[1:]:
             jax.block_until_ready(_run(sched, c))
     assert n[0] == 0, f"with_params sweep recompiled {n[0]}x"
+
+
+def _field_eqns(n, block):
+    """RHS jaxpr size for an N-path field, spelled either way."""
+    from hallsim.composite import Composite
+
+    paths = tuple(f"c/g{i}" for i in range(n))
+
+    class Blk(Process):
+        n_: int = eqx.field(static=True, default=n)
+
+        def ports_schema(self):
+            return {
+                "b": Port(
+                    role=PortRole.EVOLVED,
+                    default=1.0,
+                    elements=tuple(f"e{i}" for i in range(self.n_)),
+                )
+            }
+
+        def derivative(self, t, state):
+            return {"b": -0.3 * state["b"]}
+
+    class Sca(Process):
+        n_: int = eqx.field(static=True, default=n)
+
+        def ports_schema(self):
+            return {
+                f"g{i}": Port(role=PortRole.EVOLVED, default=1.0)
+                for i in range(self.n_)
+            }
+
+        def derivative(self, t, state):
+            return {f"g{i}": -0.3 * state[f"g{i}"] for i in range(self.n_)}
+
+    if block:
+        comp = Composite(
+            processes={"f": Blk()},
+            topology={"f": {"b": paths}},
+            semantic_validation=False,
+        )
+    else:
+        comp = Composite(
+            processes={"f": Sca()},
+            topology={"f": {f"g{i}": paths[i] for i in range(n)}},
+            semantic_validation=False,
+        )
+    rhs, _ = comp.build_rhs()
+    y = comp.initial_state_vec()
+    return len(jax.make_jaxpr(lambda v: rhs(0.0, v))(y).jaxpr.eqns)
+
+
+def test_block_port_rhs_is_flat_in_width():
+    """The point of block ports: graph size stops growing with the field."""
+    assert _field_eqns(4, block=True) == _field_eqns(64, block=True)
+
+
+def test_scalar_port_cost_per_port_does_not_regress():
+    """Guards the path every existing model uses.
+
+    Block ports were added by rewriting the scatter, and the first version
+    cost the *scalar* path an extra broadcast per port — invisible to a
+    correctness suite and to any test that only measures the block path.
+    """
+    lo, hi = _field_eqns(4, block=False), _field_eqns(64, block=False)
+    slope = (hi - lo) / 60
+    assert slope <= 6.0, f"scalar cost regressed to {slope:.2f} eqns/port"

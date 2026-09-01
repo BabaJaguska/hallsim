@@ -26,6 +26,7 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from hallsim.process import Port, PortRole, Process, calibratable
+from hallsim.store import as_paths
 
 log = logging.getLogger(__name__)
 
@@ -203,7 +204,7 @@ def clamp_species(
     """
     from hallsim.models.forcing import PulseSource
 
-    path = topology[target][species]
+    (path,) = as_paths(topology[target][species])
     port = processes[target].ports_schema()[species]
     edge = edge_name or f"{species.lower()}_clamp"
     src = source_name or f"{edge}_setpoint"

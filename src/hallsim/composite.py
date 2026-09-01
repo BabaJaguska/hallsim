@@ -28,9 +28,15 @@ from typing import Any
 
 import equinox as eqx
 import jax.numpy as jnp
+import numpy as np
 
 from hallsim.process import PortRole, Process, ProcessKind
-from hallsim.store import build_initial_store, validate_topology
+from hallsim.store import (
+    as_paths,
+    build_initial_store,
+    read_write_paths,
+    validate_topology,
+)
 from hallsim.units import canonical_units, conversion_factor
 
 log = logging.getLogger(__name__)
@@ -84,8 +90,11 @@ def _flatten_subcomposites(
                 flat_processes[merged_name] = sub_proc
                 sub_topo = item.topology.get(sub_name, {})
                 flat_topology[merged_name] = {
-                    port: (path if path.startswith(prefix) else prefix + path)
-                    for port, path in sub_topo.items()
+                    port: tuple(
+                        q if q.startswith(prefix) else prefix + q
+                        for q in as_paths(entry)
+                    )
+                    for port, entry in sub_topo.items()
                 }
         elif isinstance(item, Process):
             if outer_key in flat_processes:
@@ -101,9 +110,10 @@ def _flatten_subcomposites(
             # win on a per-port basis, so an INPUT port reading from a
             # canonical path elsewhere stays explicit.
             user_topo = extra_topology.get(outer_key, {})
+            schema = item.ports_schema()
             flat_topology[outer_key] = {
-                port: user_topo.get(port, f"{outer_key}/{port}")
-                for port in item.ports_schema()
+                port: user_topo.get(port, _auto_paths(outer_key, port, spec))
+                for port, spec in schema.items()
             }
         else:
             raise TypeError(
@@ -112,6 +122,17 @@ def _flatten_subcomposites(
             )
 
     return flat_processes, flat_topology
+
+
+def _auto_paths(outer_key, port, spec):
+    """Default store path(s) for a port with no topology entry.
+
+    A block gets one path per element, named by the element, so a generated
+    field needs no topology in user code at all.
+    """
+    if spec.elements is None:
+        return f"{outer_key}/{port}"
+    return tuple(f"{outer_key}/{port}/{e}" for e in spec.elements)
 
 
 def _order_assignments(assign_procs: list) -> list:
@@ -123,15 +144,15 @@ def _order_assignments(assign_procs: list) -> list:
     cycle (an ASSIGNED path that depends on itself through others).
     """
     writer_of = {
-        idx: i
+        int(idx): i
         for i, (_, _, assigns) in enumerate(assign_procs)
-        for idx in assigns[1]
+        for idx in assigns.idx
     }
     deps = {
         i: {
-            writer_of[idx]
-            for idx in reads[1]
-            if idx in writer_of and writer_of[idx] != i
+            writer_of[int(idx)]
+            for idx in reads.idx
+            if int(idx) in writer_of and writer_of[int(idx)] != i
         }
         for i, (_, reads, _) in enumerate(assign_procs)
     }
@@ -153,16 +174,78 @@ def _order_assignments(assign_procs: list) -> list:
     return order
 
 
-def _as_port_map(triples):
-    """``(port, index, factor)`` triples as three parallel tuples.
+class _PortMap:
+    """A process's gather/scatter plan: which store columns, at what factor.
 
-    Hashable, so it stays on the static side of the trace.
+    The arrays are built once in ``build_rhs`` and live on the static side of
+    the trace, so hashing is on their bytes rather than element-by-element —
+    a 10,000-entry tuple would otherwise cost an O(n) Python hash per
+    dispatch, and an O(n) conversion inside every RHS call.
     """
-    items = tuple(triples)
-    if not items:
-        return ((), (), ())
-    ports, idxs, factors = zip(*items)
-    return (tuple(ports), tuple(idxs), tuple(factors))
+
+    __slots__ = ("ports", "idx", "fac", "starts", "widths", "_key")
+
+    def __init__(self, ports, idxs, factors, starts=None, widths=None):
+        self.ports = tuple(ports)
+        self.idx = np.asarray(idxs, dtype=np.int32)
+        self.fac = np.asarray(factors, dtype=float)
+        self.idx.flags.writeable = False
+        self.fac.flags.writeable = False
+        # A port occupies one contiguous run of the gather; width is None for
+        # a plain port (hands back a scalar) and an int for a block.
+        self.starts = (
+            tuple(range(len(self.ports))) if starts is None else tuple(starts)
+        )
+        self.widths = (
+            (None,) * len(self.ports) if widths is None else tuple(widths)
+        )
+        self._key = (
+            self.ports,
+            self.idx.tobytes(),
+            self.fac.tobytes(),
+            self.starts,
+            self.widths,
+        )
+
+    def __hash__(self):
+        return hash(self._key)
+
+    def __eq__(self, other):
+        return isinstance(other, _PortMap) and self._key == other._key
+
+
+def _read_entry(port, entry, spec, canon, key_to_idx):
+    """One port's gather plan: its columns, canonical->port factors, width."""
+    paths = as_paths(entry)
+    return (
+        port,
+        [key_to_idx[sp] for sp in paths],
+        [conversion_factor(canon.get(sp, ""), spec.units) for sp in paths],
+        spec.width,
+    )
+
+
+def _write_entry(port, entry, spec, canon, key_to_idx):
+    """One port's scatter plan: its columns, port->canonical factors, width."""
+    paths = as_paths(entry)
+    return (
+        port,
+        [key_to_idx[sp] for sp in paths],
+        [conversion_factor(spec.units, canon.get(sp, "")) for sp in paths],
+        spec.width,
+    )
+
+
+def _as_port_map(entries):
+    """``(port, indices, factors, width)`` per port as a :class:`_PortMap`."""
+    ports, idx, fac, starts, widths = [], [], [], [], []
+    for port, indices, factors, width in entries:
+        ports.append(port)
+        starts.append(len(idx))
+        widths.append(width)
+        idx.extend(indices)
+        fac.extend(factors)
+    return _PortMap(ports, idx, fac, starts, widths)
 
 
 def _port_view(y_vec, read_map):
@@ -172,11 +255,13 @@ def _port_view(y_vec, read_map):
     One gather and one elementwise multiply for the whole process, rather than
     a slice and a multiply per port.
     """
-    ports, idxs, factors = read_map
-    if not ports:
+    if not read_map.ports:
         return {}
-    vals = y_vec[..., jnp.asarray(idxs)] * jnp.asarray(factors)
-    return {port: vals[..., i] for i, port in enumerate(ports)}
+    vals = y_vec[..., read_map.idx] * read_map.fac
+    out = {}
+    for port, a, w in zip(read_map.ports, read_map.starts, read_map.widths):
+        out[port] = vals[..., a] if w is None else vals[..., a : a + w]
+    return out
 
 
 def _apply_assignments(assign_pre, t, y_vec):
@@ -184,10 +269,16 @@ def _apply_assignments(assign_pre, t, y_vec):
     new array; JAX-functional). Shared by the RHS and materialization."""
     for proc, read_map, assign_map in assign_pre:
         raw = proc.assign(t, _port_view(y_vec, read_map))
-        ports, idxs, factors = assign_map
-        for i, port in enumerate(ports):
-            if port in raw:
-                y_vec = y_vec.at[..., idxs[i]].set(raw[port] * factors[i])
+        for i, port in enumerate(assign_map.ports):
+            if port not in raw:
+                continue
+            a, w = assign_map.starts[i], assign_map.widths[i]
+            n = 1 if w is None else w
+            cols = assign_map.idx[a : a + n]
+            facs = assign_map.fac[a : a + n]
+            value = jnp.asarray(raw[port])
+            value = value[..., None] if w is None else value
+            y_vec = y_vec.at[..., cols].set(value * facs)
     return y_vec
 
 
@@ -224,15 +315,27 @@ class _FlatRHS(eqx.Module):
             self.procs, self.read_maps, self.write_maps
         ):
             raw = proc.derivative(t, _port_view(y_vec, read_map))
-            ports, idxs, factors = write_map
-            sel = [i for i, port in enumerate(ports) if port in raw]
-            if sel:
-                vals = jnp.stack(
-                    [raw[ports[i]] for i in sel], axis=-1
-                ) * jnp.asarray([factors[i] for i in sel])
-                accum = accum.at[..., jnp.asarray([idxs[i] for i in sel])].add(
-                    vals
-                )
+            pieces, spans, scalar_only = [], [], True
+            for i, port in enumerate(write_map.ports):
+                if port not in raw:
+                    continue
+                a, w = write_map.starts[i], write_map.widths[i]
+                pieces.append(jnp.asarray(raw[port]))
+                spans.append((a, a + (1 if w is None else w)))
+                scalar_only &= w is None
+            if pieces:
+                cols = np.concatenate([write_map.idx[a:b] for a, b in spans])
+                facs = np.concatenate([write_map.fac[a:b] for a, b in spans])
+                # One stack beats an expand-dims per port; a block already
+                # carries the axis, so a mixed process concatenates instead.
+                if scalar_only:
+                    vals = jnp.stack(pieces, axis=-1)
+                else:
+                    vals = jnp.concatenate(
+                        [q if q.ndim else q[..., None] for q in pieces],
+                        axis=-1,
+                    )
+                accum = accum.at[..., cols].add(vals * facs)
         return accum
 
 
@@ -275,12 +378,17 @@ class Composite(eqx.Module):
         if rewire:
             flat_topology = {
                 proc_name: {
-                    port: rewire.get(path, path) for port, path in topo.items()
+                    port: tuple(rewire.get(q, q) for q in as_paths(entry))
+                    for port, entry in topo.items()
                 }
                 for proc_name, topo in flat_topology.items()
             }
         self.processes = flat_processes
-        self.topology = flat_topology
+        self.topology = {
+            proc_name: {port: as_paths(entry) for port, entry in topo.items()}
+            for proc_name, topo in flat_topology.items()
+        }
+        flat_topology = self.topology
         self.initial = dict(initial or {})
         if validate:
             errors = validate_topology(flat_processes, flat_topology)
@@ -369,23 +477,15 @@ class Composite(eqx.Module):
             proc_topo = self.topology[proc_name]
             schema = proc.ports_schema()
             read_pairs = _as_port_map(
-                (
-                    port,
-                    key_to_idx[sp],
-                    conversion_factor(canon.get(sp, ""), schema[port].units),
-                )
-                for port, sp in proc_topo.items()
+                _read_entry(port, entry, schema[port], canon, key_to_idx)
+                for port, entry in proc_topo.items()
             )
             assign_pairs = _as_port_map(
-                (
-                    port,
-                    key_to_idx[proc_topo[port]],
-                    conversion_factor(p.units, canon.get(proc_topo[port], "")),
-                )
+                _write_entry(port, proc_topo[port], p, canon, key_to_idx)
                 for port, p in schema.items()
                 if p.role == PortRole.ASSIGNED
             )
-            if assign_pairs[0]:
+            if assign_pairs.ports:
                 assign_procs.append((proc, read_pairs, assign_pairs))
         # Dependency-order so an assignment reading a path another assigns runs
         # after it (SBML/DAE assignment-rule semantics).
@@ -452,23 +552,15 @@ class Composite(eqx.Module):
             proc_topo = self.topology[proc_name]
             schema = proc.ports_schema()
             read_pairs = _as_port_map(
-                (
-                    port,
-                    key_to_idx[sp],
-                    conversion_factor(canon.get(sp, ""), schema[port].units),
-                )
-                for port, sp in proc_topo.items()
+                _read_entry(port, entry, schema[port], canon, key_to_idx)
+                for port, entry in proc_topo.items()
             )
             write_pairs = _as_port_map(
-                (
-                    port,
-                    key_to_idx[proc_topo[port]],
-                    conversion_factor(p.units, canon.get(proc_topo[port], "")),
-                )
+                _write_entry(port, proc_topo[port], p, canon, key_to_idx)
                 for port, p in schema.items()
                 if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
             )
-            if write_pairs[0]:
+            if write_pairs.ports:
                 pre.append((proc, read_pairs, write_pairs))
         assign_pre = self._assignment_pre(proc_names, keys, key_to_idx, canon)
 
@@ -483,6 +575,16 @@ class Composite(eqx.Module):
             ),
             keys,
         )
+
+    def assigned_paths(self) -> set[str]:
+        """Store paths computed by an ASSIGNED port rather than integrated."""
+        out: set[str] = set()
+        for pname, proc in self.processes.items():
+            topo = self.topology[pname]
+            for port, p in proc.ports_schema().items():
+                if p.role is PortRole.ASSIGNED:
+                    out.update(as_paths(topo[port]))
+        return out
 
     def evolved_indices(
         self,
@@ -507,7 +609,8 @@ class Composite(eqx.Module):
             proc_topo = self.topology[pname]
             for port, p in proc.ports_schema().items():
                 if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
-                    written.add(key_to_idx[proc_topo[port]])
+                    for sp in as_paths(proc_topo[port]):
+                        written.add(key_to_idx[sp])
         return jnp.array(sorted(written), dtype=jnp.int32)
 
     def unfed_input_indices(
@@ -533,8 +636,8 @@ class Composite(eqx.Module):
         for pname, proc in self.processes.items():
             proc_topo = self.topology[pname]
             for port, p in proc.ports_schema().items():
-                path = proc_topo[port]
-                (read if p.role == PortRole.INPUT else written).add(path)
+                target = read if p.role == PortRole.INPUT else written
+                target.update(as_paths(proc_topo[port]))
         return jnp.array(
             sorted(key_to_idx[p] for p in read - written), dtype=jnp.int32
         )
@@ -592,7 +695,8 @@ class Composite(eqx.Module):
         """All store paths referenced by any process via the topology."""
         paths: set[str] = set()
         for proc_topo in self.topology.values():
-            paths.update(proc_topo.values())
+            for entry in proc_topo.values():
+                paths.update(as_paths(entry))
         return paths
 
     def metadata(self) -> dict[str, Any]:
@@ -695,21 +799,23 @@ class Composite(eqx.Module):
         if len(groups) < 2:
             return groups
         names = list(groups)
+        known = set(self.store_keys())
         writes, reads = {}, {}
         for gname, procs in groups.items():
             w, r = set(), set()
             for pname in procs:
                 topo_p = self.topology.get(pname, {})
                 schema = self.processes[pname].ports_schema()
-                for port, path in topo_p.items():
-                    r.add(path)
-                    port_spec = schema.get(port)
-                    if port_spec is not None and port_spec.role in (
-                        PortRole.EVOLVED,
-                        PortRole.EXCLUSIVE,
-                        PortRole.ASSIGNED,
-                    ):
-                        w.add(path)
+                for port, entry in topo_p.items():
+                    for path in as_paths(entry):
+                        if path not in known:
+                            raise KeyError(
+                                f"{pname}.{port} wired to unknown path "
+                                f"{path!r}"
+                            )
+                p_reads, p_writes = read_write_paths(schema, topo_p)
+                r |= p_reads
+                w |= p_writes
             writes[gname], reads[gname] = w, r
 
         drivers = {

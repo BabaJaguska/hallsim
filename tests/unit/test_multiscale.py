@@ -678,6 +678,62 @@ class TestAutoGroups:
         assert {"fast"} in all_members
         assert {"slow"} in all_members
 
+    def test_pure_source_drives_without_being_driven(self):
+        """A ``reads_value=False`` port writes without reading, so it drives
+        the group it feeds and is driven by none.
+
+        Counting it as a reader makes it appear driven by anything writing the
+        same path — here a mutual dependency, which the cycle branch resolves
+        by falling back to timescale order. The source is deliberately the
+        *slower* process so that fallback gives the wrong answer: driver last.
+        """
+
+        class PureSource(Process):
+            timescale: float = 1.0e7
+            rate: float = 0.5
+
+            def ports_schema(self):
+                return {
+                    "out": Port(
+                        role=PortRole.EVOLVED,
+                        default=1.0,
+                        reads_value=False,
+                    )
+                }
+
+            def derivative(self, t, state):
+                return {"out": self.rate}
+
+        class DrivenPool(Process):
+            timescale: float = 1.0
+            k: float = 0.1
+
+            def ports_schema(self):
+                return {
+                    "shared": Port(role=PortRole.EVOLVED, default=1.0),
+                    "own": Port(role=PortRole.EVOLVED, default=1.0),
+                }
+
+            def derivative(self, t, state):
+                return {
+                    "shared": -self.k * state["shared"],
+                    "own": self.k * state["shared"],
+                }
+
+        composite = Composite(
+            processes={"src": PureSource(), "sink": DrivenPool()},
+            topology={
+                "src": {"out": "cell/signal"},
+                "sink": {"shared": "cell/signal", "own": "cell/own"},
+            },
+        )
+        groups = composite.auto_groups()
+        assert len(groups) == 2
+        order = [
+            next(iter(procs)) for procs in groups.values() if len(procs) == 1
+        ]
+        assert order.index("src") < order.index("sink")
+
     def test_no_timescale_default_group(self):
         composite = Composite(
             processes={"a": ContinuousDecay(), "b": ContinuousDecay()},
@@ -1588,3 +1644,54 @@ def test_newton_tolerances_are_overridable():
 def test_newton_rtol_defaults_to_rtol():
     sched = Scheduler(rtol=1e-8)
     assert sched.implicit_solver.root_finder.rtol == 1e-8
+
+
+class TestBatchedAssignedPaths:
+    """A batched y0 cannot carry per-member values on an ASSIGNED path."""
+
+    class _Setpoint(Process):
+        level: float = 0.5
+
+        def ports_schema(self):
+            return {"s": Port(role=PortRole.ASSIGNED, default=0.5)}
+
+        def assign(self, t, state):
+            return {"s": jnp.asarray(self.level)}
+
+        def derivative(self, t, state):
+            return {}
+
+    class _Driven(Process):
+        def ports_schema(self):
+            return {
+                "x": Port(role=PortRole.EVOLVED, default=0.0),
+                "s": Port(role=PortRole.INPUT, default=0.5),
+            }
+
+        def derivative(self, t, state):
+            return {"x": state["s"]}
+
+    def _composite(self):
+        return Composite(
+            processes={"sp": self._Setpoint(), "dr": self._Driven()},
+            topology={"sp": {"s": "c/s"}, "dr": {"x": "c/x", "s": "c/s"}},
+            semantic_validation=False,
+        )
+
+    def test_varying_an_assigned_path_per_member_raises(self):
+        """Without this the run succeeds and every member is identical — a
+        population study returning a plausible null."""
+        comp = self._composite()
+        keys = comp.store_keys()
+        y0 = jnp.stack([comp.initial_state_vec()] * 4)
+        y0 = y0.at[:, keys.index("c/s")].set(jnp.array([0.1, 0.4, 0.7, 1.0]))
+        with pytest.raises(ValueError, match="ASSIGNED"):
+            Scheduler().run(comp, (0.0, 1.0), macro_dt=1.0, y0=y0)
+
+    def test_identical_assigned_values_are_fine(self):
+        """Only a *varying* assigned column is a mistake; a uniform one is
+        just the default and blocks nothing."""
+        comp = self._composite()
+        y0 = jnp.stack([comp.initial_state_vec()] * 4)
+        res = Scheduler().run(comp, (0.0, 1.0), macro_dt=1.0, y0=y0)
+        assert res.ys[-1].shape[0] == 4

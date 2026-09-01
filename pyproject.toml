@@ -13,7 +13,11 @@ dependencies    = [
   "scipy",
   "pandas",
   "click",
-  "jax>=0.7,<0.8",
+  # Pin the minor: `uv run` syncs the environment to this file, so a stale
+  # bound silently downgrades jaxlib out from under the CUDA plugin, which is
+  # not declared here and so is not downgraded with it. The result is a PJRT
+  # API mismatch at import. GPU support lives in the `cuda` extra below.
+  "jax>=0.10,<0.11",
   "diffrax>=0.7,<0.8",
   "equinox>=0.13,<0.14",
   "optax>=0.2",
@@ -26,6 +30,14 @@ dependencies    = [
 ]
 
 [project.optional-dependencies]
+# GPU execution. Kept out of the base dependencies so a CPU-only install stays
+# small, but declared so `uv run`/`uv sync` do not strip the plugin: it must
+# track jaxlib's version exactly or PJRT refuses to load it.
+cuda = [
+  "jax-cuda12-plugin[with-cuda]>=0.10,<0.11",
+  "jax-cuda12-pjrt>=0.10,<0.11",
+]
+
 # xlrd reads the legacy .xls a paper's deposited fitting data arrives as
 # (DallePezze 2014's PottersWheel export); needed to verify a deposit against
 # its own published fit — see hallsim.intake.published_fit_chi2.

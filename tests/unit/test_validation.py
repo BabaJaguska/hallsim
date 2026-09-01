@@ -707,8 +707,8 @@ class TestSubCompositeFlattening:
             semantic_validation=False,
         )
         assert set(merged.processes) == {"a.prod", "b.prod"}
-        assert merged.topology["a.prod"] == {"ros": "a/pool/ros"}
-        assert merged.topology["b.prod"] == {"ros": "b/pool/ros"}
+        assert merged.topology["a.prod"] == {"ros": ("a/pool/ros",)}
+        assert merged.topology["b.prod"] == {"ros": ("b/pool/ros",)}
         assert set(merged.store_paths()) == {"a/pool/ros", "b/pool/ros"}
 
     def test_rewire_merges_overlapping_paths(self):
@@ -718,8 +718,8 @@ class TestSubCompositeFlattening:
             semantic_validation=False,
         )
         # Both inner processes now write to the same canonical path.
-        assert merged.topology["a.prod"]["ros"] == "a/pool/ros"
-        assert merged.topology["b.prod"]["ros"] == "a/pool/ros"
+        assert merged.topology["a.prod"]["ros"] == ("a/pool/ros",)
+        assert merged.topology["b.prod"]["ros"] == ("a/pool/ros",)
         assert merged.store_paths() == {"a/pool/ros"}
 
     def test_subcomposite_with_incompatible_units_raises_on_merge(self):
@@ -748,7 +748,7 @@ class TestSubCompositeFlattening:
             processes={"a": pre_namespaced},
             semantic_validation=False,
         )
-        assert merged.topology["a.prod"]["ros"] == "a/pool/ros"
+        assert merged.topology["a.prod"]["ros"] == ("a/pool/ros",)
 
     def test_mixed_process_and_composite_values(self):
         """A raw Process can sit alongside a Composite; the Process uses
@@ -762,7 +762,7 @@ class TestSubCompositeFlattening:
             semantic_validation=False,
         )
         assert set(merged.processes) == {"a.prod", "extra"}
-        assert merged.topology["extra"]["ros"] == "a/pool/ros"
+        assert merged.topology["extra"]["ros"] == ("a/pool/ros",)
 
     def test_unknown_value_type_raises_typeerror(self):
         with pytest.raises(TypeError, match="must be a Process or Composite"):
@@ -866,6 +866,6 @@ class TestAnalyzeComposability:
             semantic_validation=False,
         )
         # Both writers now collapsed onto the canonical path
-        assert merged.topology["eriq.prod"]["ros"] == "eriq/pool/ros"
-        assert merged.topology["dp14.prod"]["ros"] == "eriq/pool/ros"
+        assert merged.topology["eriq.prod"]["ros"] == ("eriq/pool/ros",)
+        assert merged.topology["dp14.prod"]["ros"] == ("eriq/pool/ros",)
         assert merged.store_paths() == {"eriq/pool/ros"}

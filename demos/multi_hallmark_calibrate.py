@@ -98,6 +98,11 @@ PLATFORM = DATA_DIR / "GPL17586-45144.txt"
 
 RUN_NAME = "multi_hallmark_calibrate"
 
+#: Horizon for the unscored run. The scored path takes its query times
+#: from the dataset; with no dataset there is none to take, so this is
+#: the experiment's own endpoint (day 14).
+UNSCORED_T_END = 14.0
+
 
 # GSE248823 columns: etoposide DDIS sampled at D00 (baseline), D07, D14,
 # and etoposide + rapamycin at D07, D14 (2 replicates each). We fit the
@@ -134,11 +139,15 @@ ARM_CONDITIONS = {arm: cond for arm, (cond, _) in ARM_PAIRS.items()}
 def build_problem(
     composite=None, reporters=None, equilibrate: bool = False
 ) -> CalibrationProblem:
-    ds = GeneExpressionDataset.from_series_matrix(
-        SERIES_MATRIX,
-        PLATFORM,
-        sample_groups={},
-        sample_position_groups=SAMPLE_POSITION_GROUPS,
+    ds = (
+        GeneExpressionDataset.from_series_matrix(
+            SERIES_MATRIX,
+            PLATFORM,
+            sample_groups={},
+            sample_position_groups=SAMPLE_POSITION_GROUPS,
+        )
+        if SERIES_MATRIX.exists()
+        else None
     )
     return CalibrationProblem(
         composite=(
@@ -175,22 +184,28 @@ def build_problem(
         # Samples per arm per day. `arm_deltas` picks the reference from
         # NORMALIZATION, so the data contrast tracks the model's. The
         # rapamycin culture's day-0 is the shared etoposide D00.
-        data=ds.arm_deltas(
-            {
-                "DDIS_vs_ctrl": {
-                    0.0: "ETOPOSIDE_D00",
-                    7.0: "ETOPOSIDE_D07",
-                    14.0: "ETOPOSIDE_D14",
+        # Empty when the dataset is absent: the composite, its conditions and
+        # its reporters stand on their own, so everything except scoring works.
+        data=(
+            ds.arm_deltas(
+                {
+                    "DDIS_vs_ctrl": {
+                        0.0: "ETOPOSIDE_D00",
+                        7.0: "ETOPOSIDE_D07",
+                        14.0: "ETOPOSIDE_D14",
+                    },
+                    "RAPA_vs_ctrl": {
+                        0.0: "ETOPOSIDE_D00",
+                        7.0: "ETOPOSIDE_RAPA_D07",
+                        14.0: "ETOPOSIDE_RAPA_D14",
+                    },
                 },
-                "RAPA_vs_ctrl": {
-                    0.0: "ETOPOSIDE_D00",
-                    7.0: "ETOPOSIDE_RAPA_D07",
-                    14.0: "ETOPOSIDE_RAPA_D14",
-                },
-            },
-            NORMALIZATION,
-            arm_pairs=ARM_PAIRS,
-            arm_conditions=ARM_CONDITIONS,
+                NORMALIZATION,
+                arm_pairs=ARM_PAIRS,
+                arm_conditions=ARM_CONDITIONS,
+            )
+            if ds is not None
+            else {a: {} for a in ARMS}
         ),
         normalization=NORMALIZATION,
         equilibrate=equilibrate,
@@ -590,14 +605,15 @@ def fig_oob_overview(
         for a, (col, lbl) in _ARM_STYLE.items():
             if a in lfc:
                 ax.plot(qt, lfc[a][i], color=col, lw=1.7, label=lbl)
-            dts = sorted(problem.data[a])
-            ax.plot(
-                [0.0] + list(dts),
-                [0.0] + [float(problem.data[a][t][g]) for t in dts],
-                "o",
-                color=col,
-                ms=5,
-            )
+            dts = sorted(problem.data.get(a, {}))
+            if dts:
+                ax.plot(
+                    [0.0] + list(dts),
+                    [0.0] + [float(problem.data[a][t][g]) for t in dts],
+                    "o",
+                    color=col,
+                    ms=5,
+                )
         ax.set_title(g, fontsize=11, fontweight="bold", loc="left")
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
@@ -751,6 +767,44 @@ def run_oob(problem, params, out_dir: Path):
     return pre
 
 
+def _missing_data_notice() -> str:
+    """Where to get the dataset the scored path needs."""
+    return (
+        f"Dataset not found: {SERIES_MATRIX.name}\n"
+        f"  expected in : {DATA_DIR}\n"
+        f"  download    : GEO accession GSE248823 (series matrix), plus the\n"
+        f"                GPL17586 platform annotation ({PLATFORM.name})\n"
+        f"                https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi"
+        f"?acc=GSE248823\n"
+        "Running the composite unscored: it will simulate and write "
+        "trajectories, but concordance against measured expression is skipped."
+    )
+
+
+def run_unscored(equilibrate: bool, out_dir: Path):
+    """The scored run minus the scoring.
+
+    Same problem, same reporters, same overview figure — the measured points
+    are simply absent, so the model trajectories are drawn on their own. No
+    concordance is reported: with no arms to compare against there is nothing
+    to be concordant with.
+    """
+    problem = build_problem(equilibrate=equilibrate)
+    params = problem.initial_params()
+    print(f"[unscored] reporters : {len(problem.reporters)}")
+    print(f"[unscored] arms      : {list(_ARM_STYLE)}")
+    fig_oob_overview(
+        problem,
+        params,
+        out_dir,
+        stem="oob_overview",
+        title="Out-of-the-box: reporter trajectories (no data)",
+    )
+    print(f"\nunscored run → {out_dir.relative_to(ROOT)}/")
+    for f in sorted(out_dir.iterdir()):
+        print(f"  {f.name}")
+
+
 def cmd_run(args) -> None:
     logging.basicConfig(
         level=logging.WARNING,
@@ -759,6 +813,9 @@ def cmd_run(args) -> None:
     )
     logging.getLogger("hallsim").setLevel(logging.INFO)
     equilibrate = getattr(args, "equilibrate", False)
+    if not SERIES_MATRIX.exists():
+        print(_missing_data_notice(), flush=True)
+        return run_unscored(equilibrate, make_run_dir(RUN_NAME))
     problem = build_problem(equilibrate=equilibrate)
     print(f"[run] equilibrate={equilibrate}", flush=True)
     init = problem.initial_params()

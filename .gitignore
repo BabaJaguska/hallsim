@@ -13,6 +13,7 @@ docs/diary.md
 # subfolder per run. Never part of the shipped demo surface.
 /scratch/
 demos/_*.py
+!demos/__init__.py
 
 # C extensions
 *.so

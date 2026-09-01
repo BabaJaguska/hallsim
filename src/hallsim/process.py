@@ -200,6 +200,7 @@ class Port:
         "description",
         "ontology",
         "reads_value",
+        "elements",
     )
 
     def __init__(
@@ -210,6 +211,7 @@ class Port:
         description: str = "",
         ontology: dict[str, str] | None = None,
         reads_value: bool = True,
+        elements: tuple[str, ...] | None = None,
     ) -> None:
         self.role = role
         self.default = default
@@ -217,6 +219,16 @@ class Port:
         self.description = description
         self.ontology = ontology or {}
         self.reads_value = reads_value
+        self.elements = None if elements is None else tuple(elements)
+
+    @property
+    def width(self) -> int | None:
+        """How many store paths this port binds, ``None`` if it binds one.
+
+        ``None`` and ``1`` differ: a one-element block hands ``derivative``
+        an array of shape ``(..., 1)``, a plain port hands it a scalar.
+        """
+        return None if self.elements is None else len(self.elements)
 
     def __repr__(self) -> str:
         return (

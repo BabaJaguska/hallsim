@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from hallsim.store import as_paths
 from hallsim.process import PortRole
 
 log = logging.getLogger(__name__)
@@ -153,10 +154,13 @@ def store_ontology_map(composite) -> dict[str, dict]:
     for pname, proc in composite.processes.items():
         topo = composite.topology[pname]
         for port_name, port in proc.ports_schema().items():
-            path = topo.get(port_name, f"{pname}/{port_name}")
             ont = getattr(port, "ontology", None)
-            if ont and path not in result:
-                result[path] = {k.lower(): v for k, v in ont.items()}
+            if not ont:
+                continue
+            entry = topo.get(port_name, f"{pname}/{port_name}")
+            for path in as_paths(entry):
+                if path not in result:
+                    result[path] = {k.lower(): v for k, v in ont.items()}
     return result
 
 
@@ -179,13 +183,14 @@ def resolve_ontology(
         schema = proc.ports_schema()
         writes = any(
             p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED)
-            and topo.get(pn, f"{pname}/{pn}") == path
+            and path in as_paths(topo.get(pn, f"{pname}/{pn}"))
             for pn, p in schema.items()
         )
         inputs = [
-            topo.get(pn, f"{pname}/{pn}")
+            q
             for pn, p in schema.items()
             if p.role is PortRole.INPUT
+            for q in as_paths(topo.get(pn, f"{pname}/{pn}"))
         ]
         if writes and len(inputs) == 1 and ontmap.get(inputs[0]):
             return ontmap[inputs[0]], inputs[0]

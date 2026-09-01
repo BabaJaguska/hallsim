@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import pint
 
+from hallsim.store import as_paths
+
 # One registry, shared with the validation layer, so quantities interoperate.
 UREG = pint.UnitRegistry()
 
@@ -58,8 +60,8 @@ def canonical_units(
     for pname, proc in processes.items():
         topo = topology.get(pname, {})
         for port_name, port in proc.ports_schema().items():
-            path = topo.get(port_name, port_name)
-            if path in canon:
-                continue
-            canon[path] = _clean(getattr(port, "units", ""))
+            for path in as_paths(topo[port_name]):
+                if path in canon:
+                    continue
+                canon[path] = _clean(getattr(port, "units", ""))
     return canon

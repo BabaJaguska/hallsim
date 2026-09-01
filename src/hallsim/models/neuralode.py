@@ -40,6 +40,11 @@ from hallsim.kinetics import hill_gate
 
 log = logging.getLogger(__name__)
 
+#: The single EVOLVED port carrying the whole learned field. One block port
+#: rather than one port per field: the MLP already works on the stacked
+#: vector, so naming each element separately only costs a slice each way.
+STATE_PORT = "state"
+
 
 class NeuralODEProcess(Process):
     """Process with MLP-parameterized dynamics.
@@ -204,10 +209,12 @@ class NeuralODEProcess(Process):
 
     def ports_schema(self):
         schema = {
-            name: Port(
-                role=PortRole.EVOLVED, default=dflt, units="dimensionless"
+            STATE_PORT: Port(
+                role=PortRole.EVOLVED,
+                default=self.field_defaults,
+                units="dimensionless",
+                elements=self.fields,
             )
-            for name, dflt in zip(self.fields, self.field_defaults)
         }
         hill_fields = {d[0] for d in self._hill_drivers}
         for _, port, *_ in self._hill_drivers:
@@ -240,12 +247,20 @@ class NeuralODEProcess(Process):
         # Trailing-axis stack so the process is shape-polymorphic: scalar
         # state -> (n_in,), batched -> (..., n_in). The MLP is applied per
         # row via vmap over the flattened leading axes.
-        base_shape = jnp.shape(state[self.fields[0]])
-        cols = [state[f] for f in self.fields] + [
+        block = state[STATE_PORT]
+        base_shape = jnp.shape(block)[:-1]
+        controls = [
             self._control_column(cf, state, base_shape)
             for cf in self.input_fields
         ]
-        inp = jnp.stack(cols, axis=-1)
+        inp = (
+            jnp.concatenate(
+                [block] + [jnp.asarray(c)[..., None] for c in controls],
+                axis=-1,
+            )
+            if controls
+            else block
+        )
         inp_n = (inp - self.in_mean) / self.in_std
         flat = inp_n.reshape(-1, inp_n.shape[-1])
         z = jax.vmap(self.mlp)(flat).reshape(
@@ -253,7 +268,7 @@ class NeuralODEProcess(Process):
         )
         field = self.out_scale * jnp.tanh(self.in_scale * z)  # normalised
         dy = field * self.out_std + self.out_mean
-        return {f: dy[..., i] for i, f in enumerate(self.fields)}
+        return {STATE_PORT: dy}
 
 
 # ── Input-conditioned templates ─────────────────────────────────────────
@@ -389,14 +404,17 @@ class _RHSProcess(Process):
 
     def ports_schema(self):
         return {
-            f: Port(role=PortRole.EVOLVED, default=0.0, units="dimensionless")
-            for f in self.fields
+            STATE_PORT: Port(
+                role=PortRole.EVOLVED,
+                default=0.0,
+                units="dimensionless",
+                elements=self.fields,
+            )
         }
 
     def derivative(self, t, state):
-        y = jnp.stack([state[f] for f in self.fields])
-        d = self.rhs(t, y)
-        return {f: d[i] for i, f in enumerate(self.fields)}
+        d = self.rhs(t, state[STATE_PORT])
+        return {STATE_PORT: d}
 
 
 class _ShootWrap(Process):

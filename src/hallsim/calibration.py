@@ -1113,6 +1113,8 @@ class CalibrationProblem:
         self._warmed_up = False
         try:
             self.check_hill_gates()
+        except ValueError:
+            raise  # a blocking verdict, not a failure to check
         except Exception as exc:
             log.debug("hill-gate check skipped: %s", exc)
 
