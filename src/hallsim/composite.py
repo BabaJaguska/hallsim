@@ -310,33 +310,37 @@ class _FlatRHS(eqx.Module):
             t,
             y_vec,
         )
-        accum = jnp.zeros_like(y_vec)
+        # Every process's contribution goes into one scatter. A scatter per
+        # process costs four primitives each, so the graph grew with the
+        # composition axis -- the axis the framework exists for -- while
+        # block ports had already flattened the port axis.
+        pieces, col_runs, fac_runs, scalar_only = [], [], [], True
         for proc, read_map, write_map in zip(
             self.procs, self.read_maps, self.write_maps
         ):
             raw = proc.derivative(t, _port_view(y_vec, read_map))
-            pieces, spans, scalar_only = [], [], True
             for i, port in enumerate(write_map.ports):
                 if port not in raw:
                     continue
                 a, w = write_map.starts[i], write_map.widths[i]
+                b = a + (1 if w is None else w)
                 pieces.append(jnp.asarray(raw[port]))
-                spans.append((a, a + (1 if w is None else w)))
+                col_runs.append(write_map.idx[a:b])
+                fac_runs.append(write_map.fac[a:b])
                 scalar_only &= w is None
-            if pieces:
-                cols = np.concatenate([write_map.idx[a:b] for a, b in spans])
-                facs = np.concatenate([write_map.fac[a:b] for a, b in spans])
-                # One stack beats an expand-dims per port; a block already
-                # carries the axis, so a mixed process concatenates instead.
-                if scalar_only:
-                    vals = jnp.stack(pieces, axis=-1)
-                else:
-                    vals = jnp.concatenate(
-                        [q if q.ndim else q[..., None] for q in pieces],
-                        axis=-1,
-                    )
-                accum = accum.at[..., cols].add(vals * facs)
-        return accum
+        if not pieces:
+            return jnp.zeros_like(y_vec)
+        cols = np.concatenate(col_runs)
+        facs = np.concatenate(fac_runs)
+        # One stack beats an expand-dims per port; a block already carries the
+        # axis, so a composite with any block concatenates instead.
+        if scalar_only:
+            vals = jnp.stack(pieces, axis=-1)
+        else:
+            vals = jnp.concatenate(
+                [q if q.ndim else q[..., None] for q in pieces], axis=-1
+            )
+        return jnp.zeros_like(y_vec).at[..., cols].add(vals * facs)
 
 
 class Composite(eqx.Module):

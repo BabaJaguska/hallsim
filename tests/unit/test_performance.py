@@ -313,3 +313,77 @@ def test_scalar_port_cost_per_port_does_not_regress():
     lo, hi = _field_eqns(4, block=False), _field_eqns(64, block=False)
     slope = (hi - lo) / 60
     assert slope <= 6.0, f"scalar cost regressed to {slope:.2f} eqns/port"
+
+
+def _process_eqns(n):
+    """RHS jaxpr size for a composite of ``n`` single-port processes."""
+    from hallsim.composite import Composite
+
+    class Node(Process):
+        i_: int = eqx.field(static=True, default=0)
+
+        def ports_schema(self):
+            return {
+                "x": Port(role=PortRole.EVOLVED, default=1.0),
+                "left": Port(role=PortRole.INPUT, default=1.0),
+            }
+
+        def derivative(self, t, state):
+            return {"x": -0.3 * state["x"] + 0.05 * state["left"]}
+
+    paths = tuple(f"r/n{i}" for i in range(n))
+    comp = Composite(
+        processes={f"p{i}": Node(i_=i) for i in range(n)},
+        topology={
+            f"p{i}": {"x": paths[i], "left": paths[(i - 1) % n]}
+            for i in range(n)
+        },
+        semantic_validation=False,
+    )
+    rhs, _ = comp.build_rhs()
+    y = comp.initial_state_vec()
+    return len(jax.make_jaxpr(lambda v: rhs(0.0, v))(y).jaxpr.eqns)
+
+
+def test_per_process_cost_does_not_regress():
+    """The composition axis, which is what the framework is for.
+
+    ``test_block_port_rhs_is_flat_in_width`` pins the cost of ports *within*
+    one process; this pins the cost of *adding a process*. They are different
+    axes, and flattening the first left the second at 23 equations per process
+    with compile growing superlinearly — invisible to every test that measures
+    one process.
+
+    Fusing the per-process scatters into one brought it to 15. The cap catches
+    a regression to the per-process scatter (23) while leaving room for an
+    honest primitive or two.
+    """
+    lo, hi = _process_eqns(8), _process_eqns(64)
+    slope = (hi - lo) / 56
+    assert slope <= 16.0, f"per-process cost regressed to {slope:.2f} eqns"
+
+
+def test_fused_scatter_still_sums_duplicate_writes():
+    """EVOLVED is additive, and one scatter over concatenated indices must sum
+    duplicates exactly as N sequential scatters did."""
+    from hallsim.composite import Composite
+
+    class Contrib(Process):
+        gain: float = 1.0
+
+        def ports_schema(self):
+            return {"a": Port(role=PortRole.EVOLVED, default=2.0)}
+
+        def derivative(self, t, state):
+            return {"a": self.gain * state["a"]}
+
+    n = 5
+    comp = Composite(
+        processes={f"c{i}": Contrib(gain=float(i + 1)) for i in range(n)},
+        topology={f"c{i}": {"a": "sh/a"} for i in range(n)},
+        semantic_validation=False,
+    )
+    rhs, _ = comp.build_rhs()
+    y = comp.initial_state_vec()
+    # gains 1..5 sum to 15, state is 2.0
+    assert jnp.allclose(rhs(0.0, y), jnp.array([30.0]))

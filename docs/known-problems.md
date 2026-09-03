@@ -1449,8 +1449,10 @@ The check that would catch a mistake does not exist, does not run, or fails open
   the identity unit multiply, with an identical slope and `slice` unchanged at
   2,203 — it cannot work while `derivative` receives `dict[str, scalar]`.
 
-- [ ] **P3.13 — P3.12 flattened the per-*port* slope; the per-*process* slope is
-  still there, unmeasured, and superlinear in compile.** Found 2026-08-31
+- [~] **P3.13 — P3.12 flattened the per-*port* slope; the per-*process* slope is
+  still there, unmeasured, and superlinear in compile.**
+  *Scatter fusion landed 2026-09-01: 23 -> 15 eqns/process, compile 1.8x. The
+  slope is still linear in process count — see the end of this entry.* Found 2026-08-31
   (external systems review). P3.12's result — jaxpr "871 equations at N=300,
   3,000 and 10,000 alike" — is flatness in *port count within one process*, and
   it reproduces. The composition axis, **process count**, which is the
@@ -1503,6 +1505,50 @@ The check that would catch a mistake does not exist, does not run, or fails open
   rather than a bare RHS trace, and with reverse-mode. Both run well past a
   minute at N≥800; the RHS is the inner loop of both, so the N^1.7 is expected to
   carry through and be worse.
+
+  **Scatter fusion landed 2026-09-01.** `_FlatRHS.__call__` now collects every
+  process's contribution and emits **one** scatter over the concatenated index
+  array; the two `np.concatenate` calls left the traced body. A/B under the
+  same machine load, the old spelling monkeypatched back in (visible to
+  `make_jaxpr` and a freshly-built `jit`, unlike the Scheduler's `filter_jit`
+  core, which is keyed on treedef and silently returns the compiled fused
+  version — a probe of mine was blind to exactly that before it was caught):
+
+  ```
+    N      scatter     trace     eqns   compile
+  100  per-process    208ms     2301     0.68s
+  100        fused    193ms     1509     0.36s
+  200  per-process    483ms     4601     1.38s
+  200        fused    248ms     3009     0.78s
+  400  per-process    895ms     9201     2.62s
+  400        fused    500ms     6009     1.47s
+  400  1 block port     5ms       20     0.06s
+  ```
+
+  **23 -> 15 equations per process** (`15N + 9`), compile 1.8x faster at every
+  N. Guarded by `test_per_process_cost_does_not_regress` (a *process*-count
+  slope test, the axis nothing measured) and
+  `test_fused_scatter_still_sums_duplicate_writes`.
+
+  **Not bit-exact, and the residual matters less than the fact of it.** 27 of
+  28 reference arrays match exactly, including two composites built
+  specifically so many processes write the same columns. `mitochondrial` moves
+  **9.095e-13 absolute / 7.450e-15 relative** — bounded, non-accumulating,
+  1000x below the solver's `atol=1e-9`. Evaluated eagerly the RHS is
+  bit-identical, so it is not accumulation order; it is XLA rounding the
+  restructured graph differently (`vals * facs` now runs on one long vector
+  instead of one per process, so vectorization and FMA contraction differ).
+  Recorded rather than absorbed into the gate: the "bit-exact" claims elsewhere
+  in this file are only worth something if the threshold is not moved when one
+  fails.
+
+  **Still open: the slope is linear, not flat.** 15 eqns/process is a smaller
+  constant on the same axis. The residual is `gather`/`slice`/`squeeze` per
+  process — the `dict[str, scalar]` interface, which is the same design
+  question P3.12 answered on the port axis and has not been answered on the
+  process axis. A block-ported process stays at 20 equations at any N, so for a
+  generated network the answer is still "emit one process, not N" (review open
+  question 2).
 
 - [ ] **P3.14 — The module layering is acyclic by static import order and a
   14-module cycle by actual dependency; the base abstraction imports the

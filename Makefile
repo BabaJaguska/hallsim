@@ -1,10 +1,15 @@
 .PHONY: install install-dev format lint check test test-all run run-compose run-validate help all
 
+# A uv-created .venv has no pip, and a CI runner has pip and no uv. Pick
+# whichever is on PATH so one command installs in both.
+PIP_INSTALL := $(shell command -v uv >/dev/null 2>&1 \
+	&& echo 'uv pip install' || echo 'python -m pip install')
+
 install:
-	uv pip install -e .
+	$(PIP_INSTALL) -e .
 
 install-dev:
-	uv pip install -e ".[dev]"
+	$(PIP_INSTALL) -e ".[dev]"
 
 format:
 	black --line-length 79 src/
