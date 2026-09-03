@@ -703,6 +703,28 @@ class Composite(eqx.Module):
         """Aggregate metadata from all processes."""
         return {name: proc.metadata() for name, proc in self.processes.items()}
 
+    def structural_fingerprint(self) -> tuple:
+        """Structural identity: store layout, process classes and wiring.
+
+        Everything that decides *which columns a process reads and writes*,
+        and nothing that a parameter sweep changes. A cache holding artefacts
+        built against one composite -- column indices, a traced core -- must
+        key on this, or a second composite of the same width silently reuses
+        the first one's.
+        """
+        return (
+            tuple(self.store_keys()),
+            tuple(
+                (name, type(proc).__module__, type(proc).__qualname__)
+                for name, proc in sorted(self.processes.items())
+            ),
+            tuple(
+                (name, port, as_paths(entry))
+                for name, proc_topo in sorted(self.topology.items())
+                for port, entry in sorted(proc_topo.items())
+            ),
+        )
+
     # -----------------------------------------------------------------
     # Process kind filtering
     # -----------------------------------------------------------------

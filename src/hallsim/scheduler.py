@@ -21,6 +21,7 @@ Example
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field, replace
 from functools import cached_property
@@ -111,6 +112,58 @@ class GroupIntegrator:
     controller: dfx.AbstractStepSizeController
     stiff: bool
     info: GroupStiffness | None = None
+
+
+@dataclass(frozen=True)
+class RunPlan:
+    """Everything a run resolves before it can integrate, as a value.
+
+    Resolving a run means picking groups, deciding the coupling mode,
+    measuring each group's stiffness to route a solver, choosing an
+    anti-aliased ``save_dt``, collecting the discontinuity times and tracing a
+    core. All of it is a function of *(policy, composite, span)* and none of it
+    is a function of the runner alone — so it lives here rather than in a cache
+    on :class:`Scheduler`, where the key has to reconstruct the composite's
+    identity and has to be complete to be sound.
+
+    A plan carries the composite it was built for, so there is no key to get
+    wrong. Hold one and reuse it across a parameter sweep and you have said, in
+    one place, that the routing verdict is stable over that sweep — which is an
+    assumption worth being able to see, and worth being able to check by
+    re-planning at the end and comparing.
+
+    ``core`` is ``None`` for composites that take the eager path (DISCRETE or
+    EVENT processes, ``adaptive_dt``, ``debug``); there is no compiled core to
+    carry.
+    """
+
+    composite: Composite
+    t_span: tuple[float, float]
+    macro_dt: float
+    keys: list[str]
+    groups: dict[str, list[str]]
+    coupling: str
+    integrators: dict[str, GroupIntegrator]
+    save_dt: float
+    requested_save_dt: float
+    jump_ts: Any
+    adjoint: Any
+    fast: bool
+    core: Any
+    state_shape: tuple[int, ...]
+    state_dtype: Any
+
+    def __repr__(self) -> str:
+        path = "fast" if self.fast else ("scan" if self.core else "eager")
+        sizes = {g: len(p) for g, p in self.groups.items()}
+        solvers = {
+            g: type(i.solver).__name__ for g, i in self.integrators.items()
+        }
+        return (
+            f"RunPlan({path}, groups={sizes}, "
+            f"coupling={self.coupling!r}, solvers={solvers}, "
+            f"save_dt={self.save_dt:g}, t_span={self.t_span})"
+        )
 
 
 @dataclass
@@ -285,6 +338,28 @@ class _ReducedRHS(eqx.Module):
         return self.base(t, full, args)[..., self.own]
 
 
+def _param_digest(composite: Composite) -> str | None:
+    """A digest of ``composite``'s concrete parameter values, or ``None`` when
+    any of them is a tracer.
+
+    The stiffness verdict is a function of parameter *values* -- a rate
+    constant of 1 and one of 1e6 are the same structure and different
+    problems -- so a structural key alone lets a sweep's second arm inherit
+    the first arm's solver. ``None`` marks "cannot be measured here", which is
+    the traced case, and sends the lookup to the last eagerly-resolved verdict
+    for this structure.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    for leaf in jax.tree_util.tree_leaves(composite):
+        if isinstance(leaf, jax.core.Tracer):
+            return None
+        arr = np.asarray(leaf)
+        h.update(str(arr.dtype).encode())
+        h.update(str(arr.shape).encode())
+        h.update(arr.tobytes())
+    return h.hexdigest()
+
+
 class Scheduler:
     """Multi-rate orchestrator for composites with mixed process kinds.
 
@@ -457,7 +532,15 @@ class Scheduler:
         # structural signature so the eager resolution (concrete params)
         # is reused under later grad/jvp/vmap tracing, where the Jacobian
         # eigenvalues would be tracers.
+        # One resolved plan, kept so a sweep loop does not re-trace. Replaced
+        # rather than accumulated: a plan carries its own composite, so a stale
+        # entry is a miss, never a wrong answer.
+        self._last_plan: tuple[Any, RunPlan] | None = None
         self._integrator_cache: dict[Any, dict[str, GroupIntegrator]] = {}
+        # The most recent verdict resolved from *concrete* parameters, per
+        # structure. A traced run cannot measure its own, so it reads this;
+        # an eager run always measures its own and refreshes it.
+        self._eager_verdict: dict[Any, dict[str, GroupIntegrator]] = {}
         self._omega_cache: dict[Any, list] = {}  # antialias spectrum cache
         # Compiled continuous cores by structure. Not an optimization: an
         # unjitted run re-traces its scan of N diffeqsolve bodies every call.
@@ -473,7 +556,6 @@ class Scheduler:
         self.throw = throw
         self.max_steps = max_steps
         self.dt0 = dt0
-        self._jump_ts = None  # per-run forcing/step discontinuity times
         self.manual_groups = groups
         self.coupling_mode = coupling_mode
         self.coupling_interp_points = coupling_interp_points
@@ -490,8 +572,8 @@ class Scheduler:
 
     def run(
         self,
-        composite: Composite,
-        t_span: tuple[float, float],
+        composite: Composite | RunPlan,
+        t_span: tuple[float, float] | None = None,
         macro_dt: float = 1.0,
         y0: jnp.ndarray | None = None,
         save_dt: float | None = None,
@@ -503,9 +585,12 @@ class Scheduler:
         Parameters
         ----------
         composite:
-            Wired bundle of processes.
+            Wired bundle of processes, or a :class:`RunPlan` from
+            :meth:`plan` — which already fixes the span, ``macro_dt``,
+            ``save_dt`` and ``adjoint``, so passing those alongside it is an
+            error rather than a silent override. ``y0`` still varies per run.
         t_span:
-            ``(t0, t1)``.
+            ``(t0, t1)``. Required unless a plan is given.
         macro_dt:
             Communication interval (initial value under ``adaptive_dt``). Each
             macro step solves the continuous groups, fires any due discrete
@@ -533,6 +618,146 @@ class Scheduler:
         -------
         :class:`SchedulerResult`
         """
+        if isinstance(composite, RunPlan):
+            conflicting = [
+                n
+                for n, v in (
+                    ("t_span", t_span),
+                    ("save_dt", save_dt),
+                    ("adjoint", adjoint),
+                )
+                if v is not None
+            ]
+            if conflicting:
+                raise TypeError(
+                    f"run() got {conflicting} alongside a RunPlan, which "
+                    "already fixes them. Build a new plan instead — the "
+                    "resolution they feed (solver routing, save grid, "
+                    "discontinuity times) is what a plan *is*."
+                )
+            return self._execute(composite, y0)
+        if t_span is None:
+            raise TypeError("run() requires t_span unless given a RunPlan")
+        plan = self._plan_for(
+            composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
+        )
+        return self._execute(plan, y0)
+
+    def plan(
+        self,
+        composite: Composite,
+        t_span: tuple[float, float],
+        macro_dt: float = 1.0,
+        y0: jnp.ndarray | None = None,
+        save_dt: float | None = None,
+        adjoint: dfx.AbstractAdjoint | None = None,
+        antialias: bool = True,
+    ) -> RunPlan:
+        """Resolve a run without executing it.
+
+        Returns the :class:`RunPlan` :meth:`run` would build — groups, coupling
+        mode, per-group solver, anti-aliased ``save_dt``, discontinuity times
+        and traced core. Hold one and pass it to :meth:`run` to reuse the
+        resolution across many initial conditions or parameter values, which is
+        what makes a sweep cheap; ``repr`` it to see what was chosen.
+
+        ``y0`` is the state the stiffness verdict is *measured at*, defaulting
+        to the composite's initial state. Reusing the plan across other states
+        or parameters asserts the verdict holds there too.
+        """
+        return self._plan_for(
+            composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
+        )
+
+    def _plan_for(
+        self, composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
+    ) -> RunPlan:
+        """The plan for this call, reusing the last one when it still applies.
+
+        A one-entry memo, not a dictionary: the key only has to be
+        *conservative* -- any doubt re-plans -- where a growing cache's key has
+        to be *complete* or it hands one composite's resolution to another.
+        That is the whole reason the artefacts moved onto a plan, so the memo
+        is deliberately the weakest thing that keeps a sweep loop off the
+        re-tracing path.
+        """
+        key = (
+            composite.structural_fingerprint(),
+            _param_digest(composite),
+            tuple(float(t) for t in t_span),
+            float(macro_dt),
+            None if save_dt is None else float(save_dt),
+            None if adjoint is None else type(adjoint).__name__,
+            bool(antialias),
+            (
+                None
+                if y0 is None
+                else (tuple(jnp.shape(y0)), str(jnp.asarray(y0).dtype))
+            ),
+        )
+        cached = self._last_plan
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        plan = self._build_plan(
+            composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
+        )
+        # A plan built under an outer trace closes over that trace's tracers,
+        # which would escape it on reuse.
+        if not any(
+            isinstance(leaf, jax.core.Tracer)
+            for leaf in jax.tree_util.tree_leaves((composite, y0))
+        ):
+            self._last_plan = (key, plan)
+        return plan
+
+    def _reject_unsupported_batch(self, composite, state, keys) -> None:
+        """Refuse a batched ``y0`` on the paths that cannot carry a batch axis.
+
+        These branch on Python ``bool()``/``float()`` of the state, which would
+        crash under vmap or silently collapse the batch axis — and a collapsed
+        batch reads as a legitimate null result, every member following the
+        same trajectory.
+        """
+        if state.ndim <= 1:
+            return
+        blockers = []
+        event_procs = composite.event_processes()
+        discrete_procs = composite.discrete_processes()
+        if event_procs:
+            blockers.append(
+                f"EVENT processes {list(event_procs.keys())} "
+                "(condition fires via Python bool — incompatible with vmap)"
+            )
+        if discrete_procs:
+            blockers.append(
+                f"DISCRETE processes {list(discrete_procs.keys())} "
+                "(delta scatter is not batch-axis-aware)"
+            )
+        if self.adaptive_dt:
+            blockers.append(
+                "adaptive_dt=True (coupling residual is a single dt "
+                "for the whole batch and reduces via Python float)"
+            )
+        varying = _varying_assigned_paths(composite, state, keys)
+        if varying:
+            blockers.append(
+                f"per-member values on ASSIGNED paths {varying} "
+                "(an assignment is recomputed from its own process "
+                "every step, so those values are overwritten before "
+                "anything reads them and every member would run "
+                "identically)"
+            )
+        if blockers:
+            raise ValueError(
+                f"Batched y0 of shape {tuple(state.shape)} is not "
+                "supported with: " + "; ".join(blockers) + ". "
+                "Run unbatched, drop the blocking feature, or vmap "
+                "Scheduler.run from outside."
+            )
+
+    def _build_plan(
+        self, composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
+    ) -> RunPlan:
         t0, t1 = t_span
         adjoint = (
             adjoint
@@ -541,7 +766,7 @@ class Scheduler:
         )
         # Discontinuities the solver should land on exactly rather than
         # resolve by adaptive step-rejection.
-        self._jump_ts = self._collect_jump_ts(composite, t0, t1)
+        jump_ts = self._collect_jump_ts(composite, t0, t1)
 
         # Flat state layout, pinned for the whole run. Batched y0 is
         # (batch, n_vars); the batch axis rides through every group's solve.
@@ -551,48 +776,12 @@ class Scheduler:
             if y0 is None
             else jnp.asarray(y0)
         )
-        key_to_idx = {k: i for i, k in enumerate(keys)}
 
         groups = self.manual_groups or composite.auto_groups()
         discrete_procs = composite.discrete_processes()
         event_procs = composite.event_processes()
 
-        # These paths branch on Python bool()/float() of the state, which
-        # would crash under vmap or silently collapse the batch axis.
-        is_batched = state.ndim > 1
-        if is_batched:
-            blockers = []
-            if event_procs:
-                blockers.append(
-                    f"EVENT processes {list(event_procs.keys())} "
-                    "(condition fires via Python bool — incompatible with vmap)"
-                )
-            if discrete_procs:
-                blockers.append(
-                    f"DISCRETE processes {list(discrete_procs.keys())} "
-                    "(delta scatter is not batch-axis-aware)"
-                )
-            if self.adaptive_dt:
-                blockers.append(
-                    "adaptive_dt=True (coupling residual is a single dt "
-                    "for the whole batch and reduces via Python float)"
-                )
-            varying = _varying_assigned_paths(composite, state, keys)
-            if varying:
-                blockers.append(
-                    f"per-member values on ASSIGNED paths {varying} "
-                    "(an assignment is recomputed from its own process "
-                    "every step, so those values are overwritten before "
-                    "anything reads them and every member would run "
-                    "identically)"
-                )
-            if blockers:
-                raise ValueError(
-                    f"Batched y0 of shape {tuple(state.shape)} is not "
-                    "supported with: " + "; ".join(blockers) + ". "
-                    "Run unbatched, drop the blocking feature, or vmap "
-                    "Scheduler.run from outside."
-                )
+        self._reject_unsupported_batch(composite, state, keys)
 
         # If no groups and no discrete/event, single-group fallback
         if not groups and not discrete_procs and not event_procs:
@@ -641,8 +830,8 @@ class Scheduler:
             and coupling in ("frozen", "interpolated")
             and not self.debug
         )
-        if fast_path_eligible or scan_eligible:
-            core = self._continuous_core(
+        core = (
+            self._continuous_core(
                 composite,
                 groups,
                 integrators,
@@ -655,8 +844,49 @@ class Scheduler:
                 coupling,
                 fast=fast_path_eligible,
                 state=state,
+                jump_ts=jump_ts,
             )
-            ts, ys, dyn = core(composite, state)
+            if (fast_path_eligible or scan_eligible)
+            else None
+        )
+        return RunPlan(
+            composite=composite,
+            t_span=(t0, t1),
+            macro_dt=macro_dt,
+            keys=keys,
+            groups=groups,
+            coupling=coupling,
+            integrators=integrators,
+            save_dt=save_dt,
+            requested_save_dt=requested_save_dt,
+            jump_ts=jump_ts,
+            adjoint=adjoint,
+            fast=fast_path_eligible,
+            core=core,
+            state_shape=tuple(state.shape),
+            state_dtype=state.dtype,
+        )
+
+    def _execute(self, plan: RunPlan, y0) -> SchedulerResult:
+        """Run a resolved :class:`RunPlan` from ``y0``."""
+        composite = plan.composite
+        keys, groups = plan.keys, plan.groups
+        t0, t1 = plan.t_span
+        macro_dt, save_dt = plan.macro_dt, plan.save_dt
+        coupling, adjoint = plan.coupling, plan.adjoint
+        integrators = plan.integrators
+        state = (
+            composite.initial_state_vec(keys)
+            if y0 is None
+            else jnp.asarray(y0)
+        )
+        self._reject_unsupported_batch(composite, state, keys)
+        key_to_idx = {k: i for i, k in enumerate(keys)}
+        discrete_procs = composite.discrete_processes()
+        event_procs = composite.event_processes()
+
+        if plan.core is not None:
+            ts, ys, dyn = plan.core(composite, state)
             stats = {
                 g: {
                     **dyn[g],
@@ -678,6 +908,7 @@ class Scheduler:
         integrators = self._scaled_tolerances(
             integrators, composite, groups, keys, state
         )
+        jump_ts = plan.jump_ts
 
         # Per-group RHS, plus the indices each group writes — interpolated
         # coupling splices the previous group's state at those positions.
@@ -780,6 +1011,7 @@ class Scheduler:
                         adjoint=adjoint,
                         group_name=gname,
                         dt0_hint=group_dt0_hint.get(gname),
+                        jump_ts=jump_ts,
                     )
                     group_dt0_hint[gname] = last_dt
                     stats[gname]["num_macro_steps"] += 1
@@ -796,6 +1028,7 @@ class Scheduler:
                         adjoint=adjoint,
                         group_name=gname,
                         dt0_hint=group_dt0_hint.get(gname),
+                        jump_ts=jump_ts,
                     )
                     group_dt0_hint[gname] = last_dt
                     stats[gname]["num_macro_steps"] += 1
@@ -817,6 +1050,7 @@ class Scheduler:
                                 integ=integrators[gname],
                                 adjoint=adjoint,
                                 dt0_hint=group_dt0_hint.get(gname),
+                                jump_ts=jump_ts,
                             )
                         )
                         group_dt0_hint[gname] = last_dt
@@ -834,6 +1068,7 @@ class Scheduler:
                             adjoint=adjoint,
                             group_name=gname,
                             dt0_hint=group_dt0_hint.get(gname),
+                            jump_ts=jump_ts,
                         )
                         group_dt0_hint[gname] = last_dt
                         _record(gname, diag)
@@ -935,6 +1170,7 @@ class Scheduler:
         *,
         fast,
         state,
+        jump_ts,
     ):
         """Compiled ``(composite, y0) -> (ts, ys, per_group_stats)`` for the
         continuous paths, cached by structure.
@@ -947,6 +1183,7 @@ class Scheduler:
         hundreds of ms while reporting zero recompiles.
         """
         sig = (
+            composite.structural_fingerprint(),
             tuple(sorted((g, tuple(sorted(p))) for g, p in groups.items())),
             coupling,
             self.splitting,
@@ -962,11 +1199,7 @@ class Scheduler:
             tuple(bool(integrators[g].stiff) for g in sorted(groups)),
             tuple(state.shape),
             str(state.dtype),
-            (
-                None
-                if self._jump_ts is None
-                else tuple(float(t) for t in self._jump_ts)
-            ),
+            (None if jump_ts is None else tuple(float(t) for t in jump_ts)),
         )
         cached = self._core_cache.get(sig)
         if cached is not None:
@@ -997,6 +1230,7 @@ class Scheduler:
                     dfx.SaveAt(ts=save_ts),
                     group_name=gname,
                     keys=keys,
+                    jump_ts=jump_ts,
                 )
                 # ASSIGNED ports aren't integrated, so their saved columns
                 # hold a stale initial value until recomputed per saved state.
@@ -1033,6 +1267,7 @@ class Scheduler:
                     save_dt,
                     adjoint,
                     coupling,
+                    jump_ts,
                 )
 
         if state.ndim > 1:
@@ -1131,6 +1366,7 @@ class Scheduler:
         save_dt: float | None,
         adjoint: dfx.AbstractAdjoint,
         coupling: str = "frozen",
+        jump_ts=None,
     ):
         """Continuous-only multi-group run as a single ``lax.scan``, returning
         ``(ts, ys, per_group_stats)``.
@@ -1196,6 +1432,7 @@ class Scheduler:
                 dt0_hint=dt0hi,
                 group_name=g,
                 keys=keys,
+                jump_ts=jump_ts,
             )
             final = saved[-1]
             ld = (t_b - t_a) / jnp.maximum(sol.stats["num_steps"], 1)
@@ -1227,6 +1464,7 @@ class Scheduler:
                         adjoint,
                         g,
                         dt0h[gi],
+                        jump_ts,
                     )
                     steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
                     res = res[:gi] + (r,) + res[gi + 1 :]
@@ -1242,6 +1480,7 @@ class Scheduler:
                         adjoint,
                         g,
                         dt0h[gi],
+                        jump_ts,
                     )
                     steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
                     res = res[:gi] + (r,) + res[gi + 1 :]
@@ -1311,15 +1550,35 @@ class Scheduler:
         }
         return ts, composite.materialize_assigned(ts, ys), stats
 
+    def _remember_verdict(self, sig, base, digest, integ):
+        """Cache a routing verdict under its exact key, and — when it was
+        measured from concrete parameters — as *the* verdict a later traced
+        run of this structure should inherit."""
+        self._integrator_cache[sig] = integ
+        if digest is not None:
+            self._eager_verdict[base] = integ
+
     @staticmethod
-    def _integrator_signature(groups, state, macro_dt):
-        """Structural key for the integrator cache: group→process structure,
-        state width, and ``macro_dt``, never state *values* — so the eager
-        resolution is reused under later traced runs of the same composite."""
+    def _integrator_signature(composite, groups, state, macro_dt):
+        """Structural key for the integrator cache: the composite's own
+        identity, group→process structure, state width, and ``macro_dt``,
+        never state *values* — so the eager resolution is reused under later
+        traced runs of the same composite.
+
+        The fingerprint is what makes "the same composite" mean it. Without it
+        the key is satisfied by any composite of the same width whose
+        processes happen to share names, and the artefacts cached against the
+        first one — column indices, a traced core — are handed to the second.
+        """
         gstruct = tuple(
             sorted((g, tuple(sorted(procs))) for g, procs in groups.items())
         )
-        return (gstruct, int(state.shape[-1]), float(macro_dt))
+        return (
+            composite.structural_fingerprint(),
+            gstruct,
+            int(state.shape[-1]),
+            float(macro_dt),
+        )
 
     @staticmethod
     def _save_grid(t0: float, t1: float, save_step: float) -> jnp.ndarray:
@@ -1360,13 +1619,18 @@ class Scheduler:
         }
         return np.asarray(sorted(times)) if times else None
 
-    def _controller_with_jumps(self, controller):
-        """Wrap a step-size controller so it steps exactly onto this run's
-        ``jump_ts`` (forcing/step discontinuities); pass-through when there
-        are none."""
-        if self._jump_ts is None:
+    @staticmethod
+    def _controller_with_jumps(controller, jump_ts):
+        """Wrap a step-size controller so it steps exactly onto ``jump_ts``
+        (forcing/step discontinuities); pass-through when there are none.
+
+        The times come from the plan rather than the runner: they are a
+        property of *(composite, span)*, and holding them on the Scheduler made
+        it non-reentrant while feeding a cache key set by a previous run.
+        """
+        if jump_ts is None:
             return controller
-        return dfx.ClipStepSizeController(controller, jump_ts=self._jump_ts)
+        return dfx.ClipStepSizeController(controller, jump_ts=jump_ts)
 
     def _resolve_adjoint(self, composite, y0):
         """``dfx.ForwardMode()`` when this run is being forward-differentiated,
@@ -1403,7 +1667,10 @@ class Scheduler:
             return omegas
         if isinstance(state, jax.core.Tracer):
             return []
-        sig = self._integrator_signature(groups, state, macro_dt)
+        sig = (
+            self._integrator_signature(composite, groups, state, macro_dt),
+            _param_digest(composite),
+        )
         if sig in self._omega_cache:
             return self._omega_cache[sig]
         from hallsim.stiffness import analyze_groups
@@ -1481,8 +1748,16 @@ class Scheduler:
         a cold cache warns its way down to the explicit solver — run
         :meth:`warm_up` first to resolve the verdict outside the trace.
         """
-        sig = self._integrator_signature(groups, state, macro_dt)
+        base = self._integrator_signature(composite, groups, state, macro_dt)
+        digest = _param_digest(composite)
+        sig = (base, digest)
         cached = self._integrator_cache.get(sig)
+        if cached is None and digest is None:
+            # Traced: the values needed to measure a verdict are tracers, so
+            # reuse the one resolved eagerly for this structure. That is the
+            # warm_up-then-differentiate contract, and it assumes the verdict
+            # holds across the parameter search space.
+            cached = self._eager_verdict.get(base)
         if cached is not None:
             return cached
 
@@ -1491,7 +1766,7 @@ class Scheduler:
                 g: GroupIntegrator(self.solver, self.controller, stiff=False)
                 for g in groups
             }
-            self._integrator_cache[sig] = integ
+            self._remember_verdict(sig, base, digest, integ)
             return integ
 
         def _all_explicit():
@@ -1539,7 +1814,7 @@ class Scheduler:
                 "solver for all groups"
             )
             integ = _all_explicit()
-            self._integrator_cache[sig] = integ
+            self._remember_verdict(sig, base, digest, integ)
             return integ
 
         if report is None:
@@ -1577,7 +1852,7 @@ class Scheduler:
                 )
             if self.debug:
                 log.info("  stiffness: %s", verdict)
-        self._integrator_cache[sig] = integ
+        self._remember_verdict(sig, base, digest, integ)
         return integ
 
     def _scaled_tolerances(
@@ -1664,6 +1939,7 @@ class Scheduler:
         dt0_hint=None,
         group_name: str = "",
         keys: list[str] | None = None,
+        jump_ts=None,
     ):
         """Solve one group over ``own`` and scatter the saved states back to
         full width. Returns ``(sol, saved)`` — ``sol.ys`` is the group's own
@@ -1690,7 +1966,9 @@ class Scheduler:
             dt0=jnp.minimum(dt0_base, t1 - t0),
             y0=state_vec[..., own],
             saveat=saveat,
-            stepsize_controller=self._controller_with_jumps(integ.controller),
+            stepsize_controller=self._controller_with_jumps(
+                integ.controller, jump_ts
+            ),
             adjoint=adjoint,
             max_steps=self.max_steps,
             throw=False,
@@ -1717,6 +1995,7 @@ class Scheduler:
         adjoint: dfx.AbstractAdjoint,
         group_name: str = "",
         dt0_hint=None,
+        jump_ts=None,
     ):
         """Trace-safe single-group ``diffeqsolve`` over ``[t0, t1]``, solved
         over ``own`` (the states this group evolves) with the rest held frozen.
@@ -1737,6 +2016,7 @@ class Scheduler:
             dfx.SaveAt(t1=True),
             dt0_hint=dt0_hint,
             group_name=group_name,
+            jump_ts=jump_ts,
         )
         final_vec = saved[-1]
         # Average step over the interval — the settled step size, without
@@ -1762,6 +2042,7 @@ class Scheduler:
         adjoint: dfx.AbstractAdjoint,
         group_name: str = "",
         dt0_hint: float | None = None,
+        jump_ts=None,
     ) -> tuple[jnp.ndarray, float]:
         """Eager single-group solve — :meth:`_group_step` plus the
         empty-interval guard and optional debug logging. Returns
@@ -1786,6 +2067,7 @@ class Scheduler:
             adjoint,
             group_name,
             dt0_hint,
+            jump_ts,
         )
         diag = (result, n_steps_s, n_rej_s)
 
@@ -1870,6 +2152,7 @@ class Scheduler:
         integ: GroupIntegrator,
         adjoint: dfx.AbstractAdjoint,
         dt0_hint: float | None = None,
+        jump_ts=None,
     ) -> tuple[jnp.ndarray, Any, float, tuple]:
         """Solve one group, sampling its trajectory on a fixed grid so the next
         group can splice in this group's evolving variables.
@@ -1915,6 +2198,7 @@ class Scheduler:
             fill=fill,
             dt0_hint=dt0_hint,
             group_name="interpolated",
+            jump_ts=jump_ts,
         )
         final_vec = saved[-1]
         last_dt = (t1 - t0) / jnp.maximum(sol.stats["num_steps"], 1)

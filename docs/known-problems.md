@@ -664,9 +664,11 @@ The framework returns a plausible number and nothing indicates it is wrong.
   **22.5 ms/arm — 19x.** That is the practical price of P0.1's open half, on a
   real workload rather than the demo.
 
-- [ ] **P0.29 — `Scheduler`'s three caches are keyed on a signature that does
+- [~] **P0.29 — `Scheduler`'s three caches are keyed on a signature that does
   not identify the composite, so a reused `Scheduler` returns another
   composite's answer.** Found 2026-08-31 (external systems review).
+  *Both wrong-answer halves fixed 2026-09-01; the stateless-runner half is
+  still open — see the end of this entry.*
   `_integrator_cache` / `_omega_cache` / `_core_cache` (`scheduler.py:460-464`)
   are process-lifetime dicts on a mutable `Scheduler`.
   `_integrator_signature` (`scheduler.py:1315-1322`) is
@@ -744,6 +746,43 @@ The framework returns a plausible number and nothing indicates it is wrong.
   form: run each scheduler test twice on one instance, the second against a
   differently-wired composite of the same width, and assert equality with the
   fresh-instance results.
+
+  **Fixed 2026-09-01 (both wrong-answer halves).** `Composite`
+  gained `structural_fingerprint()` — store layout, process classes, wiring —
+  and it is the first element of both cache signatures, which closes the
+  wrong-dynamics collision. For the gradient half a structural key cannot
+  work, so `_param_digest(composite)` hashes the concrete parameter leaves and
+  keys the verdict on `(structure, values)`; it returns `None` when any leaf is
+  a tracer, and that case falls back to `_eager_verdict[structure]`, the last
+  verdict resolved from concrete parameters. That keeps calibration's
+  warm-up-then-differentiate contract exactly as it was while giving each
+  eager sweep arm its own measurement. Two regression tests in
+  `tests/unit/test_multiscale.py`. Discrimination measured by neutralising
+  `_param_digest`: the sweep then differs by **1.6e26** relative and flips sign
+  on three of four arms; with it, the arms agree bit-for-bit.
+  **Stateless-runner half landed 2026-09-01.** `RunPlan` is a frozen value
+  carrying the resolved groups, coupling mode, per-group integrators,
+  anti-aliased `save_dt`, discontinuity times, adjoint and traced core — plus
+  the composite they were built for. `Scheduler.plan()` returns one and
+  `run(plan, y0=...)` executes it; passing `t_span`/`save_dt`/`adjoint`
+  alongside a plan raises rather than being silently ignored. `run(composite,
+  ...)` is unchanged and now resolves through a **one-entry** memo instead of
+  three growing dicts: its key only has to be *conservative* (any doubt
+  re-plans), where a growing cache's key has to be *complete* or it hands one
+  composite's resolution to another — which is the whole defect above.
+  `self._jump_ts` is gone from the runner and rides on the plan, threaded
+  through `_reduced_solve` / `_group_step` / `_solve_group` /
+  `_solve_group_interpolated`, so `Scheduler` no longer mutates per run.
+  Verified bit-identical over 22 trajectory arrays spanning the fast, scan and
+  eager paths, batched runs, Strang, both coupling modes and all three shipped
+  composites: **max|delta| = 0.000e+00**. Suite 480 -> 485 passed, 1 xfailed.
+  **Still open:** `self._warned_save_res` still latches once per instance
+  (P0.30). And `_integrator_cache` / `_eager_verdict` remain, because
+  `calibration.py` warms up on *one* condition's composite and runs all of
+  them — a deliberate cross-condition sharing of the verdict that a plan
+  cannot express, since each condition is a different composite. That sharing
+  is now the only route left to an inherited verdict, and it is still
+  unchecked (review open question 3).
 
 - [ ] **P0.30 — `save_dt` means two different things on two of the three
   execution paths, and the anti-aliasing guardrail logs that it fired on the
@@ -1287,7 +1326,14 @@ The check that would catch a mistake does not exist, does not run, or fails open
   time, not headroom. This is now **the** blocker at 10k: N=100 and N=1,000 run
   end to end including gradients, N=10,000 does not. Sparsity is derivable from
   the topology dict, and a matrix-free Jacobian-vector product needs no matrix at
-  all. Original entry, on `steady_state`: ✓ External project, 2026-08-28: a
+  all. **Stiffness half fixed 2026-08-31:** `stiffness.py` routes anything wider
+  than `DENSE_JACOBIAN_MAX_DIM = 512` to `_extremal_eigenvalues`, an Arnoldi
+  iteration over JVPs (`scipy.sparse.linalg.LinearOperator` + `eigs`), which
+  analyses 10,001 states in 281 s where the dense path exhausted the card. So
+  `analyze_groups` is no longer the 10k blocker and the "**the** blocker at 10k"
+  claim below is superseded; the `steady_state` half is untouched —
+  `steady_state.py:261, 273, 343, 374, 492, 514` still build dense `jacfwd`
+  Jacobians, and neither reduction below exists. Original entry, on `steady_state`: ✓ External project, 2026-08-28: a
   910-node linear signalling composite × 300 clamp conditions was intractable
   under `steady_state` (damped Newton + `jacfwd`) on CPU, and was finished only
   by replacing the inner solve with a hand-written linear solve — validated
@@ -1394,9 +1440,10 @@ The check that would catch a mistake does not exist, does not run, or fails open
   dict-of-scalars interface itself — which only array ports remove. The factor
   arrays this builds are what an array port consumes, so it is a step in, not
   work to unwind.
-  **Priority note:** array ports buy throughput but do not change what gets
-  allocated, so they no longer head the queue — P3.10's dense Jacobian is what
-  blocks N=10,000 outright.
+  **Priority note (written 2026-08-29, superseded):** array ports buy throughput
+  but do not change what gets allocated, so they no longer head the queue —
+  P3.10's dense Jacobian is what blocks N=10,000 outright. That held until the
+  matrix-free stiffness path landed on 2026-08-31; see P3.10.
   Refuted alternative: keeping scalar ports and grouping contiguous index runs
   inside `_port_view` measures 9 equations *worse* than the free fix of eliding
   the identity unit multiply, with an identical slope and `slice` unchanged at
@@ -1510,6 +1557,33 @@ The check that would catch a mistake does not exist, does not run, or fails open
   gives a group-restricted implicit solve), `_per_member` batching.
 
 ---
+
+- [ ] **P3.16 — The main constructors are flat parameter walls, and three of
+  the knobs silently select between three different execution paths.** Found
+  2026-08-31 (external systems review); the only finding from that report with
+  no entry until now. Measured on the current tree: `Scheduler.__init__` takes
+  **27** parameters, `CalibrationProblem.__init__` 20, `Calibrator.__init__`
+  19. Eight of the Scheduler's are the `adaptive_dt_*` cluster. The 2026-07-02
+  internal review already flagged ~25 and asked for `AdaptiveDt(...)` /
+  `Splitting(...)` value objects; the surface grew instead.
+  The sharp half is not the count. `splitting`, `coupling_mode` and
+  `adaptive_dt` are documented as independent knobs, but they *select the
+  execution path*: `adaptive_dt=True` or a DISCRETE/EVENT process forces the
+  eager loop, `debug=True` moves off the scan path (`scheduler.py:637`), and
+  everything else takes the fast or scan path. So three tuning parameters
+  choose between three implementations of "advance the composite" that do not
+  agree with each other — P0.30 (`save_dt` means two things) and P0.23
+  (interpolated coupling is frozen for non-adjacent groups) are both defects
+  *of that selection*, not of the knobs.
+  Against the stated goal — "the framework must be easy for AI agents to use"
+  — a 27-slot flat constructor where three slots silently reroute the numerics
+  is the wrong shape: nothing in the signature says those three interact, and
+  nothing in `SchedulerResult` says which path ran.
+  *Fix:* group the clusters into value objects, and put the resolved path,
+  coupling mode and `save_dt` into `SchedulerResult.stats` so the selection is
+  an observable fact rather than an inference. The `stats` half is worth doing
+  first and independently — it is a few hours and it makes P0.30/P0.23-class
+  divergences visible instead of silent.
 
 ## Review notes — 2026-08-31 external systems review
 

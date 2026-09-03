@@ -1695,3 +1695,208 @@ class TestBatchedAssignedPaths:
         y0 = jnp.stack([comp.initial_state_vec()] * 4)
         res = Scheduler().run(comp, (0.0, 1.0), macro_dt=1.0, y0=y0)
         assert res.ys[-1].shape[0] == 4
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Scheduler reuse across composites
+#
+# A Scheduler is a stateless runner: the composite is an argument to run(),
+# not to __init__, so one instance may be reused across composites. Its three
+# caches make that contract load-bearing — every test elsewhere in this file
+# builds a fresh Scheduler per assertion, so nothing exercised the contract
+# and a cache key that did not identify the composite went unnoticed.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _EvolveFirst(Process):
+    """Evolves ``x``, reads ``y``."""
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.EVOLVED, default=1.0, units=""),
+            "y": Port(role=PortRole.INPUT, default=1.0, units=""),
+        }
+
+    def derivative(self, t, state):
+        return {"x": -state["x"]}
+
+
+class _EvolveSecond(Process):
+    """Evolves ``y``, reads ``x`` — same width and port names as
+    :class:`_EvolveFirst`, opposite wiring."""
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.INPUT, default=1.0, units=""),
+            "y": Port(role=PortRole.EVOLVED, default=1.0, units=""),
+        }
+
+    def derivative(self, t, state):
+        return {"y": -state["y"]}
+
+
+def _two_path_composite(proc):
+    return Composite(
+        processes={"p": proc},
+        topology={"p": {"x": "a/x", "y": "a/y"}},
+        semantic_validation=False,
+    )
+
+
+def test_reused_scheduler_does_not_leak_wiring_between_composites():
+    """Two composites of the same width whose processes share a name must not
+    share a cached core.
+
+    The cached core closes over the *first* composite's evolved-column
+    indices, so without composite identity in the cache key the second
+    composite's state silently never moves — a flat, plausible trajectory with
+    no warning.
+    """
+    from hallsim.scheduler import Scheduler
+
+    a = _two_path_composite(_EvolveFirst())
+    b = _two_path_composite(_EvolveSecond())
+
+    def endpoint(sched, comp):
+        return sched.run(comp, (0.0, 1.0), macro_dt=1.0, save_dt=1.0).ys[-1]
+
+    fresh_b = endpoint(Scheduler(), b)
+
+    shared = Scheduler()
+    endpoint(shared, a)
+    shared_b = endpoint(shared, b)
+
+    assert jnp.array_equal(shared_b, fresh_b), (
+        f"reused Scheduler gave {shared_b} for composite b, "
+        f"fresh Scheduler gave {fresh_b}"
+    )
+
+
+class _Relax(Process):
+    """Relaxes toward a setpoint at rate ``k``; stiff for large ``k``."""
+
+    k: float = 1.0
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.EVOLVED, default=1.0, units=""),
+            "d": Port(role=PortRole.EVOLVED, default=1.0, units=""),
+        }
+
+    def derivative(self, t, state):
+        return {"x": -self.k * (state["x"] - 0.5), "d": -0.3 * state["d"]}
+
+
+def test_reused_scheduler_does_not_inherit_a_stiffness_verdict():
+    """A parameter sweep on one Scheduler must re-measure per arm.
+
+    The two arms are structurally identical and differ only in a rate
+    constant, so no structural key separates them: the stiffness verdict is a
+    function of parameter *values*. Inheriting the soft arm's explicit solver
+    for the stiff arm returns a finite, plausible, wrong-signed gradient.
+
+    Discrimination: with the parameter digest neutralised this differs by
+    1.6e26 relative and flips sign on three of the four arms.
+    """
+    from hallsim.scheduler import Scheduler
+
+    def build(k):
+        return Composite(
+            processes={"p": _Relax(k=k)},
+            topology={"p": {"x": "a/x", "d": "a/d"}},
+            semantic_validation=False,
+        )
+
+    def grad_at(sched, k):
+        def loss(kv):
+            comp = build(1.0).with_params({"p.k": kv})
+            return jnp.sum(sched.run(comp, (0.0, 1.0), macro_dt=1.0).ys[-1])
+
+        return jax.grad(loss)(jnp.asarray(k))
+
+    ks = [1e0, 1e3, 1e6]
+    fresh = []
+    for k in ks:
+        s = Scheduler()
+        s.warm_up(build(k), (0.0, 1.0), macro_dt=1.0)
+        fresh.append(grad_at(s, k))
+
+    shared = Scheduler()
+    for k, want in zip(ks, fresh):
+        shared.warm_up(build(k), (0.0, 1.0), macro_dt=1.0)
+        got = grad_at(shared, k)
+        assert jnp.array_equal(
+            got, want
+        ), f"k={k:g}: reused Scheduler gave {got}, fresh gave {want}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RunPlan
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_plan_and_run_agree_with_the_plan_free_call():
+    """A plan is a factoring of run(), not a second implementation."""
+    from hallsim.scheduler import RunPlan, Scheduler
+
+    comp = _two_path_composite(_EvolveFirst())
+    sched = Scheduler()
+
+    plan = sched.plan(comp, (0.0, 2.0), macro_dt=1.0, save_dt=0.5)
+    assert isinstance(plan, RunPlan)
+    assert plan.composite is comp
+
+    y0 = jnp.array([3.0, 1.0])
+    direct = sched.run(comp, (0.0, 2.0), macro_dt=1.0, save_dt=0.5, y0=y0)
+    via = sched.run(plan, y0=y0)
+    assert jnp.array_equal(direct.ys, via.ys)
+    assert jnp.array_equal(direct.ts, via.ts)
+
+
+def test_a_plan_refuses_resolution_arguments():
+    """``t_span``/``save_dt``/``adjoint`` are what a plan resolved. Accepting
+    them silently would let a caller believe a plan had been re-resolved when
+    it had not."""
+    from hallsim.scheduler import Scheduler
+
+    sched = Scheduler()
+    plan = sched.plan(_two_path_composite(_EvolveFirst()), (0.0, 1.0))
+    with pytest.raises(TypeError, match="alongside a RunPlan"):
+        sched.run(plan, (0.0, 99.0))
+
+
+def test_run_requires_a_span_without_a_plan():
+    from hallsim.scheduler import Scheduler
+
+    with pytest.raises(TypeError, match="requires t_span"):
+        Scheduler().run(_two_path_composite(_EvolveFirst()))
+
+
+def test_scheduler_carries_no_per_run_state():
+    """A Scheduler is policy plus one plan memo. Per-run scratch on a shared
+    object makes it non-reentrant and can key a cached core with another run's
+    values — ``_jump_ts`` was exactly that, and now rides on the plan.
+    """
+    from hallsim.scheduler import Scheduler
+
+    sched = Scheduler()
+    assert not hasattr(sched, "_jump_ts")
+
+    comp = _two_path_composite(_EvolveFirst())
+    plan = sched.plan(comp, (0.0, 1.0), macro_dt=1.0)
+    assert hasattr(plan, "jump_ts")
+
+
+def test_plan_memo_holds_one_entry():
+    """The memo is deliberately size-1: its key only has to be conservative,
+    where a growing cache's key has to be complete or it hands one composite's
+    resolution to another."""
+    from hallsim.scheduler import Scheduler
+
+    sched = Scheduler()
+    a = _two_path_composite(_EvolveFirst())
+    b = _two_path_composite(_EvolveSecond())
+    for comp in (a, b, a, b):
+        sched.run(comp, (0.0, 1.0), macro_dt=1.0)
+    assert sched._last_plan is not None
+    assert sched._last_plan[1].composite is b
