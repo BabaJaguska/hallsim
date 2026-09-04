@@ -779,17 +779,24 @@ def _extract_stoichiometry(xml_path: str) -> dict:
 def _extract_coupling_metadata(xml_path: str) -> dict:
     """Structure a coupling-wiring checker needs to judge what may drive what.
 
-    Returns ``{param_constant, param_sbo, variables, rules}``:
+    Returns ``{param_constant, param_sbo, variables, rules,
+    rate_rule_targets, boundary}``:
     - ``param_constant`` — ``{param_id: bool}`` (SBML ``constant`` flag).
     - ``param_sbo`` — ``{param_id: int}`` SBO term (−1 if unset); lets a driver
       target be classified as a kinetic rate constant.
-    - ``variables`` — ids of *dynamic* quantities: species, assignment-rule
-      targets, and non-constant parameters. These are the model's own
-      state / input channels.
+    - ``variables`` — ids of *dynamic* quantities: species, rule targets, and
+      non-constant parameters. These are the model's own state / input
+      channels.
     - ``rules`` — ``[(target_id, frozenset(referenced_ids)), …]`` for every
-      assignment rule, so the checker can see that e.g. ``kd2_0`` is modulated
-      by both the constant ``kd2`` and the variable ``DNAdamage`` — i.e. the
-      model routes the influence through ``DNAdamage``, not ``kd2``.
+      rule with a set target and math, so the checker can see that e.g.
+      ``kd2_0`` is modulated by both the constant ``kd2`` and the variable
+      ``DNAdamage`` — i.e. the model routes the influence through
+      ``DNAdamage``, not ``kd2``.
+    - ``rate_rule_targets`` — the subset of ``rules`` targets set by *rate*
+      rules. A rate rule declares ``d(target)/dt``, so its target is an
+      integrated state that an added derivative contribution sums into;
+      an assignment-rule target is recomputed algebraically and would
+      overwrite one. Only the latter is a wiring error.
 
     Empty structure if libsbml cannot parse the file.
     """
@@ -803,6 +810,7 @@ def _extract_coupling_metadata(xml_path: str) -> dict:
             "param_sbo": {},
             "variables": frozenset(),
             "rules": (),
+            "rate_rule_targets": frozenset(),
         }
 
     def ast_names(node) -> frozenset:
@@ -829,11 +837,13 @@ def _extract_coupling_metadata(xml_path: str) -> dict:
         for s in model.getListOfSpecies()
         if s.getBoundaryCondition() or s.getConstant()
     )
-    rules, rule_targets = [], set()
+    rules, rule_targets, rate_rule_targets = [], set(), set()
     for r in model.getListOfRules():
         if r.isSetVariable() and r.isSetMath():
             rules.append((r.getVariable(), ast_names(r.getMath())))
             rule_targets.add(r.getVariable())
+            if r.isRate():
+                rate_rule_targets.add(r.getVariable())
     nonconst_params = {k for k, c in param_constant.items() if not c}
     variables = frozenset(species_ids | rule_targets | nonconst_params)
     return {
@@ -841,6 +851,7 @@ def _extract_coupling_metadata(xml_path: str) -> dict:
         "param_sbo": param_sbo,
         "variables": variables,
         "rules": tuple(rules),
+        "rate_rule_targets": frozenset(rate_rule_targets),
         "boundary": boundary,
     }
 

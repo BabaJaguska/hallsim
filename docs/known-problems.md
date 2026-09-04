@@ -339,6 +339,16 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `SA_beta_gal = 0.45287·ROS` and `DNA_damage = 0.36495·ROS`, so ROS = 10
   forces SA-β-gal 4.53 against the published 0.81. No parameterisation fixes
   it; the PottersWheel source marks all 23 ICs `fix`.
+  *Mechanism located 2026-09-04* (critique §5.2): the loop is
+  `Mito_mass_new → ψm(new) ⊣ AMPK_pT172 → Mitophagy ⊣ Mito_mass_new`, and
+  cutting any one of its four links turns the young state's max Re λ from
+  +0.1599 negative. ψm is produced ∝ mass and cleared first-order, so it *is*
+  mass renamed, while the paper measures it as a TMRM/MTG ratio — an extensive
+  variable fitted to an intensive assay and then read as the intensive gate on
+  AMPK. Making the gate intensive moves the young state to −0.0099 and reverses
+  the inverted dose–response (dosed/undosed SA-β-gal, day 14: 0.773 → 1.036),
+  but the model stays monostable: `mitophagy_old` is 183× smaller than
+  `mitophagy_new`, so damaged mitochondria are the pool the model clears least.
   *Fix:* a control arm needs a **parameter** change, not a withheld dose —
   `AMPK_T172_phos × 10` breaks the loop at its hinge and gives an unirradiated
   rest state (SA-β-gal 1.30, γH2A.X 1.05, ROS 2.88), the best any single
@@ -1246,21 +1256,32 @@ The check that would catch a mistake does not exist, does not run, or fails open
 
 ## P3 — capability gaps
 
-- [ ] **P3.0 — SBML events that assign to a parameter are silently skipped,
-  so a constituent cannot run its own published experiment.** `sbml_events`
-  warns `assigns to non-species 'S' (parameter target) — skipped` and continues.
-  The model then imports, screens and composes while the experiment it was
-  published to reproduce is unreachable, so the intake protocol's
-  constituents-first rule cannot actually be satisfied for it. Hit on Yao 2008
-  (BIOMD0000000318), whose serum steps `e1`/`e2` both target the parameter `S`
-  — the arrest switch Phase 2 of
-  [senescence-model-rebuild.md](senescence-model-rebuild.md) depends on.
-  Distinct from the general event translator in [roadmap.md](roadmap.md): this
-  is one narrow case (parameter-target assignment → LATCHED param promotion)
-  and it blocks a live piece of work.
-  *Fix:* promote parameter targets to LATCHED and emit the handler; failing
-  that, refuse the import rather than warning past it, since a model that
-  cannot run its own experiment should not silently reach a composite.
+- [x] **P3.0 — SBML events that assign to a parameter are silently skipped,
+  so a constituent cannot run its own published experiment.** *Fixed
+  2026-09-04.* `translate_events` keeps a parameter target and records it in
+  `_param_targets`; `expand_events` promotes it on the owning process through
+  the existing `ImportedODEProcess.with_param_input`, so the assignment
+  reaches the rate laws through a store path. The event gets an INPUT read
+  port for the target as well, because the handler applies an assignment as a
+  delta and needs the current value, and the LATCHED write port starts at the
+  parameter's published value rather than zero.
+  `expand_events` now returns the promoted owner alongside the event
+  processes, and its topology row carries only the promoted-parameter
+  entries for the caller to merge.
+  Two further defects surfaced on the same path and are fixed with it:
+  **a zero delay was read as a delay** (COPASI writes `<delay>0</delay>` on
+  every event it exports, so every COPASI model with events was refused for a
+  delay it does not have — only a nonzero delay raises now, and a
+  state-dependent one still does), and **rule-defined ModelValues would not
+  resolve** (COPASI exports a constant as a non-constant parameter plus an
+  assignment rule, e.g. `DNAdamagefoci_0 = Gy * FociPerGy`, which was absent
+  from the constant table; `fold_constant_rules` folds those to a fixpoint and
+  leaves genuinely dynamic rules alone).
+  Verified on both models this blocked. Yao 2008 (BIOMD0000000318): `e1`/`e2`
+  translate, targets `['S']`. Kollarovic 2016 (BIOMD0000000632): imports
+  `[PASS]` with ‖f(y₀)‖/‖y₀‖ = 1.3e-16, and the dose now lands — at 0/5/20 Gy
+  `TAF` goes 0.506/2.684/4.861, p21 1.00/3.66/10.31 and CycE-Cdk2 activity
+  2.28/0.008/0.00006.
 
 - [ ] **P3.1 — Severity cannot be a state.** A hallmark dial is a constant set
   before the run, so aging is imposed as an initial condition. For an attractor

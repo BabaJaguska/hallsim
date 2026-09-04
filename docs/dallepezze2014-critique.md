@@ -250,6 +250,125 @@ mTOR → reversible quiescence) with one branch deleted by construction, and it
 is a mechanistic reason for Finding B: a model whose growth drive cannot fall
 has no reversible arrested state to be an alternative attractor.
 
+### 5.2 Which link makes the loop positive — ψm is mitochondrial mass renamed
+
+§5 establishes that the mitochondrial arm is a positive feedback loop. This
+locates the link that makes it one, and it is a semantic error rather than a
+parameter value.
+
+**Measured, by Jacobian ablation at the published young state.** Zero one
+entry `J[i, j]` — the influence of state *j* on state *i* — and re-read the
+spectrum on the conservation leaf. All links intact: max Re λ = **+0.1599**.
+Four single cuts turn it negative, and they are the four links of one cycle:
+
+| cut link | J | max Re λ after |
+|---|---|---|
+| Mitophagy → Mito_mass_new | −0.2247 | **−0.1234** |
+| Mito_membr_pot_new → AMPK_pT172 | −1.1774 | **−0.0588** |
+| AMPK_pT172 → Mitophagy | +13198.4 | **−0.0273** |
+| Mito_mass_new → Mito_membr_pot_new | +9882.0 | **−0.0096** |
+
+```
+Mito_mass_new → ψm(new) ⊣ AMPK_pT172 → Mitophagy ⊣ Mito_mass_new
+```
+
+Sign product positive. The mTOR arms are not the cause: cutting
+`mTORC1_pS2448 → Mitophagy` leaves +0.0300 and `AMPK_pT172 ⊣ mTORC1_pS2448`
+leaves +0.0811.
+
+**Why that cycle should not exist.** `Mito_membr_pot_new` is produced in
+proportion to `Mito_mass_new` (reaction 35) and cleared first-order
+(reaction 37), so at quasi-steady state ψm(new) = (k35/k37)·Mito_mass_new
+exactly. It carries no information the mass does not. Two consequences, and
+the paper contradicts itself between them:
+
+- The paper's own assay is a **TMRM/MTG ratio** — potential dye over mass dye,
+  a per-unit-mass quantity. Its own microscopy reports that old mitochondria
+  have "elevated mass and a low ψm". Both statements are about potential *per
+  mitochondrion*.
+- The model's variable is proportional to mass, so it rises when mitochondria
+  accumulate. It is a total, not a ratio.
+
+An extensive variable is fitted to an intensive measurement, and then read as
+an intensive one where it gates AMPK. Substituting the identity above into
+reaction 4, the gate is `k · AMPK_pT172 · (k35/k37) · Mito_mass_new`:
+**mitochondrial abundance switches off the sensor that clears mitochondria.**
+That is the positive loop, and no such link exists in the biology being
+modelled — AMPK reads adenylate charge, and the model carries no ATP, ADP or
+AMP species and no consumer, so the supply side of the balance is present and
+the demand side is not.
+
+**The repair, and what it does and does not fix.** Rewrite reaction 4 to read
+the intensive quantity, `ψm(new) / (Mito_mass_new + 10⁻³)`. At the published
+basal state `Mito_mass_new = 1`, so the day-0 operating point is unchanged and
+no refit is needed to compare:
+
+| unirradiated | published | ψm intensive |
+|---|---|---|
+| young-IC max Re λ | **+0.1599** | **−0.0099** |
+| dosed/undosed SA-β-gal, day 14 | 0.773 | **1.036** |
+| dosed/undosed SA-β-gal, day 21 | 0.932 | **1.081** |
+| day-400 SA-β-gal | 9.032 | 14.486 |
+| day-400 max Re λ | −0.0730 | −0.0361 |
+
+Two of the paper's most damaging properties come from this one link: the young
+state stops being locally unstable, and **the inverted dose–response of §5
+reverses** — irradiation becomes a cause of senescence rather than a brake.
+
+It is not sufficient. The day-400 unirradiated endpoint is *worse* (SA-β-gal
+14.49), the day-400 dosed/undosed ratio is still 1.000, and the model is still
+monostable. Local stability at −0.0099 is a ~100-day time constant; the ratchet
+outlives it.
+
+### 5.3 What still runs after the loop is cut — clearance selectivity is inverted
+
+In the repaired model `mTORC1_pS2448` pins at 10.53 and `AMPK_pT172` at 5.01,
+flat across every timepoint and both arms: the signalling layer reaches a fixed
+point and the only thing still moving is the mass ratchet. Its rate constants:
+
+| constant | fitted value |
+|---|---|
+| `mitophagy_new` | 0.22466 |
+| `mitophagy_old` | **0.00122608** |
+| `AMPK_pT172_dephos_by_Mito_membr_pot_new` | 0.117745 |
+| `AMPK_pT172_dephos_by_Mito_membr_pot_old` | **1.0e-06** (optimiser floor) |
+
+Both reactions carry the same rate law shape, so the ratio of constants is the
+ratio of per-unit-mass clearance rates: **damaged mitochondria are cleared 183×
+more slowly than healthy ones**, and their membrane potential reaches the
+energy sensor at 10⁻⁵ of the healthy pool's weight. There is no damage-sensing
+clearance term anywhere in the model — no PINK1/Parkin, no selectivity. Real
+mitophagy is selective *for* damage; dp14 has the selectivity backwards, which
+is the one-way ratchet that survives §5.2's repair.
+
+Two further constants sit at the same floor and are inert:
+`mTORC1_S2448_phos_by_AA` = 1.00009e-06 and
+`mTORC1_S2448_phos_by_AA_n_IKKbeta` = 1.00009e-05, against
+`mTORC1_S2448_phos_by_AA_n_Akt_pS473` = 162.471. Of the three amino-acid
+routes to mTORC1 the paper describes, one is live.
+
+**A 40-constant mechanistic ablation** (each × 0 and × 0.1, unirradiated,
+day-400 endpoint) finds exactly one bounded young rescue: cutting
+`AMPK_pT172_dephos_by_Mito_membr_pot_new` — a link of the §5.2 cycle — gives
+ROS 2.56, Mito_mass_old 0.075, SA-β-gal 1.16, Mitophagy 45.6. Every other
+young endpoint buys its youth with runaway mitophagy (109 to 6.6×10⁷), the
+divergence noted in §9. This is the same hinge the 41-parameter scan of §9
+reaches from the other direction (`AMPK_T172_phos` × 10).
+
+**Negative result worth recording.** Reaction 31's rate constant is named
+`mito_biogenesis_by_AMPK_pT172` and the paper states "mTORC1 and AMPK
+independently triggered mitochondrial biogenesis", but the deposited rate law
+passes `mTORC1_pS2448` — which is Finding E1's collinearity. Restoring the
+AMPK dependence makes the model monotonically *more* senescent (day-400
+SA-β-gal 9.02 at the fitted k34 = 5.89e-05, rising to 20.18 at k34 = 1.0):
+`Mito_mass_new` is clamped near 0.55 by CDKN1A-driven conversion, so added
+biogenesis is throughput into the old pool. The k34 → 0 fit is not only an
+optimiser flattening a redundant coordinate; the data rejects the term. Merging
+k33/k34 to their sum (Phase 1 of the rebuild plan) remains the right repair.
+
+Reproduce: `one_off_scripts/dp14_loop_ablation.py`,
+`dp14_intensive_psi_probe.py`, `dp14_reaction31_probe.py`.
+
 ---
 
 ## 6. Finding D — the evidence base contains no control

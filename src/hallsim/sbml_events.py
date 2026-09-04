@@ -9,9 +9,15 @@ compiled from the libsbml AST into a small pure-Python IR — no libsbml
 objects are retained — and evaluated with ``jax.numpy`` so it stays
 shape-polymorphic under batched runs.
 
-Supported: triggers over time and species; assignments to species.
-Assignments to plain parameters are reported and skipped (they need
-LATCHED parameter promotion — a follow-up). Delays and priorities raise.
+Supported: triggers over time and species; assignments to species and to
+parameters. A parameter target is promoted on the owning process via
+:meth:`~hallsim.imported.ImportedODEProcess.with_param_input` by
+:func:`expand_events`, so the assignment reaches the rate laws through a
+store path rather than being dropped — SBML models routinely deliver a dose
+that way. Symbols a parameter's own assignment rule defines are folded to
+constants first (:func:`fold_constant_rules`), which is how COPASI writes a
+ModelValue. A nonzero delay and any priority raise; ``<delay>0</delay>``,
+which COPASI emits on every event, is not a delay.
 """
 
 from __future__ import annotations
@@ -116,6 +122,78 @@ def _compile_ast(node, species: set) -> tuple:
     raise UnsupportedEventFeatureError(
         f"unhandled MathML node type {ty} in event expression"
     )
+
+
+def _delay_seconds(event) -> float:
+    """The event's delay as a number, or NaN when it is not a constant.
+
+    Returns 0.0 for no ``<delay>`` element and for one whose math evaluates to
+    a literal zero — the form COPASI emits unconditionally. A state- or
+    time-dependent delay is not constant and comes back NaN, which compares
+    unequal to zero and so is rejected by the caller.
+    """
+    import libsbml
+
+    delay = event.getDelay()
+    if delay is None or not delay.isSetMath():
+        return 0.0
+    math = delay.getMath()
+    if math.isNumber():
+        return float(libsbml.formulaToL3String(math))
+    return float("nan")
+
+
+def _has_time(ir: tuple) -> bool:
+    """True if the IR reads the time symbol anywhere."""
+    tag = ir[0]
+    if tag == "time":
+        return True
+    if tag in ("const", "var", "name"):
+        return False
+    kids = ir[-1] if tag in ("add", "mul", "and", "or", "func") else ir[1:]
+    return any(_has_time(k) for k in kids)
+
+
+def fold_constant_rules(model, species, consts: dict) -> dict:
+    """``consts`` extended with parameters an assignment rule defines.
+
+    COPASI exports a "ModelValue" as a non-constant parameter plus an
+    assignment rule (``DNAdamagefoci_0 = Gy * FociPerGy``), so a symbol that
+    is constant in every meaningful sense is absent from the constant table
+    and event math referencing it fails to resolve. Rules whose right-hand
+    side reduces to numbers are folded here, to a fixpoint so a rule may
+    depend on another rule. A rule that reads a species or the time symbol is
+    genuinely dynamic and is left out.
+    """
+    pending = {}
+    for i in range(model.getNumRules()):
+        rule = model.getRule(i)
+        if not (rule.isAssignment() and rule.isSetVariable()):
+            continue
+        if not rule.isSetMath() or rule.getVariable() in species:
+            continue
+        pending[rule.getVariable()] = rule.getMath()
+
+    resolved = dict(consts)
+    while pending:
+        progressed = False
+        for name, rule_math in list(pending.items()):
+            try:
+                ir = _bake_consts(_compile_ast(rule_math, species), resolved)
+            except UnsupportedEventFeatureError:
+                continue  # depends on something not resolved yet, or dynamic
+            seen: set = set()
+            _collect_species(ir, seen)
+            if seen or _has_time(ir):
+                del pending[name]  # dynamic: never a constant
+                progressed = True
+                continue
+            resolved[name] = float(_eval_ir(ir, 0.0, {}))
+            del pending[name]
+            progressed = True
+        if not progressed:
+            break
+    return resolved
 
 
 def _bake_consts(ir: tuple, consts: dict) -> tuple:
@@ -230,6 +308,14 @@ class SBMLEvent(Process):
     _trigger_ir: tuple = eqx.field(static=True, default=())
     _assign_ir: tuple = eqx.field(static=True, default=())  # ((tgt, rhs),..)
     _read_species: tuple = eqx.field(static=True, default=())
+    # Targets that are SBML parameters rather than species. They reach the
+    # rate laws through SBMLProcess.with_param_input rather than through the
+    # species vector, so expand_events wires them differently.
+    _param_targets: tuple = eqx.field(static=True, default=())
+    # (target, value) — the value the target's store path starts at. A
+    # parameter target must start at its published value, not at zero, or the
+    # model runs off a different constant until the event first fires.
+    _target_defaults: tuple = eqx.field(static=True, default=())
 
     def ports_schema(self):
         ports = {
@@ -241,10 +327,25 @@ class SBMLEvent(Process):
             )
             for s in self._read_species
         }
+        # A parameter target needs a read port too: the handler forms the
+        # assignment as a delta (rhs - current), so it must see the current
+        # value, and a parameter is not in _read_species.
+        ports.update(
+            {
+                tgt: Port(
+                    role=PortRole.INPUT,
+                    default=0.0,
+                    units="dimensionless",
+                    description=f"reads parameter {tgt}",
+                )
+                for tgt in self._param_targets
+            }
+        )
+        defaults = dict(self._target_defaults)
         for tgt, _ in self._assign_ir:
             ports[f"__set_{tgt}"] = Port(
                 role=PortRole.LATCHED,
-                default=0.0,
+                default=float(defaults.get(tgt, 0.0)),
                 units="dimensionless",
                 description=f"event assignment target {tgt}",
             )
@@ -271,8 +372,11 @@ def translate_events(
     """Read the SBML at ``xml_path`` and return one SBMLEvent per event.
 
     ``species_names`` is the model's ordered species ids; ``consts`` maps
-    parameter names to their (constant) values, baked into event math.
-    Parameter-target assignments are logged and skipped.
+    parameter names to their (constant) values, baked into event math and
+    extended by :func:`fold_constant_rules` so a rule-defined ModelValue
+    resolves. An assignment whose target is a parameter rather than a species
+    is kept and recorded in ``_param_targets``; :func:`expand_events` promotes
+    it on the owning process.
     """
     import libsbml
 
@@ -281,11 +385,14 @@ def translate_events(
     if model is None:
         return []
     species = set(species_names)
+    consts = fold_constant_rules(model, species, consts)
     out: list[SBMLEvent] = []
     for i in range(model.getNumEvents()):
         ev = model.getEvent(i)
         eid = ev.getId() or f"event{i}"
-        if ev.getDelay() is not None:
+        # COPASI writes <delay>0</delay> on every event it exports, so a
+        # delay element is not itself a delay. Only a nonzero one is.
+        if _delay_seconds(ev) != 0.0:
             raise UnsupportedEventFeatureError(
                 f"event {eid!r} on {model_name} has a delay — not supported"
             )
@@ -299,15 +406,14 @@ def translate_events(
         )
         read: set = set()
         _collect_species(trigger, read)
-        assigns = []
+        assigns, param_targets, defaults = [], [], []
         for j in range(ev.getNumEventAssignments()):
             ea = ev.getEventAssignment(j)
             var = ea.getVariable()
-            if var not in species:
+            if var not in species and var not in consts:
                 log.warning(
-                    "SBML event %r on %s assigns to non-species %r "
-                    "(parameter target) — skipped; needs LATCHED param "
-                    "promotion.",
+                    "SBML event %r on %s assigns to %r, which is neither a "
+                    "species nor a resolvable parameter — skipped.",
                     eid,
                     model_name,
                     var,
@@ -315,11 +421,17 @@ def translate_events(
                 continue
             rhs = _bake_consts(_compile_ast(ea.getMath(), species), consts)
             _collect_species(rhs, read)
-            read.add(var)  # current value needed for the assignment delta
+            if var in species:
+                read.add(var)  # current value, for the assignment delta
+            else:
+                # A parameter target reaches the rate laws through a promoted
+                # INPUT port; its store path starts at the published value.
+                param_targets.append(var)
+                defaults.append((var, float(consts[var])))
             assigns.append((var, rhs))
         if not assigns:
             log.warning(
-                "SBML event %r on %s has no species assignments — skipped.",
+                "SBML event %r on %s has no usable assignments — skipped.",
                 eid,
                 model_name,
             )
@@ -330,6 +442,8 @@ def translate_events(
                 _trigger_ir=trigger,
                 _assign_ir=tuple(assigns),
                 _read_species=tuple(sorted(read & species)),
+                _param_targets=tuple(param_targets),
+                _target_defaults=tuple(defaults),
             )
         )
         log.info(
@@ -341,18 +455,44 @@ def translate_events(
     return out
 
 
-def expand_events(proc) -> tuple[dict, dict]:
-    """``(extra_processes, topology)`` composing an SBMLProcess's events.
+PARAM_PORT_PREFIX = "__par_"
 
-    Each event's INPUT/LATCHED ports are wired to the owning model's
-    ``<name>/<species>`` store paths. Empty when the model has no events.
+
+def expand_events(proc) -> tuple[dict, dict]:
+    """``(processes, topology)`` composing an SBMLProcess with its events.
+
+    ``processes`` holds the owning process under its own name — promoted, if
+    any event assigns to a parameter, via
+    :meth:`~hallsim.sbml_import.SBMLProcess.with_param_input` — plus one
+    EVENT process per event. ``topology`` holds each event's full wiring and,
+    for the owner, *only* the promoted-parameter rows, which the caller merges
+    into its own row for that process::
+
+        procs, topo = expand_events(proc)
+        topology = {**mine, "dp14": {**mine["dp14"], **topo.get("dp14", {})}}
+
+    Both empty when the model has no events.
     """
+    events = getattr(proc, "_events", ())
+    if not events:
+        return {}, {}
+
     procs: dict = {}
     topo: dict = {}
-    for ev in getattr(proc, "_events", ()):
+    owner_wiring: dict = {}
+    for ev in events:
         procs[ev._name] = ev
         wiring = {s: f"{proc._name}/{s}" for s in ev._read_species}
+        wiring.update({t: f"{proc._name}/{t}" for t in ev._param_targets})
         for tgt, _ in ev._assign_ir:
             wiring[f"__set_{tgt}"] = f"{proc._name}/{tgt}"
         topo[ev._name] = wiring
+        for tgt in ev._param_targets:
+            port = f"{PARAM_PORT_PREFIX}{tgt}"
+            proc = proc.with_param_input(tgt, port)
+            owner_wiring[port] = f"{proc._name}/{tgt}"
+
+    procs[proc._name] = proc
+    if owner_wiring:
+        topo[proc._name] = owner_wiring
     return procs, topo

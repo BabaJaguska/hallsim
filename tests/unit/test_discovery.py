@@ -1,0 +1,170 @@
+"""Discovery source adapters — the parts that are logic, not network.
+
+The four registered sources differ in what they can do: BioModels answers a
+query server-side; ModelDB, BioSimulations and Physiome expose a listing only
+and are matched client-side against a cached index. These cover the matching,
+the kwarg routing and the record normalisation, none of which need a network.
+"""
+
+import inspect
+
+import pytest
+
+from hallsim import discovery
+from hallsim.discovery import ModelCandidate, _accepted, _score
+
+
+def test_all_sources_registered():
+    assert set(discovery.SOURCES) == {
+        "biomodels",
+        "modeldb",
+        "biosimulations",
+        "physiome",
+    }
+
+
+def test_every_source_takes_query_and_limit():
+    for name, search in discovery.SOURCES.items():
+        params = inspect.signature(search).parameters
+        assert "query" in params, name
+        assert "limit" in params, name
+
+
+def test_score_requires_every_term():
+    assert _score("dna damage", "DNA damage response") > 0
+    # one term present, the other absent -> no match, so a two-word query
+    # cannot return everything matching either word
+    assert _score("dna telomere", "DNA damage response") == 0
+    assert _score("", "anything") == 0
+
+
+def test_score_is_substring_so_stems_match():
+    assert _score("senesc", "cellular senescence") > 0
+    assert _score("senesc", "senescent fibroblast") > 0
+
+
+def test_score_ranks_by_term_count():
+    many = _score("p53", "p53 p53 p53 oscillator")
+    few = _score("p53", "p53 oscillator")
+    assert many > few
+
+
+def test_accepted_drops_kwargs_a_source_does_not_take():
+    def biomodels_like(query, limit=25, curated_only=True):
+        pass
+
+    def listing_like(query, limit=25, refresh=False):
+        pass
+
+    kwargs = {"curated_only": False}
+    assert _accepted(biomodels_like, kwargs) == {"curated_only": False}
+    # curated_only means nothing to a listing source; passing it would be a
+    # TypeError, and one source's option must not break the others
+    assert _accepted(listing_like, kwargs) == {}
+
+
+def test_accepted_passes_everything_to_a_var_keyword_source():
+    def anything(query, limit=25, **kw):
+        pass
+
+    assert _accepted(anything, {"curated_only": False}) == {
+        "curated_only": False
+    }
+
+
+def test_search_for_model_rejects_an_unknown_source():
+    with pytest.raises(KeyError):
+        discovery.search_for_model("x", sources=["nosuchrepo"])
+
+
+def test_candidate_kind_defaults_to_unknown():
+    c = ModelCandidate(
+        source="biomodels",
+        id="BIOMD1",
+        name="n",
+        format="SBML",
+        url="u",
+        curated=True,
+    )
+    assert c.kind == "unknown"
+    assert c.description == ""
+
+
+def test_fetch_names_the_manual_route_for_unsupported_sources():
+    c = ModelCandidate(
+        source="modeldb",
+        id="3343",
+        name="n",
+        format="XPP",
+        url="https://modeldb.science/3343",
+        curated=True,
+    )
+    with pytest.raises(NotImplementedError, match="modeldb.science/3343"):
+        c.fetch()
+
+
+# --- SBML event delays -----------------------------------------------------
+# Here only because it shares the "what a repository actually hands you" theme:
+# COPASI writes <delay>0</delay> on every event it exports, so the presence of
+# a delay element is not evidence of a delay.
+#
+# These drive _delay_seconds through stub objects rather than libsbml Events.
+# libsbml segfaults the interpreter when an Event is assembled through its own
+# API outside a fully-populated document, which is a fault in the library, not
+# a reason to leave the branching untested. The real-deposit path is exercised
+# by importing BIOMD0000000632, which is a network test.
+
+
+class _Math:
+    def __init__(self, number):
+        self._number = number
+
+    def isNumber(self):
+        return self._number is not None
+
+
+class _Delay:
+    def __init__(self, math):
+        self._math = math
+
+    def isSetMath(self):
+        return self._math is not None
+
+    def getMath(self):
+        return self._math
+
+
+class _Event:
+    def __init__(self, delay):
+        self._delay = delay
+
+    def getDelay(self):
+        return self._delay
+
+
+def test_absent_delay_reads_as_zero(monkeypatch):
+    from hallsim import sbml_events
+
+    assert sbml_events._delay_seconds(_Event(None)) == 0.0
+    assert sbml_events._delay_seconds(_Event(_Delay(None))) == 0.0
+
+
+def test_constant_delay_reads_its_value(monkeypatch):
+    import libsbml
+
+    from hallsim import sbml_events
+
+    monkeypatch.setattr(libsbml, "formulaToL3String", lambda m: str(m._number))
+    # the COPASI-emitted form: a delay element whose math is a literal zero
+    assert sbml_events._delay_seconds(_Event(_Delay(_Math(0.0)))) == 0.0
+    assert sbml_events._delay_seconds(_Event(_Delay(_Math(5.0)))) == 5.0
+
+
+def test_nonconstant_delay_is_nan_so_it_is_rejected():
+    import math
+
+    from hallsim import sbml_events
+
+    # a state- or time-dependent delay is not a number; NaN compares unequal
+    # to zero, so the caller rejects it rather than silently dropping it
+    assert math.isnan(sbml_events._delay_seconds(_Event(_Delay(_Math(None)))))

@@ -157,7 +157,11 @@ def classify_topology_edge(
             f"{writer_name}.{port} → {path}: owner has no rule graph; skipped.",
         )
     rule_targets = {t for t, _ in struct["rules"]}
-    if var in rule_targets:
+    # A rate rule declares d(var)/dt, so its target is an integrated state and
+    # an added derivative contribution sums into it correctly. Only an
+    # assignment rule recomputes its target and would overwrite one.
+    rate_rule_targets = struct.get("rate_rule_targets", frozenset())
+    if var in rule_targets and var not in rate_rule_targets:
         return CouplingVerdict(
             writer_name,
             path,

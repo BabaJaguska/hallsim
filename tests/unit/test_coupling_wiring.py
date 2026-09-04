@@ -90,8 +90,13 @@ class _Owner:
         return {
             "param_constant": {},
             "param_sbo": {},
-            "variables": frozenset({"p53", "kd2_0", "held"}),
-            "rules": (("kd2_0", frozenset({"kd2", "p53"})),),
+            "variables": frozenset({"p53", "kd2_0", "held", "NFkBn"}),
+            # kd2_0 is set by an assignment rule; NFkBn by a rate rule.
+            "rules": (
+                ("kd2_0", frozenset({"kd2", "p53"})),
+                ("NFkBn", frozenset({"p53"})),
+            ),
+            "rate_rule_targets": frozenset({"NFkBn"}),
             "boundary": frozenset({"held"}),
         }
 
@@ -110,6 +115,16 @@ def test_topology_write_to_rule_target_flagged():
     procs = {"owner": _Owner(), "writer": _Writer()}
     v = classify_topology_edge(procs, "writer", "out", "owner/kd2_0")
     assert v.status == "review" and "assignment rule" in v.message
+
+
+def test_topology_write_to_rate_rule_target_ok():
+    """A rate rule declares d(var)/dt, so the target is an integrated state
+    and an added derivative sums into it — not an assignment-rule overwrite.
+    Whole models are expressed this way (hand-encoded ODEs, PottersWheel
+    exports), so lumping the two rule kinds warns on every edge into them."""
+    procs = {"owner": _Owner(), "writer": _Writer()}
+    v = classify_topology_edge(procs, "writer", "out", "owner/NFkBn")
+    assert v.status == "ok"
 
 
 def test_topology_write_to_boundary_flagged():

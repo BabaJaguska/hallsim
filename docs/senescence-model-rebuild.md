@@ -290,7 +290,7 @@ These gate every measurement the later phases depend on. All are already in
 |---|---|
 | **multi-seed sweep for hysteresis** | `codim1_scan` now finds folds as well as Hopfs and reads stability on the leaf, but its continuation is plain Newton: where a fold joins two *stable* branches it steps across to the other arm and reports nothing. Phase 2's bistability claim needs both arms, so it needs a multi-seed equilibrium sweep per parameter value |
 | **P1.13** — collinearity pass over rate laws at `Process` construction | catches k33/k34-class duplicates before a fit, from structure alone |
-| **new: spontaneous-endpoint screen** | see below |
+| **new: spontaneous-endpoint screen** | see below; specified in [design-spontaneous-endpoint.md](design-spontaneous-endpoint.md) |
 
 **The new screen is the generalisable fix for this entire failure.** Extend
 `intake.triage_sbml` / `diagnostics.screen_composite` with an unperturbed
@@ -333,25 +333,67 @@ no amount of repair inside it produces a young state.
 The p16INK4a–CDK4/6–Rb–E2F axis, as a bistable switch with a proliferating
 branch and an arrested branch.
 
-- Source it, do not invent it. **Found and measured (outside notebook,
-  2026-08-29): Yao et al. 2008, BIOMD0000000318.** At serum `S = 1` it has
-  three non-negative fixed points with `unstable_dim` 0 / **1** / 0 — a real
-  saddle — and the folds bracket to `S ∈ (1.0, 1.2)` upper and `(0.1, 0.3)`
-  lower. That is the measured hysteresis window DP14 could never supply.
-- Requirement: **two stable states separated by a separatrix**, confirmed on
-  the projected leaf with the Phase-0 bifurcation tools, not asserted. *Met*
-  for the switch in isolation; **not yet met for the coupled composite.*
-- **Blocked on the SBML event translator (P3.0).** `sbml_events` skips Yao's
-  `e1`/`e2` because they assign to the parameter `S`, not to a species. The
-  model's own published serum-step experiment therefore cannot be run, so the
-  constituent has never been validated against its source — which the intake
-  protocol requires before composing. Fix the translator, reproduce Yao's
-  figure, *then* compose.
-- Note the basin asymmetry before anyone claims reversibility: from the deep
-  OFF fixed point a 5-unit `S = 20` pulse does **not** latch ON (EF 0.0087 →
-  0.0020); it takes ~20 units. The 5-unit pulse works only from BioModels'
-  curated IC. OFF→ON is much harder to reach than the curated condition
-  suggests.
+**Requirement, unchanged:** two stable states separated by a separatrix,
+confirmed on the projected leaf with the Phase-0 bifurcation tools, not
+asserted. **No candidate currently meets it.** Both models measured so far are
+recorded below with what each does and does not supply, so neither gets
+proposed again on the strength of its title.
+
+**Being added: Kollarovic et al. 2016, BIOMD0000000632** — "To senesce or not
+to senesce: how primary human fibroblasts decide their cell fate after DNA
+damage". Human fibroblasts and DNA damage, which is the benchmark's cell type
+and the benchmark's insult; 8 species, 14 reactions.
+
+- Its published IC **is** a rest state: ‖f(y₀)‖/‖y₀‖ = **1.3e-16**, against
+  DP14's 1.29e+03. Acceptance test 1 passes outright, and undosed it sits at
+  the proliferating state and stays — test 2.
+- The dose is delivered by an event assigning to the parameter `TAF`. With
+  P3.0 fixed it imports whole and the dose lands: at 0/5/20 Gy, `TAF`
+  0.506/2.684/4.861, p21 1.00/3.66/10.31, CycE-Cdk2 activity
+  2.28/0.008/0.00006.
+- **It is not a switch.** Sweeping `TAF` up from a proliferating start and back
+  down from an arrested one gives identical branches to four decimals at every
+  point, with max Re λ pinned at −0.0146 throughout: no fold, no hysteresis.
+  Steep and graded is not bistable. Whatever "decision" the paper reports comes
+  from a threshold plus cell-to-cell variability, not from two basins.
+- **So it fills the missing proliferation readout, not the switch.** It gives a
+  CDK2-activity observable with a correct-direction dose–response and a real
+  baseline — the thing §4's table marks "all of it, no proliferation readout
+  exists". The commitment mechanism is still absent.
+
+**Not being used: Yao et al. 2008, BIOMD0000000318.** Its bistability is real
+and was measured — at serum `S = 1`, three non-negative fixed points with
+`unstable_dim` 0 / **1** / 0, a genuine saddle, folds bracketing to
+`S ∈ (1.0, 1.2)` upper and `(0.1, 0.3)` lower. It is nonetheless the wrong
+switch here, for reasons that have nothing to do with the quality of the model:
+
+- **Its OFF state is quiescence, not senescence.** It is a serum switch: the
+  OFF branch is a growth-factor-deprived cell that turns back ON when serum
+  returns. Senescence is defined by *not* doing that. A model whose arrested
+  branch is reversible by construction cannot carry a commitment claim.
+- **The session-A wiring made that concrete and wrong.** `p21_switch` routed
+  DP14's `CDKN1A` into Yao's serum input `S_in`, i.e. it modelled
+  p21-induced arrest as serum withdrawal. p21 acts inside the switch on
+  CDK2/cyclin E, downstream of the growth input, not on the input itself.
+- **The cell system is unstated.** The deposit annotates taxonomy 40674
+  (Mammalia) and neither the abstract nor the SBML names a line. Unstated is
+  not the same as compatible — see
+  [design-model-admissibility.md](design-model-admissibility.md).
+- Its published IC is not a rest state either (‖f(y₀)‖/‖y₀‖ = 1.37).
+- Basin asymmetry, if it is ever revisited: from the deep OFF fixed point a
+  5-unit `S = 20` pulse does **not** latch ON (EF 0.0087 → 0.0020); it takes
+  ~20 units. The 5-unit pulse works only from BioModels' curated IC.
+
+*(P3.0, which used to block Yao's `e1`/`e2` and Kollarovic's dose event alike,
+was fixed 2026-09-04 — parameter targets are promoted onto the owning process.
+Both models now import whole. The blocker was never why Yao is unsuitable.)*
+
+**What Phase 2 still needs**, and what to search for rather than settle for: a
+sourced switch whose two branches are *proliferating* and *irreversibly
+arrested*, driven by damage or by p16 rather than by growth factor
+availability. Until one exists, the composite has an arrest readout and no
+commitment, and no result from it may be described as a fate decision.
+
 - Add a slow p16 / chromatin state coupled to Rb–E2F. This is what supplies
   history dependence.
 - `models/bistable_latch.py` exists and is phenomenological. Use it only if no
@@ -361,18 +403,21 @@ branch and an arrested branch.
   institutionalised.
 - Ship the cell-cycle observables with it: E2F activity, Rb phosphorylation,
   and a proliferation readout that maps to EdU incorporation. Without these
-  there is no way to distinguish arrest from marker accumulation. **Caveat on
-  the one wired so far:** `MKI67` is not a direct CollecTRI E2F1 target, so an
-  `MKI67 → yao08/EF` reporter is a proliferation *proxy*, not the
-  one-observable-one-canonical-gene edge that makes a gene reporter unfittable.
-  Score it separately from the anchored reporters or replace it.
-- **Open, and it decides whether the coupling is sound:** is the ON state a
-  rest state of the *coupled* composite, or only of Yao alone at basal `S`? The
-  wiring so far passes it in as an explicit initial condition. Run
-  `diagnostics.rest_timescale` on the composite before trusting any arrest
-  result. Second open item: run `ctrl` well past 14 days and confirm p21 never
-  crosses the gate — DP14's ctrl drift is still live, so an arrest that is
-  merely *late* in ctrl would look like a control at day 14.
+  there is no way to distinguish arrest from marker accumulation. Kollarovic's
+  `CycECdk2a` is the candidate for it: CDK2 activity is what EdU incorporation
+  reports on, and the earlier `MKI67 → yao08/EF` edge was a *proxy* — `MKI67`
+  is not a direct CollecTRI E2F1 target, so it never met the
+  one-observable-one-canonical-gene rule that makes a gene reporter
+  unfittable. Check whether `CycECdk2a` meets it before wiring, and score any
+  proxy separately from the anchored reporters.
+- **Open, and it decides whether the coupling is sound:** is the arrested state
+  a rest state of the *coupled* composite, or only of the constituent alone?
+  Run `diagnostics.rest_timescale` on the composite before trusting any arrest
+  result. Kollarovic starts from a genuine rest state on its own
+  (‖f(y₀)‖/‖y₀‖ = 1.3e-16), which makes this checkable rather than moot.
+  Second open item: run `ctrl` well past 14 days and confirm p21 never crosses
+  the gate — DP14's ctrl drift is still live, so an arrest that is merely
+  *late* in ctrl would look like a control at day 14.
 
 ### Phase 3 — damage that persists
 
