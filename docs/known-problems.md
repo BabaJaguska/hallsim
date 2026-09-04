@@ -1340,16 +1340,39 @@ The check that would catch a mistake does not exist, does not run, or fails open
   bit-exact against `steady_state` (max diff 0.0) on a 40-node subgraph, then
   vmapped over 300 conditions in ~8 s. Two independent reductions are missing,
   and neither costs the nonlinear general case:
-  - **Linear fast path.** For an affine RHS, Newton converges in one step and
-    the Jacobian is constant, yet it is re-derived per condition and iterated.
-    Detect (or let a Process declare) linearity and go straight to one solve.
+  - ~~**Linear fast path.** For an affine RHS, Newton converges in one step and
+    the Jacobian is constant, yet it is re-derived per condition and
+    iterated.~~ **Withdrawn 2026-09-01: the premise was wrong.**
+    `lax.while_loop` traces its body once regardless of iteration count, and
+    on an affine residual the loop exits after *one* iteration because a
+    single Newton step lands the residual at exactly 0. The general path
+    already reduces here. A `is_affine` detector built to exploit it measured
+    **3.5 s of a 7.0 s solve at n=240** — every `jax.jvp` re-traces the
+    composite RHS — so it cost more than it saved and was reverted.
   - **Sparse Jacobian.** `jacfwd` materialises a dense Jacobian — *n* forward
     passes then a dense factorisation — for a topology whose coupling graph is
     sparse and already known from the topology dict. Sparsity is derivable from
     wiring, not something the user should have to supply.
+  - **The cost is in `conservation_laws`, not the Newton solve.** Measured
+    2026-09-01, ring of *n* degrading nodes, CPU: `conservation_laws` is
+    **12.0 s at n=240** against 7.0 s for everything else in `steady_state`
+    put together, and 87% of that is `infer_conservation_laws` — eight sampled
+    dense Jacobians plus an SVD of the *n*×8*n* stack. At 910 nodes that is
+    ~7,280 forward passes per composite, ×300 clamp conditions. The
+    hand-rolled `jnp.linalg.solve` won partly by skipping this entirely.
+    *Fixed 2026-09-01 for the law-free case:* a law is kept only when
+    `|L·J| ≤ rtol·|J|`, and a unit candidate has `|L·J|_max ≥ σ_min/√n`, so a
+    large enough `σ_min` fails every candidate at once — checked on the
+    Jacobian the verification already needs, making the guard free. A ring of
+    degrading nodes (no moieties, full-rank Jacobian) goes **5.59 s → 0.84 s
+    at n=120, 6.7×**; a moiety chain is unchanged (2.97 s → 2.99 s) and still
+    finds all 60 laws, since the test is one-directional — a small `σ_min` may
+    be a slow mode, which is exactly what the sampling exists to tell apart.
+    Composites that *do* have laws still pay nine Jacobians; the exact route
+    (declared stoichiometry, one Jacobian) is P1.9.
   *Rule this is an instance of: generality must never be overhead; it must
-  reduce for the trivial case.* Until both land, the framework loses any
-  large-but-easy problem to fifteen lines of `jnp.linalg.solve`.
+  reduce for the trivial case.* Until the sparse Jacobian lands, the framework
+  still loses a large-but-easy problem to fifteen lines of `jnp.linalg.solve`.
 - [ ] **P3.11 — Port semantics cannot be declared per Process, only per port,
   so generated composites switch validation off.** ✓ Same project: 910
   programmatically generated ports, each semantically identical (a protein

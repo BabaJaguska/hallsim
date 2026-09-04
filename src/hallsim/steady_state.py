@@ -339,8 +339,17 @@ def conservation_laws(composite, y, mask=None, rcond: float = 1e-9):
 
     declared = composite_stoichiometry(composite, keys)
     if declared is None:
-        laws = infer_conservation_laws(composite, y, mask, rcond)
+        # Sampling's output is verified against this same Jacobian, so when it
+        # admits nothing the eight samples cannot either.
         jac = np.asarray(jax.jacfwd(_residual_fn(composite, mask))(y))
+        if _no_law_can_hold(jac, len(keys)):
+            log.debug(
+                "conservation_laws: Jacobian admits no conserved "
+                "combination; skipped sampling."
+            )
+            return _orthonormal_rows([], len(keys))
+
+        laws = infer_conservation_laws(composite, y, mask, rcond)
         kept = _verified(list(laws), jac, keys)
         log.debug(
             "conservation_laws: no declared stoichiometry; inferred %d law(s) "
@@ -432,7 +441,27 @@ def leaf_basis(laws) -> np.ndarray:
     return np.linalg.svd(laws)[2][len(laws) :].T
 
 
-def _verified(laws, jac, keys, rtol: float = 1e-8):
+#: Shared by :func:`_verified` and :func:`_no_law_can_hold`, so the guard and
+#: the check it skips cannot disagree about what counts as conserved.
+_VERIFY_RTOL = 1e-8
+
+
+def _no_law_can_hold(jac, n_state: int, rtol: float = _VERIFY_RTOL) -> bool:
+    """Whether ``jac`` rules out every conserved combination at once.
+
+    :func:`_verified` keeps a law only if ``|L·J| ≤ rtol·|J|``, and a unit
+    candidate has ``|L·J|_max ≥ σ_min/√n``, so a large enough ``σ_min`` fails
+    all of them. One-directional: a small ``σ_min`` may be a slow mode, which
+    is what :func:`infer_conservation_laws` samples parameters to tell apart.
+    """
+    if not jac.size:
+        return False
+    sigma_min = float(np.linalg.svd(jac, compute_uv=False)[-1])
+    scale = float(np.abs(jac).max()) or 1.0
+    return sigma_min > rtol * scale * np.sqrt(n_state)
+
+
+def _verified(laws, jac, keys, rtol: float = _VERIFY_RTOL):
     """Drop candidate laws the composite's own Jacobian contradicts.
 
     ``L`` is conserved only if ``L·J = 0``. A declared ``N`` can disagree with

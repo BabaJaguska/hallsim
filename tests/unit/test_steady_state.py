@@ -272,3 +272,71 @@ def test_undeclared_process_falls_back():
         semantic_validation=False,
     )
     assert composite_stoichiometry(comp) is None
+
+
+class Degrading(Process):
+    """dx/dt = b − k·x + w·up. Nothing is conserved."""
+
+    k: float = 0.4
+    w: float = 0.15
+    b: float = 1.0
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.EVOLVED, default=0.5),
+            "up": Port(role=PortRole.INPUT, default=0.5),
+        }
+
+    def derivative(self, t, state):
+        return {"x": self.b - self.k * state["x"] + self.w * state["up"]}
+
+
+def _ring(cls, n):
+    paths = [f"net/x{i}" for i in range(n)]
+    return Composite(
+        processes={f"p{i}": cls() for i in range(n)},
+        topology={
+            f"p{i}": {"x": paths[i], "up": paths[(i - 1) % n]}
+            for i in range(n)
+        },
+        semantic_validation=False,
+    )
+
+
+def _sampling_calls(monkeypatch):
+    """Count infer_conservation_laws calls without changing what it returns."""
+    import hallsim.steady_state as ss
+
+    calls = []
+    real = ss.infer_conservation_laws
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(ss, "infer_conservation_laws", spy)
+    return calls
+
+
+def test_law_free_composite_skips_parameter_sampling(monkeypatch):
+    """A Jacobian that admits no conserved combination rules them all out, so
+    the eight sampled Jacobians would be spent returning nothing."""
+    calls = _sampling_calls(monkeypatch)
+    comp = _ring(Degrading, 6)
+    laws = conservation_laws(comp, comp.initial_state_vec())
+    assert laws.shape[0] == 0
+    assert not calls, "sampled despite the Jacobian ruling every law out"
+
+
+def test_moiety_composite_still_samples_and_finds_its_law(monkeypatch):
+    """The guard is one-directional: a rank-deficient Jacobian still pays for
+    the search, because a slow mode looks the same at a single point."""
+    calls = _sampling_calls(monkeypatch)
+    comp = Composite(
+        processes={"r": Reversible()},
+        topology={"r": {"A": "c/A", "B": "c/B"}},
+        semantic_validation=False,
+    )
+    laws = conservation_laws(comp, comp.initial_state_vec())
+    assert laws.shape[0] == 1
+    assert calls, "guard rejected a composite that has a conservation law"
