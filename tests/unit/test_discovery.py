@@ -315,3 +315,57 @@ def test_a_time_threshold_crossing_is_not_flagged():
 
     ev = _Ev("release", ("geq", ("time",), ("const", 2000.0)))
     assert trigger_pathologies([ev]) == []
+
+
+# --- gene search: symbol and accession reach different models --------------
+
+
+def test_search_by_gene_unions_symbol_and_accession_hits(monkeypatch):
+    """BioModels indexes MIRIAM annotations as well as free text, so a model
+    whose species are annotated but whose title never writes the symbol is
+    invisible to a symbol search. Measured: TP53 returns 4 hits by symbol and
+    32 by P04637, and the miss runs both ways."""
+    from hallsim import discovery
+
+    def fake_accessions(symbol, taxon=9606, timeout=30.0):
+        return ("P04637",)
+
+    calls = []
+
+    def fake_search(term, limit=25, **kw):
+        calls.append(term)
+        by_term = {
+            "TP53": ["BIOMD1", "BIOMD2"],
+            "P04637": ["BIOMD2", "BIOMD3"],
+        }
+        return [
+            ModelCandidate(
+                source="biomodels",
+                id=i,
+                name=i,
+                format="SBML",
+                url="",
+                curated=True,
+            )
+            for i in by_term.get(term, [])
+        ]
+
+    monkeypatch.setattr(discovery, "uniprot_accessions", fake_accessions)
+    monkeypatch.setattr(discovery, "search_biomodels", fake_search)
+
+    got = discovery.search_by_gene("TP53")
+    assert calls == ["TP53", "P04637"]
+    # union, de-duplicated on the shared hit
+    assert sorted(c.id for c in got) == ["BIOMD1", "BIOMD2", "BIOMD3"]
+
+
+def test_uniprot_accessions_prefers_the_local_table(monkeypatch):
+    """The repo ships a small symbol table for its reporters; it is offline
+    and instant, so it answers before any network call."""
+    from hallsim import discovery
+
+    def boom(*a, **k):
+        raise AssertionError("should not hit the network")
+
+    monkeypatch.setattr(discovery.urllib.request, "urlopen", boom)
+    assert discovery.uniprot_accessions("TP53") == ("P04637",)

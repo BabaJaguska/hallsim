@@ -108,6 +108,7 @@ here so the plan does not rebuild it:
 | SASP / NF-κB / p38 / IL-6 / IL-8 / TGF-β | yes — the authors flag the abstraction themselves | **nothing** (Ihekwaba removed 2026-08-31; it emitted no SASP effector) | the whole axis: IL-6, IL-8, CCL2, CXCL1, p38, autocrine feedback, cGAS–STING |
 | Mitophagy as a flux, not a state | yes | nothing | flux formulation, lysosomal clearance, PINK1/Parkin |
 | Cell-cycle output (E2F, EdU, clonogenic recovery) | yes — no proliferation readout exists | nothing | **all of it.** Markers alone cannot establish arrest |
+| Apoptosis as an alternative fate | not raised by the review, but senescence is partly defined against it | Kallenberger 2014 (BIOMD0000000524), accepted 2026-09-04 | the **fate decision**. The deposit is execution kinetics; the paper's survive/die rule is a tBID threshold fitted to death times and is not in it |
 | Population heterogeneity | yes — one deterministic average cell | nothing | queued in [roadmap.md](roadmap.md) |
 
 The two entries marked **all of it** are the same gap seen twice: the model has
@@ -461,6 +462,36 @@ without changing a parameter. Route `D_p` to ATM → p53 (GZ06 already supplies
 the pulses) → p21, and to the Phase-2 switch. Two damage pools also let the
 model distinguish transient arrest from committed arrest, which one linear pool
 cannot.
+
+### Phase 3b — apoptosis, and what the accepted constituent does not supply
+
+**Kallenberger et al. 2014 (BIOMD0000000524)** joined the composite on
+2026-09-04 as its third published process, after seven candidates were
+rejected. It contributes apoptosis, a cell fate the composite could not
+previously express and which senescence is partly defined against — a
+senolytic that kills an established senescent cell is a different outcome from
+one that reverses it, and Phase 4 already requires arrest, mitochondrial
+dysfunction and secretion to stay separable.
+
+What it supplies, measured: a control arm that is exactly at rest without the
+ligand (‖f(y₀)‖ = 0, per-state drift 0 on all 16 states), reproduction against
+an independent transcription to 2.054e-06, six measured initial concentrations
+and eleven fitted rates with none invented.
+
+**What it does not supply, and must not be described as supplying:** the fate
+decision. The deposit is execution kinetics — no event, no threshold, no
+bistability, every species monotone. The paper's survive/die rule is a tBID
+threshold fitted to observed death times and was not deposited. If the
+composite needs the decision, that threshold is a one-line EVENT process which
+is *ours*, and must be declared as fitted rather than imported.
+
+Two caveats to carry in anything written from it. It is HeLa, so the parameters
+come from a transformed line — acceptable for a capability demonstration under
+the `preferred`/`required` split in
+[design-admissibility](design-model-admissibility.md), not acceptable as
+senescence biology. And its natural upstream edge, p53 → CD95 receptor
+(Owen-Schaub 1995, 3–4x surface Fas by flow cytometry), is the one arm that
+does not run in HeLa itself, which is HPV18 E6-positive.
 
 ### Phase 4 — SASP
 

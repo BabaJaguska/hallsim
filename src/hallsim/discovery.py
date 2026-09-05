@@ -390,6 +390,72 @@ def _ranked(scored: list[tuple[int, ModelCandidate]], limit: int):
     return [c for _, c in scored[:limit]]
 
 
+UNIPROT_SEARCH = "https://rest.uniprot.org/uniprotkb/search"
+
+
+def uniprot_accessions(
+    symbol: str, taxon: int = 9606, timeout: float = 30.0
+) -> tuple[str, ...]:
+    """Reviewed UniProt accessions for a gene symbol.
+
+    Tries the repo's own symbol table first — it is offline and instant, but
+    covers only the reporter genes — then UniProt's REST API.
+    """
+    try:
+        from hallsim.reporter_wiring import _uniprot_symbol
+
+        local = tuple(
+            acc
+            for acc, (sym, tax) in _uniprot_symbol().items()
+            if sym.upper() == symbol.upper() and str(tax) == str(taxon)
+        )
+        if local:
+            return local
+    except Exception:
+        pass
+    params = {
+        "query": (
+            f"gene_exact:{symbol} AND organism_id:{taxon} AND reviewed:true"
+        ),
+        "fields": "accession",
+        "format": "tsv",
+        "size": "10",
+    }
+    request = urllib.request.Request(
+        f"{UNIPROT_SEARCH}?{urllib.parse.urlencode(params)}",
+        headers={"User-Agent": USER_AGENT},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            rows = response.read().decode("utf-8").splitlines()
+    except Exception as exc:
+        log.warning("uniprot lookup failed for %r: %s", symbol, exc)
+        return ()
+    return tuple(r.strip() for r in rows[1:] if r.strip())
+
+
+def search_by_gene(
+    symbol: str, limit: int = 25, taxon: int = 9606, **kwargs
+) -> list[ModelCandidate]:
+    """BioModels hits for a gene, by symbol **and** by UniProt accession.
+
+    BioModels indexes MIRIAM annotations as well as free text, and the two
+    reach different models: a model whose species are annotated but whose
+    title and notes never write the symbol is invisible to a symbol search.
+    Measured over five genes, accession search found ~60 models a symbol
+    search missed — for `TP53`, 4 hits by symbol against 32 by `P04637` —
+    and the miss runs both ways, so this returns the union.
+    """
+    seen: dict[str, ModelCandidate] = {}
+    for term in (symbol, *uniprot_accessions(symbol, taxon=taxon)):
+        for c in search_biomodels(term, limit=limit, **kwargs):
+            seen.setdefault(c.id, c)
+    log.info(
+        "gene '%s': %d candidates via symbol + accession", symbol, len(seen)
+    )
+    return list(seen.values())[:limit]
+
+
 MODELDB_API = "https://modeldb.science/api/v1/models"
 
 

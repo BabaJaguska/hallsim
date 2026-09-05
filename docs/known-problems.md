@@ -412,6 +412,60 @@ The framework returns a plausible number and nothing indicates it is wrong.
   reproducible; it does not make it right. A model in that position is
   rejected at intake by P0.38.
 
+- [ ] **P0.42 — The inert-sink heuristic freezes a model's only output.**
+  Filed 2026-09-04. `_frozen_sink_indices` (`sbml_import.py:1218`) freezes
+  species that reactions write and nothing reads, so they cannot accumulate and
+  wreck the state scaling. The heuristic is self-defeating for exactly the case
+  the framework exists to serve: a **source process whose output is a terminal
+  product** has, by construction, a downstream-facing species that nothing
+  *inside that model* reads.
+
+  Measured on Kallenberger 2014 (BIOMD0000000524): **six** states are frozen
+  to zero — `tBid`, `mCherry`, `mGFP`, `PrNES`, `PrER`, `p18inactive` — of
+  which `tBid` is the apoptosis-commitment readout and the only thing a
+  downstream process would sensibly consume, and four of the others are the
+  paper's measured fluorescent reporters. `Bid` falls 224 → 37.02 over 240 min
+  while `tBid` stays at exactly 0.0. The mass is recoverable by balance and
+  the freeze does warn, but a user composing this to read `tBid` gets a flat
+  zero and a log line.
+
+  **There is no opt-out**: `_frozen_indices` is a static field, so `eqx.tree_at`
+  cannot reach it and a caller cannot un-freeze a species it means to export.
+
+  *Fix:* the freeze needs an opt-out — a species named as a composition output
+  must not be frozen — and the warning should say which species are being
+  frozen *and* that this makes them unusable as coupling sources. Better: infer
+  from the topology, since a frozen sink wired to another process's INPUT port
+  is unambiguous evidence the heuristic is wrong for that model.
+
+- [ ] **P0.43 — A driver and its consumer in different `auto_groups` buckets
+  makes the consumer read a static default forever, while the driver's saved
+  trajectory still shows the correct signal.** Filed 2026-09-04, and it is the
+  most dangerous defect found this session because every diagnostic looks
+  right.
+
+  Measured on Kallenberger 2014 (BIOMD0000000524). Driving `CD95L` through
+  `with_param_input` works exactly: a step at t=60 reproduces the time-shifted
+  reference to 2.37e-06 with zero pre-step activity. Wiring the same step the
+  obvious way instead — a `StepSource(timescale=None)` — puts source and
+  consumer in different timescale buckets. The consumer then reads the
+  ASSIGNED port's **static default** for the whole run: `p43(240) = 0` against
+  a correct 27.172. **And the saved `stim/CD95L` trajectory still shows the
+  step**, so plotting the input, checking the source fired, and inspecting the
+  store all confirm a stimulus the model never received.
+
+  The referee caught it only by holding an independent reference trajectory.
+  Nothing about it is specific to this model: any composite whose forcing
+  source lands in a different group from its target has it.
+
+  *Fix:* a source wired to a consumer in another group is either an error or
+  must force them into one group. At minimum `auto_groups` must report when a
+  wiring edge crosses a bucket boundary — silently substituting a port default
+  for a live signal is the exact shape of failure the validation layer exists
+  to prevent. Related: `drive_step` raises `KeyError` on `CD95L` because it is
+  an SBML *parameter* rather than a `w` input, so the working path
+  (`with_param_input`) is not the one the helper leads you to.
+
 - [ ] **P0.38 — Two classes of unrunnable event model are detectable from the
   trigger syntax alone, and triage imports them anyway.** Filed 2026-09-04 from
   the Stucki 2005 referee pass. Both are syntactic matches on
@@ -445,6 +499,22 @@ The framework returns a plausible number and nothing indicates it is wrong.
   already performs the single solve this needs. A state that never leaves zero
   over the screening horizon, and the parameters reachable only through it,
   should be named in `ScreenReport`.
+
+- [ ] **P0.44 — `native_time_seconds` cannot be set at import, so correcting a
+  guessed clock needs `eqx.tree_at` on a private field.** Filed 2026-09-04.
+  `process_from_sbml` takes `timescale` and `parameters` but has no argument
+  for the model's native clock, so when a file declares no time unit — which
+  is most of them — the only way to supply the right value is to reach into
+  the process afterwards. Kallenberger 2014 declares zero `unitDefinition`
+  elements; its rate laws are in minutes, so `reconciled_to(86400)` returns
+  `time_scale = 86400` where the correct value is **1440**.
+
+  CLAUDE.md records that a wrong clock has cost this project three times.
+  A failure with that history should be correctable at the front door.
+
+  *Fix:* `process_from_sbml(..., native_time_seconds=60.0)`, which also gives
+  the natural place to record that the value was supplied rather than
+  declared — the distinction P0.40 asks for.
 
 - [ ] **P0.40 — `native_time_seconds = 1.0` launders a tool default into a
   fact.** COPASI writes `s` as its untouched default time unit; the importer
@@ -1161,6 +1231,15 @@ The framework returns a plausible number and nothing indicates it is wrong.
   is the single most informative signal the repo can produce about itself.
   The cost is **~1.2 s of fixed overhead per macro step, independent of span**,
   so it scales with the number of sync points rather than with the work done.
+
+  **Narrowed 2026-09-04 — it is the event machinery, not macro stepping.**
+  Second data point on Kallenberger 2014, 16 species and *no events*: a
+  single-group composite takes the fast path and ignores `macro_dt` entirely
+  (endpoint difference identically 0 from `macro_dt` 240 down to 1), and
+  forcing two groups gives a warm wall of **4–7 ms total** for 1 to 60 macro
+  steps — **0.1–4.5 ms per macro step against 1.2 s**. Macro stepping is not
+  intrinsically expensive. The 2395x is specific to the event path, which is
+  where the fix should look.
   An event composite is exactly the case that forces many macro steps, so the
   overhead lands hardest on the feature that motivated the multi-rate design.
   Note this is dispatch and orchestration cost, not solver cost — the same RHS
