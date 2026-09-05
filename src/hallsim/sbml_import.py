@@ -343,17 +343,53 @@ class SBMLProcess(ImportedODEProcess):
         )
         return new
 
+    def with_unfrozen(self, *species: str):
+        """Copy that integrates ``species`` normally instead of holding them
+        at their initial value.
+
+        Import freezes species nothing reads back, which catches unbounded
+        degradation counters and a model's terminal products alike::
+
+            k14 = process_from_sbml(524).with_unfrozen("tBid")
+
+        A Composite lifts the freeze on its own for any frozen species another
+        process reads; this is for the rest — plotting, reporters, scoring.
+        """
+        unknown = [s for s in species if s not in self._species_names]
+        if unknown:
+            raise KeyError(
+                f"{unknown} are not species on {self._name!r}; "
+                f"available: {sorted(self._species_names)}"
+            )
+        drop = {self._species_names.index(s) for s in species}
+        import copy
+
+        new = copy.copy(self)
+        object.__setattr__(
+            new,
+            "_frozen_indices",
+            tuple(i for i in self._frozen_indices if i not in drop),
+        )
+        return new
+
     def native_input_exposure(self, input_name, t_start, t_end, *, n=8000):
-        """``∫ native-drive dt`` for boundary input ``input_name`` over
+        """``∫ native-drive dt`` for driveable quantity ``input_name`` over
         composite time ``[t_start, t_end]`` — the exposure the model's driven
         rates were calibrated to. A forcing source delivering a very different
         integrated exposure runs the model off that calibration;
         :func:`hallsim.models.forcing.drive_pulse` compares against this and
-        warns. Returns 0.0 if the input has no time-dependent assignment
-        rule."""
+        warns. A constant's native drive is its published value held flat;
+        a boundary input's is its assignment rule integrated. Returns 0.0 if
+        the input has no time-dependent assignment rule."""
+        if t_end <= t_start:
+            return 0.0
+        if input_name not in self._w_names:
+            return float(self.parameters[input_name]) * (
+                float(t_end) - float(t_start)
+            )
         host = getattr(self._model, "modelstepfunc", self._model)
         af = getattr(host, "assignmentfunc", None)
-        if af is None or t_end <= t_start:
+        if af is None:
             return 0.0
         widx = dict(zip(self._w_names, self._w_indexes))[input_name]
         y0 = getattr(self._model, "y0", None)
@@ -1223,8 +1259,13 @@ def _frozen_sink_indices(xml_path, species_names, name) -> tuple[int, ...]:
     if frozen:
         log.warning(
             "%s: inert sink species %s are written but read by nothing; "
-            "freezing them (treated as boundary). Consider marking "
-            "boundaryCondition=true in the source SBML.",
+            "freezing them (treated as boundary) so they cannot accumulate "
+            "unboundedly. They now hold their initial value and are UNUSABLE "
+            "as coupling sources or reporter observables. A terminal product "
+            "this model exports is indistinguishable from a degradation "
+            "counter by this test — lift the freeze with "
+            "proc.with_unfrozen(...), or mark boundaryCondition=true in the "
+            "source SBML.",
             name,
             [species_names[i] for i in frozen],
         )
@@ -1251,21 +1292,39 @@ def _apply_parameter_overrides(
         params_dict[n] = float(v)
 
 
-def _native_clock(xml_path, name):
-    """``(seconds_per_native_unit, declared)``, warning loudly when undeclared —
-    an assumed clock is silently 60x/3600x/86400x wrong once reconciled."""
+def _native_clock(xml_path, name, supplied=None):
+    """``(seconds_per_native_unit, source)`` where source is ``"declared"``,
+    ``"supplied"`` or ``"assumed"``. Warns loudly when assumed — an assumed
+    clock is silently 60x/3600x/86400x wrong once reconciled."""
     seconds, declared = _extract_native_time_seconds(xml_path)
+    if supplied is not None:
+        supplied = float(supplied)
+        if supplied <= 0:
+            raise ValueError(
+                f"native_time_seconds must be positive, got {supplied}"
+            )
+        if declared and supplied != seconds:
+            log.warning(
+                "%s: SBML declares native_time_seconds=%g but the caller "
+                "supplied %g; using the supplied value and overriding the "
+                "source's own assertion.",
+                name,
+                seconds,
+                supplied,
+            )
+        return supplied, "supplied"
     if not declared:
         log.warning(
             "%s: SBML declares no time unit; assuming native_time_seconds=1.0 "
             "(seconds). If this model's rate laws are in minutes/hours/days its "
             "clock is now a GUESS — reconciling it onto a shared canonical axis "
             "will be silently 60x/3600x/86400x wrong. Set the source SBML's "
-            "timeUnits, or pass the true seconds-per-unit if you know it. "
-            "Check `proc.native_time_declared` before composing.",
+            "timeUnits, or pass process_from_sbml(native_time_seconds=...) if "
+            "you know the true value. Check `proc.native_time_source` before "
+            "composing.",
             name,
         )
-    return seconds, declared
+    return seconds, "declared" if declared else "assumed"
 
 
 def process_from_sbml(
@@ -1273,6 +1332,7 @@ def process_from_sbml(
     name: str | None = None,
     timescale: float | None = None,
     parameters: dict[str, float] | None = None,
+    native_time_seconds: float | None = None,
 ) -> SBMLProcess:
     """Load an SBML model and wrap it as a Process.
 
@@ -1290,6 +1350,13 @@ def process_from_sbml(
         ``{c_name: value}`` overriding SBML defaults at construction. Every
         constant is auto-populated at its published default first, so this
         only replaces the listed keys.
+    native_time_seconds:
+        Real seconds per unit of the model's own time axis, for the common case
+        of a file that declares no ``timeUnits`` and whose rate laws are not in
+        seconds — Kallenberger 2014 is in minutes, so ``60.0``. Without it the
+        importer assumes seconds and ``reconciled_to`` is silently 60×/3600×/
+        86400× wrong. Recorded as ``native_time_source == "supplied"``, kept
+        distinct from a clock the source actually asserts.
 
     Returns an :class:`SBMLProcess` with ports auto-generated from the species.
     Raises ``ImportError`` without sbmltoodejax, ``KeyError`` on an unknown
@@ -1320,7 +1387,9 @@ def process_from_sbml(
     stoichiometry = _extract_stoichiometry(xml_path)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
 
-    native_time_seconds, native_time_declared = _native_clock(xml_path, name)
+    native_time_seconds, native_time_source = _native_clock(
+        xml_path, name, native_time_seconds
+    )
 
     c_indexes, w_indexes_map = _index_maps(model)
     (
@@ -1355,7 +1424,7 @@ def process_from_sbml(
         _coupling_meta=coupling_meta,
         _stoichiometry=stoichiometry,
         native_time_seconds=native_time_seconds,
-        native_time_declared=native_time_declared,
+        native_time_source=native_time_source,
         time_scale=1.0,
         _model=model,
         _w0=w0,

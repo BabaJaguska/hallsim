@@ -41,6 +41,9 @@ from hallsim.units import canonical_units, conversion_factor
 
 log = logging.getLogger(__name__)
 
+# Groupings already warned about as cycle-cut (see `_warn_cyclic_groups`).
+_CYCLIC_WARNED: set = set()
+
 _DIGIT_RUN = re.compile(r"(\d+)")
 
 
@@ -380,6 +383,61 @@ def _compose_events(processes: dict, topology: dict) -> tuple[dict, dict]:
     return out_procs, out_topo
 
 
+def _unfreeze_coupled_sinks(processes: dict, topology: dict) -> dict:
+    """Restore integration of any frozen inert sink another process reads.
+
+    Import freezes species a model writes and never reads back, so an unbounded
+    "total degraded" counter cannot wreck the state scaling. A model's terminal
+    product is indistinguishable from one by that test, so the heuristic zeroes
+    exactly the species a source model exists to export (P0.42). Wiring one to
+    another process's port is unambiguous evidence it is an output, so the
+    freeze is lifted here rather than at every call site.
+    """
+    owners = {
+        name: proc
+        for name, proc in processes.items()
+        if getattr(proc, "_frozen_indices", ())
+        and hasattr(proc, "with_unfrozen")
+    }
+    if not owners:
+        return processes
+
+    def paths_of(name, proc, port):
+        entry = topology.get(name, {}).get(port)
+        if entry is not None:
+            return as_paths(entry)
+        return as_paths(_auto_paths(name, port, proc.ports_schema()[port]))
+
+    read_by = {}
+    for name, proc in processes.items():
+        schema = proc.ports_schema()
+        row = {p: paths_of(name, proc, p) for p in schema}
+        reads, _ = read_write_paths(schema, row)
+        for path in reads:
+            read_by.setdefault(path, set()).add(name)
+
+    out = dict(processes)
+    for name, proc in owners.items():
+        exported = [
+            proc._species_names[i]
+            for i in proc._frozen_indices
+            if read_by.get(
+                paths_of(name, proc, proc._species_names[i])[0], set()
+            )
+            - {name}
+        ]
+        if exported:
+            log.warning(
+                "%s: %s were frozen as inert sinks but are read by another "
+                "process; un-freezing them so the coupling carries a value "
+                "instead of a constant.",
+                name,
+                exported,
+            )
+            out[name] = proc.with_unfrozen(*exported)
+    return out
+
+
 class Composite(eqx.Module):
     """A wired bundle of Processes sharing a flat state store.
 
@@ -419,6 +477,7 @@ class Composite(eqx.Module):
         flat_processes, flat_topology = _compose_events(
             flat_processes, flat_topology
         )
+        flat_processes = _unfreeze_coupled_sinks(flat_processes, flat_topology)
         if rewire:
             flat_topology = {
                 proc_name: {
@@ -869,20 +928,14 @@ class Composite(eqx.Module):
         if without_ts:
             groups["default"] = without_ts
 
-        return self._order_by_coupling(groups)
+        ordered = self._order_by_coupling(groups)
+        self._warn_cyclic_groups(ordered)
+        return ordered
 
-    def _order_by_coupling(
+    def _group_drivers(
         self, groups: dict[str, list[str]]
-    ) -> dict[str, list[str]]:
-        """Reorder groups so a group runs after the groups that drive it.
-
-        Timescale decides which processes share a solver; the cross-group
-        edges decide execution order. A driven group placed first reads its
-        driver's previous-step value, and interpolated coupling cannot apply
-        to an edge whose source has not run yet. Cycles keep timescale order.
-        """
-        if len(groups) < 2:
-            return groups
+    ) -> dict[str, set[str]]:
+        """``{group: {groups that write something it reads}}``."""
         names = list(groups)
         known = set(self.store_keys())
         writes, reads = {}, {}
@@ -902,8 +955,7 @@ class Composite(eqx.Module):
                 r |= p_reads
                 w |= p_writes
             writes[gname], reads[gname] = w, r
-
-        drivers = {
+        return {
             g: {
                 other
                 for other in names
@@ -911,6 +963,63 @@ class Composite(eqx.Module):
             }
             for g in names
         }
+
+    def cyclic_group_sets(
+        self, groups: dict[str, list[str]] | None = None
+    ) -> list[list[str]]:
+        """Group sets a coupling cycle runs through — the splits where Lie or
+        Strang cuts a feedback loop, so one direction always reads a
+        macro-step-stale value and accuracy is governed by ``macro_dt``
+        rather than by the integrator (P0.47).
+        """
+        groups = self.auto_groups() if groups is None else groups
+        if len(groups) < 2:
+            return []
+        import networkx as nx
+
+        g = nx.DiGraph()
+        g.add_nodes_from(groups)
+        for name, srcs in self._group_drivers(groups).items():
+            for src in srcs:
+                g.add_edge(src, name)
+        order = list(groups)
+        return [
+            sorted(scc, key=order.index)
+            for scc in nx.strongly_connected_components(g)
+            if len(scc) > 1
+        ]
+
+    def _warn_cyclic_groups(self, groups: dict[str, list[str]]) -> None:
+        # Called per solve, per arm, per fit step; the condition is a
+        # property of the wiring, so say it once per grouping.
+        for members in self.cyclic_group_sets(groups):
+            key = (self.structural_fingerprint(), tuple(members))
+            if key in _CYCLIC_WARNED:
+                continue
+            _CYCLIC_WARNED.add(key)
+            log.warning(
+                "auto_groups: a coupling cycle runs through groups %s, so "
+                "splitting cuts the feedback loop: one direction always reads "
+                "a stale value and the error is set by macro_dt, not by the "
+                "integrator. Size macro_dt accordingly, or pass groups={...} "
+                "to keep the cycle in one group. See P0.47.",
+                members,
+            )
+
+    def _order_by_coupling(
+        self, groups: dict[str, list[str]]
+    ) -> dict[str, list[str]]:
+        """Reorder groups so a group runs after the groups that drive it.
+
+        Timescale decides which processes share a solver; the cross-group
+        edges decide execution order. A driven group placed first reads its
+        driver's previous-step value, and interpolated coupling cannot apply
+        to an edge whose source has not run yet. Cycles keep timescale order.
+        """
+        if len(groups) < 2:
+            return groups
+        names = list(groups)
+        drivers = self._group_drivers(groups)
         ordered, placed = [], set()
         while len(ordered) < len(names):
             ready = [

@@ -58,16 +58,20 @@ timescales).
 
 All three sessions' suggestions, deduplicated and ranked:
 
+**Status column re-checked 2026-09-05.** Three rows read "Done" or as a
+clean win and are contradicted by filed defects — shipped is not the same
+as working, and this table was the thing asserting otherwise.
+
 | # | What | Sessions that recommend it | Effort | Impact |
 |---|------|--------------------------|--------|--------|
-| 1 | Strang splitting (symmetric half-kick) | Gyrokinetics, Variational, FSI, design doc | Low | O(dt) → O(dt²) |
-| 2 | Interpolated coupling (dense output) | Mycorrhizal, all STEM, all multiphysics | Low | **Done** |
-| 3 | Adaptive macro_dt (PLL-inspired) | PLL, Kalman, Filterbank, Gyrokinetics | Low | **Done** |
-| 4 | Waveform relaxation (Gauss-Seidel at sync) | PLL, FSI, Variational, LES | Medium | Fixes coupling loss |
+| 1 | Strang splitting (symmetric half-kick) | Gyrokinetics, Variational, FSI, design doc | Low | Shipped, **does not attain O(dt²)** — P0.2 |
+| 2 | Interpolated coupling (dense output) | Mycorrhizal, all STEM, all multiphysics | Low | Shipped, **reaches only group gi-1** — P0.23 |
+| 3 | Adaptive macro_dt (PLL-inspired) | PLL, Kalman, Filterbank, Gyrokinetics | Low | Shipped, **6-20x worse on a cyclic split** — P0.49 |
+| 4 | Waveform relaxation (Gauss-Seidel at sync) | PLL, FSI, Variational, LES | Medium | **The remaining fix** — measured trigger in P0.47 |
 | 5 | Memory kernel for fast→slow coupling | Mori-Zwanzig | Med-High | Novel — captures history |
 | 6 | Anderson acceleration for waveform relax | Filterbank, Variational, FSI | Low (once #4 exists) | Superlinear convergence |
 | 7 | Residual spectral monitoring | LES, Filterbank | Low | Diagnostic / early warning |
-| 8 | IFT adjoint at sync boundaries | All solutions, DEQ literature | Medium | Deferred: optimization |
+| 8 | IFT adjoint at sync boundaries | All solutions, DEQ literature | Medium | Required by #4 *if* its sweep count adapts — see #4 |
 | 9 | IMEX schemes | Immunological, Kalman | High | Deferred: needs custom solver |
 
 ---
@@ -99,7 +103,10 @@ symmetrization.
 each macro step, solve each group for dt/2, then solve in reverse
 order for dt/2. Straightforward modification of the Lie loop.
 
-**Status**: IMPLEMENTED in `scheduler.py`.
+**Status**: IMPLEMENTED in `scheduler.py`, but **it does not attain the
+second order this entry is claiming** — observed order decays 1.16 -> 0.63
+(P0.2). On a cycle-spanning split it is 7x *worse* than Lie and non-monotone
+(P0.47). Do not cite the O(dt^2) line as a property of the shipped code.
 
 ### 2. Dense Output Interpolation Coupling
 
@@ -115,7 +122,10 @@ this interpolant at the current time `t`.
 
 **Status**: IMPLEMENTED in `scheduler.py` as `coupling_mode="interpolated"`.
 Demo: `demos/multiscale_coupling_demo.py` (39x error reduction on slow
-coupling variable at macro_dt=2.0).
+coupling variable at macro_dt=2.0) — **but only when the driving edge is
+adjacent in group order.** The interpolant is built for group `gi-1` alone, so
+any earlier group stays frozen while the mode reports as interpolated (P0.23).
+The 39x demo happens to be an adjacent configuration.
 
 ### 2. Adaptive macro_dt (PLL-inspired)
 
@@ -148,7 +158,18 @@ optimal window scales inversely with the square root of the coupling
 Jacobian spectral radius. The adaptive controller approximates this
 without needing to compute the Jacobian explicitly.
 
-**Status**: IMPLEMENTED in `scheduler.py`.
+**Status**: IMPLEMENTED in `scheduler.py` — and **measured 6-20x worse than
+fixed `macro_dt` on a cycle-spanning split** (P0.49), at 1.5x the wall clock.
+
+The pseudocode above says why. `rho` is
+`||state_after_split - state_before_split|| / ||state||`: it measures how much
+the state **moved** over the window, not how much the split **erred**. When a
+coupling cycle spans groups, the damage is a stale edge — one group reading a
+macro-step-old value — and that does not announce itself as a large state
+change. So `rho` stays under `rho_min`, the lock detector reads "locked", and
+the controller *grows* the step in exactly the regime that needed it smaller.
+A residual that could see this has to compare against a re-solve (i.e. one
+waveform-relaxation sweep, #4), not against the window's own displacement.
 
 ### 3. Residual Spectral Monitoring (diagnostic)
 
@@ -204,7 +225,50 @@ something biologically interesting is happening (bifurcation).
 **Implementation**: ~40 lines wrapping the existing Lie loop. Anderson
 acceleration adds ~30 more.
 
-**Status**: Not implemented.
+**Status**: Not implemented. **Now has a measured trigger and cost
+(P0.47, 2026-09-05).**
+
+The generic statement above — "one-pass Lie loses cross-coupling" —
+understates when it bites. Splitting is *fine* on an acyclic group
+DAG: the driver runs first and the consumer reads a fresh value. It
+fails when a **coupling cycle spans groups**, because then no
+execution order exists in which both directions are fresh, and one
+edge is always a macro-step stale. `Composite.cyclic_group_sets()`
+reports exactly this condition, so the iteration can be *skipped*
+where it buys nothing and spent only on the cyclic sets.
+
+Measured on the three-model multi-hallmark composite (DP14 86400 s /
+GZ06 3600 s / K14 60 s, cycle `damage_bridge → dp14 → gz06 →
+p53_cdkn1a`), against the exact single-group solve:
+
+| | macro_dt 3.5 | 1.75 | 1.0 | 0.5 |
+|---|---|---|---|---|
+| Lie, fast group first | 10.00% | 3.07% | 1.96% | 1.30% |
+| Lie, slow group first | 14.03% | 2.85% | 1.58% | 0.77% |
+| Strang | 72.0% | — | 29.2% | 8.8% |
+| Lie + `adaptive_dt` | 65.2% | — | 38.6% | — |
+
+Group order buys under 2× and flips sign with `macro_dt`; Strang is
+worse here (P0.2); `adaptive_dt`, the one knob documented for this, is
+6–20× worse and slower (P0.49). Only shrinking `macro_dt` helps, at
+O(dt¹). So this is the fix, and there is currently no substitute.
+
+**Two JAX constraints the pseudocode above does not survive.**
+
+1. `until residual < epsilon or k > k_max` is a data-dependent trip
+   count. Under `jit` that needs `lax.while_loop`, or a **static**
+   sweep count with a fixed unroll. Prefer the static count: it keeps
+   the traced shape constant, which is what lets the whole solve stay
+   one compiled executable.
+2. `lax.while_loop` is **not reverse-differentiable**, and Calibrator
+   backprops through the solve. So a convergence-tested loop forecloses
+   fitting unless #6 (IFT at sync boundaries) lands with it — which is
+   the real reason those two entries belong together, not just an
+   optimization. A static unroll differentiates fine and is the
+   cheaper first step; add IFT when the sweep count needs to adapt.
+
+Land it with P0.23's fix — both rewrite `_run_scan_continuous` and the
+eager path, and doing them separately means paying that review twice.
 
 ### 5. Memory Kernel for Fast→Slow Coupling (Mori-Zwanzig)
 

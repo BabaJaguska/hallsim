@@ -8,6 +8,7 @@ Consolidates the per-figure scripts into subcommands (pick with the first arg):
   concordance    measured-vs-simulated dumbbells per gene (oob + calibrated).
   temporal       out-of-the-box → calibrated log2FC trajectories vs data.
   before-after   each constituent standalone vs inside the composite.
+  fate-branch    CD95L dose-response vs what the p53 edge delivers.
 
 Run: python demos/multi_hallmark_figures.py <figure>   (or `all`)
 Calibration itself lives in multi_hallmark_calibrate.py; the demo
@@ -341,6 +342,154 @@ def fig_trajectories(args):
     print(f"wrote {out / 'composite_trajectories.png'}", flush=True)
 
 
+# ── fate-branch ──────────────────────────────────────────────────────────
+def fig_fate_branch(args):
+    """What the apoptosis arm can do, against what the composite hands it."""
+    from hallsim.composite import single_process_composite
+    from hallsim.sbml_import import process_from_sbml
+    from demos.models.multi_hallmark import (
+        K14_CD95_BASAL,
+        K14_CD95_INDUCED,
+        K14_CD95L_DOSE,
+        K14_CD95L_CHALLENGE_MINUTES,
+        K14_CD95L_CHALLENGE_WINDOW,
+        K14_NATIVE_TIME_SECONDS,
+        K14_SBML_PATH,
+        build_multi_hallmark_composite,
+    )
+
+    BID0 = 224.0
+    sched = Scheduler()
+
+    # Left: the deposit's own dose-response, at the two receptor levels the
+    # p53 edge interpolates between. Native minutes, no reconciliation.
+    solo = single_process_composite(
+        process_from_sbml(
+            str(K14_SBML_PATH),
+            name="k14",
+            native_time_seconds=K14_NATIVE_TIME_SECONDS,
+        ).with_unfrozen("tBid"),
+        "k14",
+    )
+    idx_solo = solo.store_index()
+
+    def cleaved(ligand, receptor):
+        c = solo.with_params(
+            {
+                "k14.parameters.CD95L": float(ligand),
+                "k14.parameters.CD95": float(receptor),
+            }
+        )
+        r = sched.run(
+            c,
+            t_span=(0.0, K14_CD95L_CHALLENGE_MINUTES),
+            macro_dt=10.0,
+            save_dt=10.0,
+        )
+        return float(r.ys[-1, idx_solo["k14/tBid"]]) / BID0
+
+    doses = np.geomspace(0.1, 30.0, 24)
+    curves = {
+        r: np.array([cleaved(d, r) for d in doses])
+        for r in (K14_CD95_BASAL, K14_CD95_INDUCED)
+    }
+
+    # Right: the receptor level and death fraction the composite actually
+    # reaches, per arm, read at the end of the challenge window.
+    t0, t1 = K14_CD95L_CHALLENGE_WINDOW
+    base = build_multi_hallmark_composite(validate=False)
+    arms = (
+        ("ctrl", {"Genomic Instability": 0.0}, "tab:green"),
+        ("DDIS", {"Genomic Instability": 1.0}, "tab:red"),
+    )
+    reached = {}
+    for label, hm, _ in arms:
+        comp = with_hallmarks(base, hm)
+        res = sched.run(comp, t_span=(0.0, 14.0), macro_dt=0.05, save_dt=0.01)
+        ix, ts = comp.store_index(), np.asarray(res.ts)
+        a = int(np.argmin(np.abs(ts - t0)))
+        b = int(np.argmin(np.abs(ts - t1)))
+        reached[label] = (
+            float(res.ys[a, ix["k14/CD95_level"]]),
+            float(res.ys[b, ix["k14/tBid"]]) / BID0,
+        )
+
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(9.5, 4.0))
+    for r, style in ((K14_CD95_BASAL, "-"), (K14_CD95_INDUCED, "--")):
+        ax0.plot(
+            doses,
+            curves[r],
+            style,
+            color="tab:purple",
+            lw=1.8,
+            label=f"CD95 = {r:g}",
+        )
+    ax0.axvline(K14_CD95L_DOSE, color="0.4", lw=1.0, ls=":")
+    # At the placed dose itself, not the nearest sweep point — the title and
+    # the annotation must be the same number.
+    at_lo = cleaved(K14_CD95L_DOSE, K14_CD95_BASAL)
+    at_hi = cleaved(K14_CD95L_DOSE, K14_CD95_INDUCED)
+    solo_fold = at_hi / max(at_lo, 1e-9)
+    ax0.annotate(
+        f"{solo_fold:.2f}x",
+        xy=(K14_CD95L_DOSE, 0.5 * (at_lo + at_hi)),
+        xytext=(6, 0),
+        textcoords="offset points",
+        fontsize=9,
+    )
+    ax0.set_xscale("log")
+    ax0.set_xlabel("CD95L (nM)")
+    ax0.set_ylabel(f"tBid / Bid$_0$ at {K14_CD95L_CHALLENGE_MINUTES:g} min")
+    ax0.set_title(
+        f"Kallenberger alone: {K14_CD95_INDUCED / K14_CD95_BASAL:.2g}x "
+        f"receptor → {solo_fold:.2f}x commitment"
+    )
+    ax0.grid(alpha=0.3)
+    ax0.legend(fontsize=8)
+
+    for label, _, color in arms:
+        cd95, frac = reached[label]
+        ax1.scatter([cd95], [frac], s=70, color=color, zorder=3, label=label)
+    ax1.plot(
+        [reached["ctrl"][0], reached["DDIS"][0]],
+        [reached["ctrl"][1], reached["DDIS"][1]],
+        color="0.5",
+        lw=1.0,
+        zorder=2,
+    )
+    for r in (K14_CD95_BASAL, K14_CD95_INDUCED):
+        ax1.axvline(r, color="0.75", lw=1.0, ls=":")
+        ax1.annotate(
+            f"CD95 = {r:g}",
+            xy=(r, 0.02),
+            rotation=90,
+            fontsize=8,
+            color="0.45",
+            ha="right",
+            va="bottom",
+        )
+    ax1.set_xlim(10.0, 45.0)
+    ax1.set_ylim(0.0, 1.0)
+    ax1.set_xlabel("CD95 receptor level at challenge")
+    ax1.set_ylabel(f"tBid / Bid$_0$ at {K14_CD95L_CHALLENGE_MINUTES:g} min")
+    fold = reached["DDIS"][1] / max(reached["ctrl"][1], 1e-9)
+    ax1.set_title(f"In the composite: p53 edge delivers {fold:.2f}x")
+    ax1.grid(alpha=0.3)
+    ax1.legend(fontsize=8)
+
+    fig.suptitle(
+        f"CD95L challenge at {K14_CD95L_DOSE:g} nM over "
+        f"{K14_CD95L_CHALLENGE_MINUTES:g} min, day {t0:g}; "
+        "receptor span is Owen-Schaub 1995 (3-4x)",
+        fontsize=9,
+    )
+    fig.tight_layout()
+    out = ROOT / "outputs" / "subsystem_diagnostics"
+    out.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out / "fate_branch.png", dpi=140)
+    print(f"wrote {out / 'fate_branch.png'}", flush=True)
+
+
 # ── reporter-levels ──────────────────────────────────────────────────────
 def fig_reporter_levels(args):
     from demos.multi_hallmark_calibrate import build_problem
@@ -439,7 +588,9 @@ def fig_concordance(args):
     conditions.
     """
     from matplotlib.lines import Line2D
-    from demos.multi_hallmark_calibrate import build_problem, _rows_by_gene
+    from hallsim.calibration_report import rows_by_gene
+
+    from demos.multi_hallmark_calibrate import build_problem
 
     C_DATA, C_MODEL, INK, DIM, BAND = (
         "#2563eb",
@@ -449,12 +600,14 @@ def fig_concordance(args):
         "#f1f5f9",
     )
     problem = build_problem()
-    arms_order = ["DDIS_vs_ctrl", "RAPA_vs_ctrl", "RAS_vs_ctrl"]
     short = {
         "DDIS_vs_ctrl": "DDIS",
         "RAPA_vs_ctrl": "RAPA",
         "RAS_vs_ctrl": "RAS",
     }
+    # Preferred display order, restricted to the arms this problem scores.
+    arms_order = [a for a in short if a in problem.data]
+    short = {a: short[a] for a in arms_order}
     cond = [(a, t) for a in arms_order for t in sorted(problem.data[a])]
     cond_labels = [f"{short[a]}\nD{int(t)}" for a, t in cond]
     spans, i = [], 0  # alternating per-arm bands for visual grouping
@@ -467,7 +620,7 @@ def fig_concordance(args):
 
     def render(params, subtitle, stem):
         ev = problem.evaluate(params)
-        rows = [_rows_by_gene(ev[a][t]) for a, t in cond]
+        rows = [rows_by_gene(ev[a][t]) for a, t in cond]
         genes = [g for g in order if g in rows[0]]
 
         def panel(ax, gene):
@@ -596,7 +749,9 @@ def fig_temporal(args):
     )
 
     C_OOB, C_FIT, C_DATA, grid_c = "#9a9a95", "#2a78d6", "#0b0b0b", "#e6e6e2"
-    arms = {
+    # Subtitles for the arms this problem may carry; only the ones it actually
+    # scores get a figure, so dropping or adding an arm needs no edit here.
+    ARM_SUBTITLES = {
         "DDIS_vs_ctrl": "DDIS  (etoposide, fit arm)",
         "RAPA_vs_ctrl": "rapamycin  (etoposide + rapa @ day 2, held-out)",
         "RAS_vs_ctrl": "RAS  (oncogene-induced senescence, held-out)",
@@ -697,8 +852,8 @@ def fig_temporal(args):
     init = problem.initial_params()
     fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
     OUT_CAL.mkdir(parents=True, exist_ok=True)
-    for arm, subtitle in arms.items():
-        figure_for_arm(problem, init, fit, arm, subtitle)
+    for arm in problem.data:
+        figure_for_arm(problem, init, fit, arm, ARM_SUBTITLES.get(arm, arm))
     print(f"→ {OUT_CAL}", flush=True)
 
 
@@ -1078,6 +1233,7 @@ FIGURES = {
     "schematic": fig_schematic,
     "training": fig_training,
     "trajectories": fig_trajectories,
+    "fate-branch": fig_fate_branch,
     "reporter-levels": fig_reporter_levels,
     "concordance": fig_concordance,
     "temporal": fig_temporal,

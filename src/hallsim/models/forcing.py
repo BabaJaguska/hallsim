@@ -64,6 +64,24 @@ class PulseSource(Process):
         return (self.t_start, self.t_end)
 
 
+def _attach_driver(proc, input_name, port):
+    """Expose ``input_name`` on ``proc`` as INPUT port ``port``, whichever half
+    of the driveable surface it lives in — a rule-defined boundary input
+    (``with_input_driver``) or a plain constant (``with_param_input``). Which
+    one is a fact about the source file, not a choice the caller made.
+    """
+    if input_name in getattr(proc, "_w_names", ()):
+        return proc.with_input_driver(input_name, port)
+    if input_name in getattr(proc, "_param_names", ()):
+        return proc.with_param_input(input_name, port)
+    raise KeyError(
+        f"{input_name!r} is neither a boundary input nor a constant on "
+        f"{getattr(proc, '_name', proc)!r}; boundary inputs: "
+        f"{sorted(getattr(proc, '_w_names', ()))}; constants: "
+        f"{sorted(getattr(proc, '_param_names', ()))}"
+    )
+
+
 def drive_pulse(
     processes,
     topology,
@@ -107,7 +125,7 @@ def drive_pulse(
         signal_ontology=signal_ontology,
         hallmark=hallmark,
     )
-    processes[target] = processes[target].with_input_driver(input_name, port)
+    processes[target] = _attach_driver(processes[target], input_name, port)
     topology[src] = {"signal": path}
     topology.setdefault(target, {})[port] = path
 
@@ -231,7 +249,7 @@ def drive_step(
         signal_ontology=signal_ontology,
         hallmark=hallmark,
     )
-    processes[target] = processes[target].with_input_driver(input_name, port)
+    processes[target] = _attach_driver(processes[target], input_name, port)
     topology[src] = {"signal": path}
     topology.setdefault(target, {})[port] = path
     return processes, topology, src

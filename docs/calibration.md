@@ -24,6 +24,7 @@ multi-hallmark composite's reporters:
 | `BNIP3` | `dp14/FoxO3a` | zero-phase mean, τ=2.0 | FoxO3 target; reads the FoxO-driven mitophagy arm downstream of nutrient sensing |
 | `DDB2` | `gz06/x` | zero-phase **RMS** `√⟨x²⟩`, τ=0.75 | p53 target; GZ06's mean p53 is analytically damage-blind, so DDB2 reads pulse amplitude — see [gz06-basal-p53.md](gz06-basal-p53.md) |
 | `MDM2` | `gz06/y0` | zero-phase mean, τ=0.75 | p53 target; `y0` is the paper's Mdm2 precursor, "representing, for example, Mdm2 mRNA" — the transcript, not the protein `y` |
+| `FAS` (CD95/APO-1) | `k14/CD95_level` | zero-phase mean, τ=0.75 | p53 target via the FAS first-intron response element; the only transcript readout the Kallenberger arm admits — everything below the receptor is post-translational, and total Bid and total caspase-8 are conserved |
 
 <!-- reporters:end -->
 

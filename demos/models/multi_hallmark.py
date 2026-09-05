@@ -1,20 +1,25 @@
 """DP14-anchored multi-hallmark composite — three publications stitched.
 
-Spans three Hallmarks of Aging in one validation substrate: Cellular Senescence
+Spans four Hallmarks of Aging in one validation substrate: Cellular Senescence
 and Deregulated Nutrient Sensing (DallePezze 2014's CDKN1A / SA_beta_gal and
-mTORC1–AMPK–Akt–FoxO3a axes), and Genomic Instability (DP14's DNA_damage
-feeding the Geva-Zatorsky 2006 p53–Mdm2 oscillator).
+mTORC1–AMPK–Akt–FoxO3a axes), Genomic Instability (DP14's DNA_damage feeding
+the Geva-Zatorsky 2006 p53–Mdm2 oscillator), and Altered Intercellular
+Communication (Kallenberger 2014's CD95L, an extracellular ligand delivered by
+another cell).
 
-Constituents — DallePezze 2014 (BIOMD0000000582) and Geva-Zatorsky 2006
-(BIOMD0000000157) — ship vendored under ``demos/models/sbml/``; a missing file
-falls back to the BioModels id and downloads on first import.
+Constituents — DallePezze 2014 (BIOMD0000000582), Geva-Zatorsky 2006
+(BIOMD0000000157) and Kallenberger 2014 (BIOMD0000000524) — ship vendored under
+``demos/models/sbml/``; a missing file falls back to the BioModels id and
+downloads on first import.
 
-Altered Intercellular Communication has no module. Ihekwaba 2004 was removed on
-2026-08-31: refereed three ways, it contributed nothing (19/24 with both its
-edges ablated), the edges supplied 100% of its IKK rather than perturbing it,
-and its only NF-κB-inducible transcript was its own inhibitor — so it could not
-emit the SASP effectors the data actually moves (CCL2 +3.05, CXCL1 +2.68,
-IL6 +1.73 log2FC at D14). See docs/review-ihekwaba2004-wetlab.md.
+Apoptosis is not itself a hallmark, and Kallenberger is not here as one. It is
+the **alternative fate**: without it the composite has a single destination and
+"the cell senesces" is an assumption of the model set rather than a computed
+result. With it, one damage signal reaches two competing outputs. Ihekwaba 2004
+held the intercellular slot until 2026-08-31 and was removed — refereed three
+ways, it contributed nothing (19/24 with both its edges ablated), the edges
+supplied 100% of its IKK rather than perturbing it, and its only NF-κB-inducible
+transcript was its own inhibitor. See docs/review-ihekwaba2004-wetlab.md.
 
 Cross-publication edges:
 
@@ -27,6 +32,17 @@ Cross-publication edges:
   parameter set is the damaged end of this edge and the range carries no free
   strength. ``psi`` is the paper's ξ, a production-noise gain, and is not a
   damage variable; it stays at its published 1.0.
+
+- **p53 → CD95 receptor**: ``fas_induction`` Hill-interpolates Kallenberger's
+  ``CD95`` up from the deposit's own 12 toward 3.5x that on GZ06's p53, and
+  ``fas_receptor`` gives it first-order receptor turnover so the level
+  integrates the p53 pulse train rather than following it. Wild-type p53
+  raises surface Fas 3-4x (Owen-Schaub 1995) through a response element in the
+  FAS first intron, and ``CD95act`` is cubic in ``CD95``. Both halves are
+  needed: GZ06's mean p53 is damage-blind under ψ-cancellation, so only the
+  oscillation amplitude carries the signal and an edge reading a *level* out
+  of it has to rectify. It under-delivers at the cooperativity p53's
+  tetrameric binding supports — see P0.45.
 
 Conditions and drugs both enter through the hallmark layer::
 
@@ -43,8 +59,12 @@ to 1 (DallePezze's published irradiation dose) on its damage rate.
 
 Gene reporters (see :mod:`hallsim.gene_reporters`): CDKN1A → ``dp14/CDKN1A``,
 GLB1 → ``dp14/SA_beta_gal``, BNIP3 → ``dp14/FoxO3a``, DDB2 → ``gz06/x``
-(RMS amplitude), and MDM2 → ``gz06/y0`` — the Mdm2 *precursor*, which GZ06's
-Table I defines as the transcript, not the protein ``y``.
+(RMS amplitude), MDM2 → ``gz06/y0`` — the Mdm2 *precursor*, which GZ06's
+Table I defines as the transcript, not the protein ``y`` — and FAS →
+``k14/CD95_level``. FAS is the only transcript readout the apoptosis arm
+admits: everything below the receptor is post-translational, and the model
+conserves total Bid and total caspase-8, so BID and CASP8 have no
+transcript-level meaning in it however well they are measured.
 
 ``test_gene_reporters.py`` checks this list against
 ``MULTI_HALLMARK_REPORTERS``, so it fails rather than drifts.
@@ -54,9 +74,11 @@ from __future__ import annotations
 
 from hallsim.composite import Composite
 from hallsim.models.forcing import drive_pulse, drive_step
+from hallsim.models.clamp_edge import ClampEdge
 from hallsim.models.hill_edge import (
     HillActivationEdge,
     HillSignalEdge,
+    place_hill_gate,
     place_hill_gate_for_crossing,
 )
 from demos.models.sbml import sbml_source
@@ -69,6 +91,11 @@ DP14_SBML_PATH = sbml_source(
 )
 GZ06_SBML_PATH = sbml_source(
     "zatorsky2006", "zatorsky2006_BIOMD0000000157.xml", "BIOMD0000000157"
+)
+K14_SBML_PATH = sbml_source(
+    "kallenberger2014",
+    "kallenberger2014_BIOMD0000000524.xml",
+    "BIOMD0000000524",
 )
 # SBML defaults, named at module level so hallsim.hallmarks can target the
 # same constants. DallePezze 2014 supplementary Table S2.
@@ -132,21 +159,62 @@ GZ06_DAMAGE_GATE = place_hill_gate_for_crossing(
 )
 GZ06_DAMAGE_DRIVE_K = GZ06_DAMAGE_GATE.K
 
+# Declares no unitDefinition; its rate laws are in minutes.
+K14_NATIVE_TIME_SECONDS = 60.0
+K14_CD95_NAME = "CD95"
+K14_CD95L_NAME = "CD95L"
+# Deposit ICs. Neither takes part in a reaction — both enter only the
+# `CD95act` rule — so the importer exposes them as constants, not species.
+K14_CD95_BASAL = 12.0
+K14_CD95L_DEPOSIT_DOSE = 16.6  # 500 ng/ml T4-CD95L, per the curator
+# Placed at the maximum receptor-level contrast, measured on Kallenberger
+# alone; the deposit's own dose saturates and discriminates almost nothing.
+K14_CD95L_DOSE = 2.0
+# Kallenberger's own window. Bid is never resynthesised, so a sustained
+# ligand runs to completion at any dose — this must be a window, not a bath.
+K14_CD95L_CHALLENGE_MINUTES = 240.0
+K14_CD95L_CHALLENGE_DAY = 7.0
+# Owen-Schaub 1995: wild-type p53 raises surface Fas 3-4x. Range midpoint.
+K14_CD95_INDUCED = 3.5 * K14_CD95_BASAL
+# p53 binds as a tetramer, so n is capped at 4 whatever the levels want.
+K14_FAS_HILL_N = 4.0
+K14_P53_OFF_LEVEL = 0.3519  # ctrl mean of gz06/x, days 7-14
+K14_P53_ON_LEVEL = 0.7048  # DDIS peak of gz06/x, days 7-14
+K14_FAS_GATE = place_hill_gate(
+    off_level=K14_P53_OFF_LEVEL, on_level=K14_P53_ON_LEVEL
+)
+# Receptor turnover: the lag rectifying p53's duty cycle into a level. Not
+# fitted — it shifts when FAS peaks, and both sampled days are long past the
+# peak, so it is unidentifiable against this dataset (sigma 12 decades).
+K14_FAS_TURNOVER_RATE = 8.0  # 1/day; tau = 3 h
+
 # One t_span unit = one day, matching GSE248823's D00–D14 course. DP14 is
-# natively in days and runs unchanged; GZ06 (hours) is rescaled onto this axis
-# by reconciled_to, and settles to its cycle-average on it — which is what
-# per-day bulk transcriptomics samples.
+# natively in days and runs unchanged; GZ06 (hours) and K14 (minutes) are
+# rescaled onto this axis by reconciled_to, and settle to their cycle-average
+# on it — which is what per-day bulk transcriptomics samples.
 CANONICAL_TIME_SECONDS = 86400.0
 
 
+K14_CD95L_CHALLENGE_WINDOW = (
+    K14_CD95L_CHALLENGE_DAY,
+    K14_CD95L_CHALLENGE_DAY + K14_CD95L_CHALLENGE_MINUTES / 1440.0,
+)
+
+
 def build_multi_hallmark_composite(
-    *, validate: bool = True, dose_window=DDIS_ETOPOSIDE_DOSE_WINDOW
+    *,
+    validate: bool = True,
+    dose_window=DDIS_ETOPOSIDE_DOSE_WINDOW,
+    ligand_challenge=K14_CD95L_CHALLENGE_WINDOW,
 ):
-    """Compose DP14 + GZ06 into one composite, namespaced ``dp14/`` and
-    ``gz06/``; apply hallmarks for the treated and control variants.
+    """Compose DP14 + GZ06 + K14 into one composite, namespaced ``dp14/``,
+    ``gz06/`` and ``k14/``; apply hallmarks for the treated and control
+    variants.
 
     ``dose_window`` is the ``(t_start, t_end)`` damage pulse; ``None`` holds
     ``Irradiation`` at its severity for the whole run instead of washing out.
+    ``ligand_challenge`` is the ``(t_start, t_end)`` CD95L window; ``None``
+    leaves the apoptosis arm unchallenged and exactly at rest.
     ``validate`` covers topology only — semantic validation is configured per
     sub-composite and at the merge.
     """
@@ -170,9 +238,45 @@ def build_multi_hallmark_composite(
             DP14_IRRADIATION_RATE_NAME: DP14_IRRADIATION_RATE_DEFAULT,
         },
     ).reconciled_to(CANONICAL_TIME_SECONDS)
+    # Import freezes these as inert sinks — nothing inside the model reads
+    # them back — but they are its readouts (P0.42).
+    k14 = (
+        process_from_sbml(
+            str(K14_SBML_PATH),
+            name="k14",
+            native_time_seconds=K14_NATIVE_TIME_SECONDS,
+            # An undriven constant keeps the deposit's value, which here is
+            # a saturating ligand dose — so zero it (P0.46).
+            parameters={K14_CD95L_NAME: 0.0},
+        )
+        .reconciled_to(CANONICAL_TIME_SECONDS)
+        .with_unfrozen("tBid", "mCherry", "mGFP", "PrNES", "PrER")
+        .with_param_input(K14_CD95_NAME, "cd95_in")
+    )
     processes: dict = {
         "dp14": dp14,
         "gz06": gz06,
+        "k14": k14,
+        "fas_induction": HillSignalEdge(
+            timescale=gz06.timescale,
+            basal=K14_CD95_BASAL,
+            hi=K14_CD95_INDUCED,
+            K=K14_FAS_GATE.K,
+            n=K14_FAS_HILL_N,
+            source_ontology={"go": "GO:0006977"},
+            source_description="GZ06 p53 level",
+            hallmark="Genomic Instability",
+            reference="Owen-Schaub et al. 1995, Mol Cell Biol 15:3032–3040",
+            description="p53 → CD95/Fas receptor induction (setpoint).",
+        ),
+        "fas_receptor": ClampEdge(
+            timescale=gz06.timescale,
+            k_clamp=K14_FAS_TURNOVER_RATE,
+            target_default=K14_CD95_BASAL,
+            target_ontology={"uniprot": "P25445"},
+            target_description="CD95/Fas surface receptor level",
+            hallmark="Altered Intercellular Communication",
+        ),
         "damage_bridge": HillSignalEdge(
             timescale=gz06.timescale,
             basal=GZ06_ALPHA_X_CONTROL,
@@ -214,7 +318,28 @@ def build_multi_hallmark_composite(
         "gz06": {"alpha_x_in": "gz06/alpha_x_signal"},
         # p53 → CDKN1A: read GZ06 p53, add transcription flux to DP14's p21.
         "p53_cdkn1a": {"source": "gz06/x", "target": "dp14/CDKN1A"},
+        # p53 → CD95: Hill sets the setpoint, the clamp gives it turnover.
+        "fas_induction": {"source": "gz06/x", "signal": "k14/CD95_setpoint"},
+        "fas_receptor": {
+            "target": "k14/CD95_level",
+            "setpoint": "k14/CD95_setpoint",
+        },
+        "k14": {"cd95_in": "k14/CD95_level"},
     }
+    # Extracellular ligand from another cell — the composite's only input
+    # that is not the cell's own state.
+    if ligand_challenge is not None:
+        drive_pulse(
+            processes,
+            topology,
+            target="k14",
+            input_name=K14_CD95L_NAME,
+            t_start=ligand_challenge[0],
+            t_end=ligand_challenge[1],
+            amplitude=K14_CD95L_DOSE,
+            source_name="cd95l_challenge",
+            hallmark="Altered Intercellular Communication",
+        )
     # Etoposide exposure: a PulseSource ("irradiation_pulse") drives DP14's
     # Irradiation input over the dose window — composed from the general
     # port-coupling path, not a special-cased pulse. Its amplitude is the

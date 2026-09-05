@@ -230,8 +230,19 @@ def build_problem(
                 prior=0.085,
                 prior_sigma=0.5,
             ),
-            # mtor_phos_rate, alpha_y, mitophagy_inactiv frozen — non-identifiable
+            # mtor_phos_rate, mitophagy_inactiv frozen — non-identifiable
             # here (gain-degenerate / flat gradient); see diary.
+            # GZ06's Mdm2 degradation: the only knob on MDM2's own path.
+            "mdm2_degradation": ParameterRef(
+                "gz06",
+                "parameters.alpha_y",
+                prior=float(
+                    build_multi_hallmark_composite(validate=False)
+                    .processes["gz06"]
+                    .parameters["alpha_y"]
+                ),
+                prior_sigma=0.5,
+            ),
             "alpha_x_control": ParameterRef(
                 "damage_bridge",
                 "basal",
@@ -245,7 +256,9 @@ def build_problem(
         prior_weight=0.03,
         t_end=14.0,
         t_start=-PREROLL_DAYS,
-        macro_dt=3.5,
+        # A coupling cycle spans the timescale groups, so splitting error is
+        # set by macro_dt, not by the integrator (P0.47).
+        macro_dt=0.5,
         # The oscillating reporters (DDB2/MDM2) read raw p53 / Mdm2 /
         # IκBα-transcript and take a zero-phase RMS/mean post-hoc, so the save
         # grid must resolve the pulse: save_dt = 14/149 ≈ 0.094 d, under the

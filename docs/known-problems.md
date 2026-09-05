@@ -104,6 +104,30 @@ The framework returns a plausible number and nothing indicates it is wrong.
   *Fix:* find why Strang loses its second order; add the order test
   `design-multiscale-scheduler.md:445` has called for since day one.
 
+  **Third configuration, 2026-09-05** — the natural three-model split with
+  Kallenberger in (DP14 slow / GZ06 + K14 + edges fast), six reporters, against
+  a Lie@0.05 reference. The sign is **opposite** to the row above:
+
+  | macro_dt | 3.5 | 1.0 | 0.5 | 0.25 | 0.1 | 0.05 |
+  |---|---|---|---|---|---|---|
+  | Lie | 9.95% | 1.86% | 1.14% | — | — | ref |
+  | Strang | 72.0% | 29.1% | 8.8% | **17.5%** | 0.25% | 0.15% |
+
+  Strang converges to the same limit, so it is not wrong — but it is 7× *worse*
+  than Lie at the demo step and **non-monotone** (0.5 → 0.25 gets worse before
+  0.1 recovers). Neither the forced-split row above nor this one is the whole
+  story, and the difference between them is now the cleanest lead on the order
+  deficit: same two-group shape, opposite verdict.
+
+  **What separates them is P0.47.** This configuration's two groups are joined
+  by a *cycle*, so both schemes are cutting a feedback loop and neither order
+  of operations is defensible; the forced split above was chosen by hand and
+  may not have been. Re-run this study on a composite whose groups are
+  genuinely acyclic — P0.47's merge now guarantees `auto_groups` produces only
+  such splits — before drawing an order conclusion from either row. That also
+  retires the "NF-κB oscillation vs P0.20 span-truncation" ambiguity as the
+  only candidate pair.
+
 - [ ] **P0.23 — `coupling_mode="interpolated"` interpolates only the
   *immediately preceding* group; every earlier group stays frozen while the mode
   reports as interpolated.**
@@ -412,8 +436,19 @@ The framework returns a plausible number and nothing indicates it is wrong.
   reproducible; it does not make it right. A model in that position is
   rejected at intake by P0.38.
 
-- [ ] **P0.42 — The inert-sink heuristic freezes a model's only output.**
-  Filed 2026-09-04. `_frozen_sink_indices` (`sbml_import.py:1218`) freezes
+- [x] **P0.42 — The inert-sink heuristic freezes a model's only output.**
+  *Fixed 2026-09-05, wiring Kallenberger into the multi-hallmark composite.*
+  Three parts: `SBMLProcess.with_unfrozen(*species)` is the explicit opt-out
+  (`_frozen_indices` is static, so this rebuilds rather than `tree_at`);
+  `Composite` calls `_unfreeze_coupled_sinks` after event expansion, which
+  restores any frozen sink another process *reads* — being wired to a reader is
+  unambiguous evidence the heuristic misfired, so no call site has to know; and
+  the import warning now says the frozen species are unusable as coupling
+  sources or reporter observables and names the opt-out, instead of implying a
+  tidy-up. Verified on Kallenberger: `tBid` integrates 0 → 186.98 while `Bid`
+  falls 224 → 37.02 over the deposit's own 240-minute window, conserving mass
+  exactly. Filed 2026-09-04.
+  `_frozen_sink_indices` (`sbml_import.py:1218`) freezes
   species that reactions write and nothing reads, so they cannot accumulate and
   wreck the state scaling. The heuristic is self-defeating for exactly the case
   the framework exists to serve: a **source process whose output is a terminal
@@ -500,8 +535,16 @@ The framework returns a plausible number and nothing indicates it is wrong.
   over the screening horizon, and the parameters reachable only through it,
   should be named in `ScreenReport`.
 
-- [ ] **P0.44 — `native_time_seconds` cannot be set at import, so correcting a
-  guessed clock needs `eqx.tree_at` on a private field.** Filed 2026-09-04.
+- [x] **P0.44 — `native_time_seconds` cannot be set at import, so correcting a
+  guessed clock needs `eqx.tree_at` on a private field.**
+  *Fixed 2026-09-05.* `process_from_sbml(..., native_time_seconds=60.0)` is the
+  front door. The boolean `native_time_declared` is replaced by a three-valued
+  `native_time_source` — `"declared"` (the file asserts it), `"supplied"` (the
+  caller knows what the file omits), `"assumed"` (the tool default) — which is
+  the distinction P0.40 asks for, so a supplied clock is not laundered into a
+  declared one. A supplied value that contradicts a declared one warns. Verified
+  on Kallenberger: `reconciled_to(86400)` returns 1440, where it returned 86400.
+  Filed 2026-09-04.
   `process_from_sbml` takes `timescale` and `parameters` but has no argument
   for the model's native clock, so when a file declares no time unit — which
   is most of them — the only way to supply the right value is to reach into
@@ -515,6 +558,235 @@ The framework returns a plausible number and nothing indicates it is wrong.
   *Fix:* `process_from_sbml(..., native_time_seconds=60.0)`, which also gives
   the natural place to record that the value was supplied rather than
   declared — the distinction P0.40 asks for.
+
+- [ ] **P0.46 — An undriven imported constant keeps the deposit's own
+  experimental dose, so an unwired control arm is silently a dosed one.**
+  Filed 2026-09-05. A deposit's stored constants encode *the experiment the
+  paper ran*, not a resting condition. Kallenberger 2014 ships `CD95L = 16.6`
+  (500 ng/ml T4-CD95L) — a saturating death-ligand dose. Compose it without
+  attaching a driver to `CD95L` and every arm runs fully ligated: measured, the
+  equilibration pass reached `tBid/Bid₀ = 0.9961` before the challenge window
+  opened, and the "unchallenged" control had already executed apoptosis. The
+  demo hides it, because the arm still integrates, still stays bounded, and
+  still returns a plausible number — the same signature as P0.36.
+
+  This is not specific to ligands. Any constant a paper set to run its own
+  experiment behaves this way, and the framework currently gives no signal:
+  `with_param_input` reports nothing about the constants left undriven, and
+  `triage_sbml` scores the deposit as-shipped, which is exactly the dosed state.
+
+  *Fix:* triage should report which constants carry a nonzero value that the
+  model's own dynamics never change — the deposit's encoded stimulus — and
+  composing should say which of those went undriven. `native_input_exposure`
+  already knows a constant's flat exposure (extended 2026-09-05); the missing
+  piece is naming the set and surfacing it, not computing it.
+
+- [ ] **P0.47 — Timescale splitting cuts feedback loops, silently, with no
+  diagnostic and no way to make the split accurate.** Filed 2026-09-05, found
+  wiring Kallenberger in.
+
+  DP14 (86400 s) and GZ06 (3600 s) are within `max_ratio`, so the composite was
+  **one group** and the Scheduler took the single-solve fast path — the
+  `damage_bridge -> dp14 -> gz06 -> p53_cdkn1a` feedback loop was integrated
+  exactly. Adding Kallenberger (60 s) pushed the ratio to 1440 and split the
+  composite straight through that loop.
+
+  A cycle has no topological order, so whichever group runs first reads the
+  other's previous-step value. `_order_by_coupling` **already detected this** —
+  `if not ready: # cycle: keep the remaining timescale order` — and proceeded.
+  Measured against the exact single-group solve:
+
+  | config | macro_dt 3.5 | 1.75 | 1.0 | 0.5 |
+  |---|---|---|---|---|
+  | Lie, fast group first (current) | **10.00%** | 3.07% | 1.96% | 1.30% |
+  | Lie, slow group first | 14.03% | 2.85% | 1.58% | **0.77%** |
+  | Strang | 72.0% | — | 29.2% | 8.8% |
+  | Lie + `adaptive_dt` | 65.2% | — | 38.6% | — |
+
+  CDKN1A@14 is the casualty at the demo's own step: 23.44 against 26.03
+  converged — the same reporter P0.2 names, for the same reason.
+
+  **Nothing available today fixes it.** Group order changes it by <2x and
+  reverses sign with `macro_dt`. Strang is 7x worse (see P0.2). `adaptive_dt`
+  is 6-20x worse (P0.49). `coupling_mode="interpolated"` is bit-identical to
+  `frozen` — and that part is *correct*, not P0.23: with a cycle there is no
+  forward-only ordering, so there is nothing for an interpolant to read. Only
+  shrinking `macro_dt` helps, at O(dt^1).
+
+  *Not fixed by merging the groups.* That was the first attempt and it is an
+  avoidance: multi-rate splitting is the capability being demonstrated, and a
+  composite whose biology is feedback-coupled is exactly the case it has to
+  serve. Backed out; `auto_groups` keeps the split and now warns, and
+  `Composite.cyclic_group_sets()` reports which group sets a cycle runs
+  through so the condition is queryable rather than folklore.
+
+  *Fix:* **waveform relaxation — already designed, as suggestion #4 in
+  [crossgen-suggestions.md](crossgen-suggestions.md)** (~40 lines wrapping the
+  existing Lie loop, Anderson acceleration ~30 more). This entry is what that
+  suggestion was waiting for: a measured trigger and cost. The condition is
+  narrower than "one-pass Lie loses cross-coupling" — splitting is fine on an
+  acyclic group DAG, and only a **cycle spanning groups** forces a permanently
+  stale edge, so `cyclic_group_sets()` says where to spend the iteration and
+  where to skip it.
+
+  Two constraints recorded there and not in the original pseudocode: a
+  residual-tested trip count needs `lax.while_loop`, which is **not
+  reverse-differentiable**, so it would foreclose Calibrator unless #6 (IFT at
+  sync boundaries) lands with it; a *static* sweep count unrolls, differentiates
+  and keeps one compiled executable. Land with P0.23 — same two functions.
+
+  Until then, size `macro_dt` from the table above whenever
+  `cyclic_group_sets()` is non-empty.
+
+- [ ] **P0.49 — `adaptive_dt=True` makes a cycle-split composite 6-20x less
+  accurate, and costs more.** Filed 2026-09-05. It is documented as
+  "PLL-inspired adaptive `macro_dt` sizing off the coupling residual", i.e.
+  precisely the instrument for the P0.47 case. Measured on the two-group
+  multi-hallmark split against the exact solve: **65.2% vs 10.0%** at
+  `macro_dt=3.5` and **38.6% vs 2.0%** at 1.0, at 1.5x the wall clock
+  (0.436 s vs 0.287 s).
+
+  A knob that trades accuracy away *and* runs slower is not a trade-off.
+  **The mechanism is in the design's own pseudocode**
+  ([crossgen-suggestions.md](crossgen-suggestions.md) #3): the controller's
+  `rho` is `||state_after_split - state_before_split|| / ||state||`, which
+  measures how much the state **moved** over the window, not how much the split
+  **erred**. A cycle's damage is a stale edge — one group reading a
+  macro-step-old value — and that does not present as a large state
+  displacement. So `rho` sits below `rho_min`, the lock detector reads
+  "locked", and the step *grows* (`adaptive_dt_max` defaults to `macro_dt * 4`)
+  in precisely the regime that needed it smaller.
+
+  *Fix:* the residual has to be measured against a **re-solve** rather than
+  against the window's own displacement — which is one waveform-relaxation
+  sweep (P0.47 / suggestion #4), so the two fixes are the same work. Add a
+  regression asserting `adaptive_dt` never loses accuracy against the same
+  starting `macro_dt`. Until then it should not be recommended for composites
+  where `cyclic_group_sets()` is non-empty.
+
+- [ ] **P0.48 — The demo's whole post-fit report path is unreachable by any
+  test, and had rotted into three independent crashes.** Filed 2026-09-05.
+  Every one of these sits *after* the fit converges, so a `calibrate` run did
+  100 steps, produced its concordance and its fitted parameters, and then
+  exited 1 — reporting failure after doing all the work, three times in a row:
+
+  1. `calibration_report.plot_history` does `lo, hi = ref.clamp`
+     unconditionally, but `ParameterRef.clamp` is documented optional and
+     defaults to `None`, and none of the demo's three refs declares one.
+     `TypeError: cannot unpack non-iterable NoneType`.
+  2. `multi_hallmark_figures` hard-codes `arms_order = ["DDIS_vs_ctrl",
+     "RAPA_vs_ctrl", "RAS_vs_ctrl"]` in `fig_concordance` and the same three in
+     `fig_temporal`, but the problem defines two (`ARMS`). `KeyError:
+     'RAS_vs_ctrl'`. Directly against "parametrize figures, hard-code nothing".
+  3. `fig_concordance` imports `_rows_by_gene` from
+     `demos.multi_hallmark_calibrate`. The function is `rows_by_gene` and lives
+     in `hallsim.calibration_report` — a stale import surviving a move.
+     `ImportError`.
+
+  All three fixed 2026-09-05 (unclamped params plot against their own travelled
+  range, dashed; arm lists derive from `problem.data`; the import points at the
+  real module). None was caused by the Kallenberger wiring — they surfaced
+  because this is the first `calibrate` run to complete in this tree, the
+  outputs directory having held only `run` artefacts.
+
+  *The defect that matters is the absence, not the three bugs.* `test_cli.py`
+  asserts the subcommands exist; nothing executes them. A path that only runs
+  after a multi-minute fit will rot silently every time, and did.
+  *Fix:* a fast smoke test — 2 fit steps, 1 reporter, tiny span — that runs
+  `cmd_run` end to end including every figure, so the report path is exercised
+  on every CI run rather than the next time someone waits out a fit.
+
+- [ ] **P0.50 — The demo's frozen-parameter rationale is stale, and wrong on
+  the parameters that matter.** Filed 2026-09-05. `multi_hallmark_calibrate`
+  fits **3 of 89** available calibratable parameters, freezing the rest with the
+  blanket comment "non-identifiable here (gain-degenerate / flat gradient)".
+  Checked by scaling each x2 on the composite and measuring the scored log2
+  fold-change:
+
+  | frozen parameter | max Δ lfc | verdict |
+  |---|---|---|
+  | `gz06.alpha_y` (Mdm2 degradation) | 1.53e-01 | **wrong** — most identifiable param in the problem |
+  | `dp14.mTORC1_S2448_phos_by_AA_n_Akt_pS473` | 1.66e-01 | **wrong** — comparable to the fitted set |
+  | `dp14.CDKN1A_inactiv_by_Akt_pS473` | 2.36e-01 | never considered; largest of any checked |
+  | `dp14.JNK_pT183_inactiv` | 1.11e-02 | weak, but the only knob on BNIP3's path |
+  | `dp14.CDKN1B_inactiv_by_Akt_pS473` | 6.9e-09 | genuinely flat |
+  | `dp14.IKKbeta_inactiv` | 1.1e-07 | genuinely flat |
+
+  `alpha_y` unfrozen 2026-09-05 and it is now the **most identifiable parameter
+  in the fit** — rel. sens 1.00, σ 0.55 decades, against `sa_beta_gal_decay`'s
+  0.95 / 0.85 — with the Fisher condition number unchanged (21 → 25). Adding it
+  moved fit-arm mean|err| 0.314 → 0.281 (D07) and 0.388 → 0.344 (D14), held-out
+  ρ +0.49 → +0.60, and MDM2's own error 0.357 → 0.267.
+
+  The consequence is that **reporters with no fitted parameter on their path
+  cannot move**, and the fit is dominated by one pair: `sa_beta_gal_decay` →
+  GLB1 carries sensitivity 1.559, 5x the next, so the optimizer spends its
+  budget there and every other reporter drifts as a by-product. BNIP3's only
+  knob is `CDKN1A_transcr` at 0.268; it moved 0.048 against 0.050 predicted by
+  the linearization. Nothing is wrong with the optimizer — the fit is doing
+  exactly what its sensitivities allow.
+
+  *Fix:* re-derive the frozen set from `sensitivity_jacobian` rather than from
+  a comment, and record the measured number beside each freeze so the next
+  reader can check it. Two candidates are already identified above
+  (`CDKN1A_inactiv_by_Akt_pS473`, `mTORC1_S2448_phos_by_AA_n_Akt_pS473`); BNIP3
+  needs one on the FoxO3a/mitophagy axis, which `JNK_pT183_inactiv` may be too
+  weak to supply.
+
+- [ ] **P0.45 — The p53 → CD95 edge cannot carry a measured induction, because
+  GZ06's p53 has no DC signal to give.** Filed 2026-09-05. Wild-type p53 raises
+  surface Fas 3–4× (Owen-Schaub 1995). Measured in the composite, days 7–14:
+  GZ06's mean p53 is `0.3519` in ctrl and `0.3504` in DDIS — the ψ-cancellation
+  the DDB2 reporter already documents — while only the amplitude separates
+  (`0.346–0.357` vs `0.014–0.705`). Any edge driving a *level* out of it must
+  therefore rectify the oscillation, and rectification is weak: mean Hill
+  occupancy at the placed `K = 0.498` gives ctrl/DDIS folds of **0.98 (n=2),
+  1.04 (n=3), 1.14 (n=4), 1.92 (n=7)**. `place_hill_gate` asks for n=7; p53
+  binds DNA as a tetramer, so n=4 is the ceiling with a structural basis, and
+  the edge ships at 1.15× against a measured 3–4×.
+
+  The consequence is measurable downstream. Kallenberger's `CD95act` is cubic
+  in `CD95`, so the deposit converts a real 12 → 42 receptor change into
+  **19.5% → 82.8% of Bid cleaved (4.25×)** at the placed ligand dose. The
+  composite's own arms differ by 17.33 → 19.91 in receptor and **38.7% → 43.8%
+  in death fraction (1.13×)**. The apoptosis arm is not the limitation; it
+  amplifies faithfully whatever it is handed.
+
+  This is P0.14 seen from a new direction — the demo's ctrl arm carries a p53
+  startup transient (peak 0.54) as large as the damaged arm's, so the control
+  is pre-sensitised (`CD95 = 17.33`, not the deposit's 12) before any damage.
+  Equilibrating fixes the *sign* (ctrl 17.33 < DDIS 19.91, inverted without it)
+  but not the magnitude.
+
+  *Not a defect in the edge*, and **not what the concordance scores.** The
+  numbers above are between-arm ratios at one instant. `NORMALIZATION =
+  "baseline"` divides each arm by its own day 0, so `Delta_sim` is a *within-arm*
+  rise over time. Measured at `macro_dt = 0.5` (P0.47 — an earlier reading of
+  this table at 3.5 carried ~10% splitting error and is superseded):
+
+  | gene | ctrl@7 | DDIS@7 | DDIS-ctrl@7 |
+  |---|---|---|---|
+  | CDKN1A | 1.0441 | 0.7837 | **-0.2604** |
+  | GLB1 | 1.5652 | 1.2613 | **-0.3039** |
+  | BNIP3 | 0.1612 | 0.0451 | **-0.1161** |
+  | MDM2 | 0.2384 | 0.2053 | **-0.0331** |
+  | DDB2 | 0.1896 | 0.4018 | +0.2122 |
+  | FAS | 0.1897 | 0.3835 | +0.1938 |
+
+  **Only two of six reporters separate the arms in the right direction**, and
+  one of them is the new FAS. All three DallePezze reporters separate them
+  *backwards* — the control arm rises more than the damaged one — which is P0.14
+  stated in the scored quantity rather than in prose. By D14 every reporter has
+  collapsed to =0 or gone negative.
+
+  Against data, FAS at D07 is `+0.3835` model vs `+0.510` measured (|err| 0.126,
+  the smallest of the six at that timepoint). On the held-out RAPA arm the fit
+  brings it to `+0.1819` vs `+0.164` measured — |err| **0.018**, the best of any
+  gene in the run.
+
+  So the p53 -> CD95 edge is weak in absolute receptor terms and simultaneously
+  one of the better-behaved things in this composite. Both readings are true;
+  quote the one that matches the quantity being discussed.
 
 - [ ] **P0.40 — `native_time_seconds = 1.0` launders a tool default into a
   fact.** COPASI writes `s` as its untouched default time unit; the importer

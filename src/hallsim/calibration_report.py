@@ -257,15 +257,26 @@ def plot_history(problem, history, path) -> None:
     ax3.set_xlabel("epoch")
     ax3.set_title("grad norm · LR scale  (dotted = loss spike)")
 
+    # `clamp` is optional, so an unclamped parameter is normalized against
+    # its own travelled range instead, dashed to keep the scales distinct.
     for name, ref in problem.param_refs.items():
-        lo, hi = ref.clamp
         vals = np.asarray([float(ph[name]) for ph in history.param_history])
+        clamped = ref.clamp is not None
+        lo, hi = ref.clamp if clamped else (vals.min(), vals.max())
+        if not (lo > 0 and hi > lo):
+            ax2.plot(
+                epochs,
+                np.full_like(vals, 0.5),
+                ls=":" if clamped else "--",
+                label=f"{name} (flat)",
+            )
+            continue
         norm = (np.log(vals) - np.log(lo)) / (np.log(hi) - np.log(lo))
-        ax2.plot(epochs, norm, label=name)
+        ax2.plot(epochs, norm, ls="-" if clamped else "--", label=name)
     ax2.set_ylim(-0.02, 1.02)
     ax2.set_xlabel("epoch")
-    ax2.set_ylabel("param (log-position in clamp range)")
-    ax2.set_title("parameter trajectories")
+    ax2.set_ylabel("param (log-position in range)")
+    ax2.set_title("parameter trajectories  (dashed = unclamped, own range)")
     ax2.legend(fontsize=7, loc="best")
 
     fig.tight_layout()

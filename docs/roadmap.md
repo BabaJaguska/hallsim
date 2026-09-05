@@ -43,6 +43,18 @@ step is the prerequisite for the next.
 
 ## Models & Validation
 
+* [ ] **`place_dose` — pick a stimulus level by measured contrast.** The
+  framework places a Hill gate from operating levels (`place_hill_gate`) and a
+  clamp rate from a measured flux (`place_clamp_rate`), but has nothing for the
+  commonest placement of all: *at what dose does this readout discriminate?* A
+  deposit's own stimulus is usually chosen to saturate — Kallenberger's
+  `CD95L = 16.6` moves commitment only 1.18× for a 3.5× receptor change, where
+  `CD95L = 2.0` moves it 4.25× — so composing at the deposited value silently
+  puts the model where it cannot respond. The rule is one line (argmax over the
+  dose axis of the readout difference between two levels of the contrasting
+  parameter) and it needs a simulation rather than arithmetic, so it belongs
+  next to `place_clamp_rate`, which already measures through the composite.
+  Done by hand in `one_off_scripts/k14_dose_place.py`; see P0.45.
 * [ ] **Lipid-metabolism extension** — Tighanimine et al. 2024 (*Nat Metab*, the paper behind GSE248823) identified a G3P/PEtn homeostatic switch as *causal* for senescence (p53 → glycerol kinase activation drives G3P↑; PCYT2 post-translational inactivation drives PEtn↑; lipid droplet biogenesis is the downstream effect). Adding a `LipidMetabolism` Process (states: G3P, PEtn; inputs: `p53_activity`, a PCYT2-PTM proxy; outputs: a senescence-amplifying signal that feeds back into the SASP axis) would let HallSim test their causal claim *in silico* — and the GSE248824 SuperSeries includes the paired metabolomics needed to validate it. HallSim recapitulates the G3P/PEtn → senescence amplification loop and predicts G3PP/ETNPPL overexpression as senomorphic.
 * [ ] **Trajectory-level validation** — GSE248823 has 3 timepoints per arm (DDIS: D00/D07/D14, OIS: D00/D04/D07). Current concordance uses two-endpoint deltas; matching predicted vs. measured pathway-score *trajectories* (rate of change, time-constant ordering across pathways) would be a substantially stronger validation than scalar deltas.
 * [ ] Validate against scRNA-seq (Tabula Muris Senis, Ma 2020 caloric restriction) — pseudobulk ssGSEA

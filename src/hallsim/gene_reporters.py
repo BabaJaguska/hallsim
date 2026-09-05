@@ -490,7 +490,7 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
 
 # ── Multi-hallmark composite reporters ─────────────────────────────
 #
-# These map directly to store paths in the DP14 + GZ06 composite,
+# These map directly to store paths in the DP14 + GZ06 + K14 composite,
 # unlike CANONICAL_REPORTERS which routes through ERiQ algebraic helpers.
 
 MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
@@ -562,6 +562,23 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
             "lag-free DC level (zero-phase mean) of the raw trajectory."
         ),
         reference="Barak et al. 1993, EMBO J 12:461–468",
+    ),
+    GeneReporter(
+        observable="k14/CD95_level",
+        gene_symbol="FAS",
+        sign=+1,
+        summary=zerophase_mean(tau=0.75),
+        description=(
+            "FAS/CD95/APO-1 — direct p53 transcription target through a "
+            "response element in the FAS first intron, mapped to the "
+            "receptor level the composite drives into Kallenberger 2014. "
+            "The only transcript reporter that arm admits: everything "
+            "downstream of the receptor is post-translational (DISC "
+            "assembly, caspase-8 self-cleavage, Bid truncation), and the "
+            "model conserves total Bid and total caspase-8, so neither BID "
+            "nor CASP8 has a transcript-level readout in it."
+        ),
+        reference="Owen-Schaub et al. 1995, Mol Cell Biol 15:3032–3040",
     ),
 ]
 

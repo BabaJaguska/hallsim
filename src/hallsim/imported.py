@@ -40,11 +40,13 @@ class ImportedODEProcess(Process):
     """
 
     native_time_seconds: float = 1.0
-    # Did the source actually declare its time unit, or is native_time_seconds
-    # a fallback guess (SBML default = seconds)? False means the clock is
-    # unverified: reconciling / composing it onto a shared axis can be silently
-    # 60×/3600×/86400× wrong. Set at import; True for hand-built processes.
-    native_time_declared: bool = eqx.field(static=True, default=True)
+    # Where native_time_seconds came from: ``"declared"`` (the source asserts a
+    # time unit), ``"supplied"`` (the caller passed the true value the source
+    # omits), or ``"assumed"`` (a fallback guess — SBML's default is seconds).
+    # Only ``"assumed"`` is unverified, and reconciling an assumed clock onto a
+    # shared axis is silently 60×/3600×/86400× wrong. Hand-built processes
+    # declare their own.
+    native_time_source: str = eqx.field(static=True, default="declared")
     time_scale: float = 1.0
     # The calibration surface — traced, so Calibrator/hallmarks differentiate
     # through it. Everything below is *structure*: names, index maps, port
@@ -144,7 +146,7 @@ class ImportedODEProcess(Process):
     def metadata(self):
         base = super().metadata()
         base["native_time_seconds"] = self.native_time_seconds
-        base["native_time_declared"] = self.native_time_declared
+        base["native_time_source"] = self.native_time_source
         base["time_scale"] = self.time_scale
         base["n_parameters"] = len(self._param_names)
         return base

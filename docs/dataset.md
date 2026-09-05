@@ -93,6 +93,7 @@ Five mechanistic observables ↔ five canonical reporter genes
 | `BNIP3` | `dp14/FoxO3a` |
 | `DDB2` | `gz06/x` |
 | `MDM2` | `gz06/y0` |
+| `FAS` | `k14/CD95_level` |
 
 <!-- reporters:end -->
 

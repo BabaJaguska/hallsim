@@ -4,7 +4,7 @@ A hallmark of aging (Lopez-Otin et al., 2023) is a signed severity handle in
 [-1, 1] modulating parameters across one or more Processes: -1 is the full
 opposite perturbation (mTOR suppression), 0 homeostasis, +1 severely impaired.
 A hallmark with no meaningful opposite — there is no negative DNA damage —
-uses the [0, 1] half. :data:`HALLMARK_REGISTRY` maps 4 of the 12 today; each
+uses the [0, 1] half. :data:`HALLMARK_REGISTRY` maps 5 of the 12 today; each
 new one is a single :class:`HallmarkHandle` entry.
 
 Transforms are **multiplicative of the current base**: ``base * f(severity)``,
@@ -399,6 +399,37 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             # GZ06's psi is not mapped here — it is driven by DP14's
             # DNA_damage via a topology edge (see multi_hallmark), so GI
             # severity reaches GZ06 through Irradiation → DNA_damage → psi.
+        ],
+    ),
+    "Altered Intercellular Communication": HallmarkHandle(
+        name="Altered Intercellular Communication",
+        description=(
+            "Signal a cell receives from other cells, rather than from its "
+            "own state. Drives the CD95L death-ligand challenge on "
+            "Kallenberger 2014 — severity is the normalized ligand level "
+            "(0 = unchallenged, which leaves that model exactly at rest, "
+            "1 = the placed dose). The ligand's potency per unit "
+            "concentration lives in the deposit's own rate constants and is "
+            "never touched by this dial."
+        ),
+        category="Integrative",
+        references=[
+            "Lopez-Otin et al. 2023",
+            "Kallenberger 2014 (BIOMD0000000524)",
+        ],
+        mappings=[
+            # severity=0 → 0 (no ligand), severity=1 → the placed dose.
+            # Skipped for composites without the challenge source.
+            ParameterMapping(
+                process_name="cd95l_challenge",
+                param_name="amplitude",
+                floor=0.0,
+                slope=1.0,
+                description=(
+                    "CD95L ligand level (challenge PulseSource amplitude): "
+                    "0 at severity=0, the placed dose at severity=1"
+                ),
+            ),
         ],
     ),
 }
