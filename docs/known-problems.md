@@ -368,6 +368,80 @@ The framework returns a plausible number and nothing indicates it is wrong.
   the documented one — silently left the conservation leaf. Cost a reviewer a
   basin scan that looked multistable and was not.
 
+- [ ] **P0.34 — A zero-delay SBML event fires at `t = macro_dt`, so a
+  scheduler knob silently sets the delivered dose.** Found 2026-09-04 on
+  Kollarovic 2016 (BIOMD0000000632), whose irradiation event triggers on
+  `time > 0`. The event cannot fire before the first sync point, so the model
+  integrates undosed until `macro_dt` and the dose lands late by that much.
+  Measured: **7.3% endpoint shift between `macro_dt` = 1 h and 6 h**, with no
+  warning and no indication in the result that the answer depends on a knob
+  that is nominally an accuracy setting.
+  This is not specific to one model — an event triggering at `t > 0` is the
+  standard SBML idiom for "deliver the insult at the start", and it became
+  reachable for a whole class of models when zero-delay events started
+  importing (P3.0).
+  *Fix:* fire due events at `t0` before the first continuous step, or refuse to
+  run when an event's trigger is already satisfied at `t0` and it has not been
+  applied. Either way the delivered exposure must not be a function of
+  `macro_dt`; `native_input_exposure` already exists to check that a driven
+  dose matches its calibration, and the same comparison should guard events.
+
+- [ ] **P0.33 — The leading eigenvalue can belong to a subsystem that is not
+  the one under investigation, so `max Re λ` looks flat while a fold sits in
+  another block.** Filed 2026-09-04 after it produced a false negative on a
+  live decision. Sister defect to P0.16: there the masking came from
+  conservation directions and was fixed by projecting onto the leaf; here it
+  comes from **block-triangular structure** and the leaf projection does not
+  touch it.
+
+  Measured on Kollarovic 2016 (BIOMD0000000632). A one-way cascade
+  `DNADamage → p53 → p21` feeds the cell-cycle block and reads nothing back:
+  `‖J[damage, cycle]‖ = 0.000e+00` exactly. The whole system's leading
+  eigenvalue is then **−0.014600467889**, which is `k4a` = **0.014600467889**
+  to twelve digits — a pure cascade mode whose eigenvector sits on `p21` and
+  `p53` (both 1.000) with 0.117 on `CycECdk2a`. The cell-cycle block's own
+  leading eigenvalue is **−0.31317**, two orders faster and invisible in the
+  reported number.
+
+  Consequence: sweeping a parameter and reading `max Re λ` returned −0.0146 at
+  every point, which was read as "no eigenvalue crosses zero, therefore no
+  fold". The model is in fact bistable over `DDR ∈ (5.852, 12.624)` γH2AX
+  foci, with a saddle carrying `max Re λ` **+1.67 to +23.4** between two stable
+  branches. The reported number was correct at every point sampled and
+  supported none of the conclusion drawn from it.
+
+  **`codim1_scan` does not merely miss the fold — it reaches one and throws it
+  away.** `critical_eigenvalue` returns the eigenvalue nearest the imaginary
+  axis. With a block-triangular mode pinned at −0.0146, that mode is the
+  nearest at *every* point on the sweep including the exact fold, so the guard
+  at `bifurcation.py:426` (`abs(lam.real) > 1e-3`) fires and the fold is logged
+  as "Newton failure, not a fold" and skipped. The folding mode at the saddle
+  is **+26.3081 /h** and never reaches the test. The guard is right in
+  principle — a Newton failure should not be reported as a bifurcation — and
+  wrong here because it is applied to the wrong eigenvalue.
+
+  Two failures compound, and both need addressing:
+  1. **Nothing surfaces the decomposition.** `spectrum` returns eigenvalues; it
+     does not say that the leading one belongs to a block that no state of
+     interest feeds back into. A Jacobian in block-triangular form has an
+     exactly decomposable spectrum, which is cheap to detect and cheap to
+     report. `critical_eigenvalue` and the `codim1_scan` guard must be taken
+     over the block that is actually folding, not over the whole spectrum.
+  2. **A single-seed continuation sweep is not a bistability test, and reads
+     like one.** Both branches of a hysteresis loop are stable, so `max Re λ` is
+     negative on each; only the fold itself shows a crossing, and continuation
+     from one start never leaves its branch. This is the same gap Phase 0 of
+     [senescence-model-rebuild.md](senescence-model-rebuild.md) already names
+     ("multi-seed sweep for hysteresis") — it now has a second instance and a
+     measured cost, so it should be built rather than kept as a note.
+
+  *Fix:* (a) report the block decomposition alongside the spectrum — per-block
+  leading eigenvalues and which states each block spans — so a masked mode is
+  visible rather than inferred; (b) provide the multi-seed equilibrium sweep
+  Phase 0 asks for, and make the single-seed path decline to answer "is this
+  bistable?" rather than answering it wrongly. Until (b) exists, no
+  no-hysteresis claim from a continuation sweep is admissible evidence.
+
 - [x] **P0.16 — `bifurcation.equilibrium` and `hopf_scan` report zero equilibria
   for any model with a conserved moiety.** *Fixed 2026-08-28.* `equilibrium`,
   `spectrum`, `critical_eigenvalue`, `first_lyapunov_coefficient`,
@@ -884,6 +958,31 @@ The framework returns a plausible number and nothing indicates it is wrong.
   defaults" and means the opposite.
   *Fix:* `if semantic_validation is not False and semantic_validation is not
   None:`. 15 minutes.
+
+## P0.35 — the stop rule fired: the Scheduler is 2395× slower than the
+## hand-rolled path on an event composite
+
+- [ ] **P0.35 — `Scheduler` + `expand_events` costs 223.80 s where one jitted
+  `dfx.diffeqsolve` over the same RHS costs 0.0934 s warm — 2395×.** Measured
+  2026-09-04 on Kollarovic 2016 (BIOMD0000000632, 8 species, one event), both
+  sides same maths, same machine, reported in
+  `docs/review-kollarovic2016-maths.md` §7.
+  **This is the halt condition in CLAUDE.md**, not a performance note: a user
+  is 2395× better off bypassing the framework on this shape of problem, which
+  is the single most informative signal the repo can produce about itself.
+  The cost is **~1.2 s of fixed overhead per macro step, independent of span**,
+  so it scales with the number of sync points rather than with the work done.
+  An event composite is exactly the case that forces many macro steps, so the
+  overhead lands hardest on the feature that motivated the multi-rate design.
+  Note this is dispatch and orchestration cost, not solver cost — the same RHS
+  integrates in 93 ms.
+  *Fix:* find what costs 1.2 s per macro step and remove it. Candidates to
+  measure first: re-tracing the group solves per macro step (see the "tracing
+  is not compilation" invariant in CLAUDE.md — 0 recompiles is necessary, not
+  sufficient), rebuilding the store view or the port dicts per step, and
+  event-condition evaluation outside jit. Until this is closed, no timing
+  number from an event composite means anything, and the multi-rate path
+  cannot be recommended for the models it was built for.
 
 ## P1 — cannot tell whether a result is trustworthy
 

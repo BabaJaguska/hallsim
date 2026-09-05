@@ -41,9 +41,24 @@ class ModelCandidate:
     #: Free text the source carries — abstract, notes, concept tags. Searched
     #: client-side for repositories with no full-text endpoint.
     description: str = ""
+    #: The repository's own curation verdict, verbatim (BioModels:
+    #: "CURATED" / "NON_CURATED"). Empty when not fetched. ``curated`` is
+    #: inferred from the accession prefix and is only a guess until this is
+    #: filled — an uncurated deposit typically carries no ontology
+    #: annotations and no declared time unit, which decides whether it can
+    #: be composed and checked.
+    curation: str = ""
+    #: Title of the publication the deposit is attached to, if the record
+    #: names one. An empty string on a record that has a paper means the
+    #: deposit is not linked to it.
+    publication: str = ""
+    #: Every filename in the deposit, main and additional. A deposit's
+    #: supplementary files often carry the fitting data
+    #: :func:`hallsim.intake.published_fit_chi2` needs.
+    files: tuple = ()
 
     def fetch(self) -> Path:
-        """Download to the local cache and return the SBML path."""
+        """Download the main model file to the local cache; return its path."""
         if self.source != "biomodels":
             raise NotImplementedError(
                 f"no fetcher for source {self.source!r}; open {self.url} and "
@@ -53,9 +68,161 @@ class ModelCandidate:
 
         return Path(_download_biomodel_to_cache(self.id))
 
+    def record(self) -> dict:
+        """The repository's full record for this model."""
+        if self.source != "biomodels":
+            raise NotImplementedError(
+                f"no record API for source {self.source!r}"
+            )
+        return biomodels_record(self.id)
+
+    def enriched(self) -> "ModelCandidate":
+        """Copy with ``curation``, ``publication`` and ``files`` read from the
+        record rather than guessed. One request; search does not do this for
+        every hit."""
+        return _from_record(self.id, self.record(), fallback=self)
+
+    def fetch_all(self, dest: Path | str | None = None) -> list[Path]:
+        """Download every file in the deposit, not only the model, and return
+        the local paths.
+
+        A deposit's additional files are where the provenance lives: a README
+        saying what was deposited, and often the fitting data that licenses
+        every later claim about the model
+        (:func:`hallsim.intake.published_fit_chi2`). Fetching only the SBML
+        leaves that on the server.
+        """
+        if self.source != "biomodels":
+            raise NotImplementedError(f"no fetcher for source {self.source!r}")
+        return download_biomodel_files(self.id, dest=dest)
+
     def __str__(self) -> str:
         mark = "curated" if self.curated else "uncurated"
         return f"[{self.source}:{self.id}] {self.name} ({self.format}, {mark})"
+
+
+BIOMODELS_RECORD = "https://www.ebi.ac.uk/biomodels/{model_id}"
+BIOMODELS_DOWNLOAD = (
+    "https://www.ebi.ac.uk/biomodels/model/download/{model_id}"
+)
+
+
+def biomodels_record(model_id, timeout: float = 30.0) -> dict:
+    """The full BioModels record for ``model_id``.
+
+    Carries what the search hit does not: the curation verdict, the linked
+    publication, and the deposit's file list. `curationStatus` is the one that
+    changes decisions — a `NON_CURATED` deposit has had no ontology
+    annotations or unit declarations added, so semantic composition checks are
+    blind on it and its clock is a guess.
+    """
+    return _get_json(
+        BIOMODELS_RECORD.format(model_id=_accession(model_id)),
+        {"format": "json"},
+        timeout,
+    )
+
+
+def _accession(model_id) -> str:
+    """``10`` → ``BIOMD0000000010``; a string accession passes through."""
+    if isinstance(model_id, int):
+        return f"BIOMD{model_id:010d}"
+    return str(model_id)
+
+
+def _record_filenames(record: dict) -> tuple[str, ...]:
+    files = record.get("files") or {}
+    names = [
+        f.get("name", "")
+        for group in ("main", "additional")
+        for f in (files.get(group) or [])
+    ]
+    return tuple(n for n in names if n)
+
+
+def _from_record(model_id, record: dict, fallback=None) -> "ModelCandidate":
+    """Build a candidate from a full record, keeping ``fallback``'s search
+    fields where the record says nothing."""
+    accession = _accession(model_id)
+    publication = (record.get("publication") or {}).get("title") or ""
+    curation = record.get("curationStatus") or ""
+    return ModelCandidate(
+        source="biomodels",
+        id=accession,
+        name=record.get("name") or getattr(fallback, "name", ""),
+        format=record.get("format") or getattr(fallback, "format", "SBML"),
+        url=getattr(fallback, "url", "")
+        or f"https://www.ebi.ac.uk/biomodels/{accession}",
+        curated=(
+            (curation.upper() == "CURATED")
+            if curation
+            else accession.startswith("BIOMD")
+        ),
+        submitter=getattr(fallback, "submitter", None),
+        kind=getattr(fallback, "kind", "unknown"),
+        description=getattr(fallback, "description", ""),
+        curation=curation,
+        publication=publication,
+        files=_record_filenames(record),
+    )
+
+
+def download_biomodel_files(
+    model_id,
+    dest: "Path | str | None" = None,
+    timeout: float = 60.0,
+) -> list["Path"]:
+    """Download every file in a BioModels deposit; return the local paths.
+
+    ``_download_biomodel_to_cache`` fetches the model and stops there, but the
+    deposit's other files are where the provenance is: a README stating what
+    was deposited and under what conditions, and — for the minority of papers
+    that deposit it — the fitting data that
+    :func:`hallsim.intake.published_fit_chi2` scores against. Defaults to
+    ``~/.cache/hallsim/biomodels/<accession>/``.
+
+    A file that comes back empty is not written: the download endpoint 302s,
+    and a client that does not follow the redirect gets a silent zero-byte
+    body rather than an error.
+    """
+    import urllib.parse
+
+    accession = _accession(model_id)
+    record = biomodels_record(accession, timeout=timeout)
+    names = _record_filenames(record)
+    out_dir = (
+        Path(dest)
+        if dest is not None
+        else Path.home() / ".cache" / "hallsim" / "biomodels" / accession
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+    for name in names:
+        target = out_dir / name
+        if target.exists() and target.stat().st_size:
+            written.append(target)
+            continue
+        url = BIOMODELS_DOWNLOAD.format(model_id=accession)
+        query = urllib.parse.urlencode({"filename": name})
+        request = urllib.request.Request(
+            f"{url}?{query}", headers={"User-Agent": USER_AGENT}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read()
+        except Exception as exc:
+            log.warning("%s: could not fetch %r (%s)", accession, name, exc)
+            continue
+        if not body:
+            log.warning("%s: %r came back empty — skipped", accession, name)
+            continue
+        target.write_bytes(body)
+        written.append(target)
+    log.info(
+        "%s: %d/%d file(s) -> %s", accession, len(written), len(names), out_dir
+    )
+    return written
 
 
 def _get_json(url: str, params: dict, timeout: float) -> dict:

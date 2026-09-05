@@ -335,31 +335,59 @@ branch and an arrested branch.
 
 **Requirement, unchanged:** two stable states separated by a separatrix,
 confirmed on the projected leaf with the Phase-0 bifurcation tools, not
-asserted. **No candidate currently meets it.** Both models measured so far are
-recorded below with what each does and does not supply, so neither gets
-proposed again on the strength of its title.
+asserted. **No usable candidate.** Three have been measured and all three are
+recorded below with what each does and does not supply, so none gets proposed
+again on the strength of its title: Kollarovic 2016 has the bistability and
+fails reproduction; Yao 2008 has the bistability and is the wrong switch
+(its arrested branch is quiescence); DP14 has no second branch at all.
 
-**Being added: Kollarovic et al. 2016, BIOMD0000000632** — "To senesce or not
-to senesce: how primary human fibroblasts decide their cell fate after DNA
-damage". Human fibroblasts and DNA damage, which is the benchmark's cell type
-and the benchmark's insult; 8 species, 14 reactions.
+**Rejected: Kollarovic et al. 2016, BIOMD0000000632** — "To senesce or not to
+senesce: how primary human fibroblasts decide their cell fate after DNA
+damage". Reviewed 2026-09-04 (`docs/review-kollarovic2016-{wetlab,maths}.md`).
+Rejected on one ground: **the deposit does not reproduce its own paper**, and
+the repo does not wire a model it cannot reproduce.
 
-- Its published IC **is** a rest state: ‖f(y₀)‖/‖y₀‖ = **1.3e-16**, against
-  DP14's 1.29e+03. Acceptance test 1 passes outright, and undosed it sits at
-  the proliferating state and stays — test 2.
-- The dose is delivered by an event assigning to the parameter `TAF`. With
-  P3.0 fixed it imports whole and the dose lands: at 0/5/20 Gy, `TAF`
-  0.506/2.684/4.861, p21 1.00/3.66/10.31, CycE-Cdk2 activity
-  2.28/0.008/0.00006.
-- **It is not a switch.** Sweeping `TAF` up from a proliferating start and back
-  down from an arrested one gives identical branches to four decimals at every
-  point, with max Re λ pinned at −0.0146 throughout: no fold, no hysteresis.
-  Steep and graded is not bistable. Whatever "decision" the paper reports comes
-  from a threshold plus cell-to-cell variability, not from two basins.
-- **So it fills the missing proliferation readout, not the switch.** It gives a
-  CDK2-activity observable with a correct-direction dose–response and a real
-  baseline — the thing §4's table marks "all of it, no proliferation readout
-  exists". The commitment mechanism is still absent.
+What was measured, so it is not re-litigated:
+
+- **The bistability is real** and the earlier no-hysteresis result recorded here
+  was wrong. Two coexisting stable fixed points over
+  `DDR ∈ (5.852, 12.624)` γH2AX foci — the paper's own "six to 12 double-strand
+  breaks" — with a saddle (max Re λ +1.67 to +23.4) between branches at
+  1.0449 and 0.0300. On a pulse-at-fixed-background protocol it passes
+  acceptance test 4, with an acute threshold of ≈3 Gy falling to 2.04 Gy as
+  background rises. The composite would have gained a genuine commitment
+  mechanism.
+- **It fails reproduction anyway.** Total Cdk2 at 10 Gy floors structurally at
+  0.3775 against a measured 0.10 — the model cannot fit its own headline
+  observable, and the authors' fit report shows it. The deposit's
+  permanent-arrest dose is 10.71 Gy against the 15 Gy the paper states.
+  Figure 1's "≥5 Gy senesces" holds only to day 7; the paper's own 5 Gy EdU
+  returns to 0.73 ± 0.09 by day 14, in the same Results section.
+- **The mechanism is refuted by the paper's own knockdown.** Cdk2 siRNA drove
+  CDK2 protein to 0.09 — below what 10 Gy achieves — and EdU stayed at 0.96.
+  The CDK1-redundancy explanation exists only as a redrawn diagram; the
+  deposit has no Cdk1.
+- **Nothing is constrained.** ±1 SD on `BaseDNAdamage` (2.16 ± 1.00) moves the
+  permanent-arrest dose from 4.18 to 20.24 Gy — at −1 SD both 10 and 20 Gy
+  senesce, at +1 SD both recover. Eleven of fifteen fitted parameters have SDs
+  over 100× their value; five sit on box bounds.
+- **`CycECdk2a` under-reads the arrested state by 2–3 orders of magnitude**
+  (measured EdU floor 0.02–0.06 against fitted 7.2e-5–6.8e-3), and that is the
+  state the composite would have lived in. It also has no canonical gene, so it
+  could only ever be a phenotype observable scored off-array.
+
+Two findings from this review that outlive it and change other plans:
+
+- **Do not wire GZ06's p53 into a model like this.** `p53` in the deposit is
+  the paper's `DDRSignal` — never measured, 47.5 h time constant, with `p21`
+  slaved to it exactly (`va5_k ≡ k6a`). It is not a p53 pool.
+- **A p16-based switch has no transcriptional footprint in the benchmark**, so
+  the Phase-2 plan as written cannot be scored against GSE248823 even if a
+  model is found. In the data, `CDKN2A` moves +0.056/+0.254 while the E2F
+  output collapses (`MKI67` −3.60, `TOP2A` −3.57, `CDK1` −3.04). Kollarovic's
+  own p16-siRNA null, against a working p21-siRNA positive control, points the
+  same way for the *immediate* arrest. **Phase 2 needs restating around a
+  readout the benchmark can actually see**, or around a different dataset.
 
 **Not being used: Yao et al. 2008, BIOMD0000000318.** Its bistability is real
 and was measured — at serum `S = 1`, three non-negative fixed points with

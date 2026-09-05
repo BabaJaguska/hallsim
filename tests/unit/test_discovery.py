@@ -103,6 +103,88 @@ def test_fetch_names_the_manual_route_for_unsupported_sources():
         c.fetch()
 
 
+# --- BioModels record + multi-file fetch -----------------------------------
+# A search hit says what a model is called; the record says whether anyone
+# curated it and what else the deposit ships. Both change decisions, and
+# neither was reachable before.
+
+
+def test_accession_pads_an_integer_id():
+    from hallsim.discovery import _accession
+
+    assert _accession(10) == "BIOMD0000000010"
+    assert _accession(632) == "BIOMD0000000632"
+    # a string accession passes through, including the uncurated MODEL branch
+    assert _accession("MODEL2307050001") == "MODEL2307050001"
+
+
+def test_record_filenames_covers_main_and_additional():
+    from hallsim.discovery import _record_filenames
+
+    record = {
+        "files": {
+            "main": [{"name": "il6_model.xml"}],
+            "additional": [{"name": "ReadMe.txt"}, {"name": ""}],
+        }
+    }
+    # the empty name is dropped, and additional files are not lost
+    assert _record_filenames(record) == ("il6_model.xml", "ReadMe.txt")
+    assert _record_filenames({}) == ()
+
+
+def test_from_record_reads_curation_rather_than_guessing_it():
+    from hallsim.discovery import _from_record
+
+    # An uncurated deposit in the MODEL branch: the accession prefix and the
+    # record agree here, but the record is the one that is authoritative.
+    c = _from_record(
+        "MODEL2307050001",
+        {
+            "name": "Sobotta2017 - IL-6-induced JAK1-STAT3-signaling",
+            "curationStatus": "NON_CURATED",
+            "publication": {"title": "Model Based Targeting"},
+            "files": {"main": [{"name": "il6_model.xml"}]},
+        },
+    )
+    assert c.curation == "NON_CURATED"
+    assert c.curated is False
+    assert c.publication == "Model Based Targeting"
+    assert c.files == ("il6_model.xml",)
+
+
+def test_from_record_curation_overrides_the_accession_guess():
+    from hallsim.discovery import _from_record
+
+    # A BIOMD accession would be guessed curated; the record says otherwise
+    # and must win, because that is the field that decides whether ontology
+    # and unit annotations exist.
+    c = _from_record("BIOMD0000000632", {"curationStatus": "NON_CURATED"})
+    assert c.curated is False
+    c = _from_record("BIOMD0000000632", {"curationStatus": "CURATED"})
+    assert c.curated is True
+
+
+def test_from_record_falls_back_to_the_prefix_when_unstated():
+    from hallsim.discovery import _from_record
+
+    assert _from_record("BIOMD0000000632", {}).curated is True
+    assert _from_record("MODEL2307050001", {}).curated is False
+
+
+def test_candidate_record_and_fetch_all_refuse_non_biomodels_sources():
+    c = ModelCandidate(
+        source="modeldb",
+        id="3343",
+        name="n",
+        format="XPP",
+        url="https://modeldb.science/3343",
+        curated=True,
+    )
+    for call in (c.record, c.fetch_all):
+        with pytest.raises(NotImplementedError):
+            call()
+
+
 # --- SBML event delays -----------------------------------------------------
 # Here only because it shares the "what a repository actually hands you" theme:
 # COPASI writes <delay>0</delay> on every event it exports, so the presence of
