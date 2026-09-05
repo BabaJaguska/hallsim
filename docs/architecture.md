@@ -156,7 +156,15 @@ The importer:
 - translates `<event>` blocks (see `hallsim.sbml_events`), including those
   whose assignment target is a parameter rather than a species — the target is
   promoted onto the owning process via `with_param_input` so the assignment
-  reaches the rate laws. A nonzero delay or a priority is still refused.
+  reaches the rate laws. A nonzero delay or a priority is still refused, and a
+  zero delay is not a delay (COPASI writes `<delay>0</delay>` on every export).
+  **A `Composite` expands a member process's events automatically**; discarding
+  them is `proc.without_events()`, written at the call site so the discard is
+  visible where it is decided. `intake.triage_sbml` rejects two trigger
+  pathologies before import: complementary triggers sharing a boundary, which
+  make the outcome depend on round-off at the crossing, and equalities against
+  time, which make the scheduler's `macro_dt` decide whether the event fires at
+  all;
 - extracts MIRIAM annotations into `Port.ontology` from species CVTerms.
 
 Discover-then-import is two calls — the catalog is directly usable by an agent:

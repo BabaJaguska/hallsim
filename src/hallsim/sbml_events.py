@@ -291,6 +291,91 @@ def _eval_ir(ir: tuple, t, view: dict):
     raise UnsupportedEventFeatureError(f"cannot evaluate IR node {tag!r}")
 
 
+# ── trigger pathologies detectable without running the model ────────
+
+#: Relational operators that partition a value at a boundary. Each maps to the
+#: operator whose region is its exact complement *including* the boundary
+#: point, which is the pair that overlaps at one value.
+_OVERLAPPING = {("leq", "gt"), ("gt", "leq"), ("geq", "lt"), ("lt", "geq")}
+
+
+def _relations(ir: tuple) -> list[tuple]:
+    """Every relational comparison in a trigger, as ``(op, lhs, rhs)``."""
+    if not isinstance(ir, tuple) or not ir:
+        return []
+    tag = ir[0]
+    out = []
+    if tag in ("leq", "geq", "lt", "gt", "eq", "neq"):
+        out.append((tag, ir[1], ir[2]))
+    kids = ir[-1] if tag in ("add", "mul", "and", "or", "func") else ir[1:]
+    for k in kids:
+        if isinstance(k, tuple):
+            out.extend(_relations(k))
+        elif isinstance(k, list):
+            for sub in k:
+                out.extend(_relations(sub))
+    return out
+
+
+def _references_time(ir: tuple) -> bool:
+    return _has_time(ir)
+
+
+def trigger_pathologies(events) -> list[str]:
+    """Trigger defects that make a model's output round-off dependent.
+
+    Both are properties of the trigger expressions alone, so they are decided
+    without integrating anything, and both were found the expensive way — by a
+    referee running tolerance sweeps — on Stucki 2005 (BIOMD0000001059).
+
+    **Chattering pairs.** Two triggers testing the same quantity against the
+    same constant with complementary operators that *share* the boundary
+    (``x <= c`` and ``x > c``) are both satisfiable at ``x == c`` — which is
+    exactly where an event root-finder lands. Which one fires is then decided
+    by round-off in the last Newton step. On Stucki that returned
+    ``cascade(7000)`` as 2.0e+01 on one invocation and 7.28e+20 on another,
+    same solver and same tolerances. A latch needs a hysteresis band (arm at
+    20, disarm at 18) so no value satisfies both.
+
+    **Equality against time.** ``time == c`` is true on a set of measure zero,
+    so whether it ever fires depends on whether a sync point lands exactly on
+    ``c``. That makes the scheduler's ``macro_dt`` decide whether the model
+    receives its input at all, not merely when (P0.34). A threshold crossing
+    (``time >= c``) is the form that survives discretisation.
+    """
+    found: list[str] = []
+    triggers = [
+        (getattr(e, "_name", f"event{i}"), e._trigger_ir)
+        for i, e in enumerate(events)
+    ]
+
+    for name, ir in triggers:
+        for op, lhs, rhs in _relations(ir):
+            if op == "eq" and (_references_time(lhs) or _references_time(rhs)):
+                found.append(
+                    f"event {name!r} triggers on an equality against time; "
+                    f"whether it fires depends on the integrator landing "
+                    f"exactly on that instant — use a threshold crossing"
+                )
+
+    for i, (name_a, ir_a) in enumerate(triggers):
+        for name_b, ir_b in triggers[i + 1 :]:
+            for op_a, lhs_a, rhs_a in _relations(ir_a):
+                for op_b, lhs_b, rhs_b in _relations(ir_b):
+                    if (op_a, op_b) not in _OVERLAPPING:
+                        continue
+                    if lhs_a != lhs_b or rhs_a != rhs_b:
+                        continue
+                    found.append(
+                        f"events {name_a!r} and {name_b!r} have complementary "
+                        f"triggers sharing their boundary ({op_a}/{op_b} on the "
+                        f"same expression), so both are satisfiable at the "
+                        f"crossing and which fires is decided by round-off — "
+                        f"a latch needs a hysteresis band"
+                    )
+    return found
+
+
 # ── the EVENT process ──────────────────────────────────────────────
 
 

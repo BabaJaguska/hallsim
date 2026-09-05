@@ -1031,3 +1031,45 @@ class TestBlockPorts:
         assert float(store["c/a"]) == 1.0
         assert float(store["c/b"]) == 2.0
         assert float(store["c/c"]) == 3.0
+
+
+def test_event_and_discrete_order_survives_a_pytree_round_trip():
+    """Firing order is semantic — the Scheduler applies each delta immediately,
+    so a later process reads what an earlier one wrote. JAX sorts dict keys on
+    any flatten/unflatten, so insertion order would differ between a solo run
+    and a jitted or batched one (P0.41)."""
+    import equinox as eqx
+    import jax
+
+    from hallsim.composite import Composite
+    from hallsim.process import Port, PortRole, Process, ProcessKind
+
+    class Ev(Process):
+        kind: ProcessKind = ProcessKind.EVENT
+
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.LATCHED, default=0.0)}
+
+        def condition(self, t, state):
+            return t > 1.0
+
+        def handler(self, t, state):
+            return {"x": 1.0}
+
+    # inserted deliberately out of alphabetical order
+    comp = Composite(
+        processes={"z_evt": Ev(), "a_evt": Ev()},
+        topology={"z_evt": {"x": "s/x"}, "a_evt": {"x": "s/x"}},
+        validate=False,
+        semantic_validation=False,
+    )
+    expected = ["a_evt", "z_evt"]
+    assert list(comp.event_processes()) == expected
+
+    leaves, treedef = jax.tree_util.tree_flatten(comp)
+    round_tripped = jax.tree_util.tree_unflatten(treedef, leaves)
+    assert list(round_tripped.event_processes()) == expected
+    assert (
+        list(eqx.tree_at(lambda c: c.initial, comp, {}).event_processes())
+        == expected
+    )

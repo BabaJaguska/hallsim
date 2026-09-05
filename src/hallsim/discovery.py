@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -291,6 +292,10 @@ def search_biomodels(
 # first search against such a source pays the build; later ones are local.
 # ---------------------------------------------------------------------------
 
+#: Terms longer than this may prefix-match a word; shorter ones, which
+#: in practice are acronyms, must match a whole word.
+STEM_MIN_CHARS = 3
+
 CACHE_TTL_DAYS = 30.0
 INDEX_WORKERS = 16
 
@@ -359,14 +364,25 @@ def _score(query: str, *fields: str) -> int:
     """Match count for ``query``'s terms across ``fields``; 0 means no match.
 
     Every term must appear somewhere, so a two-word query does not return
-    everything matching either word. Substring rather than token matching, so
-    'senesc' finds 'senescence' and 'senescent'.
+    everything matching either word.
+
+    A term longer than ``STEM_MIN_CHARS`` matches at a word boundary and may
+    run on, so 'senesc' finds 'senescence' and 'senescent'. A shorter one must
+    match a whole word, because short queries are acronyms ('ROS', 'p53') and
+    prefix-matching them is indiscriminate: plain substring matching had 'ros'
+    hitting 'interossei' and 'cross-bridge', and boundary-anchored prefix
+    matching still hits 'Rosenbaum'. The cut is a convention, not a discovery —
+    it separates acronyms from stems by the only signal available here.
     """
     haystack = " ".join(f.lower() for f in fields if f)
     terms = [t for t in query.lower().split() if t]
-    if not terms or not all(t in haystack for t in terms):
+    if not terms:
         return 0
-    return sum(haystack.count(t) for t in terms)
+    counts = []
+    for t in terms:
+        tail = "" if len(t) > STEM_MIN_CHARS else r"\b"
+        counts.append(len(re.findall(r"\b" + re.escape(t) + tail, haystack)))
+    return sum(counts) if all(counts) else 0
 
 
 def _ranked(scored: list[tuple[int, ModelCandidate]], limit: int):

@@ -107,6 +107,16 @@ def triage_process(
     n_species = len(process.ports_schema())
     n_parameters = len(getattr(process, "parameters", {}) or {})
 
+    # Trigger defects are properties of the event expressions, so they cost
+    # one tree walk and are decided before anything is integrated. They block
+    # rather than flag: a model whose output depends on round-off at an event
+    # boundary has no reproducible behaviour to screen.
+    events = getattr(process, "_events", ())
+    if events:
+        from hallsim.sbml_events import trigger_pathologies
+
+        blockers.extend(trigger_pathologies(events))
+
     time_declared, coverage = False, 0.0
     if xml_path is not None:
         from hallsim.sbml_import import (

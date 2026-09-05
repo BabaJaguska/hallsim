@@ -427,7 +427,15 @@ class Composite(eqx.Module):
                 }
                 for proc_name, topo in flat_topology.items()
             }
-        self.processes = flat_processes
+        # Name-sorted at construction, not at each consumer. JAX sorts dict
+        # keys whenever it flattens a pytree, so an unsorted `processes` makes
+        # a composite iterate differently before and after any jit / vmap /
+        # tree_at round-trip. Order is semantic wherever the Scheduler applies
+        # deltas in sequence (EVENT and DISCRETE dispatch), and guarding that
+        # per call site is how the same defect reached `build_initial_store`
+        # and then EVENT ordering (P0.41). Sorting here makes it unreachable:
+        # sorted order is exactly what survives the round-trip.
+        self.processes = {n: flat_processes[n] for n in sorted(flat_processes)}
         self.topology = {
             proc_name: {port: as_paths(entry) for port, entry in topo.items()}
             for proc_name, topo in flat_topology.items()
@@ -781,21 +789,32 @@ class Composite(eqx.Module):
             if p.kind == ProcessKind.CONTINUOUS
         }
 
-    def discrete_processes(self) -> dict[str, Process]:
-        """All DISCRETE kind processes."""
+    def _kind(self, kind: ProcessKind) -> dict[str, Process]:
+        """Processes of one kind, **name-sorted**.
+
+        Sorted rather than in insertion order for the same reason
+        :func:`~hallsim.store.build_initial_store` tie-breaks by name: JAX
+        sorts dict keys when it flattens a pytree, so ``processes`` comes back
+        sorted from any ``jax.jit`` / ``vmap`` / ``eqx.tree_at`` round-trip of
+        the owning Composite. The Scheduler fires these in iteration order and
+        applies each delta immediately, so a later process sees the state an
+        earlier one wrote — meaning insertion order would make a solo run and a
+        round-tripped run fire interacting events in different orders and reach
+        different states.
+        """
         return {
-            n: p
-            for n, p in self.processes.items()
-            if p.kind == ProcessKind.DISCRETE
+            n: self.processes[n]
+            for n in sorted(self.processes)
+            if self.processes[n].kind is kind
         }
 
+    def discrete_processes(self) -> dict[str, Process]:
+        """All DISCRETE kind processes, name-sorted (see :meth:`_kind`)."""
+        return self._kind(ProcessKind.DISCRETE)
+
     def event_processes(self) -> dict[str, Process]:
-        """All EVENT kind processes."""
-        return {
-            n: p
-            for n, p in self.processes.items()
-            if p.kind == ProcessKind.EVENT
-        }
+        """All EVENT kind processes, name-sorted (see :meth:`_kind`)."""
+        return self._kind(ProcessKind.EVENT)
 
     # -----------------------------------------------------------------
     # Timescale auto-grouping

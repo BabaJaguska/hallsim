@@ -368,6 +368,50 @@ The framework returns a plausible number and nothing indicates it is wrong.
   the documented one — silently left the conservation leaf. Cost a reviewer a
   basin scan that looked multistable and was not.
 
+- [x] **P0.41 — EVENT and DISCRETE processes fired in dict-insertion order, so
+  a jit/vmap round-trip changed which one fired first.** *Fixed 2026-09-04, in
+  the commit that filed it.* Found by asking whether the round-off dependence
+  in Stucki 2005 was our defect. It was not — COPASI reproduces that on the
+  same file — but the question surfaced this, which is ours.
+
+  `Composite.event_processes()` and `discrete_processes()` preserved
+  `self.processes` insertion order. The Scheduler iterates them and applies
+  each delta **immediately** (`scheduler.py:1106-1131`), so a later process
+  reads the state an earlier one wrote — order is semantic whenever two of
+  them touch the same path.
+
+  And the order was not stable. `store.py:120` already documents the hazard for
+  `build_initial_store`: *JAX sorts dict keys when it flattens a pytree, so
+  `processes` comes back sorted from any `jax.jit` / `vmap` / `eqx.tree_at`
+  round-trip.* Measured on a two-event composite inserted as
+  `["z_evt", "a_evt"]`: before a round-trip the firing order is
+  `['z_evt', 'a_evt']`, after `jax.tree_util` flatten/unflatten **and** after
+  `eqx.tree_at` it is `['a_evt', 'z_evt']`. So a solo run and a jitted or
+  batched run of the same composite could fire interacting events in opposite
+  orders and reach different states — the same class of defect as
+  `test_batched_matches_solo` under P0.1.
+
+  *Fixed at the container, not the consumers.* `Composite.__init__` now stores
+  `processes` name-sorted, so every consumer inherits stable order and the
+  hazard is unreachable rather than guarded.
+
+  **That is the actual lesson, and it is why this recurred.** The same defect
+  was found and fixed in `build_initial_store` (P0.15-era), where the remedy
+  was a local sort at that one call site. `Composite` has **nine** places that
+  iterate `self.processes`; before this fix two sorted and seven did not, so
+  every new consumer was a fresh chance to reintroduce it — and EVENT dispatch
+  duly did. An invariant enforced per call site is not enforced. The first
+  patch attempted here name-sorted the two accessors, which would have been
+  the same mistake a third time; sorting at construction is what makes it
+  structural. Sorted order is also exactly what survives the round-trip, so
+  solo and round-tripped runs agree by construction.
+
+  **What this does not fix, and must not be confused with it:** when two
+  events are simultaneously satisfiable, *some* order still decides the
+  outcome, and the model has not specified one. Sorting makes our answer
+  reproducible; it does not make it right. A model in that position is
+  rejected at intake by P0.38.
+
 - [ ] **P0.38 — Two classes of unrunnable event model are detectable from the
   trigger syntax alone, and triage imports them anyway.** Filed 2026-09-04 from
   the Stucki 2005 referee pass. Both are syntactic matches on

@@ -38,9 +38,19 @@ def test_score_requires_every_term():
     assert _score("", "anything") == 0
 
 
-def test_score_is_substring_so_stems_match():
+def test_score_matches_a_stem_at_a_word_boundary():
     assert _score("senesc", "cellular senescence") > 0
     assert _score("senesc", "senescent fibroblast") > 0
+
+
+def test_score_does_not_match_mid_word():
+    """Plain substring matching made 'ros' hit 'interossei', 'Rosenbaum' and
+    'cross-bridge', so a Physiome search for reactive oxygen species returned
+    hand muscles and cardiac cross-bridge models."""
+    assert _score("ros", "dorsal interossei I") == 0
+    assert _score("ros", "cross-bridge model of shortening heat") == 0
+    assert _score("ros", "Zeng, Laurita, Rosenbaum, Rudy, 1995") == 0
+    assert _score("ros", "reactive oxygen species ROS") > 0
 
 
 def test_score_ranks_by_term_count():
@@ -250,3 +260,58 @@ def test_nonconstant_delay_is_nan_so_it_is_rejected():
     # a state- or time-dependent delay is not a number; NaN compares unequal
     # to zero, so the caller rejects it rather than silently dropping it
     assert math.isnan(sbml_events._delay_seconds(_Event(_Delay(_Math(None)))))
+
+
+# --- Event trigger pathologies ---------------------------------------------
+# Both are properties of the trigger expressions alone, so triage decides them
+# without integrating anything. Both were originally found by a referee running
+# tolerance sweeps in COPASI on Stucki 2005 (BIOMD0000001059).
+
+
+class _Ev:
+    def __init__(self, name, trigger_ir):
+        self._name = name
+        self._trigger_ir = trigger_ir
+
+
+def test_complementary_triggers_sharing_a_boundary_are_caught():
+    from hallsim.sbml_events import trigger_pathologies
+
+    # cascade <= 20 (and c3 >= 4.5)   vs   cascade > 20
+    a = _Ev(
+        "latch_on",
+        (
+            "and",
+            [
+                ("leq", ("var", "cascade"), ("const", 20.0)),
+                ("geq", ("var", "c3"), ("const", 4.5)),
+            ],
+        ),
+    )
+    b = _Ev("latch_off", ("gt", ("var", "cascade"), ("const", 20.0)))
+    found = trigger_pathologies([a, b])
+    assert any("round-off" in f and "hysteresis" in f for f in found), found
+
+
+def test_a_hysteresis_band_is_not_flagged():
+    from hallsim.sbml_events import trigger_pathologies
+
+    # arm at 20, disarm at 18 — no value satisfies both, so no chatter
+    a = _Ev("arm", ("gt", ("var", "cascade"), ("const", 20.0)))
+    b = _Ev("disarm", ("lt", ("var", "cascade"), ("const", 18.0)))
+    assert trigger_pathologies([a, b]) == []
+
+
+def test_equality_against_time_is_caught():
+    from hallsim.sbml_events import trigger_pathologies
+
+    ev = _Ev("release", ("eq", ("time",), ("const", 2000.0)))
+    found = trigger_pathologies([ev])
+    assert any("equality against time" in f for f in found), found
+
+
+def test_a_time_threshold_crossing_is_not_flagged():
+    from hallsim.sbml_events import trigger_pathologies
+
+    ev = _Ev("release", ("geq", ("time",), ("const", 2000.0)))
+    assert trigger_pathologies([ev]) == []
