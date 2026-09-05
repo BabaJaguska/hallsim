@@ -69,6 +69,25 @@ class ImportedODEProcess(Process):
             )
         )
 
+    def without_events(self):
+        """Copy carrying no events, so composing it discards them.
+
+        A Composite expands a member process's events automatically, because
+        forgetting to do so ran models with their input route removed while
+        returning smooth, bounded numbers (P0.36). Discarding them is
+        legitimate but deliberate — it is what replacing a model's own
+        event-delivered insult with an external ``u(t)`` driver requires, per
+        acceptance test 5 in ``docs/senescence-model-rebuild.md``. Written as a
+        method so the discard is visible where it is decided::
+
+            Composite(processes={"dp14": dp14.without_events()}, ...)
+        """
+        import copy
+
+        new = copy.copy(self)
+        object.__setattr__(new, "_events", ())
+        return new
+
     def _check_param(self, param_name: str) -> str:
         if param_name not in self._param_names:
             raise KeyError(

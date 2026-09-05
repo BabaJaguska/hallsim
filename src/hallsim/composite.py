@@ -343,6 +343,43 @@ class _FlatRHS(eqx.Module):
         return jnp.zeros_like(y_vec).at[..., cols].add(vals * facs)
 
 
+def _compose_events(processes: dict, topology: dict) -> tuple[dict, dict]:
+    """Expand any member process's imported events into EVENT processes.
+
+    A model's events are its mechanism — a dose delivered at a time, a switch
+    latching on a threshold — so this is the default rather than a second call
+    the caller has to remember. Forgetting it produced a composite that ran the
+    model with its input route removed and returned smooth, bounded,
+    tolerance-insensitive numbers that every existing screen passed (P0.36).
+
+    To drop a model's events, say so at the call site with
+    ``proc.without_events()``.
+    """
+    if not any(getattr(p, "_events", ()) for p in processes.values()):
+        return processes, topology
+
+    from hallsim.sbml_events import expand_events
+
+    out_procs = dict(processes)
+    out_topo = {name: dict(row) for name, row in topology.items()}
+    for name, proc in processes.items():
+        if not getattr(proc, "_events", ()):
+            continue
+        extra_procs, extra_topo = expand_events(proc, name=name)
+        for key, value in extra_procs.items():
+            if key != name and key in out_procs:
+                raise ValueError(
+                    f"event process {key!r} from {name!r} collides with an "
+                    f"existing process of that name; rename one"
+                )
+            out_procs[key] = value
+        for key, row in extra_topo.items():
+            # The owner's row carries only the promoted-parameter ports, which
+            # are namespaced (__par_*) and so cannot shadow the caller's wiring.
+            out_topo[key] = {**out_topo.get(key, {}), **row}
+    return out_procs, out_topo
+
+
 class Composite(eqx.Module):
     """A wired bundle of Processes sharing a flat state store.
 
@@ -378,6 +415,9 @@ class Composite(eqx.Module):
     ) -> None:
         flat_processes, flat_topology = _flatten_subcomposites(
             processes, topology or {}
+        )
+        flat_processes, flat_topology = _compose_events(
+            flat_processes, flat_topology
         )
         if rewire:
             flat_topology = {

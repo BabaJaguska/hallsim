@@ -458,8 +458,12 @@ def translate_events(
 PARAM_PORT_PREFIX = "__par_"
 
 
-def expand_events(proc) -> tuple[dict, dict]:
+def expand_events(proc, name: str | None = None) -> tuple[dict, dict]:
     """``(processes, topology)`` composing an SBMLProcess with its events.
+
+    ``name`` is the namespace the store paths are built under; it defaults to
+    the process's own ``_name``. A Composite keys a process by whatever the
+    caller chose, which need not be that, so the caller passes its key.
 
     ``processes`` holds the owning process under its own name — promoted, if
     any event assigns to a parameter, via
@@ -476,23 +480,24 @@ def expand_events(proc) -> tuple[dict, dict]:
     events = getattr(proc, "_events", ())
     if not events:
         return {}, {}
+    owner = name or proc._name
 
     procs: dict = {}
     topo: dict = {}
     owner_wiring: dict = {}
     for ev in events:
         procs[ev._name] = ev
-        wiring = {s: f"{proc._name}/{s}" for s in ev._read_species}
-        wiring.update({t: f"{proc._name}/{t}" for t in ev._param_targets})
+        wiring = {s: f"{owner}/{s}" for s in ev._read_species}
+        wiring.update({t: f"{owner}/{t}" for t in ev._param_targets})
         for tgt, _ in ev._assign_ir:
-            wiring[f"__set_{tgt}"] = f"{proc._name}/{tgt}"
+            wiring[f"__set_{tgt}"] = f"{owner}/{tgt}"
         topo[ev._name] = wiring
         for tgt in ev._param_targets:
             port = f"{PARAM_PORT_PREFIX}{tgt}"
             proc = proc.with_param_input(tgt, port)
-            owner_wiring[port] = f"{proc._name}/{tgt}"
+            owner_wiring[port] = f"{owner}/{tgt}"
 
-    procs[proc._name] = proc
+    procs[owner] = proc
     if owner_wiring:
-        topo[proc._name] = owner_wiring
+        topo[owner] = owner_wiring
     return procs, topo

@@ -368,6 +368,143 @@ The framework returns a plausible number and nothing indicates it is wrong.
   the documented one — silently left the conservation leaf. Cost a reviewer a
   basin scan that looked multistable and was not.
 
+- [ ] **P0.38 — Two classes of unrunnable event model are detectable from the
+  trigger syntax alone, and triage imports them anyway.** Filed 2026-09-04 from
+  the Stucki 2005 referee pass. Both are syntactic matches on
+  `SBMLEvent._trigger_ir` and cost nothing to check.
+
+  **Chattering complementary pairs.** Stucki's `cascade__1` triggers on
+  `cascade <= 20 and c3 >= 4.5`, `cascade__2` on `cascade > 20` — exact
+  complements *including the boundary*, so at `cascade == 20`, which is
+  precisely where a root-finder lands, both are satisfiable and the pair
+  chatters at its own root. Consequence measured in COPASI with the deposit's
+  own SED-ML settings: `cascade(7000)` returns **2.0000e+01 on one invocation
+  and 7.2812e+20 on another**, latch time moving 1099 → 2002. Nineteen orders
+  of magnitude, same file, same solver, same tolerances. A model whose
+  published readout is round-off dependent cannot be composed, and the
+  overlapping-boundary test is a comparison of two IR trees.
+
+  **Equality triggers on time.** Stucki's release event is
+  `('eq', ('time',), ('const', 2000.0))`. An equality on time makes `macro_dt`
+  decide *whether* the input fires at all, not merely when — `macro_dt = 10`
+  put a sync point on 2000.0 and delivered it; `macro_dt = 7`, the SED-ML's own
+  step, never lands there. This is P0.34 in its sharpest form: there, the knob
+  shifted the dose; here it deletes it. Any `eq` against time in a trigger
+  should be rejected at intake, or rewritten to a threshold crossing.
+
+  *Fix:* both checks belong in `intake.triage_sbml` as rejects, before import.
+
+- [ ] **P0.39 — Identically-zero states and the parameters they strand are
+  invisible.** `survivin` and `sursmac` are identically zero for the whole of
+  Stucki's own SED-ML run — 2 of its 8 declared outputs — which leaves **5 of
+  23 parameters structurally unidentifiable**, and nothing reports it. Triage
+  already performs the single solve this needs. A state that never leaves zero
+  over the screening horizon, and the parameters reachable only through it,
+  should be named in `ScreenReport`.
+
+- [ ] **P0.40 — `native_time_seconds = 1.0` launders a tool default into a
+  fact.** COPASI writes `s` as its untouched default time unit; the importer
+  reads that as a declaration and `reconciled_to` then silently trusts it.
+  On Stucki the same defaults block would make `c3` a 0.71 **molar**
+  concentration, so the unit is plainly not asserted by anyone. `native_time_declared`
+  exists and is the right signal — the defect is that a tool-default unit is
+  recorded as declared rather than as absent. Distinguish "the file says
+  seconds" from "the file says nothing and the writer defaulted to seconds".
+
+- [ ] **P0.37 — `rest_residual` is a global ratio, so one large state with zero
+  derivative hides that every other state is moving.** Filed 2026-09-04.
+  `‖f(y₀)‖/‖y₀‖` puts every state in one quotient. A species that is large and
+  stationary contributes to the denominator and nothing to the numerator, so it
+  divides the residual down and the model reads "at rest".
+
+  Measured on Stucki 2005 (BIOMD0000001059). Reported `rest_residual` **0.0415**
+  — comfortably the best of any candidate screened this session, and the reason
+  it was promoted past four rejected models. The `smacmit` pool sits at 10 with
+  derivative exactly 0 until its event fires, contributing ~10 to ‖y₀‖ and 0 to
+  ‖f(y₀)‖. **Per state, τ is 1.2–3.0 s against a 7000 s horizon.** Nothing in
+  that model is at rest.
+
+  What it hid: with the insult removed entirely (`k7 = 0`), active caspase-3
+  rises 0.7104 → 6.65 and crosses the model's own commitment threshold
+  `c3 ≥ 4.5` at **t = 690 s**, 1310 s before the insult is scheduled to arrive
+  at t = 2000. The apparent switch is relaxation from a non-rest IC to the
+  single attractor, which sits above the threshold. The entire pro-apoptotic
+  insult moves caspase-3 by **log2FC +0.11**. This is DallePezze's P0.14 defect
+  in a sharper form, and the screen that was supposed to catch it reported the
+  best rest residual of the day.
+
+  *Fix:* report `rest_residual` **per state** alongside the global ratio, and
+  make `ScreenReport` flag the case where the global figure is dominated by
+  states with near-zero derivative. `diagnostics.rest_timescale` already
+  computes per-state τ — the intake summary just does not surface it.
+
+  **Related, and now overdue:** the zero-perturbation control run specified in
+  [design-spontaneous-endpoint.md](design-spontaneous-endpoint.md) would have
+  caught this in seconds, without a reviewer. It has now been the deciding
+  check on two models (DallePezze, Stucki) and remains unbuilt. It belongs
+  before the reviewer panel in the intake order, not after it.
+
+- [ ] **P0.36 — A composite silently drops a model's events, so the model runs
+  with its own mechanism disabled and reports plausible numbers.** Filed
+  2026-09-04 after causing the same wrong conclusion **twice in one session**,
+  which is what makes it a framework defect rather than a user error.
+
+  `process_from_sbml` translates events onto the process but does not compose
+  them; that requires a separate `sbml_events.expand_events(proc)` call. Put
+  the process straight into a `Composite` — which is what
+  `single_process_composite` does, and what every screening probe does — and
+  the events are simply absent. The composite builds, validates, integrates,
+  and returns a smooth trajectory. The only signal is one INFO line at import,
+  `"imported N SBML event(s); compose with sbml_events.expand_events(proc)"`,
+  which scrolls past in the middle of solver logs.
+
+  Both failures were parameter-target events, i.e. the model's entire input
+  route:
+  - **Kollarovic 2016**: dose enters by an event assigning to `TAF`. A
+    continuation sweep with events uncomposed reported *no hysteresis*, with
+    max Re λ pinned at −0.0146 across the whole sweep. The model is in fact
+    bistable over DDR ∈ (5.85, 12.63). The false negative went into a tracked
+    doc before being caught.
+  - **Stucki 2005** (BIOMD0000001059): the mechanism is three events — a timed
+    Smac release at `t > 2000` assigning `k7`, and two `cascade`-triggered
+    latches assigning `k4`/`k10_cascade`/`k17`. Uncomposed, an eight-point
+    input sweep returned **byte-identical results at every point** and looked
+    like a model that ignores its input.
+
+  In both cases the uncomposed run is not obviously broken — it is flat,
+  bounded, and tolerance-insensitive, so every existing screen passes it.
+
+  *Fix — compose events by default; make discarding them explicit.* A warning
+  is not enough: an INFO line already exists at import and both failures
+  scrolled straight past it, and a `Composite(..., allow_uncomposed_events=True)`
+  flag would be the same shape of defect, something to remember.
+
+  1. **`Composite.__init__` expands a member process's events and merges the
+     resulting topology rows into that process's own row.** Event ports are
+     namespaced (`__set_*`, `__par_*`) so they cannot collide with user wiring,
+     which makes the merge well-defined. Then `expand_events` is never a second
+     call anyone can forget, and `single_process_composite` — the entry point
+     both failures went through — is correct without changing.
+  2. **The opt-out is a method on the process: `proc.without_events()`**,
+     returning a copy with `_events = ()`. Put on the process rather than on
+     the composite so the discard is visible and greppable exactly where it is
+     decided, e.g. `Composite(processes={"dp14": dp14.without_events()}, ...)`.
+     **Open, found 2026-09-04:** it is all-or-nothing. A model whose events
+     carry both the input and the readout — Stucki 2005 has a timed release
+     event and two latch events — cannot have the input replaced by an external
+     `u(t)` driver without also deleting the readout mechanism. It needs to
+     take event names.
+  3. Composing a process that still carries events is then an error, not a
+     warning, because the only way to reach it is to have gone around (1).
+
+  **The opt-out has a real use and must exist.** Replacing a model's own
+  event-delivered insult with an external `u(t)` driver is what acceptance
+  test 5 in [senescence-model-rebuild.md](senescence-model-rebuild.md) asks
+  for ("arms differ only in `u(t)`"), it is what the multi-hallmark demo
+  already does to DallePezze's irradiation via a forcing source, and it is
+  what was done deliberately to Kollarovic to drive `TAF` externally. It is
+  the rare deliberate case, not the default.
+
 - [ ] **P0.34 — A zero-delay SBML event fires at `t = macro_dt`, so a
   scheduler knob silently sets the delivered dose.** Found 2026-09-04 on
   Kollarovic 2016 (BIOMD0000000632), whose irradiation event triggers on
@@ -435,9 +572,17 @@ The framework returns a plausible number and nothing indicates it is wrong.
      ("multi-seed sweep for hysteresis") — it now has a second instance and a
      measured cost, so it should be built rather than kept as a note.
 
+  *Second instance, 2026-09-04 (Stucki 2005):* the Jacobian's `cascade` column
+  is identically zero off-diagonal — exactly block-triangular — and
+  `max Re λ = +0.009` with its eigenvector supported **entirely on `cascade`**,
+  a state nothing reads back. The core's `max Re λ` is 0 in all three latch
+  regimes. Attaching the eigenvector's support to the reported eigenvalue would
+  have made this legible without any decomposition machinery, and is the
+  cheapest half of the fix.
+
   *Fix:* (a) report the block decomposition alongside the spectrum — per-block
-  leading eigenvalues and which states each block spans — so a masked mode is
-  visible rather than inferred; (b) provide the multi-seed equilibrium sweep
+  leading eigenvalues, which states each block spans, and the leading
+  eigenvector's support — so a masked mode is visible rather than inferred; (b) provide the multi-seed equilibrium sweep
   Phase 0 asks for, and make the single-seed path decline to answer "is this
   bistable?" rather than answering it wrongly. Until (b) exists, no
   no-hysteresis claim from a continuation sweep is admissible evidence.

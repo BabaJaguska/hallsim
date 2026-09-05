@@ -103,14 +103,14 @@ simulate multi-hallmark sweep      # two-hallmark severity sweep
 
 ## What you can do with it
 
-- **Compose published models.** Import SBML from any source — BioModels, CellML/Physiome, a paper supplement — or XPP; the full mechanism surface auto-populates and is discoverable. → [docs/architecture.md#sbml-import](docs/architecture.md#sbml-import)
+- **Compose published models.** Import a model from BioModels, ModelDB or a paper supplement — SBML and XPP `.ode` are supported today; the full mechanism surface auto-populates and is discoverable. → [docs/architecture.md#sbml-import](docs/architecture.md#sbml-import)
 - **Turn hallmark severities.** 0–1 differentiable handles that modulate the right parameters across models; interventions (rapamycin, CR) live on the hallmark layer they perturb. → [docs/architecture.md#hallmark-handles](docs/architecture.md#hallmark-handles)
 - **Calibrate against data with held-out validation.** Gene-reporter concordance, log2-fold-change loss, MAP priors, differentiation through the stiff solve. → [docs/calibration.md](docs/calibration.md)
 - **Run batched population studies.** A `(batch, n_vars)` `y0` flows through the solve as one computation — no `vmap` — near-flat on GPU. → [docs/architecture.md#population-studies-via-batched-y0](docs/architecture.md#population-studies-via-batched-y0)
 
 ## Roadmap
 
-Scheduler (waveform relaxation, IMEX, Mori-Zwanzig coupling), models & validation (lipid-metabolism extension, stochastic/Gillespie support, multi-cell communication), and SBML import improvements (event translation). Calibration fits fold-change time courses (multi-timepoint), not just endpoints — see [docs/calibration.md](docs/calibration.md).
+Scheduler (waveform relaxation, IMEX, Mori-Zwanzig coupling), models & validation (lipid-metabolism extension, stochastic/Gillespie support, multi-cell communication), and model-adjacent formats — executing the SED-ML simulation descriptions curated deposits ship, which is an experiment description rather than another model format. Calibration fits fold-change time courses (multi-timepoint), not just endpoints — see [docs/calibration.md](docs/calibration.md).
 
 ## License
 

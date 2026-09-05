@@ -133,17 +133,30 @@ with `measure_unclamped_flux` and pick the rate with `place_clamp_rate`
 ## SBML import
 
 [`sbml_import.py`](../src/hallsim/sbml_import.py) auto-generates a Process
-from any SBML source via `sbmltoodejax` — BioModels, CellML/Physiome, a paper
-supplement — and:
+from an SBML file via `sbmltoodejax` — from BioModels or a paper supplement —
+and:
+
+**A repository is not a format.** SBML comes from BioModels, from
+BioSimulations' COMBINE archives, and from paper supplements; XPP `.ode` comes
+from ModelDB and from supplements — both have importers
+(`process_from_sbml`, `process_from_xpp`). CellML/Physiome serves CellML and
+ModelDB also serves NEURON, neither of which has an importer, so
+`hallsim.discovery` returns those as pointers rather than imports. SED-ML,
+which curated deposits ship alongside the model, is a different kind of
+artefact again — it describes a *simulation experiment over* a model, not the
+model — see [roadmap.md](roadmap.md).
+
+The importer:
 
 - auto-populates every SBML constant into `SBMLProcess.parameters`, so the
   full mechanism surface is discoverable via `Composite.calibration_targets()`;
 - inlines `<functionDefinition>` blocks (via libsbml), unlocking the majority
   of curated models that would otherwise hit "Custom functions are not
   handled" upstream;
-- translates `<event>` blocks (see `hallsim.sbml_events`), skipping with a
-  warning only those whose assignment target is a parameter rather than a
-  species, and pre-flight-rejects unsupported MathML with actionable errors;
+- translates `<event>` blocks (see `hallsim.sbml_events`), including those
+  whose assignment target is a parameter rather than a species — the target is
+  promoted onto the owning process via `with_param_input` so the assignment
+  reaches the rate laws. A nonzero delay or a priority is still refused.
 - extracts MIRIAM annotations into `Port.ontology` from species CVTerms.
 
 Discover-then-import is two calls — the catalog is directly usable by an agent:

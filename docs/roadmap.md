@@ -102,6 +102,55 @@ the JAX-native execution model. Designed as a natural follow-up.
   ERiQ signaling state to BiGG-scale flux distributions with gradients
 * [ ] 3D spatial diffusion & ECM modelling
 
+## Model-adjacent formats
+
+**A repository is not a format, and SED-ML is not a model format.** SBML, XPP
+`.ode` and CellML all describe a *model*; SED-ML describes a *simulation
+experiment over* a model — which model, which time span, which parameter
+changes per task, which outputs. Keep the distinction explicit in anything
+user-facing: HallSim imports SBML and XPP, discovers CellML and COMBINE
+archives without importing them, and would *execute* SED-ML rather than
+import it.
+
+### SED-ML: run a deposit's own verification
+
+* [ ] **Read the SED-ML that curated deposits already ship, and run it.**
+  Curated BioModels entries carry a `.sedml` alongside the model (and a COPASI
+  `.cps` plus MATLAB/Octave exports); `discovery.download_biomodel_files`
+  fetches them as of 2026-09-04. The SED-ML is the curator's reproduction
+  recipe, so executing it answers "does our import of this deposit behave like
+  the reference implementation?" without anyone hand-writing a probe.
+
+  **Why this is on the roadmap and not a nice-to-have.** Every candidate
+  screened in the 2026-09-04 session died at the same question — does the
+  deposit reproduce its paper — and each time the check was hand-built, twice
+  wrongly (see P0.36). `intake.published_fit_chi2` covers the minority of
+  papers that deposit fitting data; SED-ML covers the majority that deposit a
+  curated simulation instead.
+
+  Scope is the subset curated deposits actually use, not SED-ML L1V4 in full:
+  `<uniformTimeCourse>` (start, end, steps), `<task>` and repeated tasks,
+  `<changeAttribute>` for per-task parameter changes, `<dataGenerator>` and
+  `<plot2D>`/`<report>` for the outputs to compare. Map those onto
+  `Scheduler.run` and a comparison against the deposit's own exports.
+
+  Two things fall out of it. It gives `intake` an automatic reproduction gate,
+  which is the check the model-selection work most needed. And it demonstrates
+  a genuinely different axis than SBML/XPP import — the framework consuming an
+  *experiment description*, not another model dialect — which is worth stating
+  precisely rather than filing under "more formats".
+
+  Prerequisite: P0.36 (compose events by default). A SED-ML task run against a
+  composite that silently dropped the model's events would compare the wrong
+  thing and pass.
+
+### CellML
+
+* [ ] **No importer.** `discovery.search_physiome` finds CellML models and
+  returns a pointer; `ModelCandidate.fetch()` refuses for that source by
+  design. Wiring one is real work and nothing currently needs it — recorded so
+  the gap is not mistaken for a bug.
+
 ## SBML Import
 
 * [ ] **Translate SBML events into `ProcessKind.EVENT`** — generic event translator,

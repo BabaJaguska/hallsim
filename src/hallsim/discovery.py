@@ -547,7 +547,15 @@ def _build_physiome_index() -> list[dict]:
 def search_physiome(
     query: str, limit: int = 25, refresh: bool = False, **_
 ) -> list[ModelCandidate]:
-    """Physiome Model Repository — CellML, mostly cardiac and electrophysiology.
+    """Physiome Model Repository — CellML, across the whole of physiology.
+
+    Its own categories run from calcium dynamics and cardiovascular circulation
+    through cell cycle, gene regulation, immunology, metabolism, PKPD and signal
+    transduction. Measured over the 1108 cached exposure titles, cardiac and
+    electrophysiology account for ~4%, gene regulation is the largest
+    identifiable group at ~12%, and 77% of titles match no subject keyword at
+    all — so treat any characterisation of its contents, including this one, as
+    a summary of titles rather than of models.
 
     The exposure listing carries titles, so the index is one request. Only the
     title is searchable; there is no abstract in the listing, which makes this
