@@ -338,6 +338,24 @@ class _ReducedRHS(eqx.Module):
         return self.base(t, full, args)[..., self.own]
 
 
+def _fingerprint_difference(want, got) -> str:
+    """Which part of a structural fingerprint disagrees, for an error message.
+
+    The three parts are store layout, process classes and wiring; naming the
+    one that moved is the difference between a usable error and "they differ".
+    """
+    labels = ("store paths", "process classes", "wiring")
+    for label, a, b in zip(labels, want, got):
+        if a != b:
+            only_a = sorted(set(a) - set(b))[:3]
+            only_b = sorted(set(b) - set(a))[:3]
+            return (
+                f"They disagree on {label}: "
+                f"plan-only {only_a}, given-only {only_b}."
+            )
+    return "They disagree, but not in store paths, classes or wiring."
+
+
 def _param_digest(composite: Composite) -> str | None:
     """A digest of ``composite``'s concrete parameter values, or ``None`` when
     any of them is a tracer.
@@ -579,6 +597,7 @@ class Scheduler:
         save_dt: float | None = None,
         adjoint: dfx.AbstractAdjoint | None = None,
         antialias: bool = True,
+        params_from: Composite | None = None,
     ) -> SchedulerResult:
         """Run the composite with multi-rate scheduling.
 
@@ -589,6 +608,13 @@ class Scheduler:
             :meth:`plan` — which already fixes the span, ``macro_dt``,
             ``save_dt`` and ``adjoint``, so passing those alongside it is an
             error rather than a silent override. ``y0`` still varies per run.
+        params_from:
+            With a plan, take parameter *values* from this composite instead of
+            the one the plan was built for. Its structure must match the plan's
+            — checked, not assumed — since only values may differ. Turns a
+            sweep into one compiled call per arm rather than a re-resolution
+            per arm, and **asserts the plan's stiffness verdict holds at these
+            values**; :meth:`verify_plan` checks that assertion.
         t_span:
             ``(t0, t1)``. Required unless a plan is given.
         macro_dt:
@@ -635,7 +661,13 @@ class Scheduler:
                     "resolution they feed (solver routing, save grid, "
                     "discontinuity times) is what a plan *is*."
                 )
-            return self._execute(composite, y0)
+            return self._execute(composite, y0, params_from=params_from)
+        if params_from is not None:
+            raise TypeError(
+                "run() got params_from= without a RunPlan. It substitutes "
+                "values into a plan's resolution; without a plan there is no "
+                "resolution to reuse — pass the composite itself."
+            )
         if t_span is None:
             raise TypeError("run() requires t_span unless given a RunPlan")
         plan = self._plan_for(
@@ -755,6 +787,33 @@ class Scheduler:
                 "Scheduler.run from outside."
             )
 
+    def verify_plan(
+        self, plan: RunPlan, composite: Composite, y0=None
+    ) -> dict[str, tuple[bool, bool]]:
+        """Did the plan's routing verdict survive to ``composite``'s values?
+
+        Reusing a plan across a sweep or a fit asserts the stiffness verdict is
+        stable over the values walked. This measures it: ``{group: (planned,
+        actual)}`` for every group whose verdict moved, empty when none did.
+        Run it at the end of a fit against the fitted parameters.
+        """
+        fresh = self._resolve_integrators(
+            composite,
+            plan.groups,
+            (
+                composite.initial_state_vec(plan.keys)
+                if y0 is None
+                else jnp.asarray(y0)
+            ),
+            plan.t_span[0],
+            plan.macro_dt,
+        )
+        return {
+            g: (plan.integrators[g].stiff, fresh[g].stiff)
+            for g in plan.groups
+            if plan.integrators[g].stiff != fresh[g].stiff
+        }
+
     def _build_plan(
         self, composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
     ) -> RunPlan:
@@ -867,9 +926,22 @@ class Scheduler:
             state_dtype=state.dtype,
         )
 
-    def _execute(self, plan: RunPlan, y0) -> SchedulerResult:
+    def _execute(
+        self, plan: RunPlan, y0, params_from: Composite | None = None
+    ) -> SchedulerResult:
         """Run a resolved :class:`RunPlan` from ``y0``."""
         composite = plan.composite
+        if params_from is not None:
+            want = plan.composite.structural_fingerprint()
+            got = params_from.structural_fingerprint()
+            if got != want:
+                raise ValueError(
+                    "params_from= must match the plan's structure — only "
+                    "parameter values may differ. "
+                    + _fingerprint_difference(want, got)
+                    + " Build a plan for this composite instead."
+                )
+            composite = params_from
         keys, groups = plan.keys, plan.groups
         t0, t1 = plan.t_span
         macro_dt, save_dt = plan.macro_dt, plan.save_dt

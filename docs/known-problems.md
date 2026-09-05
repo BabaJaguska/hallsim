@@ -1524,6 +1524,60 @@ The framework returns a plausible number and nothing indicates it is wrong.
   number from an event composite means anything, and the multi-rate path
   cannot be recommended for the models it was built for.
 
+- [x] **P0.51 — the stop rule fired a second time, on the *continuous* path:
+  a parameter sweep re-resolved the solver on every arm.** Measured and
+  **fixed 2026-09-05**. Distinct from P0.35, which is the event machinery.
+
+  Hand-rolled `dfx.diffeqsolve` beat `Scheduler.run` by **4.1x and 5.9x** per
+  warm arm on BIOMD703 and BIOMD318, with **92 and 166 XLA compiles against 2**,
+  at identical solver step counts (37/38.5 and 155/155) and endpoints agreeing
+  to 1.2e-7 and 1.6e-9. Same maths, same work.
+
+  **Cause, measured by neutralising each candidate** (stiff 8-state composite,
+  6 arms, `HALLSIM_COMPILATION_CACHE_DIR=off`):
+
+  ```
+  hand-rolled (one filter_jit)   0.0016 s/arm    7 compiles first / 0 warm
+  Scheduler, before              0.0327 s/arm   78 compiles first / 0 warm
+  Scheduler, digest neutralised  0.0038 s/arm    1 compile  first / 0 warm
+  ```
+
+  The P0.29 parameter digest is **~90%** of it. Keying the stiffness verdict on
+  concrete parameter values is correct — the verdict *is* a function of them —
+  but a sweep changes a value every arm by construction, so every arm missed
+  and re-resolved. The remaining **2.4x** is eager orchestration around the
+  compiled core.
+
+  **Calibration was never affected**, contrary to the obvious worry: under
+  `jax.grad` the parameters are tracers, the digest abstains, and the warm-up
+  verdict is reused. Verified by counting `analyze_groups` calls — **6 optimiser
+  steps, 0 analyses**, against 6 analyses for 6 eager arms. (The first attempt
+  at that instrument patched `hallsim.stiffness.analyze_groups`, which the
+  scheduler binds at import, so it counted zero everywhere and read as "nothing
+  happened". Patch `hallsim.scheduler.analyze_groups`.)
+
+  *Fixed:* `run(plan, params_from=composite)` substitutes parameter values into
+  a plan's existing resolution, guarded by `structural_fingerprint()` so only
+  values may differ. **0.0327 -> 0.0038 s/arm, 8.6x, compiles 78 -> 1** —
+  identical to ignoring parameter values, except the caller now *asserts* the
+  verdict holds instead of a cache silently assuming it.
+  `Scheduler.verify_plan(plan, composite)` measures that assertion and returns
+  the groups whose verdict moved; run it against fitted parameters at the end of
+  a fit. That closes review open question 3.
+  Bit-exactness: 28 reference arrays, **0.000e+00** against HEAD without the
+  change.
+  **Still open:** the 2.4x orchestration residual, now the whole remaining gap.
+
+- [ ] **P0.52 — `single_process_composite` cannot run 4% of BioModels.**
+  Found 2026-09-05 while building a Jacobian corpus. The shipped helper for
+  running one Process alone (`composite.py:1006`) raises on **BIOMD 87, 265,
+  718, 727** with e.g. *"m/ExoXI is claimed by 2 ports of the same role with
+  differing initial values"* — its identity topology collides when a model's
+  `ports_schema()` emits two ports that auto-path to the same store path.
+  4 of 95 cached models. The helper is what `screen_process` and every
+  single-model diagnostic goes through, so those models cannot be screened at
+  all.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.

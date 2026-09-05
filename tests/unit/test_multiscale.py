@@ -1900,3 +1900,77 @@ def test_plan_memo_holds_one_entry():
         sched.run(comp, (0.0, 1.0), macro_dt=1.0)
     assert sched._last_plan is not None
     assert sched._last_plan[1].composite is b
+
+
+def test_plan_reuse_matches_a_fresh_run_per_parameter_value():
+    """A plan resolved once, then fed new parameter values, must agree
+    exactly with resolving each value from scratch.
+
+    This is the sweep case: resolution is a function of (policy, composite,
+    span), and a sweep changes only values. Reusing the resolution asserts the
+    stiffness verdict holds across them; the answer must not otherwise move.
+    """
+    from hallsim.scheduler import Scheduler
+
+    def build(rate):
+        return Composite(
+            processes={"d": ContinuousDecay(rate=rate)},
+            topology={"d": {"x": "c/x"}},
+            semantic_validation=False,
+        )
+
+    rates = [0.1, 0.25, 0.4]
+    sched = Scheduler()
+    fresh = [
+        sched.run(build(r), (0.0, 2.0), macro_dt=1.0, save_dt=0.5).ys
+        for r in rates
+    ]
+
+    reused = Scheduler()
+    plan = reused.plan(build(rates[0]), (0.0, 2.0), macro_dt=1.0, save_dt=0.5)
+    for r, want in zip(rates, fresh):
+        got = reused.run(plan, params_from=build(r)).ys
+        assert jnp.array_equal(got, want), f"rate={r} diverged under reuse"
+
+
+def test_plan_reuse_refuses_a_different_structure():
+    """Only values may differ. A different wiring reuses column indices and a
+    traced core that belong to another composite — the P0.29 failure, which
+    the structural fingerprint exists to make unreachable."""
+    from hallsim.scheduler import Scheduler
+
+    sched = Scheduler()
+    plan = sched.plan(_two_path_composite(_EvolveFirst()), (0.0, 1.0))
+    with pytest.raises(ValueError, match="must match the plan's structure"):
+        sched.run(plan, params_from=_two_path_composite(_EvolveSecond()))
+
+
+def test_params_from_without_a_plan_is_refused():
+    from hallsim.scheduler import Scheduler
+
+    comp = _two_path_composite(_EvolveFirst())
+    with pytest.raises(TypeError, match="without a RunPlan"):
+        Scheduler().run(comp, (0.0, 1.0), params_from=comp)
+
+
+def test_verify_plan_reports_a_moved_verdict():
+    """Reuse assumes the routing verdict is stable over the values swept.
+    ``verify_plan`` turns that assumption into a measurement — empty when the
+    verdict held, and naming the group when it did not."""
+    from hallsim.scheduler import Scheduler
+
+    def build(k):
+        return Composite(
+            processes={"p": _Relax(k=k)},
+            topology={"p": {"x": "a/x", "d": "a/d"}},
+            semantic_validation=False,
+        )
+
+    sched = Scheduler()
+    plan = sched.plan(build(1.0), (0.0, 1.0), macro_dt=1.0)
+    assert sched.verify_plan(plan, build(1.0)) == {}
+
+    moved = sched.verify_plan(plan, build(1e6))
+    assert moved, "a 1e6x rate change left the verdict unchanged"
+    for planned, actual in moved.values():
+        assert planned != actual
