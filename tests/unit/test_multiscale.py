@@ -2105,3 +2105,142 @@ class _Ticker2(Process):
 
     def update(self, t, state):
         return {"c": state["c"] + 1.0}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Waveform relaxation: iterate the Lie sweep until the coupling converges
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _CycleOsc(Process):
+    """Oscillator pushed by the slow group — the loop's backward edge."""
+
+    timescale: float = 1.0
+    w: float = 6.0
+    fb: float = 0.4
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.EVOLVED, default=1.0),
+            "v": Port(role=PortRole.EVOLVED, default=0.0),
+            "back": Port(role=PortRole.INPUT, default=0.0),
+        }
+
+    def derivative(self, t, s):
+        return {
+            "x": s["v"],
+            "v": -self.w**2 * s["x"] - 0.1 * s["v"] + self.fb * s["back"],
+        }
+
+
+class _CycleDriven(Process):
+    timescale: float = 100.0
+
+    def ports_schema(self):
+        return {
+            "y": Port(role=PortRole.EVOLVED, default=0.5),
+            "u": Port(role=PortRole.INPUT, default=0.0),
+        }
+
+    def derivative(self, t, s):
+        return {"y": 0.15 * s["u"] - 0.05 * s["y"]}
+
+
+def _cycle_composite():
+    return Composite(
+        processes={"drv": _CycleOsc(), "dvn": _CycleDriven()},
+        topology={
+            "drv": {"x": "c/x", "v": "c/v", "back": "c/y"},
+            "dvn": {"y": "c/y", "u": "c/x"},
+        },
+        semantic_validation=False,
+    )
+
+
+_CYCLE_GROUPS = {"gA": ["drv"], "gB": ["dvn"]}
+
+
+def _cycle_error(sweeps, macro_dt, ref):
+    from hallsim.scheduler import Scheduler
+
+    ys = (
+        Scheduler(
+            groups=_CYCLE_GROUPS,
+            coupling_mode="interpolated",
+            waveform_sweeps=sweeps,
+        )
+        .run(
+            _cycle_composite(),
+            (0.0, 10.0),
+            macro_dt=macro_dt,
+            save_dt=macro_dt,
+        )
+        .ys[-1]
+    )
+    return float(jnp.max(jnp.abs(ys - ref)))
+
+
+def test_waveform_relaxation_recovers_second_order_on_a_cycle():
+    """A cycle holds one-pass splitting at first order however good the
+    interpolant: the backward edge always reads the previous macro step.
+    Iterating the sweep lets each group see the others *within* the window,
+    which cancels the leading error term.
+
+    Asserts the order from successive halvings, not a single error — a lone
+    ratio can be a sign cancellation rather than a convergence rate.
+    """
+    from hallsim.scheduler import Scheduler
+
+    comp = _cycle_composite()
+    ref = (
+        Scheduler()
+        .run(comp, (0.0, 10.0), macro_dt=10.0 / 2048, save_dt=10.0)
+        .ys[-1]
+    )
+
+    dts = [1.0, 0.5, 0.25]
+    one = [_cycle_error(1, dt, ref) for dt in dts]
+    many = [_cycle_error(2, dt, ref) for dt in dts]
+
+    def order(errs):
+        return float(jnp.log2(jnp.asarray(errs[-2]) / jnp.asarray(errs[-1])))
+
+    assert order(one) < 1.5, f"one-pass already above first order: {one}"
+    assert order(many) > 1.6, f"sweeps did not reach second order: {many}"
+    assert (
+        many[-1] < one[-1] / 10
+    ), f"sweeps bought less than 10x at the finest step: {many} vs {one}"
+
+
+def test_one_sweep_is_the_default_and_unchanged():
+    """``waveform_sweeps=1`` must be exactly today's one-pass Lie split."""
+    from hallsim.scheduler import Scheduler
+
+    def run(**kw):
+        return (
+            Scheduler(groups=_CYCLE_GROUPS, coupling_mode="interpolated", **kw)
+            .run(_cycle_composite(), (0.0, 10.0), macro_dt=1.0, save_dt=1.0)
+            .ys
+        )
+
+    assert jnp.array_equal(run(), run(waveform_sweeps=1))
+
+
+def test_sweeps_with_frozen_coupling_is_refused():
+    """A frozen fill is the same constant on every sweep, so extra passes
+    would cost k x and change nothing — the silent no-op this guards."""
+    from hallsim.scheduler import Scheduler
+
+    with pytest.raises(ValueError, match="does nothing"):
+        Scheduler(
+            groups=_CYCLE_GROUPS,
+            coupling_mode="frozen",
+            waveform_sweeps=3,
+        ).run(_cycle_composite(), (0.0, 10.0), macro_dt=1.0)
+
+
+def test_sweeps_must_be_at_least_one():
+    from hallsim.scheduler import Scheduler
+
+    with pytest.raises(ValueError, match="must be >= 1"):
+        Scheduler(waveform_sweeps=0)

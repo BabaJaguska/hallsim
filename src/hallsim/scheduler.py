@@ -482,6 +482,7 @@ class Scheduler:
         coupling_mode: str = "auto",
         coupling_interp_points: int = 16,
         splitting: str = "lie",
+        waveform_sweeps: int = 1,
         adaptive_dt: bool = False,
         adaptive_dt_rho_max: float = 0.5,
         adaptive_dt_rho_min: float = 0.01,
@@ -577,7 +578,12 @@ class Scheduler:
         self.manual_groups = groups
         self.coupling_mode = coupling_mode
         self.coupling_interp_points = coupling_interp_points
+        if waveform_sweeps < 1:
+            raise ValueError(
+                f"waveform_sweeps must be >= 1, got {waveform_sweeps}"
+            )
         self.splitting = splitting
+        self.waveform_sweeps = waveform_sweeps
         self.adaptive_dt = adaptive_dt
         self.adaptive_dt_rho_max = adaptive_dt_rho_max
         self.adaptive_dt_rho_min = adaptive_dt_rho_min
@@ -1109,55 +1115,70 @@ class Scheduler:
                 # Every group solved this window, not just the previous one —
                 # they share the window and its grid, so their dense outputs
                 # concatenate into one interpolant (P0.23).
-                solved_ys: list[jnp.ndarray] = []
-                solved_idx: list[jnp.ndarray] = []
-                for gname, rhs_fn in group_rhs.items():
-                    if coupling == "interpolated":
-                        prev = (
-                            (t, t_next, jnp.concatenate(solved_ys, axis=-1))
-                            if solved_ys
-                            else None
-                        )
-                        state, interp_out, last_dt, diag = (
-                            self._solve_group_interpolated(
+                names = list(group_rhs)
+                state_in = state
+                last_sweep: dict[str, jnp.ndarray] = {}
+                for _sweep in range(self.waveform_sweeps):
+                    state = state_in  # every sweep re-solves the same window
+                    solved_ys: list[jnp.ndarray] = []
+                    solved_idx: list[jnp.ndarray] = []
+                    for gpos, (gname, rhs_fn) in enumerate(group_rhs.items()):
+                        if coupling == "interpolated":
+                            # Groups before this one from this sweep, groups
+                            # after it from the last -- the second half is the
+                            # backward edge a one-pass split never sees.
+                            segs_y = list(solved_ys)
+                            segs_i = list(solved_idx)
+                            for later in names[gpos + 1 :]:
+                                if later in last_sweep:
+                                    segs_y.append(last_sweep[later])
+                                    segs_i.append(group_write_idxs[later])
+                            prev = (
+                                (t, t_next, jnp.concatenate(segs_y, axis=-1))
+                                if segs_y
+                                else None
+                            )
+                            state, interp_out, last_dt, diag = (
+                                self._solve_group_interpolated(
+                                    rhs_fn,
+                                    state,
+                                    group_write_idxs[gname],
+                                    t,
+                                    t_next,
+                                    prev,
+                                    (
+                                        jnp.concatenate(segs_i)
+                                        if segs_i
+                                        else None
+                                    ),
+                                    integ=integrators[gname],
+                                    adjoint=adjoint,
+                                    dt0_hint=group_dt0_hint.get(gname),
+                                    jump_ts=jump_ts,
+                                )
+                            )
+                            group_dt0_hint[gname] = last_dt
+                            _record(gname, diag)
+                            solved_ys.append(interp_out[2])
+                            solved_idx.append(group_write_idxs[gname])
+                            last_sweep[gname] = interp_out[2]
+                        else:
+                            state, last_dt, diag = self._solve_group(
                                 rhs_fn,
                                 state,
                                 group_write_idxs[gname],
+                                keys,
                                 t,
                                 t_next,
-                                prev,
-                                (
-                                    jnp.concatenate(solved_idx)
-                                    if solved_idx
-                                    else None
-                                ),
                                 integ=integrators[gname],
                                 adjoint=adjoint,
+                                group_name=gname,
                                 dt0_hint=group_dt0_hint.get(gname),
                                 jump_ts=jump_ts,
                             )
-                        )
-                        group_dt0_hint[gname] = last_dt
-                        _record(gname, diag)
-                        solved_ys.append(interp_out[2])
-                        solved_idx.append(group_write_idxs[gname])
-                    else:
-                        state, last_dt, diag = self._solve_group(
-                            rhs_fn,
-                            state,
-                            group_write_idxs[gname],
-                            keys,
-                            t,
-                            t_next,
-                            integ=integrators[gname],
-                            adjoint=adjoint,
-                            group_name=gname,
-                            dt0_hint=group_dt0_hint.get(gname),
-                            jump_ts=jump_ts,
-                        )
-                        group_dt0_hint[gname] = last_dt
-                        _record(gname, diag)
-                    stats[gname]["num_macro_steps"] += 1
+                            group_dt0_hint[gname] = last_dt
+                            _record(gname, diag)
+                        stats[gname]["num_macro_steps"] += 1
 
             if self.adaptive_dt:
                 num = float(jnp.sum((state - state_before) ** 2))
@@ -1271,6 +1292,7 @@ class Scheduler:
             composite.structural_fingerprint(),
             tuple(sorted((g, tuple(sorted(p))) for g, p in groups.items())),
             coupling,
+            self.waveform_sweeps,
             self.splitting,
             bool(fast),
             float(t0),
@@ -1404,8 +1426,24 @@ class Scheduler:
         it does identical work at higher cost, so auto picks frozen (as do
         Strang and single-group runs). Explicit modes pass through.
         """
+        multi = len(groups) > 1
         if self.coupling_mode != "auto":
+            if (
+                self.waveform_sweeps > 1
+                and multi
+                and self.coupling_mode == "frozen"
+            ):
+                # A frozen fill is the same constant on every sweep, so the
+                # extra passes would cost k x and change nothing.
+                raise ValueError(
+                    "waveform_sweeps>1 with coupling_mode='frozen' does "
+                    "nothing: each sweep re-reads the same constant. The "
+                    "sweeps converge a *trajectory*, so they need "
+                    "coupling_mode='interpolated' (or 'auto')."
+                )
             return self.coupling_mode
+        if self.waveform_sweeps > 1 and multi:
+            return "interpolated"
         if self.splitting == "strang" or len(groups) < 2:
             return "frozen"
         # Static structure only (no jnp), so this stays concrete when run()
@@ -1577,30 +1615,42 @@ class Scheduler:
                 # they share the window and its grid, so their dense outputs
                 # concatenate into one interpolant. Carrying only the previous
                 # group left every non-adjacent edge frozen (P0.23).
-                solved: list[tuple[jnp.ndarray, jnp.ndarray]] = []
-                for gi in range(n_groups):
-                    if interp and solved:
-                        fill = _InterpFill(
-                            full=st,
-                            t0=t_start,
-                            t1=t_next,
-                            ys=jnp.concatenate(
-                                [gy_s for _, gy_s in solved], axis=-1
-                            ),
-                            idx=jnp.concatenate([ix for ix, _ in solved]),
-                        )
-                    else:
-                        fill = _FrozenFill(full=st)
+                st_in = st
+                last: list[tuple[jnp.ndarray, jnp.ndarray]] | None = None
+                for _sweep in range(self.waveform_sweeps):
+                    st = st_in  # every sweep re-solves the same window
+                    solved: list[tuple[jnp.ndarray, jnp.ndarray]] = []
+                    for gi in range(n_groups):
+                        # Gauss-Seidel: groups before gi from this sweep,
+                        # groups after it from the last one. The second half is
+                        # what a one-pass Lie split never has, and it is the
+                        # backward edge of a feedback loop.
+                        segs = list(solved)
+                        if last is not None:
+                            segs += last[gi + 1 :]
+                        if interp and segs:
+                            fill = _InterpFill(
+                                full=st,
+                                t0=t_start,
+                                t1=t_next,
+                                ys=jnp.concatenate(
+                                    [gy_s for _, gy_s in segs], axis=-1
+                                ),
+                                idx=jnp.concatenate([ix for ix, _ in segs]),
+                            )
+                        else:
+                            fill = _FrozenFill(full=st)
 
-                    st, gy, ld, ns, nr, r = solve_dense(
-                        gi, st, t_start, t_next, dt0h[gi], fill
-                    )
-                    w = write_idxs[gi]
-                    traj = traj.at[:, w].set(gy[1:])
-                    steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
-                    res = res[:gi] + (r,) + res[gi + 1 :]
-                    dt0_next[gi] = ld
-                    solved.append((w, gy))
+                        st, gy, ld, ns, nr, r = solve_dense(
+                            gi, st, t_start, t_next, dt0h[gi], fill
+                        )
+                        w = write_idxs[gi]
+                        traj = traj.at[:, w].set(gy[1:])
+                        steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
+                        res = res[:gi] + (r,) + res[gi + 1 :]
+                        dt0_next[gi] = ld
+                        solved.append((w, gy))
+                    last = solved
 
             carry = (st, jnp.stack(dt0_next), steps, rej, res)
             return carry, traj

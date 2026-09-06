@@ -624,7 +624,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   already knows a constant's flat exposure (extended 2026-09-05); the missing
   piece is naming the set and surfacing it, not computing it.
 
-- [ ] **P0.47 — Timescale splitting cuts feedback loops, silently, with no
+- [x] **P0.47 — Timescale splitting cuts feedback loops, silently, with no
   diagnostic and no way to make the split accurate.** Filed 2026-09-05, found
   wiring Kallenberger in.
 
@@ -692,6 +692,72 @@ The framework returns a plausible number and nothing indicates it is wrong.
   serve. Backed out; `auto_groups` keeps the split and now warns, and
   `Composite.cyclic_group_sets()` reports which group sets a cycle runs
   through so the condition is queryable rather than folklore.
+
+  **Fixed 2026-09-05: `Scheduler(waveform_sweeps=k)`.** Suggestion #4 built.
+  Each macro step re-solves the window k times; within a sweep, group `gi`
+  reads groups before it from *this* sweep and groups after it from the *last*
+  one. That second half is what a one-pass Lie split never has, and it is
+  exactly the backward edge of the loop.
+
+  Measured on a two-group cycle, error vs a converged reference, and the
+  observed order from successive halvings:
+
+  ```
+              scheme       2.0       1.0       0.5      0.25     0.125
+  lie / interpolated   1.5223%   1.5186%   2.7933%   1.9326%   1.0210%
+    observed order p      0.00     -0.88      0.53      0.92
+         waveform x2   0.0556%   0.0215%   0.0057%   0.0011%   0.0003%
+    observed order p      1.37      1.93      2.41      2.03
+  ```
+
+  **Error drops 27x at `macro_dt` 2.0 and 3400x at 0.125**; eager path 17x / 71x.
+
+  *What the sweeps do and do not buy — corrected after checking convergence
+  properly.* The iteration **does** reach a fixed point: at `macro_dt` 0.25 the
+  sweep-to-sweep change is exactly 0 by k=8, and k=2 is already within 2% of
+  the converged answer.
+
+  ```
+    sweeps        error   change vs prev sweep
+         1    1.932600%
+         2    0.001063%             1.9315364%
+         4    0.001041%             0.0000226%
+         8    0.001041%             0.0000000%
+  ```
+
+  But the fixed point is **not** the exact solution — it sits at 0.001041%
+  against a ~1e-4% solver floor. The residual is the *interpolant's* sample
+  count, not the splitting: at the converged k=8, varying
+  `coupling_interp_points` moves it directly, while more sweeps do not.
+
+  ```
+   interp_pts        error (k=8, macro_dt 0.25)
+            8    0.006022%
+           16    0.001041%   <- default
+           64    0.000439%
+          128    0.000384%
+  ```
+
+  So the two knobs are separable and both are needed: **sweeps remove the
+  stale-edge error, interpolation points set the floor they converge to.**
+  Reporting this as "second order" was a mis-read — the observed p ~ 2 is the
+  floor's own scaling, not a convergence rate of the iteration.
+
+  *Not verified:* at `macro_dt` 1.0 the sweep-to-sweep change **grows**
+  (0.0013% -> 0.0026% -> 0.0056% over k=4/8/16) rather than contracting, so the
+  iteration does not cleanly converge at coarse steps. Whether that is
+  contraction failure or interpolation noise is untested.
+
+  On a **feed-forward** composite it is bit-identical to one pass, correctly:
+  with no cycle there is no stale edge to converge, so the extra passes cost
+  k x and buy nothing. Default stays `waveform_sweeps=1`; use
+  `Composite.cyclic_group_sets()` to decide where it is worth paying.
+
+  A fixed sweep count rather than the suggestion's `until residual < epsilon`:
+  a data-dependent `while` inside `lax.scan` is not reverse-differentiable, and
+  end-to-end differentiability is a hard invariant. `coupling_mode="frozen"`
+  with `sweeps>1` **raises** — a frozen fill is the same constant every sweep,
+  so it would cost k x and change nothing.
 
   *Fix:* **waveform relaxation — already designed, as suggestion #4 in
   [crossgen-suggestions.md](crossgen-suggestions.md)** (~40 lines wrapping the
