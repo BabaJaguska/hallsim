@@ -1106,19 +1106,31 @@ class Scheduler:
                     stats[gname]["num_macro_steps"] += 1
                     _record(gname, diag)
             else:  # Lie: sequential, one pass
-                prev_interpolant = None
-                prev_idxs: jnp.ndarray | None = None
+                # Every group solved this window, not just the previous one —
+                # they share the window and its grid, so their dense outputs
+                # concatenate into one interpolant (P0.23).
+                solved_ys: list[jnp.ndarray] = []
+                solved_idx: list[jnp.ndarray] = []
                 for gname, rhs_fn in group_rhs.items():
                     if coupling == "interpolated":
-                        state, prev_interpolant, last_dt, diag = (
+                        prev = (
+                            (t, t_next, jnp.concatenate(solved_ys, axis=-1))
+                            if solved_ys
+                            else None
+                        )
+                        state, interp_out, last_dt, diag = (
                             self._solve_group_interpolated(
                                 rhs_fn,
                                 state,
                                 group_write_idxs[gname],
                                 t,
                                 t_next,
-                                prev_interpolant,
-                                prev_idxs,
+                                prev,
+                                (
+                                    jnp.concatenate(solved_idx)
+                                    if solved_idx
+                                    else None
+                                ),
                                 integ=integrators[gname],
                                 adjoint=adjoint,
                                 dt0_hint=group_dt0_hint.get(gname),
@@ -1127,7 +1139,8 @@ class Scheduler:
                         )
                         group_dt0_hint[gname] = last_dt
                         _record(gname, diag)
-                        prev_idxs = group_write_idxs[gname]
+                        solved_ys.append(interp_out[2])
+                        solved_idx.append(group_write_idxs[gname])
                     else:
                         state, last_dt, diag = self._solve_group(
                             rhs_fn,
@@ -1560,16 +1573,21 @@ class Scheduler:
                 traj = st[None]
             else:
                 traj = jnp.broadcast_to(st, (n_out,) + st.shape)
-                prev = None
+                # Every group solved this window, not just the previous one:
+                # they share the window and its grid, so their dense outputs
+                # concatenate into one interpolant. Carrying only the previous
+                # group left every non-adjacent edge frozen (P0.23).
+                solved: list[tuple[jnp.ndarray, jnp.ndarray]] = []
                 for gi in range(n_groups):
-                    if interp and prev is not None:
-                        p_t0, p_t1, p_ys = prev
+                    if interp and solved:
                         fill = _InterpFill(
                             full=st,
-                            t0=p_t0,
-                            t1=p_t1,
-                            ys=p_ys,
-                            idx=write_idxs[gi - 1],
+                            t0=t_start,
+                            t1=t_next,
+                            ys=jnp.concatenate(
+                                [gy_s for _, gy_s in solved], axis=-1
+                            ),
+                            idx=jnp.concatenate([ix for ix, _ in solved]),
                         )
                     else:
                         fill = _FrozenFill(full=st)
@@ -1582,7 +1600,7 @@ class Scheduler:
                     steps, rej = steps.at[gi].add(ns), rej.at[gi].add(nr)
                     res = res[:gi] + (r,) + res[gi + 1 :]
                     dt0_next[gi] = ld
-                    prev = (t_start, t_next, gy)
+                    solved.append((w, gy))
 
             carry = (st, jnp.stack(dt0_next), steps, rej, res)
             return carry, traj

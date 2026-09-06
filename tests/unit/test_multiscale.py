@@ -1974,3 +1974,134 @@ def test_verify_plan_reports_a_moved_verdict():
     assert moved, "a 1e6x rate change left the verdict unchanged"
     for planned, actual in moved.values():
         assert planned != actual
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Interpolated coupling reaches every solved group, not just the previous one
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _Osc2(Process):
+    """Fast driver."""
+
+    timescale: float = 1.0
+    w: float = 6.0
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.EVOLVED, default=1.0),
+            "v": Port(role=PortRole.EVOLVED, default=0.0),
+        }
+
+    def derivative(self, t, state):
+        return {"x": state["v"], "v": -self.w**2 * state["x"]}
+
+
+class _Inert2(Process):
+    """Coupled to nothing — its only job is to sit between two groups."""
+
+    timescale: float = 10.0
+
+    def ports_schema(self):
+        return {"z": Port(role=PortRole.EVOLVED, default=1.0)}
+
+    def derivative(self, t, state):
+        return {"z": -0.2 * state["z"]}
+
+
+class _Driven2(Process):
+    """Reads the driver, two group positions away."""
+
+    timescale: float = 100.0
+
+    def ports_schema(self):
+        return {
+            "y": Port(role=PortRole.EVOLVED, default=0.0),
+            "u": Port(role=PortRole.INPUT, default=1.0),
+        }
+
+    def derivative(self, t, state):
+        return {"y": 0.1 * state["u"] - 0.05 * state["y"]}
+
+
+def _spaced_composite(extra=None, extra_topo=None):
+    procs = {"drv": _Osc2(), "mid": _Inert2(), "dvn": _Driven2()}
+    topo = {
+        "drv": {"x": "s/x", "v": "s/v"},
+        "mid": {"z": "s/z"},
+        "dvn": {"y": "s/y", "u": "s/x"},
+    }
+    if extra:
+        procs.update(extra)
+        topo.update(extra_topo or {})
+    return Composite(processes=procs, topology=topo, semantic_validation=False)
+
+
+@pytest.mark.parametrize("eager", [False, True])
+def test_interpolated_coupling_survives_an_inert_group_between(eager):
+    """Inserting an unrelated group between a driver and its consumer must not
+    change the interpolated answer.
+
+    The interpolant used to carry only the immediately preceding group, so a
+    non-adjacent edge silently fell back to frozen — and the mode still
+    reported itself as interpolated. Structurally irrelevant perturbations are
+    exactly what a splitting scheme must be invariant to.
+    """
+    from hallsim.scheduler import Scheduler
+
+    extra, extra_topo = None, None
+    if eager:  # a DISCRETE process forces the eager loop, a separate code path
+        extra = {"tick": _Ticker2()}
+        extra_topo = {"tick": {"c": "s/c"}}
+
+    def endpoint(groups):
+        comp = _spaced_composite(extra, extra_topo)
+        res = Scheduler(groups=groups, coupling_mode="interpolated").run(
+            comp, (0.0, 10.0), macro_dt=2.0, save_dt=2.0
+        )
+        return res.ys[-1][comp.store_keys().index("s/y")]
+
+    adjacent = endpoint({"gA": ["drv"], "gC": ["dvn"]})
+    spaced = endpoint({"gA": ["drv"], "gB": ["mid"], "gC": ["dvn"]})
+    assert jnp.allclose(adjacent, spaced, rtol=1e-9, atol=1e-12), (
+        f"inert group changed the answer: adjacent {adjacent} vs "
+        f"spaced {spaced}"
+    )
+
+
+def test_interpolated_beats_frozen_on_a_non_adjacent_edge():
+    """And it must actually interpolate. Bit-identical to frozen is the
+    signature of the edge being dropped."""
+    from hallsim.scheduler import Scheduler
+
+    groups = {"gA": ["drv"], "gB": ["mid"], "gC": ["dvn"]}
+
+    def endpoint(mode):
+        comp = _spaced_composite()
+        res = Scheduler(groups=groups, coupling_mode=mode).run(
+            comp, (0.0, 10.0), macro_dt=2.0, save_dt=2.0
+        )
+        return float(res.ys[-1][comp.store_keys().index("s/y")])
+
+    comp = _spaced_composite()
+    ref = float(
+        Scheduler()
+        .run(comp, (0.0, 10.0), macro_dt=10.0 / 512, save_dt=10.0)
+        .ys[-1][comp.store_keys().index("s/y")]
+    )
+    frozen, interp = endpoint("frozen"), endpoint("interpolated")
+    assert frozen != interp, "interpolated is bit-identical to frozen"
+    assert abs(interp - ref) < abs(
+        frozen - ref
+    ), f"interpolated {interp} is no closer to {ref} than frozen {frozen}"
+
+
+class _Ticker2(Process):
+    kind: ProcessKind = ProcessKind.DISCRETE
+    dt_step: float = 1.0
+
+    def ports_schema(self):
+        return {"c": Port(role=PortRole.LATCHED, default=0.0)}
+
+    def update(self, t, state):
+        return {"c": state["c"] + 1.0}

@@ -74,7 +74,13 @@ The framework returns a plausible number and nothing indicates it is wrong.
   first eager call, or raise on a cold trace. Not: expect users to remember
   `warm_up`.
 
-- [ ] **P0.2 — Strang splitting does not attain second order.** Re-measured
+- [ ] **P0.2 — Strang splitting does not attain second order.**
+  *Contradicted 2026-09-05, see P0.47: observed order is **p = 2.33 then 2.07**
+  over `dt` 0.5 -> 0.25 -> 0.125, and Strang is 105x more accurate than Lie at
+  `dt = 0.125`. The earlier readings sampled steps at or above the fastest
+  period, where no splitting scheme is asymptotic. Needs re-taking at steps
+  small enough for the claim to be testable.*
+  Re-measured
   2026-08-31 on a forced two-group split (DP14 slow / GZ06 + edges fast),
   against a 32×-refined Lie reference, four observables:
 
@@ -128,7 +134,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   retires the "NF-κB oscillation vs P0.20 span-truncation" ambiguity as the
   only candidate pair.
 
-- [ ] **P0.23 — `coupling_mode="interpolated"` interpolates only the
+- [x] **P0.23 — `coupling_mode="interpolated"` interpolates only the
   *immediately preceding* group; every earlier group stays frozen while the mode
   reports as interpolated.**
   Measured 2026-08-31: bit-identical to `frozen` at `macro_dt` 3.5 / 1.75 /
@@ -192,6 +198,43 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `save_dt`. In the measurement above, `macro_dt=save_dt=2.0` gave 6 points
   frozen and 76 interpolated over the same span. A coupling knob should not
   change the shape of the answer.
+
+  **Fixed 2026-09-05.** Both paths now accumulate every group solved in the
+  window instead of carrying only the previous one. The groups share the window
+  and its save grid, so their dense outputs concatenate into a single
+  interpolant — one gather, no per-group loop in the fill. Sites:
+  `_run_scan_continuous`'s body (scan) and the eager Lie loop.
+
+  Measured on the P0.23 shape — driver, inert group, consumer, so the driving
+  edge spans two positions:
+
+  ```
+    grouping  macro_dt         frozen         interp   identical?
+    adjacent      2.00   -0.143982589   -0.005120877        False
+      spaced      2.00   -0.143982589   -0.005120877        False   (was True)
+  ```
+
+  Against a converged reference of -0.005296, the spaced case goes from
+  **2618% error to 3.3%**. `spaced` and `adjacent` now agree, which is the
+  invariant: inserting an unrelated group must not change the answer.
+  Regression tests: `test_interpolated_coupling_survives_an_inert_group_between`
+  (both paths) and `test_interpolated_beats_frozen_on_a_non_adjacent_edge`.
+
+  *What interpolation is worth, now that it works* — observed convergence order
+  on a two-group split, error vs a converged reference:
+
+  ```
+                scheme       2.0       1.0       0.5      0.25     0.125
+   feed-forward, lie/frozen   7.2387%   0.6084%   3.6330%   1.9266%   0.9860%
+   feed-forward, lie/interp   0.0149%   0.0010%   0.0003%   0.0004%   0.0007%
+   feedback,     lie/interp   1.5223%   1.5186%   2.7933%   1.9326%   1.0210%
+  ```
+
+  On a **DAG** interpolation does not reduce the splitting error, it removes it:
+  the error floors at ~1e-6 relative, which is solver tolerance, not splitting.
+  On a **cycle** it reverts to first order (p ~ 0.9) because the backward edge
+  still reads a stale value — that residual is what waveform relaxation (P0.47)
+  exists to remove, and it is now measured rather than asserted.
 
 - [ ] **P0.3 — The fold-change reference is an acausal filter of the whole
   trajectory.** ✓✓ Summaries are forward–backward EMAs, so the value at index 0
@@ -609,9 +652,39 @@ The framework returns a plausible number and nothing indicates it is wrong.
   **Nothing available today fixes it.** Group order changes it by <2x and
   reverses sign with `macro_dt`. Strang is 7x worse (see P0.2). `adaptive_dt`
   is 6-20x worse (P0.49). `coupling_mode="interpolated"` is bit-identical to
-  `frozen` — and that part is *correct*, not P0.23: with a cycle there is no
-  forward-only ordering, so there is nothing for an interpolant to read. Only
-  shrinking `macro_dt` helps, at O(dt^1).
+  `frozen` — **and that reading was wrong on both counts, corrected
+  2026-09-05.**
+
+  It was P0.23 after all. The bit-identical result came from a *three*-group
+  composite whose driving edge was non-adjacent, so the interpolant (which
+  carried only the previous group) never reached it. Cyclicity was a
+  coincidence of that composite, not the cause. With P0.23 fixed, interpolated
+  and frozen differ on a cycle and interpolation is worth roughly half the
+  error — 11x at the coarsest step:
+
+  ```
+    macro_dt   frozen err   interp err
+       2.000       7.127%       0.651%
+       0.500       3.811%       1.911%
+  ```
+
+  The reasoning was wrong in principle too: a cycle only denies an interpolant
+  to the group that runs **first**. Every later group has the earlier groups'
+  freshly-computed trajectories available over the window. A cycle disables
+  half the interpolation, not all of it.
+
+  **Strang is not 7x worse either** — it was measured outside its asymptotic
+  regime. Observed order from successive halvings over `dt` 0.5 -> 0.25 ->
+  0.125 is **p = 2.33 then 2.07**, second order as designed. It is useless
+  above `dt ~ 1.0` (8.9%, 8.0%), then falls to 0.199% at 0.5; at `dt = 0.125`
+  it is **0.0094% against Lie's 0.986%, 105x better**. The driver's period is
+  ~1.05, so at `dt >= 1` no splitting scheme is asymptotic — and the table
+  above samples 3.5/1.0/0.5, almost entirely that band. P0.2 needs the same
+  correction.
+
+  So "nothing available today fixes it" is false. What remains true is that the
+  cycle's backward edge holds the scheme at first order (p ~ 0.9 measured), and
+  that is what waveform relaxation removes.
 
   *Not fixed by merging the groups.* That was the first attempt and it is an
   avoidance: multi-rate splitting is the capability being demonstrated, and a
