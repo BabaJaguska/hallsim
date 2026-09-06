@@ -324,8 +324,14 @@ def test_screenreport_blocking_is_only_exploding(kwargs, blocking):
 
 def test_tolerance_advisory_names_the_tolerance_to_use():
     report = ScreenReport(
-        "m", False, False, True, 1.0, 6.13,
-        rtol_loose=1e-3, rtol_tight=1e-7,
+        "m",
+        False,
+        False,
+        True,
+        1.0,
+        6.13,
+        rtol_loose=1e-3,
+        rtol_tight=1e-7,
     )
     assert report.rtol_required == 1e-7
     assert not report.blocking

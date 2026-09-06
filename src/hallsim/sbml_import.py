@@ -183,7 +183,10 @@ def _precheck_sbml_supported(xml_path: str) -> list[str]:
     # with an empty state vector: without this the failure surfaces much
     # later as "None is not a valid value for jnp.array". BioModels serves
     # these under format "SBML" with no other signal.
-    if doc.getPlugin("qual") is not None or model.getPlugin("qual") is not None:
+    if (
+        doc.getPlugin("qual") is not None
+        or model.getPlugin("qual") is not None
+    ):
         issues.append(
             "this is an SBML qual (logical/Boolean) model, not a kinetic "
             "one: it declares update rules over discrete levels rather than "

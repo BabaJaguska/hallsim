@@ -235,23 +235,40 @@ def _get_json(url: str, params: dict, timeout: float) -> dict:
         return json.load(response)
 
 
+#: Over-fetch factor for filters applied client-side. The search truncates
+#: server-side, so filtering the returned page silently shrinks the result set
+#: — with ``sbml_only`` alone that is 21% of the corpus, and a page that
+#: happens to be format-heavy reports "no hits" for a query that had them.
+OVERFETCH = 3
+
+
 def search_biomodels(
     query: str,
     limit: int = 25,
-    curated_only: bool = True,
+    curated_only: bool = False,
     sbml_only: bool = True,
     timeout: float = 30.0,
 ) -> list[ModelCandidate]:
     """BioModels full-text search.
 
-    A ``BIOMD`` accession is the manually curated branch; ``MODEL`` accessions
-    are auto-generated or uncurated submissions, excluded unless
-    ``curated_only`` is False. ``sbml_only`` drops the MATLAB/R/other-format
-    entries the search also returns, since only SBML has an importer.
+    A ``BIOMD`` accession is the manually curated branch, a ``MODEL``
+    accession the uncurated one, reported as ``ModelCandidate.curated`` either
+    way. **Uncurated deposits are returned by default**: curation status is
+    EBI's editorial queue, not a property of the model — it is 53% of the
+    corpus (1,692 of 3,212), it holds the only CXCL8 and CCL2 models in the
+    repository, and :func:`hallsim.intake.triage_sbml` is a better admission
+    test than someone else's backlog. Pass ``curated_only=True`` to restrict.
+
+    ``sbml_only`` drops the MATLAB/R/other-format entries the search also
+    returns, since only SBML has an importer.
     """
     payload = _get_json(
         BIOMODELS_SEARCH,
-        {"query": query, "format": "json", "numResults": limit},
+        {
+            "query": query,
+            "format": "json",
+            "numResults": limit * OVERFETCH,
+        },
         timeout,
     )
     candidates = []
@@ -274,13 +291,16 @@ def search_biomodels(
                 submitter=record.get("submitter"),
             )
         )
+    kept = candidates[:limit]
     log.info(
-        "biomodels '%s': %d hits, %d candidates",
+        "biomodels '%s': %d hits, %d fetched, %d passed filters, %d returned",
         query,
         payload.get("matches", 0),
+        len(payload.get("models", [])),
         len(candidates),
+        len(kept),
     )
-    return candidates
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -781,16 +801,20 @@ def _build_jws_index() -> list[dict]:
 def search_jws(
     query: str,
     limit: int = 25,
-    curated_only: bool = True,
+    curated_only: bool = False,
     refresh: bool = False,
     **_,
 ) -> list[ModelCandidate]:
-    """JWS Online: curated kinetic models, served as SBML.
+    """JWS Online: kinetic models, served as SBML.
 
     Matches the query against model name, paper title and authors, and the
     species and reaction names — a model whose title never writes a gene is
     still reachable through the species it contains, which is the same miss
     :func:`search_by_gene` exists to close on BioModels.
+
+    JWS's own ``status`` is reported as ``curated`` / ``curation`` rather than
+    filtered on, for the reason it is not filtered on in
+    :func:`search_biomodels`. Pass ``curated_only=True`` to restrict.
 
     ``cbm`` models are constraint-based: stoichiometry with no rate laws,
     solved by linear programming rather than integrated, so they are dropped.
@@ -800,7 +824,8 @@ def search_jws(
     for rec in index:
         if rec.get("cbm"):
             continue
-        if curated_only and rec.get("status", "").upper() != "CURATED":
+        status = rec.get("status", "")
+        if curated_only and status.upper() != "CURATED":
             continue
         score = _score(
             query,
@@ -827,7 +852,8 @@ def search_jws(
                     name=rec.get("title") or rec.get("name", ""),
                     format="SBML",
                     url=f"https://jjj.bio.vu.nl/models/{rec['slug']}/",
-                    curated=True,
+                    curated=status.upper() == "CURATED",
+                    curation=status,
                     submitter=rec.get("authors") or None,
                     description=rec.get("species", ""),
                 ),
@@ -934,8 +960,23 @@ def _first_readable_sbml(paths):
     return None, "no readable SBML among " + ", ".join(seen)
 
 
+def _sbml_paths_for(model_id: str, source: str, timeout: float) -> list[str]:
+    """Local SBML paths for one candidate, dispatched on its repository.
+
+    A source missing here is reported unscreenable, never dropped. Adding one
+    is a fetcher, not a branch in the screen.
+    """
+    if source == "biomodels":
+        return download_biomodel_files(model_id, timeout=timeout)
+    if source == "jws":
+        from hallsim.sbml_import import _download_jws_to_cache
+
+        return [_download_jws_to_cache(model_id)]
+    raise LookupError(f"no SBML fetcher for source {source!r}")
+
+
 def screen_produced_species(
-    model_ids, pattern: str, *, timeout: float = 60.0
+    candidates, pattern: str, *, timeout: float = 60.0
 ) -> list[OutputScreen]:
     """Which of ``model_ids`` synthesise a species matching ``pattern``.
 
@@ -950,9 +991,29 @@ def screen_produced_species(
 
     rx = re.compile(pattern, re.I)
     out: list[OutputScreen] = []
-    for model_id in model_ids:
+    for cand in candidates:
+        model_id = getattr(cand, "id", cand)
+        source = getattr(cand, "source", "biomodels")
+        # A repository that re-hosts BioModels embeds the accession in its own
+        # id (BioSimulations: "BIOMD0000000582_tellurium_..."). Screening the
+        # underlying deposit beats reporting a duplicate as unreadable.
+        embedded = re.search(r"BIOMD\d{10}", str(model_id))
+        if source != "biomodels" and embedded:
+            model_id, source = embedded.group(0), "biomodels"
         try:
-            paths = download_biomodel_files(model_id, timeout=timeout)
+            paths = _sbml_paths_for(model_id, source, timeout)
+        except LookupError as exc:
+            # CellML and XPP deposits need their own parser. Reported, never
+            # dropped — an unscreened hit is still a hit, and silently losing
+            # it looks like the repository had none.
+            out.append(
+                OutputScreen(
+                    str(model_id),
+                    "unscreenable",
+                    note=f"{exc} (format {getattr(cand, 'format', '?')})",
+                )
+            )
+            continue
         except Exception as exc:  # network, 404, malformed accession
             out.append(
                 OutputScreen(
@@ -971,12 +1032,54 @@ def screen_produced_species(
             status = "no-sbml" if "no .xml" in note else "unreadable"
             out.append(OutputScreen(str(model_id), status, note=note))
             continue
+        n_rx = model.getNumReactions()
+        if n_rx and not any(
+            model.getReaction(i).isSetKineticLaw() for i in range(n_rx)
+        ):
+            # A CellDesigner disease map draws reactions with no rate law.
+            # Nothing is produced by an arrow, so counting one as production
+            # promotes a diagram to a model (Wu2010 has 254 such reactions).
+            out.append(
+                OutputScreen(
+                    str(model_id),
+                    "no-rate-laws",
+                    n_species=model.getNumSpecies(),
+                    n_reactions=n_rx,
+                    note=f"{n_rx} reactions, none with a kinetic law — a "
+                    f"drawn pathway map, not an integrable model",
+                )
+            )
+            continue
+        if n_rx == 0:
+            # SBML-qual and other non-reaction formalisms parse fine and
+            # present an empty core model. Reporting that as ``no-match`` is
+            # indistinguishable from a deposit whose reactions were read and
+            # produced nothing, which is the opposite conclusion.
+            out.append(
+                OutputScreen(
+                    str(model_id),
+                    "no-reactions",
+                    n_species=model.getNumSpecies(),
+                    note="parsed, but declares no reactions — a qualitative "
+                    "or constraint-based deposit, not a rate-law model",
+                )
+            )
+            continue
+        # Match id *or* display name. A CellDesigner export — a large part of
+        # BioModels — gives every species a UUID id and puts the gene symbol in
+        # the name, so an id-only screen cannot see it (Dwivedi2014 produces
+        # IL6 in three compartments under ids like `mwf626e95e_543f_...`).
+        label = {}
+        for i in range(model.getNumSpecies()):
+            s = model.getSpecies(i)
+            label[s.getId()] = s.getName() or s.getId()
         produced = {
-            reaction.getProduct(j).getSpecies()
+            label.get(sid, sid)
             for i in range(model.getNumReactions())
             for reaction in (model.getReaction(i),)
             for j in range(reaction.getNumProducts())
-            if rx.search(reaction.getProduct(j).getSpecies())
+            for sid in (reaction.getProduct(j).getSpecies(),)
+            if rx.search(sid) or rx.search(label.get(sid, ""))
         }
         out.append(
             OutputScreen(
@@ -991,12 +1094,15 @@ def screen_produced_species(
 
 
 def search_producing(
-    query: str, pattern: str, *, limit: int = 40, **kwargs
+    query: str, pattern: str, *, limit: int = 40, sources=None, **kwargs
 ) -> list[OutputScreen]:
-    """Search BioModels for ``query``, keep what *produces* ``pattern``.
+    """Search **every** repository for ``query``, keep what *produces*
+    ``pattern``.
 
     The composable version of a text search: a hit is only useful if the
-    quantity you need is something it emits.
+    quantity you need is something it emits. Defaults to all sources —
+    searching one repository and concluding the model does not exist is how
+    a candidate gets missed.
     """
-    hits = search_biomodels(query, limit=limit, **kwargs)
-    return screen_produced_species([h.id for h in hits], pattern)
+    hits = search_for_model(query, limit=limit, sources=sources, **kwargs)
+    return screen_produced_species(hits, pattern)

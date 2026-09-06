@@ -95,13 +95,19 @@ class ScreenReport:
     #: can act on tolerance_sensitive without re-deriving them.
     rtol_loose: float = 1e-3
     rtol_tight: float = 1e-7
+    #: The composite could not be built, so no trajectory exists. Distinct
+    #: from ``exploding``: a model that never ran did not blow up, and calling
+    #: it EXPLODING sends the reader to solver tolerances instead of to the
+    #: construction error (P0.59).
+    did_not_construct: bool = False
 
     @property
     def ok(self) -> bool:
         """No concerns at all — every check clean."""
         return (
             not (
-                self.exploding
+                self.did_not_construct
+                or self.exploding
                 or self.vanishing
                 or self.tolerance_sensitive
                 or self.negative
@@ -128,9 +134,12 @@ class ScreenReport:
         - ``vanishing`` is degenerate, not unusable.
         - ``tunes is False`` blocks calibration, not simulation.
 
+        ``did_not_construct`` is the other member: there is no trajectory at
+        all, so there is nothing to qualify.
+
         A caller wanting the strict gate still has :attr:`ok`.
         """
-        return self.exploding
+        return self.exploding or self.did_not_construct
 
     @property
     def advisories(self) -> tuple[str, ...]:
@@ -162,6 +171,8 @@ class ScreenReport:
 
     def __str__(self) -> str:
         flags = []
+        if self.did_not_construct:
+            flags.append("DID-NOT-CONSTRUCT")
         if self.exploding:
             flags.append("EXPLODING")
         if self.vanishing:
@@ -511,6 +522,24 @@ def screen_process(
                 probe,
             )
             for rtol in (rtol_tight, rtol_loose)
+        )
+
+    try:
+        # Build before solving, so a composite that cannot be assembled is
+        # reported as that rather than as a divergent trajectory (P0.59).
+        single_process_composite(proc).initial_state_vec()
+    except Exception as exc:
+        return ScreenReport(
+            name=name,
+            exploding=False,
+            vanishing=False,
+            tolerance_sensitive=False,
+            max_abs=float("nan"),
+            tol_rel_diff=float("nan"),
+            did_not_construct=True,
+            detail=f"composite did not build: {type(exc).__name__}: {exc}",
+            rtol_loose=rtol_loose,
+            rtol_tight=rtol_tight,
         )
 
     try:

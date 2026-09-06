@@ -860,6 +860,146 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `y0` instead of BNIP3, DDB2 and MDM2 — correct data, unreadable labels. It
   now takes `labels` and `calibration_report` passes the gene symbols.
 
+- [x] **P0.58 — FIXED 2026-09-06. `build_initial_store` compared port initial
+  values with exact equality, so a 1e-26 difference blocks the import outright.**
+  Filed 2026-09-06. **Stop rule fired**: the triage reported EXPLODING and
+  `sbmltoodejax` integrated the same model bounded.
+
+  Dwivedi2014 (BIOMD0000000534-537) is a curated IL-6 QSP model — 41 species,
+  71 reactions, 51 parameters, 100% ontology coverage — and the only deposit
+  found in a 119-model screen that emits IL6 kinetically. All four arms
+  **reject**. The reason is not numerical:
+
+      ValueError: dwi/mwf345ed7a_... is claimed by 5 ports of the same role
+      with differing initial values [0.0, 1e-26]
+
+  Four SBML `<event>`s assign the same species; each expanded event port
+  declares an initial value, and `store.py:159` rejects on
+  `np.all(a == b)` (`_same_default`, `store.py:183`). The values differ by
+  **1e-26** against a trajectory whose `max|y|` is 234 — 1e-28 relative. That
+  is a CellDesigner export artefact, not "a modelling decision", which is what
+  the error message calls it.
+
+  Declaring the value by hand makes all of them run, bounded and finite:
+
+  | model | with `Composite(initial={...: 0.0})` |
+  |---|---|
+  | BIOMD0000000534 | RAN, finite, `max|y|` = 234.6 |
+  | BIOMD0000000537 | RAN, finite, `max|y|` = 703.8 |
+  | BIOMD0000000873 | RAN, finite, `max|y|` = 1.4e5 |
+
+  *Two candidate fixes, and the second is the one:*
+  (a) compare within a tolerance — a patch, and the tolerance is unit-dependent
+  (1e-26 M is a legitimate concentration);
+  (b) **an event-assignment port should not declare an initial value at all.**
+  An event writes its target when it fires; it does not own where the target
+  starts. The owning species does. Under (b) there is no disagreement to
+  tie-break and no tolerance to choose.
+
+  Note `_same_default`'s docstring says it "drives a warning and nothing else",
+  which the raising call site contradicts.
+
+  **Fixed** by (b): `SBMLEvent.ports_schema` gives a species target
+  `default=None` — the abstain the `Port` docstring already documents for
+  exactly this case — and keeps the published value for a parameter target,
+  which has no other owner. All four Dwivedi arms now **PASS** with
+  `rest_residual` ~1e-15. Covered by `tests/unit/test_sbml_events.py`, which
+  did not exist: `sbml_events` had no tests at all.
+
+- [x] **P0.59 — FIXED 2026-09-06. The numerical screen reported a construction
+  failure as EXPLODING with `max|y| = inf`.** Filed 2026-09-06, found alongside P0.58.
+
+  Dwivedi2014 never reached a solver: `Composite.initial_state_vec` raised, so
+  no trajectory exists. The screen recorded
+  `EXPLODING + TOLERANCE-SENSITIVE max|y|=inf tol-rel-diff=inf` and rejected on
+  it. A model that never ran cannot have exploded, and "exploding" sends the
+  reader to solver tolerances instead of to the one-line construction error.
+
+  The FRAMEWORK-SUSPECT annotation did fire and did say `sbmltoodejax
+  integrates it bounded` — that annotation is the only reason this was caught,
+  and it is doing more work than the verdict it qualifies.
+
+  **Fixed:** `ScreenReport.did_not_construct`, set by building the composite
+  in its own guarded step before the tight/loose solves, carrying the
+  construction exception instead of sentinel infinities. Same family as the
+  three `screen_produced_species` defects fixed the same day: a confident
+  verdict about something that was never examined.
+
+- [ ] **P0.57 — Triage cannot tell a deposit that was written for stochastic
+  simulation, so it imports one as an ODE and silently deletes a mechanism.**
+  Filed 2026-09-05, found independently by both reviewers on Hui 2016.
+
+  A model deposited for Gillespie simulation is a different object from the
+  same file read as a mean-field ODE, and nothing in `triage_sbml` notices.
+  Hui 2016's published results are **population statistics over 500 stochastic
+  runs** — every model-data comparison in the paper is a percentage of cells
+  crossing a threshold. Run stochastically it reproduces the paper (200 COPASI
+  Gillespie replicates: MMP-13-positive cells 13.0 ± 4.7% → 85.0 ± 4.9% against
+  a measured 16.0 ± 8.3% → 80.0 ± 4.1%; 80.8% mean collagen loss against a
+  stated 80.5%). Read as an ODE the same file returns 0%/100% step functions
+  and is **9× wrong on `Smad1_P_Smad4`** — the species carrying the
+  ALK1→Runx2→MMP-13 arm the paper credits with its MMP-13 bursts, and which is
+  exactly zero at 80.6% of stochastic run-timepoints. Deterministic import
+  deletes one of the paper's two mechanisms without a word.
+
+  **The signature is declared and checkable**, verified across three deposits:
+
+  | deposit | `substance` unitDefinition | `hasOnlySubstanceUnits` | ICs integral |
+  |---|---|---|---|
+  | Hui 2016 (560) | **`item`** | **True** | **65/65** |
+  | DallePezze 2014 (582) | dimensionless | False | 36/40 |
+  | Benary 2019 (794) | mole ×1e-9 | False | 1/17 |
+
+  `item` is SBML for "count of things". A count-valued model with small integer
+  initial amounts is a stochastic model; the ODE limit of 2 ROS and 30 Bcl-2
+  molecules is not a limit anyone took.
+
+  *Fix:* `triage_sbml` should resolve the `substance` unit and flag `item`
+  (corroborated by `hasOnlySubstanceUnits` and integral ICs) as
+  **stochastic-intent — mean-field import is a different model**. Integrality
+  alone is not the rule: DP14 is 36/40 integral and is a concentration model.
+  The same check is the admission gate for the stochastic lane, because a
+  concentration model's rate law is not a propensity — see
+  `docs/design-stochastic-lane.md` and P3.6.
+
+  Two smaller items from the same review, reported but not independently
+  verified here — see `docs/review-hui2016-wetlab.md`: `classify_ontology`
+  returns PROTEIN for the model's three real mRNAs, one of which carries
+  `bqbiol:encodes`, the qualifier that says otherwise; and
+  `recommend_reporters` offers regulon candidates for genes the composite does
+  not contain, and no identity mappings.
+
+- [ ] **P0.55 — `steady_state` returns NaNs silently: the guard is `res > tol`,
+  and `NaN > tol` is False.** Filed 2026-09-05, found by the mathematician
+  refereeing Hui 2016. `steady_state.py:548` warns only when the Newton
+  residual exceeds tolerance. A diverged solve produces `res = nan`, the
+  comparison is False, and the caller gets a state vector of NaNs with no
+  warning at all — the one case where the warning matters most.
+
+  Hit live: Hui 2016 has `d(AGEprod)/dt` identically 1e-6 at every state, so
+  no fixed point exists, and `steady_state` returned **62 NaNs** without
+  comment.
+
+  *Fix:* guard on `not (res <= tol)`, which catches NaN, and say in the warning
+  that a non-finite residual means no fixed point was approached rather than
+  one was missed.
+
+- [ ] **P0.56 — `triage_sbml` judges "not at rest" at `t_end=10` in units it
+  does not know.** Filed 2026-09-05. `intake.py:188` defaults `t_end=10.0`, and
+  the rest verdict is taken over that window — but the flag immediately above
+  it in the same report is *"no declared time unit"*. On a model whose clock is
+  seconds, 10 units is ten seconds, and nothing has moved yet.
+
+  Measured on Hui 2016 (native seconds): `not_at_rest` reads **False at
+  t_end=10** and **True at t_end=1.2096e6**, the horizon the model would
+  actually be run over, with the same τ. The triage that passed it on rest is
+  the one that does not know its clock.
+
+  *Fix:* make the rest window relative to something the model asserts — its own
+  slowest time constant, or the caller's horizon — and refuse to report a rest
+  verdict at all when `native_time_source == "assumed"`, since the window is
+  then uninterpretable. Same class as P0.40.
+
 - [ ] **P0.54 — The calibratable surface is scalar-only, so a per-source
   parameter cannot be fitted.** Filed 2026-09-05.
   `Process.calibratable_params` does `float(getattr(self, f.name))`, so a field
@@ -2214,6 +2354,14 @@ The check that would catch a mistake does not exist, does not run, or fails open
 - [ ] **P3.5 — No quasi-steady-state / DAE facility.**
 - [ ] **P3.6 — No stochastic support.** Batched `y0` pushes a distribution
   through one deterministic flow onto one attractor; that is not a population.
+  Scoped 2026-09-06 in `docs/design-stochastic-lane.md`: the propensity vector
+  and stoichiometry are already generated for every SBML import and discarded,
+  the Scheduler already routes per-group steppers, and the only structural gap
+  is that no PRNG reaches the solve path. Design is an SSA `GroupIntegrator`,
+  not a fourth `ProcessKind`. Measured on Hui 2016 (a Gillespie deposit, P0.57):
+  6.25e5 events/s at 256 cells on CPU, against 4.67e6 jumps/cell for a 14-day
+  window — the composite's own horizon costs ~32 min. Tau-leaping buys 3.4×
+  and no more, because 24 of 62 species never exceed 10 molecules.
 - [~] **P3.7 — No batched parameter sweeps.** Severity varies the pytree, not
   the state, so a sweep is a Python loop.
   **Re-scoped 2026-08-30 — this is a convenience, not a blocker, and the

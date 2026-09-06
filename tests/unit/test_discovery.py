@@ -444,11 +444,19 @@ class TestJWSOnline:
         self._patched(monkeypatch)
         assert "fba1" not in [c.id for c in discovery.search_jws("genome")]
 
-    def test_curated_only_by_default(self, monkeypatch):
+    def test_uncurated_returned_by_default_and_flagged(self, monkeypatch):
+        """Curation status is the repository's editorial queue, not a property
+        of the model, so it is reported rather than filtered on — `triage_sbml`
+        is the admission test."""
         self._patched(monkeypatch)
-        assert "draft1" not in [c.id for c in discovery.search_jws("draft")]
-        assert "draft1" in [
-            c.id for c in discovery.search_jws("draft", curated_only=False)
+        (hit,) = [c for c in discovery.search_jws("draft") if c.id == "draft1"]
+        assert hit.curated is False
+        assert hit.curation.upper() != "CURATED"
+
+    def test_curated_only_restricts_on_request(self, monkeypatch):
+        self._patched(monkeypatch)
+        assert "draft1" not in [
+            c.id for c in discovery.search_jws("draft", curated_only=True)
         ]
 
 
@@ -467,3 +475,201 @@ def test_jws_source_scheme_resolves_without_touching_biomodels(monkeypatch):
     path, name = sbml_import._resolve_source("jws:achcar2", None)
     assert path.endswith("achcar2.xml")
     assert name == "jws_achcar2"
+
+
+class TestBioModelsSearchFilters:
+    """A filter applied to a server-truncated page silently shrinks the result
+    set, and the shrunk set reads as "the repository has nothing"."""
+
+    def _payload(self, n_uncurated=6, n_curated=6, n_nonsbml=6):
+        models = (
+            [
+                {"id": f"MODEL230700000{i}", "name": f"u{i}", "format": "SBML"}
+                for i in range(n_uncurated)
+            ]
+            + [
+                {"id": f"BIOMD000000000{i}", "name": f"c{i}", "format": "SBML"}
+                for i in range(n_curated)
+            ]
+            + [
+                {
+                    "id": f"MODEL230800000{i}",
+                    "name": f"m{i}",
+                    "format": "MATLAB",
+                }
+                for i in range(n_nonsbml)
+            ]
+        )
+        return {"matches": 999, "models": models}
+
+    def _spy(self, monkeypatch, payload=None):
+        seen = {}
+
+        def fake(url, params, timeout):
+            seen.update(params)
+            return payload if payload is not None else self._payload()
+
+        monkeypatch.setattr(discovery, "_get_json", fake)
+        return seen
+
+    def test_uncurated_returned_by_default_and_flagged(self, monkeypatch):
+        """Curation status is EBI's editorial queue, not a property of the
+        model; `triage_sbml` is the admission test."""
+        self._spy(monkeypatch)
+        got = discovery.search_biomodels("q", limit=25)
+        uncurated = [c for c in got if not c.curated]
+        assert uncurated, "MODEL accessions must survive the default search"
+        assert all(c.id.startswith("MODEL") for c in uncurated)
+        assert any(c.curated for c in got)
+
+    def test_curated_only_restricts_on_request(self, monkeypatch):
+        self._spy(monkeypatch)
+        got = discovery.search_biomodels("q", limit=25, curated_only=True)
+        assert got and all(c.curated for c in got)
+
+    def test_overfetches_so_a_filter_cannot_eat_the_page(self, monkeypatch):
+        seen = self._spy(monkeypatch)
+        discovery.search_biomodels("q", limit=4)
+        assert seen["numResults"] == 4 * discovery.OVERFETCH
+
+    def test_trims_after_filtering_not_before(self, monkeypatch):
+        """12 SBML hits survive `sbml_only` out of 18 fetched; asking for 6
+        must return 6, not 6-minus-whatever the format filter removed."""
+        self._spy(monkeypatch)
+        assert len(discovery.search_biomodels("q", limit=6)) == 6
+
+    def test_a_format_heavy_page_still_yields_its_sbml(self, monkeypatch):
+        """The failure this guards: every early hit is unimportable, so a
+        limit-sized fetch would have returned nothing at all."""
+        self._spy(
+            monkeypatch,
+            self._payload(n_uncurated=0, n_curated=2, n_nonsbml=20),
+        )
+        got = discovery.search_biomodels("q", limit=2)
+        assert [c.id for c in got] == ["BIOMD0000000000", "BIOMD0000000001"]
+
+
+class TestProducedSpeciesScreen:
+    class _Model:
+        def __init__(self, n_species=0, reactions=(), names=None):
+            self._n, self._rx = n_species, reactions
+            if names is None:
+                # No display names declared: id is the label, as in a
+                # hand-written or COPASI-exported deposit.
+                names = {p: p for r in reactions for p in getattr(r, "_p", ())}
+            self._names = names
+
+        def getNumSpecies(self):
+            return len(self._names) or self._n
+
+        def getSpecies(self, i):
+            sid = sorted(self._names)[i]
+            return type(
+                "_S",
+                (),
+                {
+                    "getId": lambda s, v=sid: v,
+                    "getName": lambda s, v=self._names[sid]: v,
+                },
+            )()
+
+        def getNumReactions(self):
+            return len(self._rx)
+
+        def getReaction(self, i):
+            return self._rx[i]
+
+    class _Reaction:
+        def __init__(self, products, kinetic=True):
+            self._p = products
+            self._kinetic = kinetic
+
+        def isSetKineticLaw(self):
+            return self._kinetic
+
+        def getNumProducts(self):
+            return len(self._p)
+
+        def getProduct(self, j):
+            class _P:
+                def __init__(self, s):
+                    self._s = s
+
+                def getSpecies(self):
+                    return self._s
+
+            return _P(self._p[j])
+
+    def _patch(self, monkeypatch, model):
+        monkeypatch.setattr(
+            discovery, "_sbml_paths_for", lambda *a: ["/tmp/x.xml"]
+        )
+        monkeypatch.setattr(
+            discovery, "_first_readable_sbml", lambda paths: (model, "")
+        )
+
+    def test_a_reactionless_deposit_is_not_a_no_match(self, monkeypatch):
+        """SBML-qual parses to an empty core model. Calling that `no-match` says
+        the reactions were read and produced nothing — the opposite conclusion,
+        and how three Boolean deposits read as screened negatives."""
+        self._patch(monkeypatch, self._Model(n_species=0))
+        (row,) = discovery.screen_produced_species(["MODEL1"], "IL6")
+        assert row.status == "no-reactions"
+        assert "no reactions" in row.note
+
+    def test_no_match_still_means_read_and_absent(self, monkeypatch):
+        self._patch(
+            monkeypatch,
+            self._Model(n_species=2, reactions=(self._Reaction(["TNFR"]),)),
+        )
+        (row,) = discovery.screen_produced_species(["MODEL1"], r"\bIL6\b")
+        assert row.status == "no-match"
+
+    def test_produces_reports_the_matching_products(self, monkeypatch):
+        self._patch(
+            monkeypatch,
+            self._Model(
+                n_species=3,
+                reactions=(self._Reaction(["IL6", "junk"]),),
+            ),
+        )
+        (row,) = discovery.screen_produced_species(["MODEL1"], r"IL6")
+        assert row.status == "produces" and row.produced == ("IL6",)
+
+    def test_matches_a_display_name_when_the_id_is_a_uuid(self, monkeypatch):
+        """CellDesigner exports — a large part of BioModels — put the gene
+        symbol in the name and a UUID in the id. Dwivedi2014 produces IL6 in
+        three compartments and scored `no-match` on an id-only screen."""
+        uuid = "mwf626e95e_543f_41e4_aad4_c6bf60ab345b"
+        model = TestProducedSpeciesScreen._Model(
+            reactions=(TestProducedSpeciesScreen._Reaction([uuid]),),
+            names={uuid: "IL6"},
+        )
+        monkeypatch.setattr(
+            discovery, "_sbml_paths_for", lambda *a: ["/tmp/x.xml"]
+        )
+        monkeypatch.setattr(
+            discovery, "_first_readable_sbml", lambda paths: (model, "")
+        )
+        (row,) = discovery.screen_produced_species(["MODEL1"], r"\bIL6\b")
+        assert row.status == "produces"
+        assert row.produced == ("IL6",), "report the name, not the UUID"
+
+    def test_a_drawn_map_does_not_produce_anything(self, monkeypatch):
+        """A CellDesigner disease map draws reactions with no rate law. Wu2010
+        has 254 of them and 0 parameters; counting an arrow as production
+        promotes a diagram to a model."""
+        model = TestProducedSpeciesScreen._Model(
+            reactions=(
+                TestProducedSpeciesScreen._Reaction(["IL6"], kinetic=False),
+            ),
+        )
+        monkeypatch.setattr(
+            discovery, "_sbml_paths_for", lambda *a: ["/tmp/x.xml"]
+        )
+        monkeypatch.setattr(
+            discovery, "_first_readable_sbml", lambda paths: (model, "")
+        )
+        (row,) = discovery.screen_produced_species(["MODEL1"], r"\bIL6\b")
+        assert row.status == "no-rate-laws"
+        assert row.n_reactions == 1
