@@ -102,3 +102,137 @@ class TestWithParamInput:
             jnp.stack([a[s] for s in pin._species_names]),
             jnp.stack([b[s] for s in pin._species_names]),
         )
+
+
+SBML_QUAL = """<?xml version="1.0" encoding="UTF-8"?>
+<sbml xmlns="http://www.sbml.org/sbml/level3/version1/core"
+      xmlns:qual="http://www.sbml.org/sbml/level3/version1/qual/version1"
+      level="3" version="1" qual:required="true">
+  <model id="toy">
+    <listOfCompartments>
+      <compartment id="c" constant="true"/>
+    </listOfCompartments>
+    <qual:listOfQualitativeSpecies>
+      <qual:qualitativeSpecies qual:id="A" qual:compartment="c"
+        qual:constant="false" qual:maxLevel="1" qual:initialLevel="0"/>
+      <qual:qualitativeSpecies qual:id="B" qual:compartment="c"
+        qual:constant="false" qual:maxLevel="1" qual:initialLevel="1"/>
+    </qual:listOfQualitativeSpecies>
+    <qual:listOfTransitions>
+      <qual:transition qual:id="t_A">
+        <qual:listOfInputs>
+          <qual:input qual:qualitativeSpecies="B" qual:transitionEffect="none"
+            qual:id="in_B"/>
+        </qual:listOfInputs>
+        <qual:listOfOutputs>
+          <qual:output qual:qualitativeSpecies="A"
+            qual:transitionEffect="assignmentLevel"/>
+        </qual:listOfOutputs>
+        <qual:listOfFunctionTerms>
+          <qual:defaultTerm qual:resultLevel="0"/>
+        </qual:listOfFunctionTerms>
+      </qual:transition>
+    </qual:listOfTransitions>
+  </model>
+</sbml>
+"""
+
+
+class TestSBMLQualRejected:
+    """A logical model must be named as one, not fail deep in codegen.
+
+    BioModels serves SBML qual under format "SBML" with no other signal, and
+    libsbml parses it happily — the state vector just comes back empty, so
+    the failure used to surface as "None is not a valid value for jnp.array".
+    """
+
+    def test_qual_model_is_rejected_by_name(self, tmp_path):
+        path = tmp_path / "toy_qual.xml"
+        path.write_text(SBML_QUAL)
+        with pytest.raises(Exception) as exc:
+            process_from_sbml(str(path), name="toy")
+        assert "qual" in str(exc.value).lower()
+        assert "rate laws" in str(exc.value)
+
+    def test_kinetic_model_still_imports(self):
+        proc = _gz06(0.0)
+        assert len(proc.ports_schema()) > 0
+
+
+SBML_EVENT_ON_NONZERO_SPECIES = """<?xml version="1.0" encoding="UTF-8"?>
+<sbml xmlns="http://www.sbml.org/sbml/level2/version4" level="2" version="4">
+  <model id="ev">
+    <listOfCompartments>
+      <compartment id="c" size="1" constant="true"/>
+    </listOfCompartments>
+    <listOfSpecies>
+      <species id="S" compartment="c" initialConcentration="5"
+        boundaryCondition="false" constant="false"/>
+    </listOfSpecies>
+    <listOfParameters>
+      <parameter id="k" value="0.1" constant="true"/>
+    </listOfParameters>
+    <listOfReactions>
+      <reaction id="decay" reversible="false">
+        <listOfReactants><speciesReference species="S"/></listOfReactants>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <apply><times/><ci>k</ci><ci>S</ci></apply>
+          </math>
+        </kineticLaw>
+      </reaction>
+    </listOfReactions>
+    <listOfEvents>
+      <event id="reset">
+        <trigger>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <apply><gt/><csymbol
+              definitionURL="http://www.sbml.org/sbml/symbols/time">t
+              </csymbol><cn>1</cn></apply>
+          </math>
+        </trigger>
+        <listOfEventAssignments>
+          <eventAssignment variable="S">
+            <math xmlns="http://www.w3.org/1998/Math/MathML"><cn>0</cn></math>
+          </eventAssignment>
+        </listOfEventAssignments>
+      </event>
+    </listOfEvents>
+  </model>
+</sbml>
+"""
+
+
+class TestEventTargetKeepsPublishedInitial:
+    """An event writing to a species must not claim where that species starts.
+
+    Event translation wires a LATCHED ``__set_<species>`` port onto the
+    species' own store path. Seeding it with a value makes it a second
+    writer-tier claim, which collides with the ODE process's published
+    initial condition for every species that does not start at zero --
+    jws:conradie (GM = 1.35565) and jws:calzone1 failed to build at all,
+    and the numerical screen reported it as EXPLODING with max|y|=inf.
+    """
+
+    def test_composite_builds_and_keeps_published_ic(self, tmp_path):
+        from hallsim.composite import single_process_composite
+
+        path = tmp_path / "ev.xml"
+        path.write_text(SBML_EVENT_ON_NONZERO_SPECIES)
+        proc = process_from_sbml(str(path), name="ev")
+        comp = single_process_composite(proc, name="ev")
+        store = comp.initial_state()
+        assert float(store["ev/S"]) == pytest.approx(5.0)
+
+    def test_event_set_port_abstains_for_species_target(self, tmp_path):
+        from hallsim.sbml_events import translate_events
+        from hallsim.sbml_import import _preprocess_sbml
+
+        path = tmp_path / "ev.xml"
+        path.write_text(SBML_EVENT_ON_NONZERO_SPECIES)
+        events = translate_events(
+            _preprocess_sbml(str(path)), ("S",), {"k": 0.1}, "ev"
+        )
+        assert events, "expected the <event> to translate"
+        ports = events[0].ports_schema()
+        assert ports["__set_S"].default is None

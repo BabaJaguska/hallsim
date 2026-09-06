@@ -722,8 +722,17 @@ def _build_jws_index() -> list[dict]:
     same shape as the ModelDB index.
     """
     listing = _get_json(JWS_MODELS, {}, 60.0)
-    slugs = [m["slug"] for m in listing if m.get("slug")]
-    log.info("jws: hydrating %d records (one-time, cached)", len(slugs))
+    # The listing repeats a slug once per model version — the beuke* family
+    # is 30 models in 180 rows. Fetching per row wastes the duplicates and,
+    # worse, counts a broken record once per repeat, which sinks the
+    # hydration ratio below the guard on 30 bad models out of 676.
+    by_slug = {}
+    for entry in listing:
+        if entry.get("slug"):
+            by_slug.setdefault(entry["slug"], entry)
+    listing = list(by_slug.values())
+    slugs = list(by_slug)
+    log.info("jws: hydrating %d unique records (one-time, cached)", len(slugs))
     details = _fetch_many(
         [f"{JWS_MODELS}{s}/" for s in slugs], timeout=30.0, workers=JWS_WORKERS
     )

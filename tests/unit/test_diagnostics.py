@@ -289,3 +289,52 @@ def test_screen_sensitivity_finite_gradients_and_live_detection():
     by = {r.reporter: r for r in reports}
     assert all(r.finite for r in reports), reports
     assert by["CDKN1A"].live, by["CDKN1A"]  # damage→p21 stays live
+
+
+@pytest.mark.parametrize(
+    "kwargs, blocking",
+    [
+        ({}, False),
+        ({"exploding": True}, True),
+        ({"tol_sensitive": True}, False),
+        ({"vanishing": True}, False),
+        ({"negative": True}, False),
+        ({"tunes": False}, False),
+    ],
+)
+def test_screenreport_blocking_is_only_exploding(kwargs, blocking):
+    """Only a run that produced no trajectory blocks; the rest advise.
+
+    Folding tolerance sensitivity into the same boolean as EXPLODING made the
+    triage discard oscillators for oscillating -- pointwise
+    max|y_loose - y_tight| reaches full amplitude on a limit cycle once a
+    slight period difference has accumulated half a period of phase.
+    """
+    report = ScreenReport(
+        "m",
+        kwargs.pop("exploding", False),
+        kwargs.pop("vanishing", False),
+        kwargs.pop("tol_sensitive", False),
+        1.0,
+        1e-4,
+        **kwargs,
+    )
+    assert report.blocking is blocking
+
+
+def test_tolerance_advisory_names_the_tolerance_to_use():
+    report = ScreenReport(
+        "m", False, False, True, 1.0, 6.13,
+        rtol_loose=1e-3, rtol_tight=1e-7,
+    )
+    assert report.rtol_required == 1e-7
+    assert not report.blocking
+    advisory = "\n".join(report.advisories)
+    assert "1e-07" in advisory
+    assert "phase drift" in advisory
+
+
+def test_clean_report_has_no_advisories():
+    report = ScreenReport("m", False, False, False, 1.0, 1e-9, tunes=True)
+    assert report.ok and not report.blocking
+    assert report.advisories == ()

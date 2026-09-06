@@ -12,7 +12,17 @@ each constituent on its own for three modes:
   nothing.
 - **tolerance-sensitive** — the load-bearing check. If the trajectory changes
   materially between a loose and a tight tolerance, the result is
-  solver-dependent and is not yet a result.
+  solver-dependent and is not yet a result *at the loose tolerance*. The
+  finding names the tolerance to use (``ScreenReport.rtol_required``); it does
+  not condemn the model, and only ``exploding`` gates
+  :attr:`ScreenReport.blocking`.
+
+  Read it with care on an oscillator. The measure is pointwise
+  ``max|y_loose - y_tight|``, so a limit cycle whose period shifts by one part
+  in 1e5 accumulates phase until the two runs are half a period apart, at
+  which point the difference is the full amplitude on an orbit that is
+  otherwise identical. Compare cycle-average or phase-aligned quantities
+  before concluding a cycling model is solver-dependent.
 
 Each model runs on its **native clock** over a window in its own time unit — a
 few characteristic times, not the composite's full horizon. Solver steps are
@@ -48,9 +58,11 @@ log = logging.getLogger(__name__)
 class ScreenReport:
     """Verdict from screening one process solo.
 
-    ``ok`` is True only when none of the failure flags fire. They are
-    advisory — some models legitimately grow or decay — but every flag
-    is something to understand before trusting the subsystem.
+    ``ok`` is True only when every check is clean, and is the strict gate.
+    ``blocking`` is the narrow one: True only when the run produced no usable
+    trajectory. Between them sit :attr:`advisories`, findings that qualify a
+    run that did succeed — each carries an action, and none of them is
+    "discard the model".
 
     ``undriven`` is the exception: it reports that the process only moves
     when something drives its INPUT ports (a coupling edge, a clamp, a
@@ -79,9 +91,14 @@ class ScreenReport:
     not_at_rest: bool = False
     rest_tau: float = float("inf")
     rest_state: str = ""
+    #: The tolerances the two comparison runs used, so a reader of the report
+    #: can act on tolerance_sensitive without re-deriving them.
+    rtol_loose: float = 1e-3
+    rtol_tight: float = 1e-7
 
     @property
     def ok(self) -> bool:
+        """No concerns at all — every check clean."""
         return (
             not (
                 self.exploding
@@ -91,6 +108,57 @@ class ScreenReport:
             )
             and self.tunes is not False
         )
+
+    @property
+    def blocking(self) -> bool:
+        """The run produced no usable trajectory.
+
+        Only ``exploding`` qualifies. The other findings all describe a run
+        that *succeeded*, and each has an action attached that is not
+        "discard the model":
+
+        - ``tolerance_sensitive`` compares two finite trajectories and reports
+          that they differ. That says which rtol to integrate at
+          (:attr:`rtol_required`), and it fires on any limit cycle whose
+          period shifts slightly with tolerance — pointwise
+          ``max|y_loose - y_tight|`` reaches full amplitude once the two are
+          half a period apart, however well-behaved the orbit is.
+        - ``negative`` may be a domain violation or a state that is not a
+          concentration; the check cannot tell which.
+        - ``vanishing`` is degenerate, not unusable.
+        - ``tunes is False`` blocks calibration, not simulation.
+
+        A caller wanting the strict gate still has :attr:`ok`.
+        """
+        return self.exploding
+
+    @property
+    def advisories(self) -> tuple[str, ...]:
+        """Findings that qualify the run without invalidating it."""
+        out = []
+        if self.tolerance_sensitive:
+            out.append(
+                f"tolerance-sensitive ({self.tol_rel_diff:.3g} peak-relative "
+                f"between rtol {self.rtol_loose:.0e} and "
+                f"{self.rtol_tight:.0e}) — integrate at rtol <= "
+                f"{self.rtol_required:.0e}; on a limit cycle this is usually "
+                f"phase drift rather than an unstable trajectory"
+            )
+        if self.negative:
+            out.append(
+                "a state that started non-negative went materially negative "
+                "— a domain violation if it is a concentration"
+            )
+        if self.vanishing:
+            out.append("every state decayed to zero")
+        if self.tunes is False:
+            out.append("non-finite gradient — not calibratable as configured")
+        return tuple(out)
+
+    @property
+    def rtol_required(self) -> float:
+        """The tolerance this model needs, given what the screen measured."""
+        return self.rtol_tight if self.tolerance_sensitive else self.rtol_loose
 
     def __str__(self) -> str:
         flags = []
@@ -467,6 +535,8 @@ def screen_process(
             tol_rel_diff=float("inf"),
             detail=detail,
             framework_suspect=suspect,
+            rtol_loose=rtol_loose,
+            rtol_tight=rtol_tight,
         )
 
     v = _verdict(
@@ -548,6 +618,8 @@ def screen_process(
         not_at_rest=bool(at_rest_detail),
         rest_tau=tau,
         rest_state=state,
+        rtol_loose=rtol_loose,
+        rtol_tight=rtol_tight,
     )
 
 

@@ -162,10 +162,17 @@ def triage_process(
     report = None
     try:
         report = screen_process(process, t_end)
-        if not report.ok:
+        if report.blocking:
             blockers.append(f"numerical screen: {report}")
-        elif report.not_at_rest:
-            flags.append(f"not at rest: tau={report.rest_tau:.3g}")
+        else:
+            # Everything else the screen found describes a run that produced
+            # a usable trajectory, so it qualifies the model rather than
+            # disqualifying it. Rejecting on tolerance sensitivity in
+            # particular discarded the oscillators for oscillating, and threw
+            # away the tolerance the screen had just measured.
+            flags.extend(report.advisories)
+            if report.not_at_rest:
+                flags.append(f"not at rest: tau={report.rest_tau:.3g}")
     except Exception as exc:
         blockers.append(f"screen raised: {exc}")
 

@@ -178,6 +178,18 @@ def _precheck_sbml_supported(xml_path: str) -> list[str]:
 
     issues: list[str] = []
 
+    # An SBML-qual file carries qualitativeSpecies and transitions in place
+    # of species and reactions, so libsbml parses it and the model comes back
+    # with an empty state vector: without this the failure surfaces much
+    # later as "None is not a valid value for jnp.array". BioModels serves
+    # these under format "SBML" with no other signal.
+    if doc.getPlugin("qual") is not None or model.getPlugin("qual") is not None:
+        issues.append(
+            "this is an SBML qual (logical/Boolean) model, not a kinetic "
+            "one: it declares update rules over discrete levels rather than "
+            "rate laws, so there is no ODE to integrate"
+        )
+
     # <event> elements are translated separately (hallsim.sbml_events) and
     # stripped from the copy sbmltoodejax generates from, so they are not a
     # blocker here.

@@ -428,9 +428,16 @@ class SBMLEvent(Process):
         )
         defaults = dict(self._target_defaults)
         for tgt, _ in self._assign_ir:
+            # Only a parameter target carries a default here, and only a
+            # parameter target needs one: a species target shares its store
+            # path with the ODE process's own EVOLVED port, which declares
+            # the published initial condition. Naming a value too makes this
+            # a second writer-tier claim on that path, and the two disagree
+            # whenever the species does not start at zero.
+            seed = defaults.get(tgt)
             ports[f"__set_{tgt}"] = Port(
                 role=PortRole.LATCHED,
-                default=float(defaults.get(tgt, 0.0)),
+                default=None if seed is None else float(seed),
                 units="dimensionless",
                 description=f"event assignment target {tgt}",
             )

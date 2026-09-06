@@ -176,15 +176,22 @@ import it.
 ## Model discovery: which repositories are worth adding
 
 `SOURCES` now reaches BioModels, **JWS Online**, ModelDB, BioSimulations and
-Physiome. JWS was added 2026-09-06: 826 curated kinetic models served as SBML
-with PubMed/DOI metadata, reachable by `jws:<slug>` in `process_from_sbml`.
+Physiome. JWS was added 2026-09-06: **676 unique curated kinetic models**
+served as SBML, reachable by `jws:<slug>` in `process_from_sbml`. Its listing
+endpoint repeats a slug once per model version, so it returns 826 rows; 30 of
+those models (`beuke*`) answer 500 on the detail endpoint and index with slug
+only. 646 carry species and reaction names, 520 a PubMed ID.
 
 The criterion for the rest is **whether the maths fits an ODE composite**, not
-whether an importer exists — writing importers is the framework's job.
+whether an importer exists — writing importers is the framework's job. What a
+source *holds* is the second criterion, and it has to be measured rather than
+assumed: the catalogue check below moved SBML qual off the top of this list.
 
 | Source | Formalism | Verdict |
 |---|---|---|
-| **Cell Collective / GINsim** | Boolean / logical, SBML qual | **Add.** A logical model is a discrete-time update rule, which is `ProcessKind.DISCRETE` and its `update(t, state)` — the formalism already exists. Highest value: logical models cover regulatory programs that were never given rate constants, and `VCC/docs/model_candidates.md` shows nucleolar stress and ISR-ATF4 have **no** representative in curated SBML. Also gives the DISCRETE path a standing workload, which P1.16 says it has never had. |
+| **BioModels' own SBML-qual branch** | Boolean / logical, SBML qual | **Add first — it needs no new source.** 72 logical/Boolean deposits are already in BioModels, 65 of them SBML-qual, 61 in the `MODEL` branch that `curated_only=True` hides. Reaching them is a flag, not an adapter. The importer is the work: a logical model is a discrete-time update rule, which is `ProcessKind.DISCRETE` and its `update(t, state)`, so the formalism exists and this gives the DISCRETE path the standing workload P1.16 says it lacks. |
+| **Cell Collective** | Boolean / logical, SBML qual | **Blocked, not merely unwritten.** The API authenticates with `X-AUTH-TOKEN`; every anonymous endpoint 404s, and all five registered sources are anonymous, so this needs a credential story before it needs a parser. Its own client `ccapi` still points at the dead `ginsim.org` for model data. |
+| **GINsim** | Boolean / logical, SBML qual | **Small.** `ginsim.org` has lapsed to a parked domain; the live repository is `ginsim.github.io/models/`, **50 models**. Worth harvesting once a qual importer exists, but it is not a catalogue on the scale the previous entry assumed. |
 | **NeuroML-DB** | conductance-based ODEs | **Add.** 1,500+ published models; Hodgkin-Huxley is an ODE system, so this needs a parser, not a new solver. |
 | **DDMoRe / Open Systems Pharmacology** | compartmental PK/PD ODEs | **Add.** Linear compartment models are among the easiest to import. Check DDMoRe's service status first. |
 | **FAIRDOMHub / SEEK** | SBML inside COMBINE/OMEX | Worth it once OMEX unpacking exists; DOI-linked investigations. |
@@ -193,8 +200,36 @@ whether an importer exists — writing importers is the framework's job.
 | **CoMSES / NetLogo** | agent-based, stochastic | No shared state vector and no derivative. Wrong formalism. |
 | **CellML Model Repository** | CellML | Already covered: it runs on the Physiome infrastructure already registered. A format view, not an independent source. |
 
-Ordering: **SBML qual first** (existing formalism, fills the two missing
-response programs, exercises an untested code path), then NeuroML, then PK/PD.
+Ordering: **SBML qual first**, then NeuroML, then PK/PD — but on the strength
+of the existing formalism and the untested DISCRETE path, *not* on filling the
+missing response programs. That justification was checked on 2026-09-06 and
+does not hold.
+
+### What the logical-model catalogues actually contain
+
+Measured against the six response programs in `VCC/docs/model_candidates.md`,
+across BioModels' qual branch (72 deposits) and GINsim (50 models):
+
+| program | logical models |
+|---|---|
+| growth arrest / cell cycle | 8 in BioModels, ~8 in GINsim |
+| NF-κB | 2 |
+| p53-DDR | 0 in BioModels' qual branch; 2 in GINsim |
+| UPR | 0 |
+| ISR-ATF4 | 0 |
+| nucleolar stress / ribosome biogenesis | 0 |
+
+So qual adds depth to the two programs that are *already* best covered by
+kinetic models, and closes neither gap. The gap is not a formalism gap — those
+programs are absent from BioModels in every formalism, curated or not, and a
+targeted search over ISR and nucleolar terms returns nothing usable. They need
+a model built, not found.
+
+One correction in the other direction: JWS holds `jws:goodman`, a PKR/eIF2α
+model (species `PKRp`, `eIF2ap`, `P58a`, influenza `NS1`). That is the ISR
+sensing arm, though not the ATF4 translational-control arm, so "ISR has no
+representative" was too strong. It surfaced only after the index-hydration fix
+below, having been invisible to the search before it.
 
 
 ## SBML Import
