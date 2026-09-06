@@ -17,6 +17,7 @@ from hallsim.discovery import ModelCandidate, _accepted, _score
 def test_all_sources_registered():
     assert set(discovery.SOURCES) == {
         "biomodels",
+        "jws",
         "modeldb",
         "biosimulations",
         "physiome",
@@ -369,3 +370,100 @@ def test_uniprot_accessions_prefers_the_local_table(monkeypatch):
 
     monkeypatch.setattr(discovery.urllib.request, "urlopen", boom)
     assert discovery.uniprot_accessions("TP53") == ("P04637",)
+
+
+class TestJWSOnline:
+    """JWS Online is the second SBML-serving source. Its index is assembled
+    from three endpoints, so the parts that can be checked without the network
+    are the record shaping and the filters."""
+
+    INDEX = [
+        {
+            "slug": "achcar2",
+            "name": "achcar2",
+            "cbm": False,
+            "status": "CURATED",
+            "title": "Topological and parameter uncertainty in glycolysis",
+            "authors": "Achcar Barrett",
+            "species": "Glucose (Glucose) ATP (ATP)",
+            "reactions": "hexokinase (hexokinase)",
+        },
+        {
+            "slug": "fba1",
+            "name": "fba1",
+            "cbm": True,  # constraint-based: no rate laws to integrate
+            "status": "CURATED",
+            "title": "A genome-scale reconstruction",
+            "authors": "",
+            "species": "Glucose (Glucose)",
+            "reactions": "",
+        },
+        {
+            "slug": "draft1",
+            "name": "draft1",
+            "cbm": False,
+            "status": "SUBMITTED",
+            "title": "An uncurated glycolysis draft",
+            "authors": "",
+            "species": "",
+            "reactions": "",
+        },
+    ]
+
+    def _patched(self, monkeypatch):
+        monkeypatch.setattr(
+            discovery, "cached_index", lambda *a, **k: self.INDEX
+        )
+
+    def test_registered_as_a_source(self):
+        assert "jws" in discovery.SOURCES
+        assert discovery.SOURCES["jws"] is discovery.search_jws
+
+    def test_matches_on_title_and_shapes_a_candidate(self, monkeypatch):
+        self._patched(monkeypatch)
+        (hit,) = [
+            c for c in discovery.search_jws("glycolysis") if c.id == "achcar2"
+        ]
+        assert hit.source == "jws"
+        assert hit.format == "SBML"
+        assert hit.curated
+        assert "jjj.bio.vu.nl" in hit.url
+
+    def test_matches_on_species_a_title_never_writes(self, monkeypatch):
+        """The miss `search_by_gene` exists to close, on the other source: a
+        model whose title omits the molecule is still reachable through the
+        species it contains."""
+        self._patched(monkeypatch)
+        assert [c.id for c in discovery.search_jws("hexokinase")] == [
+            "achcar2"
+        ]
+
+    def test_drops_constraint_based_models(self, monkeypatch):
+        """A `cbm` model is stoichiometry with no rate laws — solved by linear
+        programming, not integrated, so importing it yields no dynamics."""
+        self._patched(monkeypatch)
+        assert "fba1" not in [c.id for c in discovery.search_jws("genome")]
+
+    def test_curated_only_by_default(self, monkeypatch):
+        self._patched(monkeypatch)
+        assert "draft1" not in [c.id for c in discovery.search_jws("draft")]
+        assert "draft1" in [
+            c.id for c in discovery.search_jws("draft", curated_only=False)
+        ]
+
+
+def test_jws_source_scheme_resolves_without_touching_biomodels(monkeypatch):
+    """`jws:<slug>` must route to JWS, not fall through to a BioModels fetch."""
+    from hallsim import sbml_import
+
+    monkeypatch.setattr(
+        sbml_import, "_download_jws_to_cache", lambda slug: f"/tmp/{slug}.xml"
+    )
+    monkeypatch.setattr(
+        sbml_import,
+        "_download_biomodel_to_cache",
+        lambda i: pytest.fail("routed to BioModels"),
+    )
+    path, name = sbml_import._resolve_source("jws:achcar2", None)
+    assert path.endswith("achcar2.xml")
+    assert name == "jws_achcar2"

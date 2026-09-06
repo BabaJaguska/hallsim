@@ -173,6 +173,30 @@ import it.
   design. Wiring one is real work and nothing currently needs it — recorded so
   the gap is not mistaken for a bug.
 
+## Model discovery: which repositories are worth adding
+
+`SOURCES` now reaches BioModels, **JWS Online**, ModelDB, BioSimulations and
+Physiome. JWS was added 2026-09-06: 826 curated kinetic models served as SBML
+with PubMed/DOI metadata, reachable by `jws:<slug>` in `process_from_sbml`.
+
+The criterion for the rest is **whether the maths fits an ODE composite**, not
+whether an importer exists — writing importers is the framework's job.
+
+| Source | Formalism | Verdict |
+|---|---|---|
+| **Cell Collective / GINsim** | Boolean / logical, SBML qual | **Add.** A logical model is a discrete-time update rule, which is `ProcessKind.DISCRETE` and its `update(t, state)` — the formalism already exists. Highest value: logical models cover regulatory programs that were never given rate constants, and `VCC/docs/model_candidates.md` shows nucleolar stress and ISR-ATF4 have **no** representative in curated SBML. Also gives the DISCRETE path a standing workload, which P1.16 says it has never had. |
+| **NeuroML-DB** | conductance-based ODEs | **Add.** 1,500+ published models; Hodgkin-Huxley is an ODE system, so this needs a parser, not a new solver. |
+| **DDMoRe / Open Systems Pharmacology** | compartmental PK/PD ODEs | **Add.** Linear compartment models are among the easiest to import. Check DDMoRe's service status first. |
+| **FAIRDOMHub / SEEK** | SBML inside COMBINE/OMEX | Worth it once OMEX unpacking exists; DOI-linked investigations. |
+| **Zenodo / Figshare / Dryad** | arbitrary | Catches the common case of a model existing only as a paper supplement. No format guarantee, so this is a fetch-and-triage path rather than a search adapter. |
+| **BiGG / VMH / ModelSEED / KBase** | constraint-based (FBA) | **Do not add as a search source.** A genome-scale reconstruction is stoichiometry with no rate laws, solved by linear programming over a steady-state null space rather than integrated. Importing one yields a composite with no dynamics. If constraint-based models matter, the question is whether `steady_state` grows an LP path — an architecture decision, not an importer. |
+| **CoMSES / NetLogo** | agent-based, stochastic | No shared state vector and no derivative. Wrong formalism. |
+| **CellML Model Repository** | CellML | Already covered: it runs on the Physiome infrastructure already registered. A format view, not an independent source. |
+
+Ordering: **SBML qual first** (existing formalism, fills the two missing
+response programs, exercises an untested code path), then NeuroML, then PK/PD.
+
+
 ## SBML Import
 
 * [ ] **Translate SBML events into `ProcessKind.EVENT`** — generic event translator,

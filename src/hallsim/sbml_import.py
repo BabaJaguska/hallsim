@@ -1193,14 +1193,49 @@ def _detect_inert_sinks(xml_path: str) -> set[str]:
     return sinks
 
 
+JWS_SBML_URL = "https://jjj.bio.vu.nl/models/{slug}/sbml/"
+
+
+def _download_jws_to_cache(slug: str) -> str:
+    """Fetch a JWS Online model's SBML and cache it under
+    ``~/.cache/hallsim/jws``. Returns the cached path."""
+    import urllib.request
+    from pathlib import Path
+
+    out = Path.home() / ".cache" / "hallsim" / "jws" / f"{slug}.xml"
+    if out.exists():
+        return str(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(
+        JWS_SBML_URL.format(slug=slug), timeout=60
+    ) as fh:
+        body = fh.read()
+    if b"<sbml" not in body[:4000]:
+        raise ValueError(
+            f"JWS model {slug!r} did not return SBML — check the slug at "
+            f"https://jjj.bio.vu.nl/models/{slug}/"
+        )
+    out.write_bytes(body)
+    return str(out)
+
+
 def _resolve_source(model_id, name):
-    """``(xml_path, name)`` for a local file path or a BioModels ID."""
+    """``(xml_path, name)`` for a local path, a BioModels ID, or ``jws:<slug>``.
+
+    A bare integer or ``BIOMD...`` is BioModels; ``jws:glycolysis1`` is JWS
+    Online. Both cache to disk, so a repeated import is a local read.
+    """
     import os
 
     if isinstance(model_id, str) and os.path.isfile(model_id):
         name = name or os.path.splitext(os.path.basename(model_id))[0]
         log.info(f"Loading local SBML file '{model_id}' as '{name}'...")
         return model_id, name
+    if isinstance(model_id, str) and model_id.lower().startswith("jws:"):
+        slug = model_id.split(":", 1)[1]
+        name = name or f"jws_{slug}"
+        log.info(f"Fetching JWS Online '{slug}' as '{name}'...")
+        return _download_jws_to_cache(slug), name
     name = name or f"biomodel_{model_id}"
     log.info(f"Fetching BioModels #{model_id} as '{name}'...")
     return _download_biomodel_to_cache(model_id), name

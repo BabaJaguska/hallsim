@@ -298,6 +298,14 @@ STEM_MIN_CHARS = 3
 
 CACHE_TTL_DAYS = 30.0
 INDEX_WORKERS = 16
+#: Tries per URL during an index build, backing off between them.
+INDEX_ATTEMPTS = 4
+#: Gap between straggler refetches, once concurrency has been given up on.
+SERIAL_RETRY_PAUSE = 0.5
+#: Reject an index build that could not hydrate this fraction of its rows.
+#: An empty row is indistinguishable from a model with no annotation, so a
+#: partial build caches as a complete one and reads as absence of evidence.
+INDEX_MIN_HYDRATED = 0.9
 
 
 def _cache_dir() -> Path:
@@ -341,23 +349,53 @@ def cached_index(
     return records
 
 
-def _fetch_many(urls: list[str], timeout: float = 30.0) -> list[dict | None]:
+def _fetch_many(
+    urls: list[str],
+    timeout: float = 30.0,
+    workers: int = INDEX_WORKERS,
+    attempts: int = INDEX_ATTEMPTS,
+) -> list[dict | None]:
     """Fetch JSON from many URLs concurrently, preserving order.
 
     Index builds are thousands of small requests against a public API; serial
     fetching makes the first search a coffee break. A failed record is None
     rather than an exception — one bad row must not lose the index.
+
+    Overload is retried with backoff. A loaded repository answers a request it
+    would otherwise serve with 429 *or* with 500 — JWS returns 500 — so a
+    status-code allowlist would drop two thirds of that index on the floor and
+    still look like a complete build. Callers must therefore check how many
+    rows came back None; :func:`cached_index` writes whatever it is handed.
+
+    Stragglers get a final serial pass. Retrying in place keeps every worker
+    hammering a source that is shedding load, and JWS's failures were measured
+    to be transient rather than per-URL: the same 40 URLs that failed 29 times
+    inside a concurrent batch all succeeded when spaced out.
     """
+    import random
+    import time
     from concurrent.futures import ThreadPoolExecutor
 
-    def one(url):
-        try:
-            return _get_json(url, {}, timeout)
-        except Exception:
-            return None
+    def one(url, tries):
+        for attempt in range(tries):
+            try:
+                return _get_json(url, {}, timeout)
+            except Exception:
+                if attempt == tries - 1:
+                    return None
+                time.sleep(2.0**attempt * (0.5 + random.random()))
+        return None
 
-    with ThreadPoolExecutor(max_workers=INDEX_WORKERS) as pool:
-        return list(pool.map(one, urls))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        out = list(pool.map(lambda u: one(u, attempts), urls))
+
+    missing = [i for i, rec in enumerate(out) if rec is None]
+    if missing and len(missing) < len(urls):
+        log.info("retrying %d straggler(s) serially", len(missing))
+        for i in missing:
+            time.sleep(SERIAL_RETRY_PAUSE)
+            out[i] = one(urls[i], attempts)
+    return out
 
 
 def _score(query: str, *fields: str) -> int:
@@ -668,8 +706,133 @@ def search_physiome(
     return _ranked(scored, limit)
 
 
+JWS_MODELS = "https://jjj.bio.vu.nl/rest/models/"
+JWS_SBML = "https://jjj.bio.vu.nl/models/{slug}/sbml/"
+#: JWS sheds load at well under :data:`INDEX_WORKERS`, answering 500 rather
+#: than 429 for most of it. Measured: 16 workers hydrated 11 of 40 records,
+#: and the same 40 fetched cleanly once spaced out.
+JWS_WORKERS = 4
+
+
+def _build_jws_index() -> list[dict]:
+    """Slug, species, reactions and citation for every JWS Online model.
+
+    JWS serves a listing and per-model detail, with the manuscript on a third
+    endpoint, so searchable text has to be assembled once and cached — the
+    same shape as the ModelDB index.
+    """
+    listing = _get_json(JWS_MODELS, {}, 60.0)
+    slugs = [m["slug"] for m in listing if m.get("slug")]
+    log.info("jws: hydrating %d records (one-time, cached)", len(slugs))
+    details = _fetch_many(
+        [f"{JWS_MODELS}{s}/" for s in slugs], timeout=30.0, workers=JWS_WORKERS
+    )
+    hydrated = sum(1 for d in details if d)
+    if hydrated < INDEX_MIN_HYDRATED * len(slugs):
+        raise RuntimeError(
+            f"jws: only {hydrated}/{len(slugs)} model records fetched; "
+            f"refusing to cache a partial index"
+        )
+    # A model with no linked paper 404s here, so these are allowed to be
+    # sparse in a way the detail fetch is not.
+    papers = _fetch_many(
+        [f"{JWS_MODELS}{s}/manuscript/" for s in slugs],
+        timeout=30.0,
+        workers=JWS_WORKERS,
+    )
+    log.info(
+        "jws: %d/%d records, %d with a linked paper",
+        hydrated,
+        len(slugs),
+        sum(1 for p in papers if p),
+    )
+    out = []
+    for base, detail, paper in zip(listing, details, papers):
+        d, m = detail or {}, paper or {}
+        out.append(
+            {
+                "slug": base["slug"],
+                "name": d.get("name") or base.get("slug", ""),
+                "cbm": bool(base.get("cbm") or d.get("cbm")),
+                "status": base.get("status", ""),
+                "title": m.get("title") or "",
+                "authors": " ".join(
+                    a.get("family_name", "") for a in (m.get("authors") or [])
+                ),
+                "year": m.get("year"),
+                "pubmed": m.get("pm_id"),
+                "doi": m.get("doi") or "",
+                "species": " ".join(d.get("species_set") or []),
+                "reactions": " ".join(d.get("reaction_set") or []),
+            }
+        )
+    return out
+
+
+def search_jws(
+    query: str,
+    limit: int = 25,
+    curated_only: bool = True,
+    refresh: bool = False,
+    **_,
+) -> list[ModelCandidate]:
+    """JWS Online: curated kinetic models, served as SBML.
+
+    Matches the query against model name, paper title and authors, and the
+    species and reaction names — a model whose title never writes a gene is
+    still reachable through the species it contains, which is the same miss
+    :func:`search_by_gene` exists to close on BioModels.
+
+    ``cbm`` models are constraint-based: stoichiometry with no rate laws,
+    solved by linear programming rather than integrated, so they are dropped.
+    """
+    index = cached_index("jws", _build_jws_index, refresh=refresh)
+    scored = []
+    for rec in index:
+        if rec.get("cbm"):
+            continue
+        if curated_only and rec.get("status", "").upper() != "CURATED":
+            continue
+        score = _score(
+            query,
+            *(
+                str(rec.get(k, ""))
+                for k in (
+                    "slug",
+                    "name",
+                    "title",
+                    "authors",
+                    "species",
+                    "reactions",
+                )
+            ),
+        )
+        if not score:
+            continue
+        scored.append(
+            (
+                score,
+                ModelCandidate(
+                    source="jws",
+                    id=rec["slug"],
+                    name=rec.get("title") or rec.get("name", ""),
+                    format="SBML",
+                    url=f"https://jjj.bio.vu.nl/models/{rec['slug']}/",
+                    curated=True,
+                    submitter=rec.get("authors") or None,
+                    description=rec.get("species", ""),
+                ),
+            )
+        )
+    log.info(
+        "jws '%s': %d candidates of %d indexed", query, len(scored), len(index)
+    )
+    return _ranked(scored, limit)
+
+
 SOURCES = {
     "biomodels": search_biomodels,
+    "jws": search_jws,
     "modeldb": search_modeldb,
     "biosimulations": search_biosimulations,
     "physiome": search_physiome,
