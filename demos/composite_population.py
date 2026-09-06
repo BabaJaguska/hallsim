@@ -38,16 +38,22 @@ from hallsim.scheduler import Scheduler
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ALPHA_Y = ("gz06", "alpha_y", 0.8)
 CDKN1A = ("dp14", "CDKN1A_transcr_by_FoxO3a_n_DNA_damage", 0.085)
+
+
 # Reporters read at the shared macro-step resolution (the coupled state a
 # bulk assay would sample). p53 pulse dynamics need sub-hour resolution and
 # are covered standalone in gz06_population.py; here we read the slow,
 # integrating hallmark reporters the composite couples together.
-REPORTERS = {
-    "p21 (CDKN1A)": "dp14/CDKN1A",
-    "NFKBIA (IkBat)": "nfkb/IkBat",
-    "mTORC1": "dp14/mTORC1_pS2448",
-    "ROS": "dp14/ROS",
-}
+def _reporters():
+    """Read the reporter table rather than transcribing it — a hard-coded
+    panel outlives the model it names (this one still read `nfkb/IkBat` after
+    Ihekwaba was removed, so the demo could not run)."""
+    from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
+
+    return {r.gene_symbol: r.observable for r in MULTI_HALLMARK_REPORTERS}
+
+
+REPORTERS = _reporters()
 
 
 def lognormal(key, mean, cv, shape):

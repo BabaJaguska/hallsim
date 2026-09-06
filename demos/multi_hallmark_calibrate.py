@@ -265,8 +265,6 @@ def build_problem(
         prior_weight=0.03,
         t_end=14.0,
         t_start=-PREROLL_DAYS,
-        # A coupling cycle spans the timescale groups, so splitting error is
-        # set by macro_dt, not by the integrator (P0.47).
         macro_dt=0.5,
         # The oscillating reporters (DDB2/MDM2) read raw p53 / Mdm2 /
         # IκBα-transcript and take a zero-phase RMS/mean post-hoc, so the save

@@ -713,3 +713,118 @@ def _accepted(search, kwargs: dict) -> dict:
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return kwargs
     return {k: v for k, v in kwargs.items() if k in params}
+
+
+@dataclass(frozen=True)
+class OutputScreen:
+    """Whether a deposit *produces* a quantity, not merely mentions it.
+
+    Annotation search answers "is this model about IL6"; composing needs
+    "does this model emit IL6". A module imported to supply an output that it
+    only ever consumes contributes nothing — the Ihekwaba 2004 failure.
+    """
+
+    model_id: str
+    #: ``produces`` | ``no-match`` | ``no-sbml`` | ``unreadable`` |
+    #: ``fetch-failed``
+    status: str
+    produced: tuple[str, ...] = ()
+    n_species: int = 0
+    n_reactions: int = 0
+    #: Why, when the deposit could not be screened.
+    note: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "produces"
+
+
+def _first_readable_sbml(paths):
+    """``(model, note)`` for the first path libsbml reads as SBML.
+
+    A deposit is a directory of many files — OWL, MATLAB, Octave, PNG, PDF and
+    a ``manifest.xml`` that is XML but not SBML — so "the .xml file" is not a
+    well-defined thing to open.
+    """
+    import libsbml
+
+    seen = []
+    for path in paths:
+        if not str(path).endswith((".xml", ".sbml")):
+            continue
+        doc = libsbml.SBMLReader().readSBMLFromFile(str(path))
+        model = doc.getModel()
+        if model is not None:
+            return model, ""
+        seen.append(f"{Path(path).name}({doc.getNumErrors()} errors)")
+    if not seen:
+        return None, "deposit contains no .xml/.sbml file"
+    return None, "no readable SBML among " + ", ".join(seen)
+
+
+def screen_produced_species(
+    model_ids, pattern: str, *, timeout: float = 60.0
+) -> list[OutputScreen]:
+    """Which of ``model_ids`` synthesise a species matching ``pattern``.
+
+    ``pattern`` is a case-insensitive regex matched against species ids. A
+    species counts as produced when it is a *product* of some reaction;
+    appearing only as a reactant means the deposit consumes it.
+
+    Every input yields a row, including the ones that could not be read — a
+    silent skip hides an unreadable deposit as an uninteresting one.
+    """
+    import re
+
+    rx = re.compile(pattern, re.I)
+    out: list[OutputScreen] = []
+    for model_id in model_ids:
+        try:
+            paths = download_biomodel_files(model_id, timeout=timeout)
+        except Exception as exc:  # network, 404, malformed accession
+            out.append(
+                OutputScreen(
+                    str(model_id),
+                    "fetch-failed",
+                    note=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            continue
+        try:
+            model, note = _first_readable_sbml(paths)
+        except ImportError as exc:
+            out.append(OutputScreen(str(model_id), "no-sbml", note=str(exc)))
+            continue
+        if model is None:
+            status = "no-sbml" if "no .xml" in note else "unreadable"
+            out.append(OutputScreen(str(model_id), status, note=note))
+            continue
+        produced = {
+            reaction.getProduct(j).getSpecies()
+            for i in range(model.getNumReactions())
+            for reaction in (model.getReaction(i),)
+            for j in range(reaction.getNumProducts())
+            if rx.search(reaction.getProduct(j).getSpecies())
+        }
+        out.append(
+            OutputScreen(
+                str(model_id),
+                "produces" if produced else "no-match",
+                tuple(sorted(produced)),
+                model.getNumSpecies(),
+                model.getNumReactions(),
+            )
+        )
+    return out
+
+
+def search_producing(
+    query: str, pattern: str, *, limit: int = 40, **kwargs
+) -> list[OutputScreen]:
+    """Search BioModels for ``query``, keep what *produces* ``pattern``.
+
+    The composable version of a text search: a hit is only useful if the
+    quantity you need is something it emits.
+    """
+    hits = search_biomodels(query, limit=limit, **kwargs)
+    return screen_produced_species([h.id for h in hits], pattern)
