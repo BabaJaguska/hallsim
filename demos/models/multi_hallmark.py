@@ -1,11 +1,17 @@
 """DP14-anchored multi-hallmark composite — three publications stitched.
 
-Spans four Hallmarks of Aging in one validation substrate: Cellular Senescence
-and Deregulated Nutrient Sensing (DallePezze 2014's CDKN1A / SA_beta_gal and
-mTORC1–AMPK–Akt–FoxO3a axes), Genomic Instability (DP14's DNA_damage feeding
-the Geva-Zatorsky 2006 p53–Mdm2 oscillator), and Altered Intercellular
-Communication (Kallenberger 2014's CD95L, an extracellular ligand delivered by
-another cell).
+**Two** hallmark dials are varied across its arms: Genomic Instability (DP14's
+irradiation exposure, feeding the Geva-Zatorsky 2006 p53–Mdm2 oscillator
+through DNA_damage) and Deregulated Nutrient Sensing (DP14's mTORC1–AMPK–Akt–
+FoxO3a axis). Cellular Senescence is *read* rather than driven — it has no
+registry handle, only DallePezze 2014's CDKN1A / SA_beta_gal markers.
+
+Altered Intercellular Communication is **exposed but never turned**: the handle
+is registered and wired to Kallenberger 2014's CD95L challenge, and no
+condition varies it, because GSE248823 has no death-ligand arm. Every arm gets
+the same dose. Read it as a capability the composite carries, never as an axis
+this study varies — `apply_hallmarks` will drive it the moment there is data
+that does.
 
 Constituents — DallePezze 2014 (BIOMD0000000582), Geva-Zatorsky 2006
 (BIOMD0000000157) and Kallenberger 2014 (BIOMD0000000524) — ship vendored under
@@ -76,8 +82,7 @@ from hallsim.composite import Composite
 from hallsim.models.forcing import drive_pulse, drive_step
 from hallsim.models.clamp_edge import ClampEdge
 from hallsim.models.hill_edge import (
-    HillActivationEdge,
-    HillSignalEdge,
+    HillEdge,
     place_hill_gate,
     place_hill_gate_for_crossing,
 )
@@ -257,14 +262,15 @@ def build_multi_hallmark_composite(
         "dp14": dp14,
         "gz06": gz06,
         "k14": k14,
-        "fas_induction": HillSignalEdge(
+        "fas_induction": HillEdge(
+            mode="level",
             timescale=gz06.timescale,
             basal=K14_CD95_BASAL,
             hi=K14_CD95_INDUCED,
-            K=K14_FAS_GATE.K,
-            n=K14_FAS_HILL_N,
-            source_ontology={"go": "GO:0006977"},
-            source_description="GZ06 p53 level",
+            K=(K14_FAS_GATE.K,),
+            n=(K14_FAS_HILL_N,),
+            source_ontology=({"go": "GO:0006977"},),
+            source_descriptions=("GZ06 p53 level",),
             hallmark="Genomic Instability",
             reference="Owen-Schaub et al. 1995, Mol Cell Biol 15:3032–3040",
             description="p53 → CD95/Fas receptor induction (setpoint).",
@@ -277,14 +283,15 @@ def build_multi_hallmark_composite(
             target_description="CD95/Fas surface receptor level",
             hallmark="Altered Intercellular Communication",
         ),
-        "damage_bridge": HillSignalEdge(
+        "damage_bridge": HillEdge(
+            mode="level",
             timescale=gz06.timescale,
             basal=GZ06_ALPHA_X_CONTROL,
             hi=GZ06_ALPHA_X_DAMAGED,
-            K=GZ06_DAMAGE_DRIVE_K,
-            n=GZ06_DAMAGE_DRIVE_N,
-            source_ontology={"go": "GO:0006974"},
-            source_description="DP14 accumulated DNA damage",
+            K=(GZ06_DAMAGE_DRIVE_K,),
+            n=(GZ06_DAMAGE_DRIVE_N,),
+            source_ontology=({"go": "GO:0006974"},),
+            source_descriptions=("DP14 accumulated DNA damage",),
             hallmark="Genomic Instability",
             reference="Banin et al. 1998, Science 281:1674–1677",
             description="DNA damage ⊣ p53 degradation (GZ06 alpha_x).",
@@ -292,9 +299,10 @@ def build_multi_hallmark_composite(
         # Oscillating reporters read their raw species and summarize post-hoc,
         # so no integral observer accumulates, lags, or stiffens the solve.
         # n=1.8 per Shi 2021.
-        "p53_cdkn1a": HillActivationEdge(
+        "p53_cdkn1a": HillEdge(
+            mode="flux",
             timescale=gz06.timescale,
-            k_act=10.0,
+            hi=10.0,
             K=(0.3,),
             n=(1.8,),
             target_ontology={"go": "GO:0006357"},

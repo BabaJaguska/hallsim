@@ -7,18 +7,18 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from hallsim.models.hill_edge import HillActivationEdge
+from hallsim.models.hill_edge import HillEdge
 from hallsim.process import PortRole
 
 
 def _edge(**kw):
-    kw.setdefault("k_act", 0.02)
+    kw.setdefault("hi", 0.02)
     kw.setdefault("K", (4.0,))
     kw.setdefault("n", (2.0,))
-    return HillActivationEdge(**kw)
+    return HillEdge(**kw)
 
 
-class TestHillActivationEdge:
+class TestHillEdge:
     def test_ports_are_generic(self):
         schema = _edge().ports_schema()
         assert schema["target"].role == PortRole.EVOLVED
@@ -35,7 +35,7 @@ class TestHillActivationEdge:
         high = float(e.derivative(0.0, {"source": jnp.array(5.7)})["target"])
         assert 0.0 < low < high
         sat = float(e.derivative(0.0, {"source": jnp.array(1e4)})["target"])
-        assert sat <= e.k_act + 1e-9  # Hill saturates at 1
+        assert sat <= e.hi + 1e-9  # Hill saturates at 1
 
     def test_half_saturation_at_K(self):
         # source == K -> drive == 0.5 -> target == k_act/2.
@@ -48,14 +48,19 @@ class TestHillActivationEdge:
         )(jnp.array(4.0))
         assert jnp.isfinite(g) and g > 0
         gk = jax.grad(
-            lambda k: _edge(k_act=k).derivative(
-                0.0, {"source": jnp.array(4.0)}
-            )["target"]
+            lambda k: _edge(hi=k).derivative(0.0, {"source": jnp.array(4.0)})[
+                "target"
+            ]
         )(jnp.array(0.02))
         assert jnp.isfinite(gk) and gk > 0
 
-    def test_k_act_is_the_calibratable_surface(self):
-        assert {p.field for p in _edge().calibratable_params()} == {"k_act"}
+    def test_the_calibratable_surface_is_the_scalar_rate_law(self):
+        """`K`/`n` are per-source tuples; the calibratable surface is scalar
+        (P0.54), so they are placed rather than fitted."""
+        assert {p.field for p in _edge().calibratable_params()} == {
+            "basal",
+            "hi",
+        }
 
     def test_declarative_metadata_folds_in(self):
         m = _edge(hallmark="H", reference="R", description="D").metadata()
@@ -66,7 +71,7 @@ class TestHillActivationEdge:
         )
 
     def test_multi_source_gates_multiply(self):
-        e = _edge(k_act=1.0, K=(1.0, 1.0), n=(2.0, 2.0), sources=("a", "b"))
+        e = _edge(hi=1.0, K=(1.0, 1.0), n=(2.0, 2.0), sources=("a", "b"))
         assert set(e.ports_schema()) == {"target", "a", "b"}
         d = e.derivative(0.0, {"a": jnp.array(1.0), "b": jnp.array(1.0)})
         assert float(d["target"]) == pytest.approx(0.25, abs=1e-6)
@@ -80,7 +85,7 @@ class TestGateEnumerationAndRange:
 
     def _composite(self, K):
         from hallsim.composite import Composite
-        from hallsim.models.hill_edge import HillActivationEdge
+        from hallsim.models.hill_edge import HillEdge
         from hallsim.process import Port, PortRole, Process
 
         class Source(Process):
@@ -95,9 +100,7 @@ class TestGateEnumerationAndRange:
         return Composite(
             processes={
                 "src": Source(),
-                "gate": HillActivationEdge(
-                    k_act=0.1, K=(K,), n=(2.0,), target_default=0.0
-                ),
+                "gate": HillEdge(hi=0.1, K=(K,), n=(2.0,), target_default=0.0),
             },
             topology={
                 "src": {"s": "pool/s"},
@@ -210,3 +213,40 @@ class TestCrossingPlacement:
         )
         assert not s.ok
         assert "overlap" in s.note
+
+
+class TestModes:
+    """The two modes are the same arithmetic on different ports."""
+
+    def test_flux_and_level_agree_when_basal_is_zero(self):
+        from hallsim.models.hill_edge import HillEdge
+
+        flux = HillEdge(mode="flux", basal=0.0, hi=0.7, K=(2.0,), n=(3.0,))
+        level = HillEdge(mode="level", basal=0.0, hi=0.7, K=(2.0,), n=(3.0,))
+        st = {"source": jnp.asarray(1.3)}
+        assert flux.derivative(0.0, st)["target"] == pytest.approx(
+            float(level.assign(0.0, st)["signal"])
+        )
+
+    def test_mode_picks_the_port_role(self):
+        from hallsim.process import PortRole
+        from hallsim.models.hill_edge import HillEdge
+
+        flux = HillEdge(mode="flux", hi=1.0).ports_schema()
+        level = HillEdge(mode="level", basal=0.0, hi=1.0).ports_schema()
+        assert flux["target"].role is PortRole.EVOLVED
+        assert level["signal"].role is PortRole.ASSIGNED
+
+    def test_level_rejects_a_constant_edge_and_flux_allows_ablation(self):
+        from hallsim.models.hill_edge import HillEdge
+
+        with pytest.raises(ValueError, match="carries no signal"):
+            HillEdge(mode="level", basal=1.0, hi=1.0)
+        # basal == hi == 0 in flux mode is the documented ablation.
+        HillEdge(mode="flux", basal=0.0, hi=0.0)
+
+    def test_unknown_mode_raises(self):
+        from hallsim.models.hill_edge import HillEdge
+
+        with pytest.raises(ValueError, match="must be 'flux' or 'level'"):
+            HillEdge(mode="signal")

@@ -145,6 +145,26 @@ def fig_schematic(args):
         ]
         return "readouts:  " + " · ".join(genes)
 
+    # The blocks and edge labels below are hand-laid-out, so nothing links
+    # them to the composite. Fail rather than draw a composite that no longer
+    # exists — it drew a removed model (ih04) for a week (P0.53).
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
+
+    DRAWN = {"dp14", "gz06", "nfkb"}
+    live = {
+        n
+        for n, pr in build_multi_hallmark_composite(
+            validate=False
+        ).processes.items()
+        if hasattr(pr, "_species_names")
+    }
+    if live != DRAWN:
+        raise RuntimeError(
+            f"composite_schematic is drawn by hand for {sorted(DRAWN)} but the "
+            f"composite has {sorted(live)}. Update the drawing (and DRAWN) "
+            "before regenerating — see P0.53."
+        )
+
     fig, ax = plt.subplots(figsize=(12.8, 5.9))
     ax.set_xlim(0, 12.8)
     ax.set_ylim(0, 5.9)
@@ -867,15 +887,17 @@ def fig_temporal_compare(args):
         _annotate_interventions,
     )
 
-    arms = {
+    ARM_STYLE = {
         "DDIS_vs_ctrl": ("DDIS", "#c0392b"),
         "RAPA_vs_ctrl": ("rapamycin", "#2a78d6"),
+        "RAS_vs_ctrl": ("RAS", "#2a9d8f"),
     }
     grid_c = "#e6e6e2"
     t_end = 14.0
     qt = np.arange(0.1, t_end + 1e-6, 0.1)
 
     problem = build_problem()
+    arms = {a: ARM_STYLE.get(a, (a, "#6b7280")) for a in problem.data}
     init = problem.initial_params()
     fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
     genes = [r.gene_symbol for r in problem.reporters]
@@ -926,7 +948,11 @@ def fig_temporal_compare(args):
             ax.plot(
                 dx, dy, "o", color=color, ms=6, mfc="white", mew=1.6, zorder=4
             )
-        _annotate_interventions(ax, "RAPA_vs_ctrl")
+        # Both arms are overlaid; annotate the one carrying the most
+        # interventions so the shading is drawn once.
+        _annotate_interventions(
+            ax, max(arms, key=lambda a: ("rapa" in a.lower(), a))
+        )
         ax.set_title(gene, fontsize=11, fontweight="bold", loc="left")
         ax.grid(True, color=grid_c, lw=0.6, alpha=0.7)
         ax.set_axisbelow(True)

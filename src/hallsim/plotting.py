@@ -214,6 +214,7 @@ def plot_runs_comparison(
     ncols: int = 2,
     figsize: tuple[float, float] | None = None,
     save: str | None = None,
+    labels: Mapping[str, str] | None = None,
 ):
     """Overlay multiple SchedulerResults per store path.
 
@@ -226,6 +227,10 @@ def plot_runs_comparison(
         ``{label: SchedulerResult}``.
     paths:
         Store paths to plot. Each gets one subplot.
+    labels:
+        ``{store_path: panel title}``. Without it a panel is titled by its
+        path's last segment, which names the model's internal species rather
+        than what the panel is being read as.
     """
     n = len(paths)
     nrows = (n + ncols - 1) // ncols
@@ -241,7 +246,12 @@ def plot_runs_comparison(
             except KeyError:
                 continue
             ax.plot(ts, vals, linewidth=1.5, label=label, alpha=0.85)
-        ax.set_title(path.split("/")[-1] if "/" in path else path, fontsize=10)
+        ax.set_title(
+            (labels or {}).get(
+                path, path.split("/")[-1] if "/" in path else path
+            ),
+            fontsize=10,
+        )
         ax.set_xlabel("Time", fontsize=8)
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best", fontsize=8)

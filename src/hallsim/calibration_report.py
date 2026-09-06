@@ -58,6 +58,12 @@ def save_outputs(
     results_post = problem.evaluate(final)
 
     reporter_paths = [r.observable for r in problem.reporters]
+    # Title panels by the gene each path is read as, not by the
+    # model-internal species name it happens to carry.
+    reporter_labels = {
+        r.observable: f"{r.gene_symbol}  [{r.observable}]"
+        for r in problem.reporters
+    }
 
     # 1. Topology
     draw_composite_graph(
@@ -74,6 +80,7 @@ def save_outputs(
                 "post-fit": post_runs[cond_name],
             },
             paths=reporter_paths,
+            labels=reporter_labels,
             title=f"{cond_name}: pre vs post",
             save=str(out / f"trajectories_{cond_name}_pre_vs_post.png"),
         )
@@ -82,6 +89,7 @@ def save_outputs(
     plot_runs_comparison(
         post_runs,
         paths=reporter_paths,
+        labels=reporter_labels,
         title="all conditions at post-fit params",
         save=str(out / "trajectories_post_all_arms.png"),
     )

@@ -37,7 +37,7 @@ class ClampEdge(Process):
 
     ``target`` is an EVOLVED port that *reads* its own path — the restoring
     term is negative feedback on the clamped species, unlike the pure-source
-    :class:`~hallsim.models.hill_edge.HillActivationEdge`. ``setpoint`` is an
+    :class:`~hallsim.models.hill_edge.HillEdge` in ``flux`` mode. ``setpoint`` is an
     INPUT: wire it to a constant hold
     (:class:`~hallsim.models.forcing.PulseSource` with no washout, which
     :func:`clamp_species` assembles), to a dose schedule, or to another

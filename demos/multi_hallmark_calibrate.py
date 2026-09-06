@@ -137,8 +137,13 @@ ARM_CONDITIONS = {arm: cond for arm, (cond, _) in ARM_PAIRS.items()}
 
 
 def build_problem(
-    composite=None, reporters=None, equilibrate: bool = False
+    composite=None,
+    reporters=None,
+    equilibrate: bool = False,
+    parameters=None,
 ) -> CalibrationProblem:
+    """The calibration problem. ``parameters`` overrides the fitted set,
+    which is what an identifiability screen varies."""
     ds = (
         GeneExpressionDataset.from_series_matrix(
             SERIES_MATRIX,
@@ -149,12 +154,15 @@ def build_problem(
         if SERIES_MATRIX.exists()
         else None
     )
+    if composite is None:
+        composite = build_multi_hallmark_composite()
+
+    def published(process: str, field: str) -> float:
+        """The deposit's own value, as the MAP prior centre."""
+        return float(composite.processes[process].parameters[field])
+
     return CalibrationProblem(
-        composite=(
-            composite
-            if composite is not None
-            else build_multi_hallmark_composite()
-        ),
+        composite=composite,
         reporters=(
             reporters if reporters is not None else MULTI_HALLMARK_REPORTERS
         ),
@@ -213,44 +221,45 @@ def build_problem(
         arm_pairs=ARM_PAIRS,
         # Each fit param is read by ≥1 reporter and has a log-normal MAP prior.
         # See docs/coupling-edge-priors.md, docs/gz06-basal-p53.md.
-        params={
-            # SA-beta-gal decay: the GLB1 reporter's only lever. Its production
-            # constant is not fitted — the pair sets a level, which cancels in a
-            # fold change; the decay sets track-vs-accumulate, which does not.
-            "sa_beta_gal_decay": ParameterRef(
-                "dp14",
-                "parameters.sen_ass_beta_gal_dec",
-                prior=0.1548,
-                prior_sigma=0.5,
-            ),
-            # ROS pair frozen — no ROS reporter (see diary).
-            "CDKN1A_transcr": ParameterRef(
-                "dp14",
-                "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
-                prior=0.085,
-                prior_sigma=0.5,
-            ),
-            # mtor_phos_rate, mitophagy_inactiv frozen — non-identifiable
-            # here (gain-degenerate / flat gradient); see diary.
-            # GZ06's Mdm2 degradation: the only knob on MDM2's own path.
-            "mdm2_degradation": ParameterRef(
-                "gz06",
-                "parameters.alpha_y",
-                prior=float(
-                    build_multi_hallmark_composite(validate=False)
-                    .processes["gz06"]
-                    .parameters["alpha_y"]
+        # Screened 2026-09-05 over all 84 calibratable candidates
+        # (`identifiability.sensitivity_jacobian`); 33 are numerically flat.
+        # Selecting the top 5 by Gauss-Newton loss reduction was measured to
+        # OVERFIT — better on the fit arm at D07, held-out worse than not
+        # fitting at all — and the identifiability verdict predicted it: that
+        # set had 0 identifiable parameters against this one's 2. Rank by
+        # loss reduction, but keep only what the data constrains. See P0.50.
+        params=(
+            parameters
+            if parameters is not None
+            else {
+                "sa_beta_gal_decay": ParameterRef(
+                    "dp14",
+                    "parameters.sen_ass_beta_gal_dec",
+                    prior=0.1548,
+                    prior_sigma=0.5,
                 ),
-                prior_sigma=0.5,
-            ),
-            "alpha_x_control": ParameterRef(
-                "damage_bridge",
-                "basal",
-                prior=GZ06_ALPHA_X_CONTROL,
-                prior_sigma=0.5,
-            ),
-            # p53 → CDKN1A edge (P53CDKN1AActivator.k_act) is fixed, not fitted.
-        },
+                "CDKN1A_transcr": ParameterRef(
+                    "dp14",
+                    "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
+                    prior=0.085,
+                    prior_sigma=0.5,
+                ),
+                # GZ06's Mdm2 degradation: the only knob on MDM2's own path, and
+                # the most identifiable parameter in the fit.
+                "mdm2_degradation": ParameterRef(
+                    "gz06",
+                    "parameters.alpha_y",
+                    prior=published("gz06", "alpha_y"),
+                    prior_sigma=0.5,
+                ),
+                "alpha_x_control": ParameterRef(
+                    "damage_bridge",
+                    "basal",
+                    prior=GZ06_ALPHA_X_CONTROL,
+                    prior_sigma=0.5,
+                ),
+            }
+        ),
         fit_arms=["DDIS_vs_ctrl"],
         held_out_arms=["RAPA_vs_ctrl"],
         prior_weight=0.03,

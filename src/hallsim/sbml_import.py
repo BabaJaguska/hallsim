@@ -266,6 +266,9 @@ class SBMLProcess(ImportedODEProcess):
     # since no rate law reads them.
     _frozen_indices: tuple[int, ...] = eqx.field(static=True, default=())
     # Translated SBML <event> elements; expand with sbml_events.expand_events.
+    # Compartment sizes live in `parameters` but are geometry, not mechanism;
+    # excluded from the calibration surface.
+    _compartment_names: frozenset = eqx.field(static=True, default=frozenset())
     _events: tuple = eqx.field(static=True, default=())
     # ``((input_name, input_port), ...)`` — boundary inputs driven from an
     # INPUT port, overriding their native SBML rule (:meth:`with_input_driver`).
@@ -701,6 +704,21 @@ def _download_biomodel_to_cache(model_id) -> str:
         # truncated file that every later run then trusts.
         _atomic_write(cache_path, lambda p: open(p, "w").write(xml))
     return cache_path
+
+
+def _extract_compartment_names(xml_path: str) -> frozenset[str]:
+    """Compartment ids. They reach ``parameters`` as sizes, but a compartment
+    volume is geometry: it scales every rate at once, so it is the most
+    sensitive and the most degenerate thing in a fit."""
+    import libsbml
+
+    model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
+    if model is None:
+        return frozenset()
+    return frozenset(
+        model.getCompartment(i).getId()
+        for i in range(model.getNumCompartments())
+    )
 
 
 def _extract_species_ontology(xml_path: str) -> dict[str, dict[str, str]]:
@@ -1384,6 +1402,7 @@ def process_from_sbml(
     # SBML models by their identifiers.org references.
     ontology_map = _extract_species_ontology(xml_path)
     coupling_meta = _extract_coupling_metadata(xml_path)
+    compartment_names = _extract_compartment_names(xml_path)
     stoichiometry = _extract_stoichiometry(xml_path)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
 
@@ -1436,6 +1455,7 @@ def process_from_sbml(
         _w_names=w_names,
         _w_indexes=w_index_tuple,
         _frozen_indices=frozen_indices,
+        _compartment_names=compartment_names,
         # Default the scheduler timescale to the model's native time unit (a
         # day-scale model has day-scale dynamics) so auto_groups clusters
         # mixed-rate composites correctly. Never None for SBML processes, so

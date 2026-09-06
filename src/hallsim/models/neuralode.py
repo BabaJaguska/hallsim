@@ -63,7 +63,7 @@ class NeuralODEProcess(Process):
     - **Hill-driven** (:meth:`with_input_driver`) — read a wired port and
       Hill-interpolate it between a fittable basal (a ``parameters`` entry)
       and ``hi``, the neural analogue of the mechanistic
-      :class:`hallsim.models.hill_edge.HillSignalEdge`, so an upstream state
+      :class:`hallsim.models.hill_edge.HillEdge`, so an upstream state
       can drive the block the way it drives the mechanistic model it replaces;
     - **parameter-sourced** (:meth:`with_control_param`) — filled from a
       fittable scalar in ``parameters``, so a bifurcation knob stays a live,

@@ -696,6 +696,51 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `cmd_run` end to end including every figure, so the report path is exercised
   on every CI run rather than the next time someone waits out a fit.
 
+- [ ] **P0.53 — `composite_schematic` is drawn by hand and has been depicting a
+  composite that does not exist.** Filed 2026-09-05. `fig_schematic` places
+  every block, label and edge caption at absolute coordinates with nothing
+  linking it to the composite. It still draws **ih04 / BIOMD230 / NF-κB**,
+  removed on 2026-08-31, captions two edges that went with it (`mTOR -> IKK`,
+  `IKKb -> IKK`), and has no block for Kallenberger. The figure is the one a
+  reader would take as the composite's definition, and it is two models wrong.
+
+  Only the readouts are derived (`readouts_for(namespace)` reads
+  `MULTI_HALLMARK_REPORTERS`), which is why the reporter labels stayed correct
+  while everything around them rotted.
+
+  *Guarded 2026-09-05* — it now raises when the composite's SBML members differ
+  from what is drawn, so it cannot silently produce a lie. That is not the fix.
+  *Fix:* derive the blocks from `composite.processes` (name, BioModels id from
+  `metadata()`, readouts as now) and the edge captions from each edge process's
+  own `description`, rendering into the existing hand-tuned slots and raising
+  when there are more members than slots. Everything needed is already on the
+  processes; only the drawing is disconnected from them.
+
+  Related, fixed in the same pass: `plot_runs_comparison` titled each panel by
+  its store path's last segment, so the pre/post figures read `FoxO3a`, `x` and
+  `y0` instead of BNIP3, DDB2 and MDM2 — correct data, unreadable labels. It
+  now takes `labels` and `calibration_report` passes the gene symbols.
+
+- [ ] **P0.54 — The calibratable surface is scalar-only, so a per-source
+  parameter cannot be fitted.** Filed 2026-09-05.
+  `Process.calibratable_params` does `float(getattr(self, f.name))`, so a field
+  marked `calibratable` must be a scalar. `HillEdge`'s `K` and `n` are
+  per-source tuples, so neither can go on the surface however much a fit would
+  want them.
+
+  This is what forced the old `HillActivationEdge` / `HillSignalEdge` split:
+  the signal edge was single-source, so its `K` could be a scalar and
+  calibratable; the activation edge was multi-source, so its `K` had to be a
+  tuple and was not. Two classes for one rate law, to work around a scalar
+  assumption one layer down. Merging them into `HillEdge(mode=...)` (2026-09-05)
+  makes the constraint explicit rather than removing it: `K` is now placed with
+  `place_hill_gate` and never fitted.
+
+  *Fix:* expand a tuple-valued calibratable field into one
+  `CalibratableParam` per element (`K[0]`, `K[1]`, …), which also needs
+  `read_param`/`write_param` to accept an index. Then a per-source threshold is
+  fittable and the merge loses nothing.
+
 - [ ] **P0.50 — The demo's frozen-parameter rationale is stale, and wrong on
   the parameters that matter.** Filed 2026-09-05. `multi_hallmark_calibrate`
   fits **3 of 89** available calibratable parameters, freezing the rest with the
@@ -726,12 +771,43 @@ The framework returns a plausible number and nothing indicates it is wrong.
   the linearization. Nothing is wrong with the optimizer — the fit is doing
   exactly what its sensitivities allow.
 
-  *Fix:* re-derive the frozen set from `sensitivity_jacobian` rather than from
-  a comment, and record the measured number beside each freeze so the next
-  reader can check it. Two candidates are already identified above
-  (`CDKN1A_inactiv_by_Akt_pS473`, `mTORC1_S2448_phos_by_AA_n_Akt_pS473`); BNIP3
-  needs one on the FoxO3a/mitophagy axis, which `JNK_pT183_inactiv` may be too
-  weak to supply.
+  **Screened properly 2026-09-05** over all 84 candidates (forcing sources
+  excluded as `u(t)`): **33 are numerically flat**. Two more freeze rationales
+  fell — `mTORC1_S2448_phos_by_AA_n_Akt_pS473` ("flat gradient") reduces the
+  loss by 0.557, and GLB1's production constant, frozen because "the pair sets
+  a level, which cancels in a fold change", is the **largest single loss
+  reducer in the fit** (residual 1.95 → 0.88). A rate whose effect runs through
+  ROS dynamics does not cancel the way a bare gain would.
+
+  The screen also caught `dp14::Cell` ranking **first** — a compartment of
+  size 1, which tops the ranking precisely because it scales every rate at
+  once and is therefore maximally degenerate. Compartments are now excluded
+  from `calibratable_params()` at import rather than by name-matching.
+
+  **Selecting the top 5 by loss reduction overfits — measured, not argued.**
+
+  | | out-of-box | 4-param set | 5-param screened |
+  |---|---|---|---|
+  | fit D07 | 0.376 | 0.281 | **0.245** |
+  | fit D14 | 0.456 | **0.344** | 0.411 |
+  | held-out D07 | 0.248 | **0.148** | 0.285 |
+  | held-out D14 | 0.460 | **0.428** | 0.612 |
+
+  The screened set beats the incumbent on the arm it was selected against and
+  is **worse than not fitting at all** on both held-out timepoints. The
+  identifiability verdict predicted it before the fit ran: 0 identifiable
+  parameters against the incumbent's 2, everything prior-dominated at
+  σ 1.06-2.86 decades. Gauss-Newton loss reduction optimises exactly the arm it
+  is computed on; with 12 residuals and unconstrained directions, that is
+  overfitting by construction.
+
+  *Fix:* selection must be ranked by loss reduction **and** filtered by what
+  the data constrains — neither alone. Reverted to the 4-param set. The
+  remaining defect is the original one: the frozen set is still justified by
+  comments rather than by numbers, and `sensitivity_jacobian` should be run as
+  a screen whenever the composite changes shape, since it just did and three of
+  the stated rationales were wrong. BNIP3 still has no well-constrained knob on
+  its own axis (`JNK_pT183_inactiv`, its only candidate, measures 1.1e-02).
 
 - [ ] **P0.45 — The p53 → CD95 edge cannot carry a measured induction, because
   GZ06's p53 has no DC signal to give.** Filed 2026-09-05. Wild-type p53 raises

@@ -22,7 +22,7 @@ class ParamInput(eqx.Module):
 
     The transform-free primitive for parameter coupling: put any Hill / gate /
     product in a composable edge that writes the driving path (e.g.
-    :class:`hallsim.models.hill_edge.HillSignalEdge`), then this reads it.
+    :class:`hallsim.models.hill_edge.HillEdge` in ``level`` mode), then this reads it.
     """
 
     param_name: str = eqx.field(static=True)
@@ -160,7 +160,10 @@ class ImportedODEProcess(Process):
         from hallsim.calibration import CalibratableParam
 
         out = super().calibratable_params()
+        skip = getattr(self, "_compartment_names", frozenset())
         for name, value in self.parameters.items():
+            if name in skip:
+                continue
             v = float(value)
             out.append(
                 CalibratableParam(

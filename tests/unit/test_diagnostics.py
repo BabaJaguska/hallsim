@@ -18,7 +18,7 @@ from hallsim.diagnostics import (
     screen_sensitivity,
 )
 from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
-from hallsim.models.hill_edge import HillActivationEdge
+from hallsim.models.hill_edge import HillEdge
 from demos.models.multi_hallmark import (
     GZ06_PSI_PUBLISHED,
     GZ06_PSI_NAME,
@@ -229,7 +229,7 @@ def test_driven_edge_is_undriven_not_vanishing():
     """A coupling edge screened solo sits at its port defaults. That is the
     screen having no driver, not the component having no dynamics — it must
     not fail the constituents-first assertion agents are told to write."""
-    edge = HillActivationEdge(k_act=1.0, K=(1.0,), n=(2.0,))
+    edge = HillEdge(hi=1.0, K=(1.0,), n=(2.0,))
     report = screen_process(edge, t_end=100.0)
     assert report.undriven and not report.vanishing, report
     assert report.ok
@@ -249,7 +249,7 @@ def test_solo_screen_does_not_warn_about_its_own_unfed_inputs(caplog):
     every screen is noise that trains agents to ignore validation."""
     with caplog.at_level(logging.WARNING):
         screen_process(
-            HillActivationEdge(k_act=1.0, K=(1.0,), n=(2.0,)),
+            HillEdge(hi=1.0, K=(1.0,), n=(2.0,)),
             t_end=100.0,
             check_tunability=False,
         )

@@ -1084,7 +1084,7 @@ def build_mitochondrial_aging_composite(
     lives in the rate constant (the same conclusion ``multi_hallmark`` reached).
     """
     from hallsim.composite import Composite
-    from hallsim.models.hill_edge import HillActivationEdge
+    from hallsim.models.hill_edge import HillEdge
     from hallsim.sbml_import import process_from_sbml
 
     p = prefix
@@ -1114,9 +1114,10 @@ def build_mitochondrial_aging_composite(
         # an additive channel carrying the mtDNA/bioenergetic contribution, not
         # a replacement — K sits at the healthy operating level so it is
         # half-open at rest and rises with mitochondrial ROS.
-        "mito_ros": HillActivationEdge(
+        "mito_ros": HillEdge(
+            mode="flux",
             timescale=dp14.timescale,
-            k_act=MITO_ROS_EDGE_STRENGTH,
+            hi=MITO_ROS_EDGE_STRENGTH,
             K=(1.0,),
             n=(2.0,),
             target_default=10.0,
