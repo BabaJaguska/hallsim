@@ -172,8 +172,15 @@ def download_biomodel_files(
     model_id,
     dest: "Path | str | None" = None,
     timeout: float = 60.0,
+    main_only: bool = False,
 ) -> list["Path"]:
     """Download every file in a BioModels deposit; return the local paths.
+
+    ``main_only`` fetches just the deposit's main model file. A screen that
+    only reads the SBML otherwise pulls the PDF, the reaction-diagram PNG and
+    SVG, the MATLAB and XPP exports and the curation log with it — megabytes
+    per deposit, and across a few hundred candidates that is most of the wall
+    clock spent on files nothing opens.
 
     ``_download_biomodel_to_cache`` fetches the model and stops there, but the
     deposit's other files are where the provenance is: a README stating what
@@ -190,7 +197,11 @@ def download_biomodel_files(
 
     accession = _accession(model_id)
     record = biomodels_record(accession, timeout=timeout)
-    names = _record_filenames(record)
+    if main_only:
+        files = (record.get("files") or {}).get("main") or []
+        names = tuple(f.get("name", "") for f in files if f.get("name"))
+    else:
+        names = _record_filenames(record)
     out_dir = (
         Path(dest)
         if dest is not None
@@ -865,9 +876,20 @@ def search_jws(
     return _ranked(scored, limit)
 
 
+def _search_europepmc(*a, **kw):
+    """Late import: `literature` imports `ModelCandidate` from here."""
+    from hallsim.literature import search_europepmc
+
+    return search_europepmc(*a, **kw)
+
+
 SOURCES = {
     "biomodels": search_biomodels,
     "jws": search_jws,
+    # Not a repository: papers whose model was never deposited anywhere. The
+    # harvest recovers the file from the supplement, so the screen treats a
+    # paper exactly like a deposit.
+    "europepmc": _search_europepmc,
     "modeldb": search_modeldb,
     "biosimulations": search_biosimulations,
     "physiome": search_physiome,
@@ -937,6 +959,109 @@ class OutputScreen:
         return self.status == "produces"
 
 
+def _is_junk_archive_entry(name: str) -> bool:
+    """Whether a zip entry is packaging debris rather than content.
+
+    A zip made on macOS carries an AppleDouble resource fork beside every file
+    (`._model.ode`, under `__MACOSX/`). They have the right extension and none
+    of the content, so an extractor that trusts the suffix hands the importer
+    a binary metadata blob — which is where ModelDB 35358's
+    `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa2` came from.
+    """
+    parts = name.replace("\\", "/").split("/")
+    return any(
+        p == "__MACOSX" or p.startswith("._") or p == ".DS_Store"
+        for p in parts
+    )
+
+
+MODELDB_DOWNLOAD = "https://modeldb.science/download/{model_id}"
+
+
+def _download_modeldb_models(model_id, timeout: float = 120.0) -> list:
+    """Model source files from a ModelDB entry, cached on disk.
+
+    ModelDB ships a zip of whatever the authors ran. Only the formats there is
+    a reader for are returned — ``.ode`` (XPPAUT) and ``.cps`` — so a NEURON
+    or GENESIS entry comes back empty and is reported unscreenable rather than
+    silently dropped.
+    """
+    import io
+    import zipfile
+
+    dest = Path.home() / ".cache" / "hallsim" / "modeldb" / str(model_id)
+    if dest.exists():
+        return sorted(dest.iterdir())
+    url = MODELDB_DOWNLOAD.format(model_id=model_id)
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        blob = response.read()
+    dest.mkdir(parents=True, exist_ok=True)
+    out = []
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(blob))
+    except zipfile.BadZipFile as exc:
+        raise LookupError(f"modeldb {model_id}: not a zip ({exc})") from exc
+    for info in archive.infolist():
+        name = Path(info.filename).name
+        if info.is_dir() or _is_junk_archive_entry(info.filename):
+            continue
+        if not name.lower().endswith((".ode", ".cps")):
+            continue
+        target = dest / name
+        target.write_bytes(archive.read(info))
+        out.append(target)
+    if not out:
+        raise LookupError(
+            f"modeldb {model_id}: no .ode or .cps in the deposit — the entry "
+            f"is NEURON, MATLAB or another format with no reader here"
+        )
+    return sorted(out)
+
+
+def _screen_xpp(model_id: str, path, pattern: str) -> "OutputScreen":
+    """Screen an XPPAUT model, which declares dynamics and no reactions."""
+    from hallsim.intake import emitted_species
+    from hallsim.xpp_import import process_from_xpp
+
+    try:
+        proc = process_from_xpp(str(path), name="m")
+    except Exception as exc:
+        return OutputScreen(
+            model_id, "unreadable", note=f"{type(exc).__name__}: {exc}"
+        )
+    produced = emitted_species(proc, pattern)
+    schema = proc.ports_schema()
+    return OutputScreen(
+        model_id,
+        "produces" if produced else "no-match",
+        produced,
+        n_species=len(schema),
+        note="XPPAUT; screened on the derivative, not on reactions",
+    )
+
+
+def _readable_model_files(paths):
+    """``paths`` with any COPASI file converted to SBML.
+
+    A deposit's supplement often ships the ``.cps`` and no SBML at all, which
+    the screen used to report as "no .xml/.sbml file" — a deposit skipped for
+    its format rather than its content.
+    """
+    from hallsim.cps_import import CopasiUnavailableError, cps_to_sbml, is_cps
+
+    out = []
+    for path in paths:
+        if not is_cps(path):
+            out.append(path)
+            continue
+        try:
+            out.append(cps_to_sbml(path))
+        except (CopasiUnavailableError, Exception) as exc:
+            log.warning("could not convert %s: %s", path, exc)
+    return out
+
+
 def _first_readable_sbml(paths):
     """``(model, note)`` for the first path libsbml reads as SBML.
 
@@ -967,11 +1092,29 @@ def _sbml_paths_for(model_id: str, source: str, timeout: float) -> list[str]:
     is a fetcher, not a branch in the screen.
     """
     if source == "biomodels":
+        # The screen reads the model and nothing else; fall back to the whole
+        # deposit only if the main file turns out not to be readable SBML.
+        main = download_biomodel_files(
+            model_id, timeout=timeout, main_only=True
+        )
+        if main:
+            return main
         return download_biomodel_files(model_id, timeout=timeout)
     if source == "jws":
         from hallsim.sbml_import import _download_jws_to_cache
 
         return [_download_jws_to_cache(model_id)]
+    if source == "modeldb":
+        return _download_modeldb_models(model_id, timeout=timeout)
+    if source == "europepmc":
+        from hallsim.literature import supplementary_model_files
+
+        files = supplementary_model_files(model_id, timeout=timeout)
+        if not files:
+            raise LookupError(
+                f"{model_id} deposited no model file in its supplement"
+            )
+        return files
     raise LookupError(f"no SBML fetcher for source {source!r}")
 
 
@@ -1022,6 +1165,16 @@ def screen_produced_species(
                     note=f"{type(exc).__name__}: {exc}",
                 )
             )
+            continue
+        paths = _readable_model_files(paths)
+        # An XPPAUT .ode has no reactions to scan, so it is screened on the
+        # derivative instead (intake.emitted_species). Reported with the same
+        # statuses so the two formats read alike in the outcome table.
+        ode = [q for q in paths if str(q).lower().endswith(".ode")]
+        if ode and not [
+            q for q in paths if str(q).lower().endswith((".xml", ".sbml"))
+        ]:
+            out.append(_screen_xpp(str(model_id), ode[0], pattern))
             continue
         try:
             model, note = _first_readable_sbml(paths)

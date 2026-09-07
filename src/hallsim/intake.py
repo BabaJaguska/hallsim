@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 
 import jax.numpy as jnp
 
+from hallsim.process import PortRole
+
 log = logging.getLogger(__name__)
 
 #: ‖f(y₀)‖ relative to ‖y₀‖ above which the declared IC is not a rest state.
@@ -149,16 +151,54 @@ def emitted_species(process, pattern: str) -> tuple[str, ...]:
     rx = re.compile(pattern, re.I)
     names = getattr(process, "_species_names", ()) or ()
     labels = dict(getattr(process, "_species_labels", ()) or ())
+    if not names:  # a format with no species list (XPP): use the ports
+        names = tuple(process.ports_with_role(PortRole.EVOLVED))
+    wanted = [
+        sid
+        for sid in names
+        if rx.search(sid) or rx.search(labels.get(sid, ""))
+    ]
+    if not wanted:
+        return ()
+
+    reaction_based = bool(getattr(process, "_stoichiometry", None))
     out = []
-    for sid in names:
-        if not (rx.search(sid) or rx.search(labels.get(sid, ""))):
-            continue
+    for sid in wanted:
         try:
-            if coupling_source_verdict(process, sid).produced:
-                out.append(labels.get(sid) or sid)
+            produced = (
+                coupling_source_verdict(process, sid).produced
+                if reaction_based
+                else _produced_by_derivative(process, sid)
+            )
         except Exception:
             continue
+        if produced:
+            out.append(labels.get(sid) or sid)
     return tuple(sorted(set(out)))
+
+
+def _produced_by_derivative(process, name: str) -> bool:
+    """Whether ``name`` has a source term, judged from the derivative.
+
+    An XPP model has no reactions at all, and an SBML model may express its
+    dynamics as rate rules, so scanning reaction products sees nothing in
+    either. The format-agnostic statement is that a species is *produced* when
+    something adds to it that does not depend on the species itself — so hold
+    it at zero and ask whether its derivative is positive.
+    """
+    import numpy as np
+
+    from hallsim.composite import single_process_composite
+
+    comp = single_process_composite(process)
+    keys = list(comp.store_keys())
+    idx = [i for i, k in enumerate(keys) if k.split("/")[-1] == name]
+    if not idx:
+        return False
+    rhs, _ = comp.build_rhs()
+    y = jnp.asarray(comp.initial_state_vec()).at[jnp.asarray(idx)].set(0.0)
+    dy = np.asarray(rhs(0.0, y))
+    return bool(np.any(dy[np.asarray(idx)] > 0))
 
 
 def coupling_response(

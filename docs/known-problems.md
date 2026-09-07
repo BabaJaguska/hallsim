@@ -925,6 +925,58 @@ The framework returns a plausible number and nothing indicates it is wrong.
   three `screen_produced_species` defects fixed the same day: a confident
   verdict about something that was never examined.
 
+- [ ] **P0.60 — `coupling_source_verdict` counts the reverse leg of a
+  reversible binding pair as production.** Filed 2026-09-06 (Proctor 2013 F11).
+
+  A deposit that writes forward and reverse as separate reactions makes
+  `AB -> A + B` a reaction whose *product* is `A`, so unbinding scores as
+  synthesis. Proctor 2013's `IL1` and `OSM` returned `suitable` — produced and
+  consumed, bounded turnover — while having **no synthesis reaction anywhere**;
+  both are pure decaying input pools with no autocrine loop, which is the
+  defining SASP feature. That verdict promoted the deposit to lead candidate
+  and cost a full review. It is the check every candidate this session was
+  cleared on.
+
+  *Fix:* decide production by conservation, not reaction role. If a species'
+  total across free and bound forms is conserved, its "production" is
+  redistribution. `Process.stoichiometry()` and
+  `steady_state.conservation_laws` already supply the moieties.
+
+- [ ] **P0.61 — Reporter-panel rank is not in `triage_sbml`, so a model whose
+  named readouts are one variable reaches a reviewer.** Filed 2026-09-06.
+
+  Twice the deciding defect has been linearly dependent reporters, both times
+  found by hand after hours of review:
+
+  | deposit | degeneracy |
+  |---|---|
+  | Hui 2016 | `ADAMTS5 == 10*IL1`; ADAMTS5/IL1A/MMP13/MMP2 are one variable |
+  | Proctor 2013 | `MMP1_mRNA == MMP3_mRNA`, `MMP13_mRNA == 0.1*MMP1_mRNA` (max abs dev 8.5e-14); panel rank **7 of 9**, pairwise r = 1.0000 |
+
+  A constant ratio cancels in a fold change, so a degenerate pair has
+  *identical* log2FC by construction. Proctor's benchmark spreads those three
+  genes by 1.39 log2 **with a sign flip** — unrepresentable at any parameter
+  values, so calibration cannot touch it.
+
+  *Fix:* one solve plus an SVD of the reporter trajectories. Rank below panel
+  size means the extra reporters are not independent evidence and scoring them
+  double-counts. Would have rejected both deposits for one solve.
+
+- [ ] **P0.62 — `rest_residual` is normalised by `‖y₀‖`, so one large species
+  hides every other state's motion.** Filed 2026-09-06.
+
+  Proctor 2013 reports `‖f(y₀)‖/‖y₀‖ = 2.48e-05` and reads as equilibrated. It
+  is not: `‖y₀‖ = 100,006` and `Aggrecan_Collagen2` alone is 100,000 of it.
+  Per species, `IL1` has **τ = 0.03 h**, and two states drift with no stimulus
+  — `Matriptase` to 0.6% of its IC, `TIMP3` to exactly 2× (its IC is half its
+  own basal steady state). The aggregate was reported to the user as the
+  candidate's strongest property.
+
+  Affects any model with a wide magnitude spread, which is most of them.
+
+  *Fix:* report a per-species relative rate — `|f_i(y0)| / max(|y0_i|, floor)`
+  — and flag the worst, alongside the norm.
+
 - [ ] **P0.57 — Triage cannot tell a deposit that was written for stochastic
   simulation, so it imports one as an ODE and silently deletes a mechanism.**
   Filed 2026-09-05, found independently by both reviewers on Hui 2016.

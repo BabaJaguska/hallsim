@@ -1308,12 +1308,20 @@ def _resolve_source(model_id, name):
     """``(xml_path, name)`` for a local path, a BioModels ID, or ``jws:<slug>``.
 
     A bare integer or ``BIOMD...`` is BioModels; ``jws:glycolysis1`` is JWS
-    Online. Both cache to disk, so a repeated import is a local read.
+    Online. Both cache to disk, so a repeated import is a local read. A local
+    path ending ``.cps`` is a COPASI model and is converted to SBML first.
     """
     import os
 
     if isinstance(model_id, str) and os.path.isfile(model_id):
         name = name or os.path.splitext(os.path.basename(model_id))[0]
+        # A COPASI file is converted to SBML here, at the boundary, so every
+        # downstream check sees an ordinary SBML import (hallsim.cps_import).
+        if model_id.lower().endswith(".cps"):
+            from hallsim.cps_import import cps_to_sbml
+
+            log.info(f"Converting COPASI file '{model_id}' as '{name}'...")
+            return cps_to_sbml(model_id), name
         log.info(f"Loading local SBML file '{model_id}' as '{name}'...")
         return model_id, name
     if isinstance(model_id, str) and model_id.lower().startswith("jws:"):

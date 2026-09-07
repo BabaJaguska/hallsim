@@ -18,6 +18,7 @@ def test_all_sources_registered():
     assert set(discovery.SOURCES) == {
         "biomodels",
         "jws",
+        "europepmc",
         "modeldb",
         "biosimulations",
         "physiome",
@@ -25,8 +26,16 @@ def test_all_sources_registered():
 
 
 def test_every_source_takes_query_and_limit():
+    """A source is called uniformly by `search_for_model`, so a thin
+    late-import wrapper is unwrapped before its signature is read."""
     for name, search in discovery.SOURCES.items():
-        params = inspect.signature(search).parameters
+        target = search
+        if search.__name__.startswith("_search_"):
+            target = getattr(
+                __import__("hallsim.literature", fromlist=["x"]),
+                search.__name__.removeprefix("_"),
+            )
+        params = inspect.signature(target).parameters
         assert "query" in params, name
         assert "limit" in params, name
 

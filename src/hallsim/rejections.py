@@ -27,6 +27,7 @@ CLASSES = (
     "cell-type-mismatch",
     "numerically-unusable",
     "no-provenance",
+    "degenerate-readouts",
 )
 
 REGISTRY = Path(__file__).resolve().parents[2] / "docs" / "rejections.md"

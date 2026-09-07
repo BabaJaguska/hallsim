@@ -38,6 +38,13 @@ cuda = [
   "jax-cuda12-pjrt>=0.10,<0.11",
 ]
 
+# COPASI's own bindings, used only to convert a .cps deposit to SBML on the
+# way in (hallsim.cps_import). A paper's supplement is often a .cps rather
+# than an SBML file, and COPASI exports SBML natively — reimplementing that
+# translation would be reinventing a solved problem. Native wheel, so it is an
+# extra rather than a base dependency; import fails with an install hint.
+copasi = ["python-copasi>=4.42"]
+
 # xlrd reads the legacy .xls a paper's deposited fitting data arrives as
 # (DallePezze 2014's PottersWheel export); needed to verify a deposit against
 # its own published fit — see hallsim.intake.published_fit_chi2.

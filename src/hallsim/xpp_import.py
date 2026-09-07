@@ -297,16 +297,21 @@ _ASSIGN_NUM = re.compile(
     r"([A-Za-z_]\w*)\s*=\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)"
 )
 
+# XPPAUT accepts abbreviated keywords, and published files use the whole
+# range: `params` and `ini` were absent and cost two ModelDB imports.
 _KEYWORDS_PARAM = {
+    "p",
+    "pa",
     "par",
+    "para",
     "param",
+    "params",
     "parameter",
     "parameters",
-    "p",
     "number",
     "num",
 }
-_KEYWORDS_INIT = {"init", "initial", "i"}
+_KEYWORDS_INIT = {"i", "in", "ini", "init", "initial", "inits"}
 _UNSUPPORTED = {
     "wiener",
     "global",
@@ -342,6 +347,12 @@ def _parse_xpp_text(text: str) -> _ParsedXPP:
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].strip()  # strip comments and whitespace
         if not line:
+            continue
+        # `%` opens XPPAUT's array block only when followed by `[` (`%[1..10]`).
+        # Everywhere else in published files it is a plain comment — a title,
+        # an author, a journal reference — and refusing the whole model over
+        # one is how three ModelDB entries came back "unreadable".
+        if line.startswith("%") and not line[1:].lstrip().startswith("["):
             continue
         low = line.lower()
 
@@ -610,7 +621,9 @@ def process_from_xpp(
 
     name = name or os.path.splitext(os.path.basename(path))[0]
     log.info(f"Loading XPP file '{path}' as '{name}'...")
-    with open(path) as f:
+    # A published .ode often carries a degree sign or a Greek letter in a
+    # comment, written in whatever encoding the author's editor used.
+    with open(path, encoding="utf-8", errors="replace") as f:
         parsed = _parse_xpp_text(f.read())
 
     if parameters:

@@ -25,6 +25,7 @@ allowed, and `class` must come from the closed vocabulary below.
 | `cell-type-mismatch` | cell type, stimulus or receptor complement does not transfer to the target |
 | `numerically-unusable` | does not import, does not solve, or has no usable gradient |
 | `no-provenance` | parameters or citations do not support what the model asserts |
+| `degenerate-readouts` | the model's named outputs are one variable and a constant, so a contrast between them is unrepresentable |
 
 A deposit usually fails several ways. `class` is the one that decided it —
 the cheapest check that would have been sufficient on its own.
@@ -54,4 +55,5 @@ the cheapest check that would have been sufficient on its own.
 | BIOMD0000000537 | Dwivedi2014 anti-IL6R antibody arm | inflammation | not-identifiable | same module, same rank-3 limit | docs/review-dwivedi2014-maths.md |
 | BIOMD0000000873 | Soni2018 IL-6 M2 macrophage | inflammation | numerically-unusable | integrates and is tolerance-insensitive, but the gradient is non-finite | session 2026-09-06 |
 | MODEL1911130003 | Boer1985 macrophage-T cell | inflammation | no-provenance | 0% ontology coverage, no declared time unit, population-level not cell-level | session 2026-09-06 |
+| BIOMD0000000504 | Proctor2013 cartilage breakdown | inflammation | degenerate-readouts | MMP1_mRNA == MMP3_mRNA and MMP13_mRNA == 0.1*MMP1_mRNA exactly for all t (max abs dev 8.5e-14), so all three have identical log2FC while the data spreads them 1.39 log2 and disagrees on sign; 6 of 9 transcripts have no basal transcription and sit at 0.000; the 10x is mis-cited | docs/review-proctor2013-wetlab.md |
 | BIOMD0000000524 | Kallenberger2014 CD95L apoptosis | apoptosis | cell-type-mismatch | CD95L-induced extrinsic death in HeLa; irradiated fibroblasts die by the intrinsic route, which the deposit does not contain | docs/design-fate-architecture.md |
