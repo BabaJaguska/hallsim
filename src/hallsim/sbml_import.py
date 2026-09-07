@@ -255,6 +255,10 @@ class SBMLProcess(ImportedODEProcess):
     # untouched through eqx.tree_at substitutions on `parameters`.
     _species_names: tuple[str, ...] = eqx.field(static=True, default=())
     _species_y0: tuple[float, ...] = eqx.field(static=True, default=())
+    # ``((species_id, display_name), ...)``. A CellDesigner export — a large
+    # part of BioModels — gives every species a UUID id and puts the gene
+    # symbol in the name, so matching on id alone cannot find IL6.
+    _species_labels: tuple = eqx.field(static=True, default=())
     _species_ontology: tuple[dict[str, str], ...] = eqx.field(
         static=True, default=()
     )
@@ -276,6 +280,18 @@ class SBMLProcess(ImportedODEProcess):
     # `parameters` surface; these route their values into `_w0`.
     _w_names: tuple[str, ...] = eqx.field(static=True, default=())
     _w_indexes: tuple[int, ...] = eqx.field(static=True, default=())
+    # Quantities the SBML determines by an <assignmentRule> rather than by
+    # integration. They live in the generated model's `w` vector, which
+    # `derivative` already evaluates every step and then discarded: without a
+    # port they are invisible (`geneProduct`), and a species that is also in
+    # `y` reads its unchanging `y` slot instead of the rule (`CRP` held its
+    # initial value for a whole run while the rule evaluated to 158). Surfaced
+    # as ASSIGNED, which is the role for exactly this.
+    _assigned_names: tuple[str, ...] = eqx.field(static=True, default=())
+    _assigned_indexes: tuple[int, ...] = eqx.field(static=True, default=())
+    # Static, like _species_y0: ports_schema() must stay concrete under a
+    # trace, and reading them off the traced _w0 breaks that.
+    _assigned_y0: tuple[float, ...] = eqx.field(static=True, default=())
     # Inert sinks: written by degradation, read by nothing. Frozen to dy/dt=0
     # so they can't accumulate unboundedly and wreck the state scaling — exact,
     # since no rate law reads them.
@@ -437,6 +453,19 @@ class SBMLProcess(ImportedODEProcess):
                 self._species_ontology or ({},) * len(self._species_names),
             )
         }
+        # An assignment rule determines its target outright, so ASSIGNED
+        # replaces the EVOLVED port when the species is in `y` as well.
+        schema.update(
+            {
+                name: Port(
+                    role=PortRole.ASSIGNED,
+                    default=y0,
+                    units="dimensionless",
+                    description=f"SBML assignment rule: {name}",
+                )
+                for name, y0 in zip(self._assigned_names, self._assigned_y0)
+            }
+        )
         schema.update(self._driver_input_ports())
         schema.update(
             {
@@ -450,6 +479,29 @@ class SBMLProcess(ImportedODEProcess):
             }
         )
         return schema
+
+    def assign(self, t, state):
+        """Values of the ASSIGNED ports — the SBML assignment rules, evaluated
+        at the current state on the model's own clock."""
+        if not self._assigned_names:
+            return {}
+        host = getattr(self._model, "modelstepfunc", self._model)
+        assignmentfunc = getattr(host, "assignmentfunc", None)
+        if assignmentfunc is None:
+            return {}
+        y = jnp.stack([state[name] for name in self._species_names], axis=-1)
+        t_native = t * self.time_scale
+        c = self._constants(t)
+        if y.ndim > 1:
+            w = jax.vmap(assignmentfunc, in_axes=(0, None, None, None))(
+                y, self._w0, c, t_native
+            )
+        else:
+            w = assignmentfunc(y, self._w0, c, t_native)
+        return {
+            name: w[..., idx]
+            for name, idx in zip(self._assigned_names, self._assigned_indexes)
+        }
 
     def _constants(self, t):
         """The SBML ``c`` vector with ``parameters`` scattered in — one
@@ -734,6 +786,24 @@ def _extract_compartment_names(xml_path: str) -> frozenset[str]:
         model.getCompartment(i).getId()
         for i in range(model.getNumCompartments())
     )
+
+
+def _extract_species_labels(xml_path: str) -> dict[str, str]:
+    """``{species_id: display name}`` from the SBML.
+
+    A CellDesigner export gives every species a UUID id and puts the gene
+    symbol in the ``name`` attribute, so anything matching on id alone is
+    blind to it (Dwivedi 2014 produces IL6 under ``mwf626e95e_543f_...``).
+    """
+    import libsbml
+
+    model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
+    if model is None:
+        return {}
+    return {
+        model.getSpecies(i).getId(): (model.getSpecies(i).getName() or "")
+        for i in range(model.getNumSpecies())
+    }
 
 
 def _extract_species_ontology(xml_path: str) -> dict[str, dict[str, str]]:
@@ -1309,6 +1379,9 @@ def _settable_surface(xml_path, c, w0, c_indexes, w_indexes):
     boundary_inputs = _collect_boundary_inputs(xml_path) & set(w_indexes)
     params_dict.update({n: float(w0[w_indexes[n]]) for n in boundary_inputs})
     w_names = tuple(sorted(boundary_inputs))
+    # Everything else in `w` is determined by an <assignmentRule> each step.
+    # Those are outputs, not inputs, and go out as ASSIGNED ports.
+    assigned = tuple(sorted(set(w_indexes) - boundary_inputs))
     return (
         params_dict,
         param_names,
@@ -1316,6 +1389,8 @@ def _settable_surface(xml_path, c, w0, c_indexes, w_indexes):
         w_names,
         tuple(w_indexes[n] for n in w_names),
         boundary_inputs,
+        assigned,
+        tuple(w_indexes[n] for n in assigned),
     )
 
 
@@ -1455,6 +1530,7 @@ def process_from_sbml(
     compartment_names = _extract_compartment_names(xml_path)
     stoichiometry = _extract_stoichiometry(xml_path)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
+    _species_label_map = _extract_species_labels(xml_path)
 
     native_time_seconds, native_time_source = _native_clock(
         xml_path, name, native_time_seconds
@@ -1468,6 +1544,8 @@ def process_from_sbml(
         w_names,
         w_index_tuple,
         boundary_inputs,
+        assigned_names,
+        assigned_indexes,
     ) = _settable_surface(xml_path, c, w0, c_indexes, w_indexes_map)
     frozen_indices = _frozen_sink_indices(xml_path, species_names, name)
     _apply_parameter_overrides(
@@ -1489,6 +1567,9 @@ def process_from_sbml(
     proc = SBMLProcess(
         _species_names=species_names,
         _species_y0=tuple(float(y0[i]) for i in range(len(species_names))),
+        _species_labels=tuple(
+            (sid, _species_label_map.get(sid, "")) for sid in species_names
+        ),
         _species_ontology=species_ontology,
         _coupling_meta=coupling_meta,
         _stoichiometry=stoichiometry,
@@ -1504,6 +1585,9 @@ def process_from_sbml(
         _param_indexes=param_indexes,
         _w_names=w_names,
         _w_indexes=w_index_tuple,
+        _assigned_names=assigned_names,
+        _assigned_indexes=assigned_indexes,
+        _assigned_y0=tuple(float(w0[i]) for i in assigned_indexes),
         _frozen_indices=frozen_indices,
         _compartment_names=compartment_names,
         # Default the scheduler timescale to the model's native time unit (a

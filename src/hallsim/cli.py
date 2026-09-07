@@ -458,6 +458,121 @@ def clamp(level, t1, rel_error, k_clamps):
     run_demo(**overrides)
 
 
+@simulate.command("find")
+@click.argument("query", nargs=-1, required=True)
+@click.option(
+    "--produces",
+    "pattern",
+    required=True,
+    help="Regex a deposit must EMIT, matched against species id and display "
+    "name (e.g. 'IL6|CXCL8|MMP1'). Word-boundary it or TNF matches TNFR.",
+)
+@click.option(
+    "--limit",
+    default=15,
+    show_default=True,
+    help="Hits per query per repository.",
+)
+@click.option(
+    "--sources",
+    default=None,
+    help="Comma-separated repositories; default is all of them.",
+)
+@click.option(
+    "--triage/--no-triage",
+    default=False,
+    help="Run the numerical screen on the producers.",
+)
+def find(query, pattern, limit, sources, triage):
+    """Search every repository for a model that EMITS a quantity.
+
+    A text search answers "is this deposit about IL6"; composing needs "does
+    it emit IL6". A module imported to supply an output it only ever consumes
+    contributes nothing, which is the single most common way a candidate
+    fails. Each query term is searched separately and the hits are pooled.
+
+        simulate find NFkB inflammation --produces '\bIL6\b|\bCXCL8\b'
+
+    Every candidate yields a row, including the ones that could not be
+    screened: `no-reactions` is a qualitative deposit, `no-rate-laws` a drawn
+    pathway map, and neither is a screened negative.
+    """
+    from collections import Counter
+
+    from hallsim.discovery import screen_produced_species, search_for_model
+
+    src = sources.split(",") if sources else None
+    seen, cands = set(), []
+    for term in query:
+        for c in search_for_model(term, limit=limit, sources=src):
+            if c.id not in seen:
+                seen.add(c.id)
+                cands.append(c)
+    click.echo(
+        f"{len(cands)} distinct candidates from {len(query)} quer"
+        f"{'y' if len(query) == 1 else 'ies'}"
+    )
+    rows = screen_produced_species(cands, pattern)
+    by = {c.id: c for c in cands}
+
+    producers = [r for r in rows if r.status == "produces"]
+    click.echo(f"\n=== PRODUCES /{pattern}/ ===")
+    for r in sorted(producers, key=lambda r: -len(r.produced)):
+        c = by[r.model_id]
+        mark = "cur" if c.curated else "UNC"
+        click.echo(
+            f"  {mark} {r.model_id:20s} n={r.n_species:4d} "
+            f"rx={r.n_reactions:4d} {list(r.produced)[:8]}"
+        )
+        click.echo(f"      {c.name[:96]}")
+    if not producers:
+        click.echo("  (none)")
+
+    click.echo(f"\noutcome: {dict(Counter(r.status for r in rows))}")
+    for r in rows:
+        if r.status not in ("produces", "no-match"):
+            click.echo(f"  [{r.status}] {r.model_id}: {r.note[:88]}")
+
+    if triage and producers:
+        from hallsim.intake import triage_sbml
+
+        click.echo(f"\n=== TRIAGE of {len(producers)} producer(s) ===")
+        for r in producers:
+            click.echo(f"\n{by[r.model_id].name[:88]}")
+            click.echo(str(triage_sbml(r.model_id)))
+
+
+@simulate.command("rejections")
+@click.option(
+    "--class", "cls", default=None, help="Show only this failure class."
+)
+@click.option("--slot", default=None, help="Show only this slot.")
+def rejections(cls, slot):
+    """Which deposits were screened out of a slot, and why.
+
+    A search that ends in "nothing suitable" is a result only when the reasons
+    are recorded. The distribution of failure classes is a finding about the
+    field, and the registry stops the same deposit being re-screened by the
+    next session.
+    """
+    from hallsim.rejections import load, summary
+
+    if cls is None and slot is None:
+        click.echo(summary())
+        return
+    rows = [
+        r
+        for r in load()
+        if (cls is None or r.failure_class == cls)
+        and (slot is None or r.slot == slot)
+    ]
+    click.echo(f"{len(rows)} matching")
+    for r in rows:
+        click.echo(f"\n  {r.id}  {r.model}")
+        click.echo(f"    {r.failure_class} ({r.slot}) — {r.reason}")
+        click.echo(f"    evidence: {r.evidence}")
+
+
 @simulate.command("stiffness")
 @click.option(
     "--macro-dt",
@@ -635,6 +750,14 @@ def info():
     click.echo("  simulate mito-aging       — mitochondrial decline with age")
     click.echo(
         "  simulate clamp            — hold a consumed species at a setpoint"
+    )
+    click.echo(
+        "  simulate find             — find a model that EMITS a "
+        "quantity, not one that mentions it"
+    )
+    click.echo(
+        "  simulate rejections       — deposits screened out of a slot, "
+        "and why"
     )
     click.echo("  simulate info             — this help")
     click.echo()

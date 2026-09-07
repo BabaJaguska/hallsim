@@ -19,12 +19,6 @@ value here.
 DEFAULT_RTOL = 1e-6
 DEFAULT_ATOL = 1e-9
 
-# Per-state vector atol coefficient: atol_i = max(DEFAULT_ATOL,
-# DEFAULT_ATOL_SCALE * |y_i|). Loosens the absolute floor on
-# large-magnitude states (molecule counts) that would otherwise force
-# stability-tiny steps, while keeping a tight floor near zero.
-DEFAULT_ATOL_SCALE = 1e-6
-
 # Algebraic convergence tolerance of an implicit stage's Newton solve — not an
 # accuracy target, and deliberately not DEFAULT_ATOL (docs/diary.md).
 DEFAULT_NEWTON_ATOL = 1e-6

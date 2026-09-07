@@ -1534,8 +1534,8 @@ The framework returns a plausible number and nothing indicates it is wrong.
   ASSIGNED/LATCHED/INPUT values but **never** on an EVOLVED write. Applying it
   there is a second silent-wrong.
 
-- [ ] **P0.17 — `atol_scale` freezes the tolerance on a decaying state, and the
-  solve returns 10⁵⁷ with `ok=True`.** ✓✓ From an off-attractor IC on GZ06,
+- [x] **P0.17 — FIXED 2026-09-06. `atol_scale` froze the tolerance on a
+  decaying state, and the solve returned 10⁵⁷ with `ok=True`.** ✓✓ From an off-attractor IC on GZ06,
   HallSim returns **−1.53e57** where scipy Radau / LSODA / DOP853 at rtol 1e-10
   all return **+9.9584e-6**, at every horizon ≥ 100 with `macro_dt ≥ 100`:
 
@@ -1555,12 +1555,32 @@ The framework returns a plausible number and nothing indicates it is wrong.
   **The failure is tolerance-insensitive**, so the loose-vs-tight screen calls it
   converged, and `_guard_result` inspects only diffrax's RESULTS code, never the
   values.
-  Not currently active: the composite starts from the deposit's own IC, which is
-  bounded at 600 / 2000 / 5000 d. It bites a basin scan, a heterogeneous-IC
-  population sweep, or an equilibration probe.
-  *Fix:* scale `atol` to the state's running magnitude rather than freezing it at
-  `|y₀|`, or check the returned values against a bound rather than trusting the
-  solver's status code.
+  **The "not currently active" reading was wrong.** Re-found 2026-09-06 from the
+  other end — a Dwivedi 2014 review measured `jax.jacfwd` through
+  `Scheduler.run` as 0.40% off central differences **from the deposit's own
+  IC**, invariant to `rtol` 1e-6…1e-12 and `newton_atol` 1e-6…1e-14. That is
+  this entry: not a broken AD path but a correct gradient of a trajectory
+  integrated to the wrong tolerance. On a 2-state stiff probe
+  (`scratch/2026-09-06-gradient/`) the default cost **4.5% on the value and
+  2.6% on the gradient**, resolving a state that had decayed to 1.66e-6
+  against an `atol` frozen at 1e-6 — 60% of the answer. It reaches every
+  calibration through a stiff group, which is most of them.
+
+  **Fixed by removing the state scaling outright**, not by lowering the
+  constant. `rtol` already scales the error allowance by the *current* state,
+  which is what `atol_scale·|y₀|` was doing with stale data; `atol` is now a
+  true floor near zero, shared by every group. `DEFAULT_ATOL_SCALE`, the
+  `atol_scale` argument and `Scheduler._scaled_tolerances` are gone.
+
+  Measured cost of the removal: DP14 34.2 → 38.8 ms, GZ06 26.2 → 27.5 ms, both
+  trajectories moving ~1e-5 relative. The DP14 13.3 s → 1.7 s speedup this
+  scaling was credited with came from **stiffness routing** (Kvaerno5 over
+  Tsit5), which is untouched. After: value error 4.5% → 0.019%, gradient
+  2.6% → 0.0054%. Regression test in
+  `tests/unit/test_stiffness_routing.py::TestToleranceIsNotStateDerived`.
+
+  *Still open from this entry:* `_guard_result` inspects only diffrax's RESULTS
+  code, never the values, so a diverged solve can still report `ok=True`.
 
 - [ ] **P0.18 — `suggest_hill_gate` exists and no one runs it, so a coupling
   edge can be placed outside its driver's entire range.** ✓✓ `psi_bridge` gates

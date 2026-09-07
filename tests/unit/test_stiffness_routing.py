@@ -103,13 +103,13 @@ class TestRoutingDefault:
         assert _solvers(res) == {"Tsit5"}
 
     def test_routing_changes_the_solver_not_the_answer(self):
-        """Both routes solve the same system to their stated tolerance.
+        """Both routes solve the same system to the same stated tolerance.
 
-        Not bit-identical, and shouldn't be: the stiff route carries the
-        magnitude-scaled vector ``atol`` (``max(atol, atol_scale·|y0|)``,
-        1e-6 here) rather than the scalar 1e-9, which is the whole point —
-        it buys the step-count collapse. So the agreement to check is
-        solver-tolerance-level, not exactness.
+        Not bit-identical, and shouldn't be — two different discretisations
+        agree to their shared tolerance, not exactly. Both now carry the same
+        scalar ``atol``: the stiff route used to get a magnitude-scaled vector
+        one, which integrated a decaying state to a tolerance sized for where
+        it started (P0.17).
         """
         comp = _composite(StiffPair(), "stiff")
         routed = Scheduler().run(comp, t_span=(0.0, 5.0), macro_dt=1.0)
@@ -158,18 +158,22 @@ class TestRoutingOptOut:
         assert _solvers(res) == {"Tsit5"}
 
 
-class TestVectorTolerance:
-    """The stiff route's ``atol`` is ``max(atol, atol_scale·|y|)``, so it
-    belongs to the state being solved, not to the routing verdict — which is
-    cached structurally, and captured by a core compiled once per structure."""
+class TestToleranceIsNotStateDerived:
+    """``atol`` is a floor near zero, the same for every group and every run.
+
+    It used to be ``max(atol, atol_scale·|y0|)`` on stiff groups, which made
+    the tolerance a property of the state a run happened to start from. A
+    state that starts large and decays was then integrated to a tolerance
+    sized for its initial magnitude — 60% of the value it ended at, on the
+    probe in P0.17 — so both the trajectory and its gradient were wrong, and
+    the loose-vs-tight screen called it converged because the error was
+    tolerance-insensitive.
+    """
 
     def _y0(self, comp, magnitude):
         return jnp.full((len(comp.store_keys()),), magnitude)
 
     def test_result_does_not_depend_on_the_previous_run(self):
-        """At ``|y0| = 1e6`` the scaled ``atol`` is 1.0 — meaningless for a
-        run starting at 1e-3, which is what a scheduler reused across
-        magnitudes would inherit."""
         comp = _composite(StiffPair(), "stiff")
         small, large = self._y0(comp, 1e-3), self._y0(comp, 1e6)
 
@@ -181,10 +185,10 @@ class TestVectorTolerance:
             reused.run(comp, (0.0, 5.0), y0=small).ys, fresh, rtol=1e-6
         )
 
-    def test_population_members_scale_to_their_own_magnitudes(self):
-        """The population case of the same thing, against the exact answer —
-        ``StiffPair`` is two decoupled exponentials. A scheduler already warmed
-        on a large state must not hand its tolerance to every member."""
+    def test_population_members_are_each_solved_to_the_same_tolerance(self):
+        """``StiffPair`` is two decoupled exponentials, so the exact answer is
+        known. A member six orders of magnitude smaller than another must be
+        resolved just as well."""
         comp = _composite(StiffPair(), "stiff")
         proc = comp.processes["stiff"]
         sched = Scheduler()
@@ -204,6 +208,32 @@ class TestVectorTolerance:
                 jnp.abs(member)
             )
             assert float(err) < 1e-4
+
+    def test_a_decaying_state_is_resolved_at_its_final_magnitude(self):
+        """The P0.17 regression, stated as the property it broke.
+
+        ``s`` decays to ~4.5e-5. The old stiff-group tolerance was
+        ``max(atol, 1e-6*|y0|) = 1e-6`` — 2% of that answer — while the scalar
+        floor is 1e-9, five orders below it. Held against the analytic
+        solution, and against a run at the tolerance the old scaling produced,
+        so the test shows the difference rather than asserting it.
+        """
+        comp = _composite(StiffPair(), "stiff")
+        proc = comp.processes["stiff"]
+        T = 100.0
+        exact = float(jnp.exp(-proc.k_slow * T))
+        assert 1e-5 < exact < 1e-3, "state must decay into the band that bites"
+
+        tight = float(
+            Scheduler().run(comp, (0.0, T), macro_dt=T / 10).get("stiff/s")[-1]
+        )
+        as_old = float(
+            Scheduler(atol=1e-6)
+            .run(comp, (0.0, T), macro_dt=T / 10)
+            .get("stiff/s")[-1]
+        )
+        assert abs(tight - exact) / exact < 1e-3
+        assert abs(as_old - exact) / exact > 10 * abs(tight - exact) / exact
 
 
 class TestRoutingUnderTracing:

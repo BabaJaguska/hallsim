@@ -90,14 +90,153 @@ def rest_residual(process) -> float:
     return float(jnp.linalg.norm(dy)) / (scale if scale > 0 else 1.0)
 
 
+@dataclass
+class CouplingResponse:
+    """How a readout answers a parameter driven across its plausible range.
+
+    A module can pass every numerical check and still be useless as a
+    component: if the readout is already near its ceiling at the low end of
+    the range you would drive it over, the module cannot discriminate the
+    thing you wanted it to report. Dwivedi 2014's IL-6 arm sits at 93.8% of
+    its ceiling at the published disease point and gains 5.6 points over the
+    next three decades — measured after a reviewer spent half an hour on it,
+    which is what this exists to avoid.
+    """
+
+    param: str
+    readout: str
+    multipliers: tuple[float, ...]
+    values: tuple[float, ...]
+    #: Fraction of the achievable span already reached at the *top of the
+    #: plausible range*. Near 1.0 means the range is spent before it starts.
+    span_used: float
+    monotone: bool
+
+    #: Above this, most of the achievable response is spent before the
+    #: coupling edge reaches the top of its plausible drive, so the module
+    #: cannot discriminate across the range it would actually see.
+    SATURATION = 0.8
+
+    @property
+    def saturated(self) -> bool:
+        return self.span_used >= self.SATURATION
+
+    def __str__(self) -> str:
+        return (
+            f"{self.readout} vs {self.param}: "
+            + ", ".join(
+                f"{m:g}x={v:.4g}"
+                for m, v in zip(self.multipliers, self.values)
+            )
+            + f" | span used by the plausible range {self.span_used:.1%}"
+            + ("  SATURATED" if self.saturated else "")
+            + ("" if self.monotone else "  NON-MONOTONE")
+        )
+
+
+def emitted_species(process, pattern: str) -> tuple[str, ...]:
+    """Species matching ``pattern`` that ``process`` actually *produces*.
+
+    Mentioning a quantity is not emitting it. A module imported to supply an
+    output it only ever consumes contributes nothing — the single most common
+    way a candidate fails (Ihekwaba 2004, Bekkar 2018, Singh 2006 and
+    Dwivedi's cell arm all failed exactly here).
+    """
+    import re
+
+    from hallsim.diagnostics import coupling_source_verdict
+
+    rx = re.compile(pattern, re.I)
+    names = getattr(process, "_species_names", ()) or ()
+    labels = dict(getattr(process, "_species_labels", ()) or ())
+    out = []
+    for sid in names:
+        if not (rx.search(sid) or rx.search(labels.get(sid, ""))):
+            continue
+        try:
+            if coupling_source_verdict(process, sid).produced:
+                out.append(labels.get(sid) or sid)
+        except Exception:
+            continue
+    return tuple(sorted(set(out)))
+
+
+def coupling_response(
+    process,
+    param: str,
+    readout: str,
+    t_end: float,
+    multipliers=(1.0, 2.0, 5.0, 10.0, 100.0, 1000.0),
+    plausible: float = 10.0,
+) -> "CouplingResponse":
+    """Drive ``param`` across ``multipliers`` and report where ``readout``
+    lands, so a saturated module is caught before a reviewer is spent.
+
+    ``plausible`` is the top of the range the coupling edge would realistically
+    drive — measured SASP IL-6 induction spans roughly 3x to 40x, so 10x is a
+    middling default. ``span_used`` is the fraction of the full swept span
+    already reached there.
+    """
+    import numpy as np
+
+    from hallsim.composite import single_process_composite
+    from hallsim.process import read_param, write_param
+    from hallsim.scheduler import Scheduler
+
+    base = float(np.asarray(read_param(process, param)))
+    values = []
+    for m in multipliers:
+        proc = write_param(process, param, base * m)
+        comp = single_process_composite(proc)
+        idx = comp.store_index()
+        key = next(k for k in idx if k.endswith("/" + readout))
+        res = Scheduler().run(
+            comp,
+            (0.0, t_end),
+            macro_dt=t_end,
+            save_dt=t_end,
+            y0=comp.initial_state_vec(),
+        )
+        values.append(float(np.asarray(res.ys)[-1, idx[key]]))
+    v = np.asarray(values)
+    span = v.max() - v.min()
+    # The sweep is log-spaced, so interpolate in log-multiplier; doing it
+    # linearly understates where a plausible drive actually lands.
+    at_plausible = float(np.interp(np.log(plausible), np.log(multipliers), v))
+    span_used = 1.0 if span == 0 else abs(at_plausible - v[0]) / span
+    monotone = bool(np.all(np.diff(v) >= 0) or np.all(np.diff(v) <= 0))
+    return CouplingResponse(
+        param=param,
+        readout=readout,
+        multipliers=tuple(float(m) for m in multipliers),
+        values=tuple(values),
+        span_used=float(span_used),
+        monotone=monotone,
+    )
+
+
 def triage_process(
     process,
     t_end: float,
     *,
     xml_path: str | None = None,
     name: str | None = None,
+    produces: str | None = None,
+    sweep: tuple | None = None,
 ) -> TriageVerdict:
-    """Screen one already-imported process. ``xml_path`` adds SBML metadata."""
+    """Screen one already-imported process. ``xml_path`` adds SBML metadata.
+
+    ``produces`` is a regex the deposit must *emit* — not mention. A module
+    imported to supply an output it only ever consumes contributes nothing,
+    and that is the single most common way a candidate fails, so failing it
+    **blocks**.
+
+    ``sweep`` is ``(param, readout)`` or ``(param, readout, plausible)``: drive
+    the parameter a coupling edge would drive across its plausible range and
+    check the readout still moves there. A module already at its ceiling
+    cannot discriminate. Flags rather than blocks — a saturated module is
+    still usable at a different operating point.
+    """
     from hallsim.diagnostics import screen_process
 
     label = name or getattr(process, "name", type(process).__name__)
@@ -176,6 +315,36 @@ def triage_process(
     except Exception as exc:
         blockers.append(f"screen raised: {exc}")
 
+    if produces is not None:
+        emitted = emitted_species(process, produces)
+        if emitted:
+            flags.append(f"emits {', '.join(emitted)}")
+        else:
+            blockers.append(
+                f"emits nothing matching /{produces}/ — it may consume or "
+                f"merely mention the quantity, which composes to nothing"
+            )
+
+    if sweep is not None:
+        param, readout = sweep[0], sweep[1]
+        plausible = sweep[2] if len(sweep) > 2 else 10.0
+        try:
+            resp = coupling_response(
+                process, param, readout, t_end, plausible=plausible
+            )
+            if resp.saturated:
+                flags.append(
+                    f"coupling range: {resp.span_used:.0%} of the achievable "
+                    f"{readout} response is spent by {plausible:g}x {param} "
+                    f"— saturated across the range the edge would drive"
+                )
+            if not resp.monotone:
+                flags.append(
+                    f"coupling range: {readout} is non-monotone in " f"{param}"
+                )
+        except Exception as exc:
+            flags.append(f"coupling sweep failed: {type(exc).__name__}: {exc}")
+
     status = "reject" if blockers else ("flag" if flags else "pass")
     return TriageVerdict(
         name=label,
@@ -192,7 +361,12 @@ def triage_process(
 
 
 def triage_sbml(
-    model_id, t_end: float = 10.0, name: str = "m"
+    model_id,
+    t_end: float = 10.0,
+    name: str = "m",
+    *,
+    produces: str | None = None,
+    sweep: tuple | None = None,
 ) -> TriageVerdict:
     """Import a BioModels ID or local SBML path, then triage it.
 
@@ -211,7 +385,12 @@ def triage_sbml(
             blockers=(f"import failed: {type(exc).__name__}: {exc}",),
         )
     return triage_process(
-        process, t_end, xml_path=str(xml_path), name=str(model_id)
+        process,
+        t_end,
+        xml_path=str(xml_path),
+        name=str(model_id),
+        produces=produces,
+        sweep=sweep,
     )
 
 
