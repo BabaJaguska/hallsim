@@ -594,6 +594,46 @@ class PeriodicCounter(Process):
         return {"count": jnp.asarray(1.0)}
 
 
+class ThresholdGate(Process):
+    """Discrete: flag <- (x > threshold), written as a delta."""
+
+    kind: ProcessKind = ProcessKind.DISCRETE
+    dt_step: float = 1.0
+    threshold: float = 5.0
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.INPUT, default=0.0, units="uM"),
+            "flag": Port(
+                role=PortRole.LATCHED, default=0.0, units="dimensionless"
+            ),
+        }
+
+    def update(self, t, state):
+        return {
+            "flag": jnp.where(state["x"] > self.threshold, 1.0, 0.0)
+            - state["flag"]
+        }
+
+
+class FlagDrivenProduction(Process):
+    """Continuous: dy/dt = flag, reading a LATCHED path as input."""
+
+    kind: ProcessKind = ProcessKind.CONTINUOUS
+    timescale: float = 1.0
+
+    def ports_schema(self):
+        return {
+            "flag": Port(
+                role=PortRole.INPUT, default=0.0, units="dimensionless"
+            ),
+            "y": Port(role=PortRole.EVOLVED, default=0.0, units="uM"),
+        }
+
+    def derivative(self, t, state):
+        return {"y": state["flag"]}
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Tests: Composite extensions (Phase 2)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1357,8 +1397,11 @@ class TestSchedulerBatchedGuards:
     silent batch-axis collapse on these paths is what the guards prevent.
     """
 
-    def test_batched_y0_with_event_raises(self):
-        """Batched y0 + EVENT process → ValueError naming the offender."""
+    def test_batched_y0_with_event_matches_solo(self):
+        """An EVENT fires per member on that member's own False→True edge:
+        a latch crossed at different times across the batch reproduces the
+        per-member solo runs, fires once per member, and the record names
+        the members it fired for."""
         composite = Composite(
             processes={
                 "prod": ConstantProduction(rate=1.0),
@@ -1370,30 +1413,68 @@ class TestSchedulerBatchedGuards:
             },
         )
         keys = composite.store_keys()
-        y0 = jnp.broadcast_to(
-            composite.initial_state_vec(keys), (4, len(keys))
+        x0 = jnp.array([0.0, 2.0, 4.0, 9.0])
+        y0 = (
+            jnp.broadcast_to(composite.initial_state_vec(keys), (4, len(keys)))
+            .at[:, keys.index("pool/x")]
+            .set(x0)
         )
-        with pytest.raises(ValueError, match="EVENT processes"):
-            Scheduler().run(composite, t_span=(0.0, 10.0), macro_dt=1.0, y0=y0)
+        run = lambda y: Scheduler().run(  # noqa: E731
+            composite, t_span=(0.0, 10.0), macro_dt=1.0, save_dt=1.0, y0=y
+        )
+        batched = run(y0)
+        for m in range(4):
+            solo = run(y0[m])
+            for path in ("pool/x", "state/flag"):
+                assert jnp.allclose(
+                    batched.get(path)[:, m], solo.get(path), atol=1e-6
+                ), (path, m)
+        assert jnp.array_equal(batched.get("state/flag")[-1], jnp.ones(4))
+        fired = [e for e in batched.events if e.process == "latch"]
+        assert sum(int(e.members.sum()) for e in fired) == 4
+        assert fired[0].members.tolist() == [False, False, False, True]
 
-    def test_batched_y0_with_discrete_raises(self):
-        """Batched y0 + DISCRETE process → ValueError naming the offender."""
+    def test_batched_y0_with_discrete_matches_solo(self):
+        """A DISCRETE process sees one state per member and writes one delta
+        per member: a gate that trips at different times across the batch,
+        feeding a continuous consumer, reproduces the per-member solo runs.
+        A scalar delta (the counter) broadcasts to every member."""
         composite = Composite(
             processes={
                 "prod": ConstantProduction(rate=1.0),
-                "counter": PeriodicCounter(),
+                "gate": ThresholdGate(threshold=5.0),
+                "drive": FlagDrivenProduction(),
+                "counter": PeriodicCounter(dt_step=2.0),
             },
             topology={
                 "prod": {"x": "pool/x"},
+                "gate": {"x": "pool/x", "flag": "state/flag"},
+                "drive": {"flag": "state/flag", "y": "pool/y"},
                 "counter": {"count": "stats/count"},
             },
         )
         keys = composite.store_keys()
-        y0 = jnp.broadcast_to(
-            composite.initial_state_vec(keys), (4, len(keys))
+        x0 = jnp.array([0.0, 2.0, 4.0, 9.0])
+        y0 = (
+            jnp.broadcast_to(composite.initial_state_vec(keys), (4, len(keys)))
+            .at[:, keys.index("pool/x")]
+            .set(x0)
         )
-        with pytest.raises(ValueError, match="DISCRETE processes"):
-            Scheduler().run(composite, t_span=(0.0, 10.0), macro_dt=1.0, y0=y0)
+        run = lambda y: Scheduler().run(  # noqa: E731
+            composite, t_span=(0.0, 10.0), macro_dt=1.0, save_dt=1.0, y0=y
+        )
+        batched = run(y0)
+        for path in ("pool/x", "state/flag", "pool/y", "stats/count"):
+            got = batched.get(path)
+            assert got.shape == (11, 4), path
+            for m in range(4):
+                want = run(y0[m]).get(path)
+                assert jnp.allclose(got[:, m], want, atol=1e-6), (path, m)
+        # The gate trips when x crosses 5: member 3 starts above it.
+        assert jnp.array_equal(
+            batched.get("state/flag")[1], jnp.array([0.0, 0.0, 0.0, 1.0])
+        )
+        assert jnp.array_equal(batched.get("state/flag")[-1], jnp.ones(4))
 
     def test_batched_y0_with_adaptive_dt_raises(self):
         """Batched y0 + adaptive_dt=True → ValueError mentioning adaptive_dt."""

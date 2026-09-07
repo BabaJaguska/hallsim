@@ -90,11 +90,13 @@ def _attach_diagnosis(stats: dict, ys: jnp.ndarray) -> dict:
 
 @dataclass
 class EventRecord:
-    """Log entry for a fired event."""
+    """Log entry for a fired event. ``members`` is the ``(batch,)`` mask of
+    the members it fired for, ``None`` when the run is not batched."""
 
     time: float
     process: str
     delta: dict[str, jnp.ndarray]
+    members: np.ndarray | None = None
 
 
 @dataclass
@@ -261,7 +263,10 @@ def _apply_delta(
     raw_delta: dict[str, jnp.ndarray],
     write_pairs: tuple,
 ) -> jnp.ndarray:
-    """Scatter-add a process's delta dict into the flat state vector."""
+    """Scatter-add a process's delta dict into the flat state vector.
+
+    ``state_vec`` is ``(n_vars,)`` or ``(batch, n_vars)``; a delta entry is a
+    scalar, applied to every member, or ``(batch,)``, one per member."""
     out = [
         (idx, raw_delta[port])
         for port, idx in write_pairs
@@ -270,8 +275,11 @@ def _apply_delta(
     if not out:
         return state_vec
     idxs = jnp.array([i for i, _ in out])
-    vals = jnp.stack([v for _, v in out])
-    return state_vec.at[idxs].add(vals)
+    lead = state_vec.shape[:-1]
+    vals = jnp.stack(
+        [jnp.broadcast_to(jnp.asarray(v), lead) for _, v in out], axis=-1
+    )
+    return state_vec.at[..., idxs].add(vals)
 
 
 def _interp_uniform(
@@ -755,18 +763,6 @@ class Scheduler:
         if state.ndim <= 1:
             return
         blockers = []
-        event_procs = composite.event_processes()
-        discrete_procs = composite.discrete_processes()
-        if event_procs:
-            blockers.append(
-                f"EVENT processes {list(event_procs.keys())} "
-                "(condition fires via Python bool — incompatible with vmap)"
-            )
-        if discrete_procs:
-            blockers.append(
-                f"DISCRETE processes {list(discrete_procs.keys())} "
-                "(delta scatter is not batch-axis-aware)"
-            )
         if self.adaptive_dt:
             blockers.append(
                 "adaptive_dt=True (coupling residual is a single dt "
@@ -1003,7 +999,7 @@ class Scheduler:
             for name, proc in event_procs.items()
         }
 
-        was_active: dict[str, bool] = {n: False for n in event_procs}
+        was_active: dict[str, Any] = {n: False for n in event_procs}
 
         save_dt = save_dt or macro_dt
         trajectory_ts: list[float] = [t0]
@@ -1203,16 +1199,22 @@ class Scheduler:
             for proc_name, proc in discrete_procs.items():
                 if self._is_due(t, t_next, proc.dt_step):
                     read_pairs, write_pairs = discrete_idxs[proc_name]
-                    view = {p: state[i] for p, i in read_pairs}
+                    view = {p: state[..., i] for p, i in read_pairs}
                     delta = proc.update(t_next, view)
                     state = _apply_delta(state, delta, write_pairs)
 
             for proc_name, proc in event_procs.items():
                 read_pairs, write_pairs = event_idxs[proc_name]
-                view = {p: state[i] for p, i in read_pairs}
-                cond = bool(proc.condition(t_next, view))
-                if cond and not was_active[proc_name]:
-                    delta = proc.handler(t_next, view)
+                view = {p: state[..., i] for p, i in read_pairs}
+                # One verdict per member: an edge fires for the members whose
+                # condition just turned True, and only their deltas land.
+                cond = jnp.asarray(proc.condition(t_next, view), dtype=bool)
+                fire = cond & ~jnp.asarray(was_active[proc_name], dtype=bool)
+                if bool(jnp.any(fire)):
+                    delta = {
+                        port: jnp.where(fire, v, 0.0)
+                        for port, v in proc.handler(t_next, view).items()
+                    }
                     state = _apply_delta(state, delta, write_pairs)
                     routed = {
                         keys[idx]: delta[port]
@@ -1224,6 +1226,7 @@ class Scheduler:
                             time=float(t_next),
                             process=proc_name,
                             delta=routed,
+                            members=np.asarray(fire) if fire.ndim else None,
                         )
                     )
                 was_active[proc_name] = cond

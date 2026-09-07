@@ -155,6 +155,68 @@ def _harvest(blob: bytes, dest: Path, stem: str, depth: int) -> list[Path]:
     return found
 
 
+#: Where a paper's model actually lives when it is not an attachment. Measured
+#: on a 12-paper sample: 0 shipped a model file, 4 linked GitHub, 2 Zenodo.
+POINTER_PATTERNS = {
+    "github": re.compile(
+        r"github\.com/([\w.\-]+/[\w.\-]+?)(?:\.git)?\b", re.I
+    ),
+    "zenodo": re.compile(
+        r"(?:zenodo\.org/record/|10\.5281/zenodo\.)(\d+)", re.I
+    ),
+    "biomodels": re.compile(r"\b((?:BIOMD|MODEL)\d{10})\b"),
+    "figshare": re.compile(r"figshare\.com/[\w/.\-]+", re.I),
+    "modeldb": re.compile(
+        r"modeldb\.(?:science|yale\.edu)[\w/.\-]*?(\d{4,7})", re.I
+    ),
+}
+
+
+def full_text(pmcid: str, *, timeout: float = 60.0) -> str:
+    """The article's full text as XML, cached on disk. Empty when absent."""
+    if not re.fullmatch(r"PMC\d+", pmcid):
+        raise ValueError(f"not a PMC id: {pmcid!r}")
+    path = CACHE / pmcid / "fulltext.xml"
+    if path.exists():
+        return path.read_text(errors="replace")
+    try:
+        with urllib.request.urlopen(
+            f"{EUROPEPMC}/{pmcid}/fullTextXML", timeout=timeout
+        ) as fh:
+            text = fh.read().decode("utf-8", "replace")
+    except Exception as exc:
+        log.info("europepmc %s: no full text (%s)", pmcid, exc)
+        return ""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return text
+
+
+def model_pointers(pmcid: str, *, timeout: float = 60.0) -> dict:
+    """``{kind: [identifier, ...]}`` — where the paper says its model lives.
+
+    A modern paper rarely attaches its model; it cites a repository in the
+    data- or code-availability statement. Measured on the first 12 papers of a
+    senescence/autophagy sweep: **none** shipped a model file, a third linked
+    GitHub and a sixth linked Zenodo. Reading only the attachment therefore
+    misses most of what is actually available, which is the gap between "the
+    paper deposited nothing" and "the model cannot be obtained".
+    """
+    text = full_text(pmcid, timeout=timeout)
+    if not text:
+        return {}
+    out = {}
+    for kind, pattern in POINTER_PATTERNS.items():
+        seen = []
+        for m in pattern.finditer(text):
+            value = m.group(1) if m.groups() else m.group(0)
+            if value not in seen:
+                seen.append(value)
+        if seen:
+            out[kind] = seen
+    return out
+
+
 def supplementary_model_files(
     pmcid: str, *, timeout: float = 120.0, refresh: bool = False
 ) -> list[Path]:

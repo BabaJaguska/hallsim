@@ -54,6 +54,7 @@ from __future__ import annotations
 
 from hallsim.composite import Composite
 from hallsim.models.forcing import drive_pulse, drive_step
+from hallsim.models.gain_edge import GainEdge, place_gain
 from hallsim.models.hill_edge import (
     HillEdge,
     place_hill_gate_for_crossing,
@@ -69,6 +70,22 @@ DP14_SBML_PATH = sbml_source(
 GZ06_SBML_PATH = sbml_source(
     "zatorsky2006", "zatorsky2006_BIOMD0000000157.xml", "BIOMD0000000157"
 )
+PROCTOR07_SBML_PATH = sbml_source(
+    "proctor2007", "proctor2007_BIOMD0000000105.xml", "BIOMD0000000105"
+)
+# The curated deposit ships k69 = 0, so its proteasome never degrades a
+# substrate and every protein is misfolded and aggregated by day 14. Proctor
+# 2007 Table 2 gives 1.0E-3 s^-1 (P0.68).
+PROCTOR07_K69_PAPER = 1.0e-3
+PROCTOR07_K69_NAME = "k69"
+# Proctor's misfolding rate is k2·NatP·ROS with ROS a constant 10, and its
+# synthesis is k1·Source. DP14's ROS and phospho-mTORC1 drive those two rate
+# constants through linear gains placed so each deposit's published rest
+# point maps onto the other's.
+PROCTOR07_MISFOLDING_RATE_NAME = "k2"
+PROCTOR07_SYNTHESIS_RATE_NAME = "k1"
+DP14_ROS_NAME = "ROS"
+DP14_MTORC1_ACTIVE_NAME = "mTORC1_pS2448"
 # SBML defaults, named at module level so hallsim.hallmarks can target the
 # same constants. DallePezze 2014 supplementary Table S2.
 DP14_MTOR_PHOS_RATE_DEFAULT = 162.471039450073
@@ -139,7 +156,10 @@ CANONICAL_TIME_SECONDS = 86400.0
 
 
 def build_multi_hallmark_composite(
-    *, validate: bool = True, dose_window=DDIS_ETOPOSIDE_DOSE_WINDOW
+    *,
+    validate: bool = True,
+    dose_window=DDIS_ETOPOSIDE_DOSE_WINDOW,
+    proteostasis: bool = False,
 ):
     """Compose DP14 + GZ06 into one composite, namespaced ``dp14/`` and
     ``gz06/``; apply hallmarks for the treated and control variants.
@@ -147,7 +167,9 @@ def build_multi_hallmark_composite(
     ``dose_window`` is the ``(t_start, t_end)`` damage pulse; ``None`` holds
     ``Irradiation`` at its severity for the whole run instead of washing out.
     ``validate`` covers topology only — semantic validation is configured per
-    sub-composite and at the merge.
+    sub-composite and at the merge. ``proteostasis`` adds Proctor 2007's
+    ubiquitin–proteasome system as ``ups/``, its misfolding rate driven by
+    DP14's ROS and its synthesis rate by DP14's phospho-mTORC1.
     """
     gz06 = (
         process_from_sbml(
@@ -216,6 +238,8 @@ def build_multi_hallmark_composite(
         # p53 → CDKN1A: read GZ06 p53, add transcription flux to DP14's p21.
         "p53_cdkn1a": {"source": "gz06/x", "target": "dp14/CDKN1A"},
     }
+    if proteostasis:
+        _add_proteostasis(processes, topology, dp14)
     # Etoposide exposure: a PulseSource ("irradiation_pulse") drives DP14's
     # Irradiation input over the dose window — composed from the general
     # port-coupling path, not a special-cased pulse. Its amplitude is the
@@ -254,3 +278,65 @@ def build_multi_hallmark_composite(
         validate=validate,
         semantic_validation=True,
     )
+
+
+def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
+    """Proctor 2007 as ``ups/``, with two linear gains from DP14: ROS onto
+    the misfolding rate and phospho-mTORC1 onto the synthesis rate, each
+    placed so DP14's published initial level reproduces Proctor's published
+    rate constant."""
+    ups = (
+        process_from_sbml(
+            str(PROCTOR07_SBML_PATH),
+            name="ups",
+            parameters={PROCTOR07_K69_NAME: PROCTOR07_K69_PAPER},
+        )
+        .reconciled_to(CANONICAL_TIME_SECONDS)
+        .with_param_input(PROCTOR07_MISFOLDING_RATE_NAME, "k2_in")
+        .with_param_input(PROCTOR07_SYNTHESIS_RATE_NAME, "k1_in")
+    )
+    dp14_ports = dp14.ports_schema()
+    ros_rest = float(dp14_ports[DP14_ROS_NAME].default)
+    mtor_rest = float(dp14_ports[DP14_MTORC1_ACTIVE_NAME].default)
+    k2_pub = float(ups.parameters[PROCTOR07_MISFOLDING_RATE_NAME])
+    k1_pub = float(ups.parameters[PROCTOR07_SYNTHESIS_RATE_NAME])
+    processes["ups"] = ups
+    processes["ros_misfolding"] = GainEdge(
+        mode="level",
+        timescale=ups.timescale,
+        offset=0.0,
+        gain=place_gain(ros_rest, k2_pub),
+        source_ontology={"chebi": "CHEBI:26523"},
+        source_description="DP14 ROS",
+        target_description=(
+            "Proctor 2007 misfolding rate k2, rescaled to DP14 ROS."
+        ),
+        hallmark="Loss of Proteostasis",
+        reference="Proctor et al. 2007, BMC Syst Biol 1:17, Table 2",
+        description="ROS → protein misfolding (DP14 ROS drives Proctor k2).",
+    )
+    processes["mtor_synthesis"] = GainEdge(
+        mode="level",
+        timescale=ups.timescale,
+        offset=0.0,
+        gain=place_gain(mtor_rest, k1_pub),
+        source_description="DP14 phospho-mTORC1 (S2448)",
+        target_description=(
+            "Proctor 2007 synthesis rate k1, rescaled to DP14 phospho-mTORC1."
+        ),
+        hallmark="Deregulated Nutrient Sensing",
+        reference="Ma & Blenis 2009, Nat Rev Mol Cell Biol 10:307–318",
+        description=(
+            "mTORC1 → protein synthesis (DP14 phospho-mTORC1 drives "
+            "Proctor k1)."
+        ),
+    )
+    topology["ups"] = {"k2_in": "ups/k2_signal", "k1_in": "ups/k1_signal"}
+    topology["ros_misfolding"] = {
+        "source": f"dp14/{DP14_ROS_NAME}",
+        "signal": "ups/k2_signal",
+    }
+    topology["mtor_synthesis"] = {
+        "source": f"dp14/{DP14_MTORC1_ACTIVE_NAME}",
+        "signal": "ups/k1_signal",
+    }

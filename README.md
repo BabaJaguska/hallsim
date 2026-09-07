@@ -4,7 +4,7 @@
 **HallSim composes independently-published systems-biology models into one multi-scale dynamical system — and calibrates the whole thing by gradient descent through the ODE solve.** Built on JAX / Equinox / Diffrax, with a focus on aging biology, where no single model captures the crosstalk between hallmarks.
 
 - **End-to-end differentiable.** The entire composite — multiple stiff SBML models, operator-split across timescales — is a single differentiable function. Mechanism parameters spread across separate publications are fit with the same reverse-mode autodiff that trains neural networks, *through* the stiff ODE solve. GPU-friendly, with held-out validation. See [docs/calibration.md](docs/calibration.md).
-- **Agent-friendly by construction.** A published model becomes a `Process` in one call — `process_from_sbml` for SBML from any source, `process_from_xpp` for XPP — wired by a plain `{process: {port: path}}` topology dict, with its fittable parameters self-documenting via `Composite.calibration_targets()`. Typed ports carry units and ontology; `analyze_composability` proposes how to merge overlapping models. Meant for an LLM agent to assemble and calibrate a digital twin without bespoke glue. See [docs/architecture.md](docs/architecture.md).
+- **Agent-friendly by construction.** A published model becomes a `Process` in one call — `process_from_sbml` for SBML or COPASI `.cps` from any source, `process_from_xpp` for XPPAUT `.ode` — wired by a plain `{process: {port: path}}` topology dict, with its fittable parameters self-documenting via `Composite.calibration_targets()`. Typed ports carry units and ontology; `analyze_composability` proposes how to merge overlapping models. Meant for an LLM agent to assemble and calibrate a digital twin without bespoke glue. See [docs/architecture.md](docs/architecture.md).
 - **Scale is the point, not an edge case.** The reason to hand assembly to an agent is to go past what a person wires by hand, so composites are expected to be **generated** — hundreds to thousands of ports, built from a network file rather than typed out. Everything downstream is built for that shape: one flat state vector, batched scatter-adds instead of per-process Python, `store_index()` to align externally-built node-indexed arrays, and natural-sorted keys so generated names keep their numbering. Where a reduced path is still missing, it is tracked as a defect, not a limit — see [docs/known-problems.md](docs/known-problems.md).
 
 ## Why
@@ -91,7 +91,14 @@ simulate info           # what the architecture exposes
 make test
 ```
 
-One worked case study composes three published SBML models and calibrates them
+Finding a model to compose is part of the workflow, not a prerequisite for it:
+
+```bash
+simulate find NFkB inflammation --produces 'IL6|CXCL8'   # every repository, filtered by what a deposit EMITS
+simulate rejections                                       # what was screened out, and why
+```
+
+One worked case study composes two published SBML models and calibrates them
 against a public dataset. It is there to exercise the framework on real
 published models — not a model of senescence to build on:
 
@@ -103,14 +110,10 @@ simulate multi-hallmark sweep      # two-hallmark severity sweep
 
 ## What you can do with it
 
-- **Compose published models.** Import a model from BioModels, ModelDB or a paper supplement — SBML and XPP `.ode` are supported today; the full mechanism surface auto-populates and is discoverable. → [docs/architecture.md#sbml-import](docs/architecture.md#sbml-import)
+- **Compose published models.** Search BioModels, JWS Online, ModelDB, BioSimulations, Physiome and Europe PMC supplements from one call, filtered by what a deposit *emits*; import SBML, COPASI `.cps` or XPPAUT `.ode`. The full mechanism surface auto-populates and is discoverable, and every candidate screened out is recorded with its reason in [docs/rejections.md](docs/rejections.md). → [docs/architecture.md#sbml-import](docs/architecture.md#sbml-import)
 - **Turn hallmark severities.** 0–1 differentiable handles that modulate the right parameters across models; interventions (rapamycin, CR) live on the hallmark layer they perturb. → [docs/architecture.md#hallmark-handles](docs/architecture.md#hallmark-handles)
 - **Calibrate against data with held-out validation.** Gene-reporter concordance, log2-fold-change loss, MAP priors, differentiation through the stiff solve. → [docs/calibration.md](docs/calibration.md)
 - **Run batched population studies.** A `(batch, n_vars)` `y0` flows through the solve as one computation — no `vmap` — near-flat on GPU. → [docs/architecture.md#population-studies-via-batched-y0](docs/architecture.md#population-studies-via-batched-y0)
-
-## Roadmap
-
-Scheduler (waveform relaxation, IMEX, Mori-Zwanzig coupling), models & validation (lipid-metabolism extension, stochastic/Gillespie support, multi-cell communication), and model-adjacent formats — executing the SED-ML simulation descriptions curated deposits ship, which is an experiment description rather than another model format. Calibration fits fold-change time courses (multi-timepoint), not just endpoints — see [docs/calibration.md](docs/calibration.md).
 
 ## License
 

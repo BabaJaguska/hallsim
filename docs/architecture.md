@@ -274,7 +274,11 @@ result.get("dp14/CDKN1A").shape                      # (n_time, 1024)
 ```
 
 Near-flat in `batch` on GPU (kernel launch dominates); sub-linear on CPU
-(Python overhead amortizes across the batch).
+(Python overhead amortizes across the batch). Every process kind rides the
+batch axis: a discrete `update` and an event `condition`/`handler` see
+`(batch,)` per port, a delta may be a scalar for every member or one per
+member, and an event fires for exactly the members whose condition just
+turned True — `EventRecord.members` is that mask.
 
 Batched `y0` broadcasts *initial conditions*. Varying a **parameter** across a
 batch — a hallmark severity sweep, for instance — changes the process pytree

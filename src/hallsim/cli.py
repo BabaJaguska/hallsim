@@ -497,6 +497,7 @@ def find(query, pattern, limit, sources, triage):
     screened: `no-reactions` is a qualitative deposit, `no-rate-laws` a drawn
     pathway map, and neither is a screened negative.
     """
+    import re
     from collections import Counter
 
     from hallsim.discovery import screen_produced_species, search_for_model
@@ -513,18 +514,30 @@ def find(query, pattern, limit, sources, triage):
         f"{'y' if len(query) == 1 else 'ies'}"
     )
     rows = screen_produced_species(cands, pattern)
-    by = {c.id: c for c in cands}
+    # A re-hosted deposit is screened under its BioModels accession, so a
+    # row can carry that id rather than the candidate's own; two candidates
+    # can also resolve to the same deposit.
+    by = {}
+    for c in cands:
+        by.setdefault(c.id, c)
+        embedded = re.search(r"BIOMD\d{10}", c.id)
+        if embedded:
+            by.setdefault(embedded.group(0), c)
 
-    producers = [r for r in rows if r.status == "produces"]
+    producers, listed = [], set()
+    for r in rows:
+        if r.status == "produces" and r.model_id not in listed:
+            listed.add(r.model_id)
+            producers.append(r)
     click.echo(f"\n=== PRODUCES /{pattern}/ ===")
     for r in sorted(producers, key=lambda r: -len(r.produced)):
-        c = by[r.model_id]
-        mark = "cur" if c.curated else "UNC"
+        c = by.get(r.model_id)
+        mark = "cur" if c is not None and c.curated else "UNC"
         click.echo(
             f"  {mark} {r.model_id:20s} n={r.n_species:4d} "
             f"rx={r.n_reactions:4d} {list(r.produced)[:8]}"
         )
-        click.echo(f"      {c.name[:96]}")
+        click.echo(f"      {c.name[:96] if c is not None else ''}")
     if not producers:
         click.echo("  (none)")
 
@@ -660,11 +673,24 @@ def gz06_damage_scan():
     help="Newton-solve the whole composite to a fixed point and share it as "
     "t=0 (off by default: DP14 senescence is progressive and has none)",
 )
+@click.option(
+    "--proteostasis",
+    is_flag=True,
+    help="add Proctor 2007's ubiquitin–proteasome system, driven by DP14's "
+    "ROS and phospho-mTORC1, with its own reporters",
+)
 def multi_hallmark(
-    command, lr, steps, no_cosine, grad_clip, no_plateau, equilibrate
+    command,
+    lr,
+    steps,
+    no_cosine,
+    grad_clip,
+    no_plateau,
+    equilibrate,
+    proteostasis,
 ):
-    """The multi-hallmark composite (DallePezze 2014 + Geva-Zatorsky 2006 +
-    Ihekwaba 2004) scored against GSE248823.
+    """The multi-hallmark composite (DallePezze 2014 + Geva-Zatorsky 2006,
+    plus Proctor 2007 with --proteostasis) scored against GSE248823.
 
     \b
       run        score the composite out of the box, no fitting (default)
@@ -686,6 +712,7 @@ def multi_hallmark(
         grad_clip=grad_clip,
         no_plateau=no_plateau,
         equilibrate=equilibrate,
+        proteostasis=proteostasis,
     )
     (cmd_sweep if command == "sweep" else cmd_run)(args)
 

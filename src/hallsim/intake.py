@@ -255,6 +255,294 @@ def coupling_response(
     )
 
 
+@dataclass
+class ReporterRank:
+    """How much independent information a model's readouts carry.
+
+    A **measurement, not a verdict.** Two species held at a constant ratio are
+    one degree of freedom, and that may be perfectly good modelling — a
+    protein tracking its transcript at quasi-steady state is a standard
+    reduction, not a defect. Whether it disqualifies a model depends on the
+    data it will be scored against, which this does not know about.
+
+    What it costs is specific and worth reporting:
+
+    - **Under a fold-change readout, proportional species predict identical
+      log2FC at every parameter value**, because the ratio cancels. If the
+      dataset separates them, that gap is unrepresentable rather than badly
+      fitted. Proctor 2013 asserts ``MMP1_mRNA == MMP3_mRNA`` while GSE248823
+      spreads them 1.39 log2 with a sign flip — but that is a statement about
+      *that* dataset, so it belongs to scoring, not to intake.
+    - Scoring both double-counts one number, silently reweighting the loss.
+    - Adding a correlated reporter buys no identifiability: the rank of
+      ``d(reporter)/d(parameter)`` does not grow, which is the real currency
+      and is properly measured by :mod:`hallsim.identifiability`.
+
+    A *linear* dependence short of proportionality is milder still: the fold
+    change of a sum is a weighted average of the parts' fold changes, so the
+    prediction stays distinct.
+    """
+
+    names: tuple[str, ...]
+    rank: int
+    #: ``(a, b, ratio)`` for pairs whose ratio is constant over the runs.
+    proportional: tuple[tuple[str, str, float], ...]
+    singular_values: tuple[float, ...]
+
+    @property
+    def rank_deficient(self) -> bool:
+        """Fewer independent directions than reporters. Descriptive."""
+        return self.rank < len(self.names)
+
+    def groups(self) -> tuple[tuple[str, ...], ...]:
+        """Reporters collected into mutually proportional sets."""
+        parent = {n: n for n in self.names}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for a, b, _ in self.proportional:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+        out = {}
+        for n in self.names:
+            out.setdefault(find(n), []).append(n)
+        return tuple(tuple(v) for v in out.values() if len(v) > 1)
+
+    def __str__(self) -> str:
+        head = f"reporter panel rank {self.rank} of {len(self.names)}"
+        if not self.proportional:
+            return head
+        pairs = "; ".join(
+            f"{a} == {r:.4g}*{b}" for a, b, r in self.proportional
+        )
+        return f"{head} — proportional: {pairs}"
+
+
+def reporter_rank(
+    process, names, t_end: float, n_save: int = 60, tol: float = 1e-8
+) -> "ReporterRank":
+    """Rank of the reporter trajectories, and which pairs are proportional.
+
+    Three solves from scaled initial conditions and an SVD over the stacked
+    result, so a proportionality must hold across trajectories to count.
+    ``tol`` is relative to the largest singular value.
+    """
+    import numpy as np
+
+    from hallsim.composite import single_process_composite
+    from hallsim.scheduler import Scheduler
+
+    comp = single_process_composite(process)
+    idx = comp.store_index()
+    y0 = np.asarray(comp.initial_state_vec())
+    sched = Scheduler()
+    # Several initial conditions, not one. A model relaxing along a single
+    # dominant mode makes every readout look proportional on one trajectory,
+    # which is incidental rather than structural — Dwivedi 2014 tripped the
+    # single-trajectory version and is not degenerate. A proportionality that
+    # survives different ICs is a property of the equations.
+    runs = []
+    for scale in (1.0, 0.3, 3.0):
+        try:
+            res = sched.run(
+                comp,
+                (0.0, t_end),
+                macro_dt=t_end,
+                save_dt=t_end / n_save,
+                y0=jnp.asarray(y0 * scale),
+            )
+            runs.append(np.asarray(res.ys))
+        except Exception:
+            continue
+    if not runs:
+        return ReporterRank((), 0, (), ())
+    ys = np.concatenate(runs, axis=0)
+    cols, kept = [], []
+    for n in names:
+        key = next((k for k in idx if k.split("/")[-1] == n), None)
+        if key is None:
+            continue
+        cols.append(ys[:, idx[key]])
+        kept.append(n)
+    if len(kept) < 2:
+        return ReporterRank(tuple(kept), len(kept), (), ())
+
+    m = np.stack(cols, axis=1)
+    scale = np.maximum(np.abs(m).max(axis=0), 1e-300)
+    sv = np.linalg.svd(m / scale, compute_uv=False)
+    rank = int(np.sum(sv > tol * sv[0]))
+
+    proportional = []
+    for i in range(len(kept)):
+        for j in range(i + 1, len(kept)):
+            a, b = m[:, i], m[:, j]
+            live = np.abs(b) > 1e-300
+            if live.sum() < 3:
+                continue
+            ratio = a[live] / b[live]
+            spread = np.ptp(ratio) / max(abs(np.median(ratio)), 1e-300)
+            if spread < 1e-6:
+                proportional.append(
+                    (kept[i], kept[j], float(np.median(ratio)))
+                )
+    return ReporterRank(
+        tuple(kept), rank, tuple(proportional), tuple(float(v) for v in sv)
+    )
+
+
+@dataclass
+class CombinatorialPropensity:
+    """A rate law written as a stochastic propensity rather than a rate.
+
+    ``k*x*(x-1)/2`` counts the distinct *pairs* among ``x`` molecules — the
+    propensity of a dimerisation in a Gillespie simulation. Integrated as an
+    ODE it is **negative for 0 < x < 1**, and a small pool sits there. The
+    mean-field form is ``k*x**2/2``.
+
+    Found three times, twice only after a full review:
+
+    - Hui 2016 ``kdimerAlk5*Alk5*(Alk5-1)*0.5`` — mean-field wrong by 1/Alk5,
+      3.3% at the model's own 30.5 molecules.
+    - Proctor 2013 ``kdimercJun*cJun_P*(cJun_P-1)*0.5`` — ``cJun_dimer``
+      reaches -3.302e-4, invariant to the sixth significant figure across
+      rtol 1e-3 to 1e-10, and inverts seven transcription laws that read it.
+
+    Both papers say they wanted stochastic *and* deterministic runs from one
+    file, so the deposit is faithful and this is the modelling choice showing
+    through — the rate-law counterpart of P0.57's unit-level check.
+    """
+
+    reaction: str
+    species: str
+    formula: str
+
+    def __str__(self) -> str:
+        return (
+            f"{self.reaction}: {self.species}*({self.species}-1) is a "
+            f"Gillespie propensity, negative for 0 < {self.species} < 1; "
+            f"the mean-field form is {self.species}**2/2"
+        )
+
+
+def combinatorial_propensities(xml_path) -> tuple:
+    """Rate laws containing an ``x*(x-1)`` factor, from the SBML alone.
+
+    One pass over the kinetic laws, no solve. Reports rather than judges: a
+    deposit written for Gillespie is a legitimate object, and P0.57 is the
+    check for whether it should be imported as an ODE at all.
+    """
+    import re
+
+    import libsbml
+
+    model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
+    if model is None:
+        return ()
+    species = {
+        model.getSpecies(i).getId() for i in range(model.getNumSpecies())
+    }
+    # `a * (a - 1)` in either order, with the same name on both sides.
+    pattern = re.compile(
+        r"\b([A-Za-z_]\w*)\s*\*\s*\(\s*\1\s*-\s*1(?:\.0*)?\s*\)"
+        r"|\(\s*([A-Za-z_]\w*)\s*-\s*1(?:\.0*)?\s*\)\s*\*\s*\2\b"
+    )
+    out = []
+    for i in range(model.getNumReactions()):
+        rxn = model.getReaction(i)
+        if not rxn.isSetKineticLaw():
+            continue
+        formula = libsbml.formulaToL3String(rxn.getKineticLaw().getMath())
+        for match in pattern.finditer(formula):
+            name = match.group(1) or match.group(2)
+            if name in species:
+                out.append(
+                    CombinatorialPropensity(rxn.getId(), name, formula[:160])
+                )
+    return tuple(out)
+
+
+@dataclass
+class Persistence:
+    """How much of a readout's response survives to the benchmark's first
+    sample, under sustained drive.
+
+    A model built for a pulse experiment — one irradiation, one cytokine
+    bolus — can respond over hours and be back at baseline before a
+    chronic-exposure dataset takes its first sample. It then passes every
+    other check and contributes nothing. Proctor 2013's MMP1_mRNA was at 3.6%
+    of peak at day 7 and 0.1% at day 14; Konrath 2023's IKK pool exhausted in
+    hours. Neither was caught before a reviewer had spent the day.
+    """
+
+    readout: str
+    t_peak: float
+    peak: float
+    at_first_sample: float
+    t_first_sample: float
+
+    @property
+    def fraction_remaining(self) -> float:
+        return abs(self.at_first_sample) / max(abs(self.peak), 1e-300)
+
+    def __str__(self) -> str:
+        return (
+            f"{self.readout}: peak {self.peak:.4g} at t={self.t_peak:.3g}, "
+            f"{self.fraction_remaining:.1%} of it remaining at the first "
+            f"sample (t={self.t_first_sample:.3g})"
+        )
+
+
+def persistence(
+    process,
+    param: str,
+    readout: str,
+    t_first_sample: float,
+    drive: float = 10.0,
+    n_save: int = 200,
+) -> "Persistence":
+    """Drive ``param`` to ``drive``x its published value, hold it there, and
+    report where ``readout`` peaks and how much survives to
+    ``t_first_sample`` — the benchmark's earliest timepoint, on the model's
+    own clock. A fraction near zero means the model's programme is finished
+    before the data starts."""
+    import numpy as np
+
+    from hallsim.composite import single_process_composite
+    from hallsim.process import read_param, write_param
+    from hallsim.scheduler import Scheduler
+
+    base = float(np.asarray(read_param(process, param)))
+    proc = write_param(process, param, base * drive)
+    comp = single_process_composite(proc)
+    idx = comp.store_index()
+    key = next(k for k in idx if k.split("/")[-1] == readout)
+    t_end = t_first_sample * 1.05
+    res = Scheduler().run(
+        comp,
+        (0.0, t_end),
+        macro_dt=t_end,
+        save_dt=t_end / n_save,
+        y0=comp.initial_state_vec(),
+    )
+    ts, ys = np.asarray(res.ts), np.asarray(res.ys)[:, idx[key]]
+    base_y = ys[0]
+    dev = np.abs(ys - base_y)
+    i_peak = int(np.argmax(dev))
+    at_first = float(np.interp(t_first_sample, ts, ys)) - base_y
+    return Persistence(
+        readout=readout,
+        t_peak=float(ts[i_peak]),
+        peak=float(ys[i_peak] - base_y),
+        at_first_sample=at_first,
+        t_first_sample=float(t_first_sample),
+    )
+
+
 def triage_process(
     process,
     t_end: float,
@@ -263,6 +551,7 @@ def triage_process(
     name: str | None = None,
     produces: str | None = None,
     sweep: tuple | None = None,
+    reporters=(),
 ) -> TriageVerdict:
     """Screen one already-imported process. ``xml_path`` adds SBML metadata.
 
@@ -365,6 +654,41 @@ def triage_process(
                 f"merely mention the quantity, which composes to nothing"
             )
 
+    if xml_path is not None:
+        try:
+            props = combinatorial_propensities(xml_path)
+        except Exception:
+            props = ()
+        if props:
+            flags.append(
+                f"{len(props)} rate law(s) written as a stochastic "
+                f"propensity: " + "; ".join(str(x) for x in props[:3])
+            )
+
+    if reporters:
+        # Reported, never blocking. Proportional readouts may be the intended
+        # biology, and whether a degeneracy matters depends on the dataset
+        # the model will be scored against — which intake does not know.
+        try:
+            rr = reporter_rank(process, reporters, t_end)
+            if rr.rank_deficient and rr.names:
+                detail = str(rr)
+                groups = rr.groups()
+                if groups:
+                    detail += "; one degree of freedom each: " + ", ".join(
+                        "{" + " ".join(g) + "}" for g in groups
+                    )
+                flags.append(
+                    detail
+                    + " — under a fold-change readout a proportional set "
+                    "predicts identical log2FC, so check the data separates "
+                    "them before scoring more than one"
+                )
+        except Exception as exc:
+            flags.append(
+                f"reporter rank not computable: {type(exc).__name__}: {exc}"
+            )
+
     if sweep is not None:
         param, readout = sweep[0], sweep[1]
         plausible = sweep[2] if len(sweep) > 2 else 10.0
@@ -407,6 +731,7 @@ def triage_sbml(
     *,
     produces: str | None = None,
     sweep: tuple | None = None,
+    reporters=(),
 ) -> TriageVerdict:
     """Import a BioModels ID or local SBML path, then triage it.
 
@@ -431,6 +756,7 @@ def triage_sbml(
         name=str(model_id),
         produces=produces,
         sweep=sweep,
+        reporters=reporters,
     )
 
 

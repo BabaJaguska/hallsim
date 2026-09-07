@@ -52,6 +52,7 @@ from hallsim.hallmarks import with_hallmarks  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.gene_reporters import (  # noqa: E402
     MULTI_HALLMARK_REPORTERS,
+    PROTEOSTASIS_REPORTERS,
     GeneExpressionDataset,
 )
 from demos.models.multi_hallmark import (  # noqa: E402
@@ -141,9 +142,11 @@ def build_problem(
     reporters=None,
     equilibrate: bool = False,
     parameters=None,
+    proteostasis: bool = False,
 ) -> CalibrationProblem:
     """The calibration problem. ``parameters`` overrides the fitted set,
-    which is what an identifiability screen varies."""
+    which is what an identifiability screen varies. ``proteostasis`` builds
+    the composite with Proctor 2007 attached and scores its reporters too."""
     ds = (
         GeneExpressionDataset.from_series_matrix(
             SERIES_MATRIX,
@@ -155,7 +158,11 @@ def build_problem(
         else None
     )
     if composite is None:
-        composite = build_multi_hallmark_composite()
+        composite = build_multi_hallmark_composite(proteostasis=proteostasis)
+    if reporters is None:
+        reporters = list(MULTI_HALLMARK_REPORTERS)
+        if proteostasis:
+            reporters += PROTEOSTASIS_REPORTERS
 
     def published(process: str, field: str) -> float:
         """The deposit's own value, as the MAP prior centre."""
@@ -163,9 +170,7 @@ def build_problem(
 
     return CalibrationProblem(
         composite=composite,
-        reporters=(
-            reporters if reporters is not None else MULTI_HALLMARK_REPORTERS
-        ),
+        reporters=reporters,
         conditions={
             "ctrl": Condition(
                 "ctrl",
@@ -833,11 +838,15 @@ def cmd_run(args) -> None:
     )
     logging.getLogger("hallsim").setLevel(logging.INFO)
     equilibrate = getattr(args, "equilibrate", False)
+    proteostasis = getattr(args, "proteostasis", False)
     if not SERIES_MATRIX.exists():
         print(_missing_data_notice(), flush=True)
         return run_unscored(equilibrate, make_run_dir(RUN_NAME))
-    problem = build_problem(equilibrate=equilibrate)
-    print(f"[run] equilibrate={equilibrate}", flush=True)
+    problem = build_problem(equilibrate=equilibrate, proteostasis=proteostasis)
+    print(
+        f"[run] equilibrate={equilibrate} proteostasis={proteostasis}",
+        flush=True,
+    )
     init = problem.initial_params()
     out_dir = make_run_dir(RUN_NAME)
     print(f"[run] writing to {out_dir.relative_to(ROOT)}/", flush=True)
@@ -1012,6 +1021,12 @@ def main() -> None:
         help="Newton-solve the whole composite to a fixed point and share it "
         "as t=0. Off by default: this composite is mixed, and DP14 senescence "
         "is progressive with no healthy fixed point to solve for",
+    )
+    ap.add_argument(
+        "--proteostasis",
+        action="store_true",
+        help="add Proctor 2007's ubiquitin-proteasome system, driven by "
+        "DP14's ROS and phospho-mTORC1, with its own reporters",
     )
     args = ap.parse_args()
     _COMMANDS[args.command](args)

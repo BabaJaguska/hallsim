@@ -318,6 +318,9 @@ class _FlatRHS(eqx.Module):
         # composition axis -- the axis the framework exists for -- while
         # block ports had already flattened the port axis.
         pieces, col_runs, fac_runs, scalar_only = [], [], [], True
+        # A process that ignores its state returns a scalar; under a batched
+        # y_vec it still owes one value per member.
+        lead = y_vec.shape[:-1]
         for proc, read_map, write_map in zip(
             self.procs, self.read_maps, self.write_maps
         ):
@@ -327,7 +330,8 @@ class _FlatRHS(eqx.Module):
                     continue
                 a, w = write_map.starts[i], write_map.widths[i]
                 b = a + (1 if w is None else w)
-                pieces.append(jnp.asarray(raw[port]))
+                shape = lead if w is None else lead + (w,)
+                pieces.append(jnp.broadcast_to(jnp.asarray(raw[port]), shape))
                 col_runs.append(write_map.idx[a:b])
                 fac_runs.append(write_map.fac[a:b])
                 scalar_only &= w is None
@@ -341,7 +345,8 @@ class _FlatRHS(eqx.Module):
             vals = jnp.stack(pieces, axis=-1)
         else:
             vals = jnp.concatenate(
-                [q if q.ndim else q[..., None] for q in pieces], axis=-1
+                [q[..., None] if q.ndim == len(lead) else q for q in pieces],
+                axis=-1,
             )
         return jnp.zeros_like(y_vec).at[..., cols].add(vals * facs)
 

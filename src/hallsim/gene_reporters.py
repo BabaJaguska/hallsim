@@ -565,6 +565,46 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
     ),
 ]
 
+PROTEOSTASIS_REPORTERS: list[GeneReporter] = [
+    GeneReporter(
+        observable="ups/MisP",
+        gene_symbol="HSPA1A",
+        sign=+1,
+        summary=zerophase_mean(tau=2.0),
+        description=(
+            "HSP70 (HSPA1A) — the canonical HSF1 target induced by misfolded "
+            "protein load; reads Proctor 2007's free misfolded pool MisP. "
+            "The model has no chaperone arm, so this is the load the heat-"
+            "shock response would answer, not the response itself."
+        ),
+        reference="Morimoto 1998, Genes Dev 12:3788–3796",
+    ),
+    GeneReporter(
+        observable="ups/AggP",
+        gene_symbol="SQSTM1",
+        sign=+1,
+        summary=zerophase_mean(tau=2.0),
+        description=(
+            "p62/SQSTM1 — the aggregate-binding autophagy receptor, "
+            "transcriptionally induced by proteotoxic stress via NRF2; reads "
+            "Proctor 2007's aggregated protein AggP."
+        ),
+        reference="Jain et al. 2010, J Biol Chem 285:22576–22591",
+    ),
+    GeneReporter(
+        observable="ups/Proteasome",
+        gene_symbol="PSMB5",
+        sign=+1,
+        summary=zerophase_mean(tau=2.0),
+        description=(
+            "PSMB5 — the chymotrypsin-like β5 subunit, the textbook single-"
+            "gene proteasome readout; reads Proctor 2007's free proteasome "
+            "pool, which falls as aggregates sequester it."
+        ),
+        reference="Chondrogianni et al. 2005, J Biol Chem 280:11840–11850",
+    ),
+]
+
 
 def summarize_reporters(
     ts,

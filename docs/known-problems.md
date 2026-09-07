@@ -925,6 +925,115 @@ The framework returns a plausible number and nothing indicates it is wrong.
   three `screen_produced_species` defects fixed the same day: a confident
   verdict about something that was never examined.
 
+- [ ] **P0.63 — A large integer literal in an SBML file overflows on import,
+  and the model is rejected as EXPLODING.** Filed 2026-09-06.
+
+  Proctor 2010 (BIOMD0000000293, 140 species, 88% annotated, curated) fails
+  with `OverflowError: ... Got <class 'int'> with value 11390625000000000000`
+  — 1.139e19, past int64's 9.22e18. It is a rate constant, not an index, so
+  it should be imported as a float; SBML has no integer type for parameters
+  and the value is only an int because it was written without a decimal point.
+
+  Rejected as `EXPLODING + TOLERANCE-SENSITIVE, max|y| = inf`, which is the
+  P0.59 pattern again — a construction failure reported as a numerical one.
+  P0.59's `did_not_construct` covers the composite-build step; this one raises
+  inside the solve, so it slips past.
+
+  *Fix:* coerce numeric SBML literals to float at import. One line, and it
+  recovers a curated deposit.
+
+- [x] **P0.64 — FIXED 2026-09-06. A combinatorial propensity used as an ODE
+  rate law goes negative, and it is machine-checkable.** Third occurrence.
+
+  A rate law of the form `k*x*(x-1)*0.5` is a **Gillespie propensity**: the
+  number of distinct pairs among `x` molecules. Integrated as an ODE it is
+  negative for `0 < x < 1`, and small pools sit there.
+
+  | deposit | rate law | consequence |
+  |---|---|---|
+  | Hui 2016 | `kdimerAlk5 * Alk5 * (Alk5 - 1) * 0.5` | mean-field wrong by `1/Alk5`, 3.3% at its own 30.5 molecules |
+  | Proctor 2013 | `kdimercJun * cJun_P * (cJun_P - 1) * 0.5` | `cJun_dimer` reaches **-3.302e-4**, invariant to the sixth significant figure across rtol 1e-3…1e-10 — structural, not numerical. Persists 14 days and inverts seven transcription rate laws that read it linearly. |
+
+  Both papers say why: they wanted stochastic *and* deterministic runs from one
+  file. So the deposit is faithful and the defect belongs to the modelling
+  choice — which is exactly what P0.57's stochastic-intent check is about,
+  reached from the rate laws instead of the units.
+
+  **Fixed:** `intake.combinatorial_propensities` scans the kinetic laws for
+  an `x*(x-1)` factor where `x` is a species, and `triage_process` reports it
+  with the mean-field correction. One pass over the MathML, no solve.
+  Measured: Hui 2016 `Alk5Dimerisation` 1 hit, Proctor 2013 `cJunDimerisation`
+  1 hit, Dwivedi 2014 0 hits. Reports rather than blocks — a deposit written
+  for Gillespie is a legitimate object, and P0.57 is the check for whether it
+  should be an ODE at all. Covered by `tests/unit/test_propensity_scan.py`.
+
+- [ ] **P0.65 — A coupling edge with `timescale=None` gets its own scheduler
+  group, so `macro_dt = span` freezes the model it couples.** Filed
+  2026-09-06 (Proctor 2013 maths review, FW3).
+
+  `HillEdge.timescale` defaults to `None`, so `auto_groups` cannot place the
+  edge with the process it drives and gives it a group of its own. Run with
+  `macro_dt = t_end` — a natural choice, and the one
+  :func:`hallsim.intake.coupling_response` makes — that is a **single Lie step
+  over the whole span with every other group frozen**. The RHS is correct
+  throughout; only the schedule is wrong.
+
+  It produced "a fully plausible, fully wrong reject-this-model number" on a
+  reviewer's first pass. Nothing warns.
+
+  `coupling_response` itself is not currently exposed — it builds a
+  single-process composite, so there is exactly one group (verified on
+  MODEL2201210001 and BIOMD0000000534). It becomes exposed the moment the
+  function is pointed at a composite with edges, which is the obvious next use.
+
+  *Fix:* an edge should inherit the timescale of what it drives, or grouping
+  should refuse to isolate a process whose ports all bind another group's
+  paths. Failing both, warn when a group contains only edges.
+
+- [x] **P0.66 — FIXED 2026-09-07 (`<log/>` with a base rewrites to `ln/ln` in `_preprocess_sbml`; Konrath 2020 imports). `log10()` in a rate law fails the import outright.** Filed
+  2026-09-06. `MODEL2004300002` (Konrath 2020, p53/ATM/Wip1, 7 species)
+  rejects with `calls function(s) outside sbmltoodejax's mathFuncs table:
+  log10()`. `log10(x)` is `log(x)/log(10)`; the pre-processing that already
+  flattens function definitions can rewrite it. Same class as P0.63 — a
+  curated-quality deposit lost to a one-line translation gap.
+
+- [x] **P0.67 — FIXED 2026-09-07. A batched `y0` was refused whenever the
+  composite held a DISCRETE process.** The eager loop gathered a process's
+  port view with `state[i]` and scattered its delta with `state.at[idxs]`,
+  both leading-axis on a `(batch, n_vars)` state, so the guard refused the
+  batch outright. Both now index the trailing axis; a delta entry is a scalar
+  (every member) or `(batch,)` (one per member). The regression exposed a
+  second one on the continuous side: `_FlatRHS` stacked a state-independent
+  derivative (a constant source returns a scalar) next to a per-member one and
+  failed on the stack, so any batched run with a constant source was already
+  broken. Every piece is now broadcast to the batch shape before the single
+  scatter, a no-op unbatched. EVENT processes were refused for the same
+  reason one layer up: `condition` was reduced through Python `bool`, one
+  verdict for the whole batch. The edge is now computed per member
+  (`cond & ~was_active` as arrays), the handler's delta is masked to the
+  members that fired, and `EventRecord.members` carries the mask.
+  Regressions: `TestSchedulerBatchedGuards::test_batched_y0_with_discrete_matches_solo`
+  and `::test_batched_y0_with_event_matches_solo`.
+
+- [x] **P0.69 — FIXED 2026-09-07. Any `<root/>` in a rule failed the import: sbmltoodejax's function table maps `sqrt` to the misspelt `no.sqrt`, so the generated code raised `NameError` at the first assignment rule. `_preprocess_sbml` now rewrites roots as powers (and logs with a base as `ln/ln`), and the cache is versioned so old translations are redone. Erguler 2013 imports (38 species, 87 parameters, FLAG: not at rest) and its Goldbeter–Koshland `piecewise` evaluates to the hand computation at three PERK levels.** Originally filed as a piecewise failure:
+  Filed 2026-09-07. BIOMD0000000446 (Erguler 2013, unfolded protein response,
+  27 species) is the only kinetic ER-stress deposit in any repository and its
+  readouts move in the benchmark (DDIT3 +0.23/+0.54, ATF3 +0.37/+0.74). Its
+  eIF2α rule uses a Goldbeter–Koshland function written as a piecewise that
+  sbmltoodejax cannot translate. Same class as P0.63/P0.66: a translation
+  gap, not a modelling one.
+
+- [ ] **P0.68 — BIOMD0000000105 (Proctor 2007, ubiquitin–proteasome) ships
+  `k69 = 0`, against the paper's `1.0E-3 s^-1`.** Filed 2026-09-07. `k69`
+  is the proteasome's degradation rate, so in the deposit no substrate is
+  ever degraded: over 14 days every native protein misfolds (MisP 998 of
+  1000), aggregates reach 5, free proteasome and free ubiquitin go to zero.
+  With Table 2's value the model sits at the paper's homeostasis (free
+  proteasome 84 of 100, MisP 5.9, ubiquitin 63). The demo imports it with
+  `parameters={"k69": 1e-3}` and cites the table; the deposit itself is
+  what `intake.triage_sbml` scores, so its `max|y| = 998` flag is this
+  defect, not a numerical one. A deposit defect for BioModels to fix.
+
 - [ ] **P0.60 — `coupling_source_verdict` counts the reverse leg of a
   reversible binding pair as production.** Filed 2026-09-06 (Proctor 2013 F11).
 

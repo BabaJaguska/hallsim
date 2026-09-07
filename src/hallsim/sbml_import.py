@@ -666,13 +666,19 @@ def _source_stamp(sbml_path: str):
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
+# Bump when a conversion pass changes, so cached copies made by the previous
+# passes are redone rather than served.
+_CONVERT_VERSION = 3
+
+
 def _cached_convert(sbml_path: str, out_name: str, transform) -> str:
     """Path to a converted copy of ``sbml_path``, reusing a cached one.
 
     ``transform(doc) -> bool`` mutates the parsed document and returns whether
     a converted copy is needed; ``False`` means the source is usable as-is.
-    The entry is keyed on the source's size and mtime, so an edited source
-    reconverts, and both the document and its key are written atomically.
+    The entry is keyed on the source's size and mtime and on
+    ``_CONVERT_VERSION``, so an edited source or a changed pass reconverts,
+    and both the document and its key are written atomically.
     """
     import json
     import os
@@ -687,7 +693,10 @@ def _cached_convert(sbml_path: str, out_name: str, transform) -> str:
         try:
             with open(stamp_path) as fh:
                 record = json.load(fh)
-            if record.get("src") == stamp:
+            if (
+                record.get("src") == stamp
+                and record.get("xform") == _CONVERT_VERSION
+            ):
                 cached = record.get("result") or sbml_path
                 if cached == sbml_path or os.path.exists(cached):
                     return cached
@@ -705,7 +714,9 @@ def _cached_convert(sbml_path: str, out_name: str, transform) -> str:
         _atomic_write(
             stamp_path,
             lambda p: open(p, "w").write(
-                json.dumps({"src": stamp, "result": result})
+                json.dumps(
+                    {"src": stamp, "xform": _CONVERT_VERSION, "result": result}
+                )
             ),
         )
     return result
@@ -741,9 +752,106 @@ def _preprocess_sbml(sbml_path: str) -> str:
         props = libsbml.ConversionProperties()
         props.addOption("expandFunctionDefinitions", True)
         doc.convert(props)
+        _rewrite_math_functions(doc.getModel())
         return True
 
     return _cached_convert(sbml_path, os.path.basename(sbml_path), transform)
+
+
+def _rewrite_math_functions(sbml_model) -> int:
+    """Rewrite MathML functions sbmltoodejax mistranslates into forms it
+    handles, in place, returning the number of rewrites.
+
+    * ``<log/>`` (base 10 by default, or an explicit ``<logbase>``) becomes
+      ``ln(x) / ln(base)``: libsbml prints the former as ``log10(x)``, which
+      the translator has no entry for, and ``ln`` maps to ``jnp.log``.
+    * ``<root/>`` (square root by default, or an explicit ``<degree>``)
+      becomes ``x ^ (1/degree)``: the translator's ``sqrt`` entry is the
+      misspelt ``no.sqrt``, so every deposit taking a root in a rule fails
+      on a ``NameError`` (Erguler 2013, P0.69).
+    """
+    import libsbml
+
+    def ln(arg):
+        node = libsbml.ASTNode(libsbml.AST_FUNCTION_LN)
+        node.addChild(arg.deepCopy())
+        return node
+
+    def number(value):
+        node = libsbml.ASTNode(libsbml.AST_REAL)
+        node.setValue(float(value))
+        return node
+
+    def rewrite(node):
+        if node is None:
+            return node, 0
+        count = 0
+        for i in range(node.getNumChildren()):
+            child, n = rewrite(node.getChild(i))
+            count += n
+            if n and child is not node.getChild(i):
+                node.replaceChild(i, child)
+        kind = node.getType()
+        if kind == libsbml.AST_FUNCTION_LOG:
+            if node.getNumChildren() == 2:
+                base, arg = node.getChild(0), node.getChild(1)
+            else:
+                base, arg = number(10), node.getChild(0)
+            out = libsbml.ASTNode(libsbml.AST_DIVIDE)
+            out.addChild(ln(arg))
+            out.addChild(ln(base))
+            return out, count + 1
+        if kind == libsbml.AST_FUNCTION_ROOT:
+            if node.getNumChildren() == 2:
+                degree, arg = node.getChild(0), node.getChild(1)
+                # libsbml gives an implicit degree a unit attribute, which
+                # the L3 printer emits as a bare token; rebuild a number.
+                if degree.isNumber():
+                    degree = number(degree.getValue())
+                else:
+                    degree = degree.deepCopy()
+                exponent = libsbml.ASTNode(libsbml.AST_DIVIDE)
+                exponent.addChild(number(1))
+                exponent.addChild(degree)
+            else:
+                arg, exponent = node.getChild(0), number(0.5)
+            out = libsbml.ASTNode(libsbml.AST_POWER)
+            out.addChild(arg.deepCopy())
+            out.addChild(exponent)
+            return out, count + 1
+        return node, count
+
+    def containers():
+        for i in range(sbml_model.getNumReactions()):
+            kl = sbml_model.getReaction(i).getKineticLaw()
+            if kl is not None:
+                yield kl
+        for i in range(sbml_model.getNumRules()):
+            yield sbml_model.getRule(i)
+        for i in range(sbml_model.getNumInitialAssignments()):
+            yield sbml_model.getInitialAssignment(i)
+        for i in range(sbml_model.getNumConstraints()):
+            yield sbml_model.getConstraint(i)
+        for i in range(sbml_model.getNumEvents()):
+            e = sbml_model.getEvent(i)
+            if e.isSetTrigger():
+                yield e.getTrigger()
+            if e.isSetDelay():
+                yield e.getDelay()
+            for j in range(e.getNumEventAssignments()):
+                yield e.getEventAssignment(j)
+        for i in range(sbml_model.getNumFunctionDefinitions()):
+            yield sbml_model.getFunctionDefinition(i)
+
+    total = 0
+    for holder in containers():
+        if not holder.isSetMath():
+            continue
+        new, n = rewrite(holder.getMath().deepCopy())
+        if n:
+            holder.setMath(new)
+            total += n
+    return total
 
 
 def _download_biomodel_to_cache(model_id) -> str:
