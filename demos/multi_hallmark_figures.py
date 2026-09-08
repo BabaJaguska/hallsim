@@ -154,7 +154,7 @@ def fig_schematic(args):
 
     # The blocks and edge labels below are hand-laid-out, so nothing links
     # them to the composite. Fail rather than draw a composite that no longer
-    # exists — it drew a removed model (ih04) for a week (P0.53).
+    # exists — it drew a removed model (ih04) for a week.
     from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     DRAWN = {"dp14", "gz06", "nfkb"}
@@ -169,7 +169,7 @@ def fig_schematic(args):
         raise RuntimeError(
             f"composite_schematic is drawn by hand for {sorted(DRAWN)} but the "
             f"composite has {sorted(live)}. Update the drawing (and DRAWN) "
-            "before regenerating — see P0.53."
+            "before regenerating."
         )
 
     fig, ax = plt.subplots(figsize=(12.8, 5.9))

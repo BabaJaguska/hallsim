@@ -9,12 +9,23 @@ repos:
     rev: 7.1.1
     hooks:
       - id: flake8
-        args: [--ignore=E501,E402,W504,W503,E226,E203]
+        # Quoted: an unquoted flow sequence splits on the commas, so
+        # only E501 reaches --ignore and the rest arrive as filenames.
+        args: ["--ignore=E501,E402,W504,W503,E226,E203"]
 
   - repo: local
     hooks:
       - id: prose-ratio
         name: prose ratio
-        entry: python scripts/check_prose_ratio.py src/hallsim
+        entry: python3 scripts/check_prose_ratio.py src/hallsim
         language: system
         pass_filenames: false
+
+      # The defect registry is prose and is cited from prose. A P-number in
+      # code dates the line to an incident instead of saying why it exists.
+      - id: registry-ids
+        name: no registry ids in code
+        entry: python3 scripts/check_no_registry_ids.py src demos tests
+        language: system
+        pass_filenames: false
+

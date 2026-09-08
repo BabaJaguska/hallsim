@@ -768,7 +768,7 @@ def _rewrite_math_functions(sbml_model) -> int:
     * ``<root/>`` (square root by default, or an explicit ``<degree>``)
       becomes ``x ^ (1/degree)``: the translator's ``sqrt`` entry is the
       misspelt ``no.sqrt``, so every deposit taking a root in a rule fails
-      on a ``NameError`` (Erguler 2013, P0.69).
+      on a ``NameError`` (Erguler 2013).
     """
     import libsbml
 

@@ -76,7 +76,7 @@ PROCTOR07_SBML_PATH = sbml_source(
 )
 # The curated deposit ships k69 = 0, so its proteasome never degrades a
 # substrate and every protein is misfolded and aggregated by day 14. Proctor
-# 2007 Table 2 gives 1.0E-3 s^-1 (P0.68).
+# 2007 Table 2 gives 1.0E-3 s^-1.
 PROCTOR07_K69_PAPER = 1.0e-3
 PROCTOR07_K69_NAME = "k69"
 # Proctor's misfolding rate is k2·NatP·ROS with ROS a constant 10, and its

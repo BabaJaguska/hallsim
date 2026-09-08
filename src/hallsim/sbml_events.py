@@ -340,7 +340,7 @@ def trigger_pathologies(events) -> list[str]:
     **Equality against time.** ``time == c`` is true on a set of measure zero,
     so whether it ever fires depends on whether a sync point lands exactly on
     ``c``. That makes the scheduler's ``macro_dt`` decide whether the model
-    receives its input at all, not merely when (P0.34). A threshold crossing
+    receives its input at all, not merely when. A threshold crossing
     (``time >= c``) is the form that survives discretisation.
     """
     found: list[str] = []

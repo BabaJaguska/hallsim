@@ -283,7 +283,7 @@ def build_problem(
         # OVERFIT — better on the fit arm at D07, held-out worse than not
         # fitting at all — and the identifiability verdict predicted it: that
         # set had 0 identifiable parameters against this one's 2. Rank by
-        # loss reduction, but keep only what the data constrains. See P0.50.
+        # loss reduction, but keep only what the data constrains.
         params=(
             parameters
             if parameters is not None

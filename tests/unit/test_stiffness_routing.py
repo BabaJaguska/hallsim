@@ -109,7 +109,7 @@ class TestRoutingDefault:
         agree to their shared tolerance, not exactly. Both now carry the same
         scalar ``atol``: the stiff route used to get a magnitude-scaled vector
         one, which integrated a decaying state to a tolerance sized for where
-        it started (P0.17).
+        it started.
         """
         comp = _composite(StiffPair(), "stiff")
         routed = Scheduler().run(comp, t_span=(0.0, 5.0), macro_dt=1.0)
@@ -165,7 +165,7 @@ class TestToleranceIsNotStateDerived:
     the tolerance a property of the state a run happened to start from. A
     state that starts large and decays was then integrated to a tolerance
     sized for its initial magnitude — 60% of the value it ended at, on the
-    probe in P0.17 — so both the trajectory and its gradient were wrong, and
+    probe that found it — so both the trajectory and its gradient were wrong, and
     the loose-vs-tight screen called it converged because the error was
     tolerance-insensitive.
     """
@@ -210,7 +210,7 @@ class TestToleranceIsNotStateDerived:
             assert float(err) < 1e-4
 
     def test_a_decaying_state_is_resolved_at_its_final_magnitude(self):
-        """The P0.17 regression, stated as the property it broke.
+        """The regression, stated as the property it broke.
 
         ``s`` decays to ~4.5e-5. The old stiff-group tolerance was
         ``max(atol, 1e-6*|y0|) = 1e-6`` — 2% of that answer — while the scalar

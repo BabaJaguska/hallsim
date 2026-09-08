@@ -98,7 +98,7 @@ class ScreenReport:
     #: The composite could not be built, so no trajectory exists. Distinct
     #: from ``exploding``: a model that never ran did not blow up, and calling
     #: it EXPLODING sends the reader to solver tolerances instead of to the
-    #: construction error (P0.59).
+    #: construction error.
     did_not_construct: bool = False
 
     @property
@@ -526,7 +526,7 @@ def screen_process(
 
     try:
         # Build before solving, so a composite that cannot be assembled is
-        # reported as that rather than as a divergent trajectory (P0.59).
+        # reported as that rather than as a divergent trajectory.
         single_process_composite(proc).initial_state_vec()
     except Exception as exc:
         return ScreenReport(

@@ -76,7 +76,7 @@ class ImportedODEProcess(Process):
 
         A Composite expands a member process's events automatically, because
         forgetting to do so ran models with their input route removed while
-        returning smooth, bounded numbers (P0.36). Discarding them is
+        returning smooth, bounded numbers. Discarding them is
         legitimate but deliberate — it is what replacing a model's own
         event-delivered insult with an external ``u(t)`` driver requires, per
         acceptance test 5 in ``docs/senescence-model-rebuild.md``. Written as a

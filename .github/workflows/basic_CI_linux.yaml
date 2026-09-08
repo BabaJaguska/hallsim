@@ -33,5 +33,8 @@ jobs:
       - name: Check prose ratio
         run: python scripts/check_prose_ratio.py src/hallsim
 
+      - name: Check no registry ids in code
+        run: python scripts/check_no_registry_ids.py src demos tests
+
       - name: Run tests
         run: make test

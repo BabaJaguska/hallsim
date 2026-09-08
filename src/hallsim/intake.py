@@ -414,7 +414,8 @@ class CombinatorialPropensity:
 
     Both papers say they wanted stochastic *and* deterministic runs from one
     file, so the deposit is faithful and this is the modelling choice showing
-    through — the rate-law counterpart of P0.57's unit-level check.
+    through — the rate-law counterpart of the unit-level stochastic-intent
+    check.
     """
 
     reaction: str
@@ -433,8 +434,8 @@ def combinatorial_propensities(xml_path) -> tuple:
     """Rate laws containing an ``x*(x-1)`` factor, from the SBML alone.
 
     One pass over the kinetic laws, no solve. Reports rather than judges: a
-    deposit written for Gillespie is a legitimate object, and P0.57 is the
-    check for whether it should be imported as an ODE at all.
+    deposit written for Gillespie is a legitimate object, and whether it should
+    be imported as an ODE at all is the stochastic-intent check's question.
     """
     import re
 

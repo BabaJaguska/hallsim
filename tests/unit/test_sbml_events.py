@@ -38,7 +38,7 @@ class _Owner(Process):
 class TestAssignmentTargetDefaults:
     def test_a_species_target_abstains(self):
         """The species already has an owner, so the event claims nothing about
-        where it starts (P0.58)."""
+        where it starts."""
         port = _event("m__e1", ["S1"]).ports_schema()["__set_S1"]
         assert port.role is PortRole.LATCHED
         assert port.default is None
@@ -67,7 +67,7 @@ class TestAssignmentTargetDefaults:
 
 
 def test_a_composite_that_cannot_build_is_not_reported_as_exploding():
-    """P0.59: Dwivedi2014 was rejected as `EXPLODING max|y|=inf` for a
+    """Dwivedi2014 was rejected as `EXPLODING max|y|=inf` for a
     construction error it never got past. A model that never ran did not blow
     up, and `EXPLODING` sends the reader to solver tolerances."""
     from hallsim.diagnostics import screen_process

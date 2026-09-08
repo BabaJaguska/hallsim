@@ -37,10 +37,10 @@ hooks:
 	pre-commit install
 
 test:
-	python -m pytest tests/ -m "not slow and not network and not demo"
+	python3 -m pytest tests/ -m "not slow and not network and not demo"
 
 test-all:
-	python -m pytest tests/ -m "not network"
+	python3 -m pytest tests/ -m "not network"
 
 run:
 	simulate multi-hallmark run

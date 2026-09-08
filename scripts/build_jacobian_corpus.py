@@ -35,7 +35,9 @@ from pathlib import Path
 CACHE = Path.home() / ".cache" / "hallsim"
 BIOMODELS = CACHE / "biomodels"
 JACOBIANS = CACHE / "jacobians"
-MANIFEST = Path(__file__).resolve().parents[1] / "artifacts" / "jacobian_corpus"
+MANIFEST = (
+    Path(__file__).resolve().parents[1] / "artifacts" / "jacobian_corpus"
+)
 
 #: Import errors and timeouts already measured; re-running them buys nothing.
 SKIP = {56, 154, 155, 158, 446, 723, 1006, 252, 1044}
@@ -97,16 +99,22 @@ def build_one(key: str, source: str) -> dict:
     f0 = np.asarray(f(y0), dtype=float)
     ny = float(np.linalg.norm(y0))
     JACOBIANS.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(JACOBIANS / f"{key}.npz", J=J, y0=y0,
-                        keys=np.array(keys, dtype=object))
+    np.savez_compressed(
+        JACOBIANS / f"{key}.npz", J=J, y0=y0, keys=np.array(keys, dtype=object)
+    )
     return {
         "key": key,
         "source": source,
         "n_state": int(J.shape[0]),
-        "native_time_seconds": float(getattr(proc, "native_time_seconds", 1.0)),
+        "native_time_seconds": float(
+            getattr(proc, "native_time_seconds", 1.0)
+        ),
         "native_time_declared": bool(
-            getattr(proc, "native_time_declared", False)),
-        "rest_residual": float(np.linalg.norm(f0) / ny) if ny else float("nan"),
+            getattr(proc, "native_time_declared", False)
+        ),
+        "rest_residual": (
+            float(np.linalg.norm(f0) / ny) if ny else float("nan")
+        ),
         "finite": bool(np.all(np.isfinite(J))),
         "t_import_s": t_import,
         "t_jacobian_s": t_jac,
@@ -116,12 +124,17 @@ def build_one(key: str, source: str) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", help="comma-separated keys or accessions")
-    ap.add_argument("--list", action="store_true", help="print models and exit")
+    ap.add_argument(
+        "--list", action="store_true", help="print models and exit"
+    )
     ap.add_argument("--worker", nargs=2, metavar=("KEY", "SOURCE"))
     args = ap.parse_args()
 
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout,
-                        format="%(asctime)s %(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format="%(asctime)s %(levelname)s: %(message)s",
+    )
 
     if args.worker:  # one model, own process, so a crash cannot take the run
         print(json.dumps(build_one(*args.worker)))
@@ -130,8 +143,11 @@ def main() -> None:
     models = discover()
     if args.only:
         want = {w.strip() for w in args.only.split(",")}
-        models = [(k, s) for k, s in models
-                  if k in want or s in want or k.lstrip("BIOMD0") in want]
+        models = [
+            (k, s)
+            for k, s in models
+            if k in want or s in want or k.lstrip("BIOMD0") in want
+        ]
     if args.list:
         for k, s in models:
             print(f"  {k:24s} {s}")
@@ -149,8 +165,11 @@ def main() -> None:
                 pass
     log.info("%d models, %d already cached", len(models), len(done))
 
-    env = {**os.environ, "JAX_PLATFORMS": "cpu",
-           "HALLSIM_COMPILATION_CACHE_DIR": "off"}
+    env = {
+        **os.environ,
+        "JAX_PLATFORMS": "cpu",
+        "HALLSIM_COMPILATION_CACHE_DIR": "off",
+    }
     with out.open("a") as fh:  # stream: a kill loses one model, not the run
         for i, (key, source) in enumerate(models, 1):
             if key in done:
@@ -159,24 +178,49 @@ def main() -> None:
             try:
                 r = subprocess.run(
                     [sys.executable, __file__, "--worker", key, source],
-                    capture_output=True, text=True, timeout=TIMEOUT_S, env=env)
+                    capture_output=True,
+                    text=True,
+                    timeout=TIMEOUT_S,
+                    env=env,
+                )
                 if r.returncode != 0:
-                    row = {"key": key, "source": source, "error":
-                           (r.stderr.strip().splitlines() or ["?"])[-1][:300]}
+                    row = {
+                        "key": key,
+                        "source": source,
+                        "error": (r.stderr.strip().splitlines() or ["?"])[-1][
+                            :300
+                        ],
+                    }
                 else:
                     row = json.loads(r.stdout.strip().splitlines()[-1])
             except subprocess.TimeoutExpired:
-                row = {"key": key, "source": source,
-                       "error": f"timeout after {TIMEOUT_S}s"}
-            except Exception as exc:  # a malformed worker line is data, not a stop
-                row = {"key": key, "source": source,
-                       "error": f"{type(exc).__name__}: {exc}"[:300]}
+                row = {
+                    "key": key,
+                    "source": source,
+                    "error": f"timeout after {TIMEOUT_S}s",
+                }
+            except (
+                Exception
+            ) as exc:  # a malformed worker line is data, not a stop
+                row = {
+                    "key": key,
+                    "source": source,
+                    "error": f"{type(exc).__name__}: {exc}"[:300],
+                }
             row["t_total_s"] = time.time() - t
             fh.write(json.dumps(row) + "\n")
             fh.flush()
-            log.info("[%3d/%3d] %-24s %s", i, len(models), key,
-                     f"n={row['n_state']}" if "n_state" in row
-                     else row.get("error", "?")[:80])
+            log.info(
+                "[%3d/%3d] %-24s %s",
+                i,
+                len(models),
+                key,
+                (
+                    f"n={row['n_state']}"
+                    if "n_state" in row
+                    else row.get("error", "?")[:80]
+                ),
+            )
 
 
 if __name__ == "__main__":

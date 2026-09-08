@@ -423,7 +423,7 @@ class Scheduler:
         oscillator risks numerical anti-damping (see CLAUDE.md). ``atol`` is a
         true floor near zero and applies to every group — scaling it by the
         state duplicates what ``rtol`` already does, and freezing that scale
-        at ``|y0|`` broke any state with a large dynamic range (P0.17).
+        at ``|y0|`` broke any state with a large dynamic range.
     newton_rtol, newton_atol:
         Convergence tolerances of the Newton solve *inside* each implicit
         stage — algebraic, not an accuracy target. ``newton_rtol`` defaults to
@@ -1101,7 +1101,7 @@ class Scheduler:
             else:  # Lie: sequential, one pass
                 # Every group solved this window, not just the previous one —
                 # they share the window and its grid, so their dense outputs
-                # concatenate into one interpolant (P0.23).
+                # concatenate into one interpolant.
                 names = list(group_rhs)
                 state_in = state
                 last_sweep: dict[str, jnp.ndarray] = {}
@@ -1604,7 +1604,7 @@ class Scheduler:
                 # Every group solved this window, not just the previous one:
                 # they share the window and its grid, so their dense outputs
                 # concatenate into one interpolant. Carrying only the previous
-                # group left every non-adjacent edge frozen (P0.23).
+                # group left every non-adjacent edge frozen.
                 st_in = st
                 last: list[tuple[jnp.ndarray, jnp.ndarray]] | None = None
                 for _sweep in range(self.waveform_sweeps):

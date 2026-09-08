@@ -186,10 +186,25 @@ class _PortMap:
     dispatch, and an O(n) conversion inside every RHS call.
     """
 
-    __slots__ = ("ports", "idx", "fac", "starts", "widths", "_key")
+    __slots__ = (
+        "ports",
+        "idx",
+        "fac",
+        "starts",
+        "widths",
+        "owner",
+        "declared",
+        "_key",
+    )
 
-    def __init__(self, ports, idxs, factors, starts=None, widths=None):
+    def __init__(
+        self, ports, idxs, factors, starts=None, widths=None, owner=""
+    ):
         self.ports = tuple(ports)
+        #: Whose plan this is, and the set form of ``ports`` — both for the
+        #: undeclared-port check, which needs O(1) membership per returned key.
+        self.owner = owner
+        self.declared = frozenset(self.ports)
         self.idx = np.asarray(idxs, dtype=np.int32)
         self.fac = np.asarray(factors, dtype=float)
         self.idx.flags.writeable = False
@@ -208,6 +223,7 @@ class _PortMap:
             self.fac.tobytes(),
             self.starts,
             self.widths,
+            self.owner,
         )
 
     def __hash__(self):
@@ -239,7 +255,7 @@ def _write_entry(port, entry, spec, canon, key_to_idx):
     )
 
 
-def _as_port_map(entries):
+def _as_port_map(entries, owner=""):
     """``(port, indices, factors, width)`` per port as a :class:`_PortMap`."""
     ports, idx, fac, starts, widths = [], [], [], [], []
     for port, indices, factors, width in entries:
@@ -248,7 +264,26 @@ def _as_port_map(entries):
         widths.append(width)
         idx.extend(indices)
         fac.extend(factors)
-    return _PortMap(ports, idx, fac, starts, widths)
+    return _PortMap(ports, idx, fac, starts, widths, owner=owner)
+
+
+def _reject_undeclared(raw, write_map, method):
+    """Raise when a process returns a port the scatter has no column for.
+
+    Such a key is dropped, and a dropped term reads downstream exactly like a
+    term that was never modelled — the failure a renamed or mistyped port
+    makes, and the one a generated ``Process`` makes most often. The check is
+    Python at trace time, so it never enters the jaxpr.
+    """
+    extra = sorted(p for p in raw if p not in write_map.declared)
+    if extra:
+        raise ValueError(
+            f"{write_map.owner or 'process'}.{method}() returned "
+            f"{extra}, which it does not declare as a written port. "
+            f"Written ports are {sorted(write_map.declared)}. The value "
+            "would be dropped, so this raises instead. Declare the port in "
+            "ports_schema(), or drop it from the return."
+        )
 
 
 def _port_view(y_vec, read_map):
@@ -272,6 +307,7 @@ def _apply_assignments(assign_pre, t, y_vec):
     new array; JAX-functional). Shared by the RHS and materialization."""
     for proc, read_map, assign_map in assign_pre:
         raw = proc.assign(t, _port_view(y_vec, read_map))
+        _reject_undeclared(raw, assign_map, "assign")
         for i, port in enumerate(assign_map.ports):
             if port not in raw:
                 continue
@@ -325,6 +361,7 @@ class _FlatRHS(eqx.Module):
             self.procs, self.read_maps, self.write_maps
         ):
             raw = proc.derivative(t, _port_view(y_vec, read_map))
+            _reject_undeclared(raw, write_map, "derivative")
             for i, port in enumerate(write_map.ports):
                 if port not in raw:
                     continue
@@ -358,7 +395,7 @@ def _compose_events(processes: dict, topology: dict) -> tuple[dict, dict]:
     latching on a threshold — so this is the default rather than a second call
     the caller has to remember. Forgetting it produced a composite that ran the
     model with its input route removed and returned smooth, bounded,
-    tolerance-insensitive numbers that every existing screen passed (P0.36).
+    tolerance-insensitive numbers that every existing screen passed.
 
     To drop a model's events, say so at the call site with
     ``proc.without_events()``.
@@ -394,7 +431,7 @@ def _unfreeze_coupled_sinks(processes: dict, topology: dict) -> dict:
     Import freezes species a model writes and never reads back, so an unbounded
     "total degraded" counter cannot wreck the state scaling. A model's terminal
     product is indistinguishable from one by that test, so the heuristic zeroes
-    exactly the species a source model exists to export (P0.42). Wiring one to
+    exactly the species a source model exists to export. Wiring one to
     another process's port is unambiguous evidence it is an output, so the
     freeze is lifted here rather than at every call site.
     """
@@ -497,7 +534,7 @@ class Composite(eqx.Module):
         # tree_at round-trip. Order is semantic wherever the Scheduler applies
         # deltas in sequence (EVENT and DISCRETE dispatch), and guarding that
         # per call site is how the same defect reached `build_initial_store`
-        # and then EVENT ordering (P0.41). Sorting here makes it unreachable:
+        # and then EVENT ordering. Sorting here makes it unreachable:
         # sorted order is exactly what survives the round-trip.
         self.processes = {n: flat_processes[n] for n in sorted(flat_processes)}
         self.topology = {
@@ -597,9 +634,12 @@ class Composite(eqx.Module):
                 for port, entry in proc_topo.items()
             )
             assign_pairs = _as_port_map(
-                _write_entry(port, proc_topo[port], p, canon, key_to_idx)
-                for port, p in schema.items()
-                if p.role == PortRole.ASSIGNED
+                (
+                    _write_entry(port, proc_topo[port], p, canon, key_to_idx)
+                    for port, p in schema.items()
+                    if p.role == PortRole.ASSIGNED
+                ),
+                owner=proc_name,
             )
             if assign_pairs.ports:
                 assign_procs.append((proc, read_pairs, assign_pairs))
@@ -672,9 +712,12 @@ class Composite(eqx.Module):
                 for port, entry in proc_topo.items()
             )
             write_pairs = _as_port_map(
-                _write_entry(port, proc_topo[port], p, canon, key_to_idx)
-                for port, p in schema.items()
-                if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
+                (
+                    _write_entry(port, proc_topo[port], p, canon, key_to_idx)
+                    for port, p in schema.items()
+                    if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
+                ),
+                owner=proc_name,
             )
             if write_pairs.ports:
                 pre.append((proc, read_pairs, write_pairs))
@@ -975,7 +1018,7 @@ class Composite(eqx.Module):
         """Group sets a coupling cycle runs through — the splits where Lie or
         Strang cuts a feedback loop, so one direction always reads a
         macro-step-stale value and accuracy is governed by ``macro_dt``
-        rather than by the integrator (P0.47).
+        rather than by the integrator.
         """
         groups = self.auto_groups() if groups is None else groups
         if len(groups) < 2:
@@ -1007,7 +1050,7 @@ class Composite(eqx.Module):
                 "splitting cuts the feedback loop: one direction always reads "
                 "a stale value and the error is set by macro_dt, not by the "
                 "integrator. Size macro_dt accordingly, or pass groups={...} "
-                "to keep the cycle in one group. See P0.47.",
+                "to keep the cycle in one group.",
                 members,
             )
 

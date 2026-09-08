@@ -109,7 +109,7 @@ def test_scan_no_false_positive_when_no_crossing():
     )
 
 
-# --- conserved moieties (P0.16) -------------------------------------------
+# --- conserved moieties -------------------------------------------
 # A <-> B with A + B conserved. The Jacobian [[-K1, K2], [K1, -K2]] is
 # singular at every state, so the raw Newton has no unique solution however
 # good the seed is; the fixed point on the leaf through y0 is analytic.
@@ -153,7 +153,7 @@ def test_leaf_spectrum_drops_the_conserved_zero():
 
 @pytest.mark.slow
 def test_dallepezze_equilibrium_needs_its_conservation_laws():
-    """The model P0.16 was filed against. Six laws over 23 states: without
+    """Six laws over 23 states: without
     them the search reports no equilibrium for a model that has one, and the
     raw spectrum's leading mode is a conserved zero rather than the rate the
     fixed point actually relaxes at."""

@@ -5,6 +5,12 @@ Defects found by review, ordered by priority. Distinct from
 that is wrong now. Each entry carries the evidence that established it, so
 nothing has to be re-argued.
 
+**Open entries only.** A defect that is fixed moves to
+[fixed-problems.md](fixed-problems.md) rather than being deleted, because the
+reviews and the diary cite it and a citation has to resolve. Ids are unique
+across both files and `tests/unit/test_known_problems.py` checks that, that
+this file holds no closed entry, and that no code cites an id at all.
+
 Evidence sources: the mitochondrial stress test (2026-08-18), the
 multi-hallmark demo review (2026-08-19), and the DallePezze 2014 referee pass
 (2026-08-25) — all by the review panel in `.claude/agents/` — plus two outside
@@ -40,7 +46,6 @@ does not survive their next pull and the next user repeats it. Instances so far:
 The guard for the second one is the pattern to repeat: reachability under trace
 is a whole-call-graph property, so the test traces the public entry points and
 lets the failure surface rather than trying to reason about it.
-
 
 ---
 
@@ -134,108 +139,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   retires the "NF-κB oscillation vs P0.20 span-truncation" ambiguity as the
   only candidate pair.
 
-- [x] **P0.23 — `coupling_mode="interpolated"` interpolates only the
-  *immediately preceding* group; every earlier group stays frozen while the mode
-  reports as interpolated.**
-  Measured 2026-08-31: bit-identical to `frozen` at `macro_dt` 3.5 / 1.75 /
-  0.875, five significant figures, all four observables.
-  `_effective_coupling` passes an explicit mode straight through and
-  `_run_scan_continuous` sets `interp = coupling == "interpolated" and
-  n_groups > 1`, which was true — so it was requested and enabled, and produced
-  no difference.
-
-  *Mechanism traced 2026-08-31 (external systems review), and it is one line.*
-  `scheduler.py:1253-1262`, inside `_run_scan_continuous`'s `body`, builds
-  `_InterpFill(..., idx=write_idxs[gi - 1])` and reassigns `prev = (t_start,
-  t_next, gy)` every iteration. So `_InterpFill` (`scheduler.py:248-261`) only
-  ever carries group `gi-1`'s trajectory and only re-fills group `gi-1`'s
-  columns; groups `0 .. gi-2` are supplied by `_FrozenFill`'s constant. The
-  eager path has the identical defect — `prev_idxs = group_write_idxs[gname]`
-  is reassigned per group at `scheduler.py:810`.
-
-  Three continuous processes; A a 6 rad/s oscillator, C integrates A, B
-  independent. Same composite, same `macro_dt=2.0`, only the *grouping* differs;
-  reference is a `macro_dt=10/2048` solve, y(10) = -0.0576600435:
-
-  ```
-  grouping                                    frozen y(10)     interp y(10)     identical?  interp err
-  {gA:[drv], gC:[dvn]}       edge adjacent    -1.722649856820  -0.051501993040  no          10.68 %
-  {gA:[drv], gB:[mid], gC:[dvn]} non-adjacent -1.722649856820  -1.722649856820  bit-identical 2887.60 %
-  ```
-
-  Inserting one *unrelated* group between the driver and the driven turns
-  interpolated coupling into a bit-exact no-op and multiplies the error by 270×.
-  That reproduces this entry's original signature exactly, and it is consistent
-  with P0.6 having measured interpolated working (1.7% vs 20.9%) on a
-  configuration where the driving edge happened to be adjacent.
-
-  **A design defect, not just a bug.** `auto_groups` clusters by timescale and
-  `_order_by_coupling` topologically sorts, but nothing ties *adjacency in the
-  group order* to *where the coupling edges are*. The coupling representation
-  was written as if the group sequence were a chain; it is a DAG. A topologically
-  valid ordering can place any number of groups between a driver and its
-  consumer, so adding a fourth model to a working three-model composite can
-  silently switch a previously-interpolated edge to frozen, with no diagnostic.
-  *Fix:* (1) keep **one interpolant per group**, not one for `gi-1` — accumulate
-  `prev` into a list and build the fill from every already-solved group's samples
-  this window; the samples are already computed and already a static shape
-  (`n_save`), so this costs memory, not compile shape (~1 day including the eager
-  path). (2) Make `_effective_coupling`'s verdict **per edge**, not per run
-  (`scheduler.py:1074` decides for the whole run from the existence of *any*
-  forward cross-group edge), and put the resolved per-edge mode into
-  `SchedulerResult.stats` so "interpolated" is an observable fact rather than a
-  requested flag. (3) Regression test: insert an inert group between a driver and
-  its consumer and assert the interpolated result is unchanged. Today it fails.
-  **Bears on P0.2.** That entry calls the Strang/Lie order study "unseparated"
-  between NF-κB's oscillation breaking Strang and the P0.20 span-truncation fix.
-  There is a third candidate it does not list — whether the NF-κB edge was
-  adjacent in the group order in each configuration. Separate it before designing
-  around either.
-  **Side effect worth knowing.** `coupling_mode="interpolated"` also silently
-  changes the output grid: `n_save = max(base_out + 1,
-  self.coupling_interp_points)` (`scheduler.py:1170-1172`), so an interpolated
-  run returns `coupling_interp_points` samples per macro window regardless of
-  `save_dt`. In the measurement above, `macro_dt=save_dt=2.0` gave 6 points
-  frozen and 76 interpolated over the same span. A coupling knob should not
-  change the shape of the answer.
-
-  **Fixed 2026-09-05.** Both paths now accumulate every group solved in the
-  window instead of carrying only the previous one. The groups share the window
-  and its save grid, so their dense outputs concatenate into a single
-  interpolant — one gather, no per-group loop in the fill. Sites:
-  `_run_scan_continuous`'s body (scan) and the eager Lie loop.
-
-  Measured on the P0.23 shape — driver, inert group, consumer, so the driving
-  edge spans two positions:
-
-  ```
-    grouping  macro_dt         frozen         interp   identical?
-    adjacent      2.00   -0.143982589   -0.005120877        False
-      spaced      2.00   -0.143982589   -0.005120877        False   (was True)
-  ```
-
-  Against a converged reference of -0.005296, the spaced case goes from
-  **2618% error to 3.3%**. `spaced` and `adjacent` now agree, which is the
-  invariant: inserting an unrelated group must not change the answer.
-  Regression tests: `test_interpolated_coupling_survives_an_inert_group_between`
-  (both paths) and `test_interpolated_beats_frozen_on_a_non_adjacent_edge`.
-
-  *What interpolation is worth, now that it works* — observed convergence order
-  on a two-group split, error vs a converged reference:
-
-  ```
-                scheme       2.0       1.0       0.5      0.25     0.125
-   feed-forward, lie/frozen   7.2387%   0.6084%   3.6330%   1.9266%   0.9860%
-   feed-forward, lie/interp   0.0149%   0.0010%   0.0003%   0.0004%   0.0007%
-   feedback,     lie/interp   1.5223%   1.5186%   2.7933%   1.9326%   1.0210%
-  ```
-
-  On a **DAG** interpolation does not reduce the splitting error, it removes it:
-  the error floors at ~1e-6 relative, which is solver tolerance, not splitting.
-  On a **cycle** it reverts to first order (p ~ 0.9) because the backward edge
-  still reads a stale value — that residual is what waveform relaxation (P0.47)
-  exists to remove, and it is now measured rather than asserted.
-
 - [ ] **P0.3 — The fold-change reference is an acausal filter of the whole
   trajectory.** ✓✓ Summaries are forward–backward EMAs, so the value at index 0
   averages the future. `dp14/CDKN1A` raw y(0)=10, reference used **4176**
@@ -261,51 +164,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   now targets `nutrient_drive.after` the same way, so a composite built without
   that source silently loses the mTOR dial too.
   *Fix:* raise when every mapping of an applied hallmark misses its target.
-
-- [x] **P0.5 — `_substitute` overwrites `eqx.tree_at` edits on fitted
-  `ParameterRef`s.** *Fixed 2026-08-23.* `CalibrationProblem` snapshots each
-  fitted field at construction and `_substitute` raises on an edit it would
-  overwrite, pointing at `with_overrides` — the single route for changing any
-  parameter, fitted or not, by fittable name or by `<process>.<field>` address.
-  Overrides are applied last, so they outrank both the fitted iterate and the
-  composite's own value; no caller has to know which list a parameter is in.
-  Verified on the multi-hallmark demo: zeroing `mtor_nfkb.k_act` — one of the three edges
-  the review ablated — raises when edited in the pytree, and via `with_overrides`
-  moves the control arm 0.924 relative against the review's 2.7×10⁻¹³. Editing a
-  field nobody fits is untouched and still reaches the solver.
-  **Still open:** the mitochondrial panel's "loop gain 3×10⁻⁴" claim was
-  possibly produced this way and needs re-measuring.
-  Original report: any ablation done by editing the pytree is silently undone,
-  so an edge appears dead when it is live. This produced a wrong finding in
-  review (three edges measured at 2.7×10⁻¹³; true gains 1.85, ≤0.185, 0.0077).
-
-- [x] **P0.6 — Group execution order came from timescale, so cross-group edges
-  ran backwards and interpolated coupling was unreachable.** *Fixed
-  2026-08-25.* `auto_groups` still clusters by timescale; `_order_by_coupling`
-  then topologically sorts the groups so one runs after whatever drives it,
-  keeping timescale order on a cycle. The multi-hallmark demo's dp14/gz06 group now
-  precedes nfkb, `_effective_coupling` returns `interpolated`, and NF-κB reads
-  an interpolant of its driver instead of a staircase.
-
-  Measured on `nfkb/IkBat` against a `macro_dt=0.109` reference:
-
-  | `macro_dt` | frozen | interpolated |
-  |---|---|---|
-  | 3.5 (shipped) | 20.9% | **1.7%** |
-  | 1.75 | 15.2% | 1.7% |
-  | 0.875 | 12.6% | 3.4% |
-
-  Correct ordering at the shipped step beats frozen at a 4× smaller step, at no
-  cost. An outside reviewer independently measured ~20% at `macro_dt=3.5`,
-  matching the frozen column.
-  **Open:** the interpolated column is not monotone (1.7 → 1.7 → 3.4); a
-  smaller macro step should not be worse, so either the fixed
-  `coupling_interp_points=16` interacts with step size or the reference carries
-  error. Not yet understood.
-  Original report: `timescale = native_time_seconds`; `auto_groups` sorted by
-  it, putting NF-κB first; `_effective_coupling` finds no earlier-writes /
-  later-reads pair and returns `frozen`. NF-κB integrated 3.5 days against a
-  4-point staircase of its own driver.
 
 - [ ] **P0.13 — `timescale` is a declared unit, not a rate.** Split from P0.6,
   whose execution-order half is fixed. An SBML import sets `timescale =
@@ -422,100 +280,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   constant achieves. Open question whether changing the model between arms is
   defensible. Until then no multi-hallmark demo concordance number means anything.
 
-- [x] **P0.15 — `conservation_laws` returns rows that are not normalised, so
-  `LᵀL` is not a projector.** *Fixed 2026-08-25, in the commit that filed it —
-  the checkbox was missed.* Rows come back **orthonormal** via
-  `_orthonormal_rows`, on both the declared-stoichiometry and the inferred
-  path, and the docstring now states `LᵀL` is the projector onto the conserved
-  directions. Guarded by the two tests the fix line asked for:
-  `test_laws_are_orthonormal` and `test_projector_step_stays_on_the_leaf`
-  (`tests/unit/test_steady_state.py:116,126`), both passing.
-  What it replaces: rows mutually orthogonal but with squared norms
-  `L Lᵀ = diag(2,2,2,3,2,1)`, so projecting with `LᵀL` — the obvious use, and
-  the documented one — silently left the conservation leaf. Cost a reviewer a
-  basin scan that looked multistable and was not.
-
-- [x] **P0.41 — EVENT and DISCRETE processes fired in dict-insertion order, so
-  a jit/vmap round-trip changed which one fired first.** *Fixed 2026-09-04, in
-  the commit that filed it.* Found by asking whether the round-off dependence
-  in Stucki 2005 was our defect. It was not — COPASI reproduces that on the
-  same file — but the question surfaced this, which is ours.
-
-  `Composite.event_processes()` and `discrete_processes()` preserved
-  `self.processes` insertion order. The Scheduler iterates them and applies
-  each delta **immediately** (`scheduler.py:1106-1131`), so a later process
-  reads the state an earlier one wrote — order is semantic whenever two of
-  them touch the same path.
-
-  And the order was not stable. `store.py:120` already documents the hazard for
-  `build_initial_store`: *JAX sorts dict keys when it flattens a pytree, so
-  `processes` comes back sorted from any `jax.jit` / `vmap` / `eqx.tree_at`
-  round-trip.* Measured on a two-event composite inserted as
-  `["z_evt", "a_evt"]`: before a round-trip the firing order is
-  `['z_evt', 'a_evt']`, after `jax.tree_util` flatten/unflatten **and** after
-  `eqx.tree_at` it is `['a_evt', 'z_evt']`. So a solo run and a jitted or
-  batched run of the same composite could fire interacting events in opposite
-  orders and reach different states — the same class of defect as
-  `test_batched_matches_solo` under P0.1.
-
-  *Fixed at the container, not the consumers.* `Composite.__init__` now stores
-  `processes` name-sorted, so every consumer inherits stable order and the
-  hazard is unreachable rather than guarded.
-
-  **That is the actual lesson, and it is why this recurred.** The same defect
-  was found and fixed in `build_initial_store` (P0.15-era), where the remedy
-  was a local sort at that one call site. `Composite` has **nine** places that
-  iterate `self.processes`; before this fix two sorted and seven did not, so
-  every new consumer was a fresh chance to reintroduce it — and EVENT dispatch
-  duly did. An invariant enforced per call site is not enforced. The first
-  patch attempted here name-sorted the two accessors, which would have been
-  the same mistake a third time; sorting at construction is what makes it
-  structural. Sorted order is also exactly what survives the round-trip, so
-  solo and round-tripped runs agree by construction.
-
-  **What this does not fix, and must not be confused with it:** when two
-  events are simultaneously satisfiable, *some* order still decides the
-  outcome, and the model has not specified one. Sorting makes our answer
-  reproducible; it does not make it right. A model in that position is
-  rejected at intake by P0.38.
-
-- [x] **P0.42 — The inert-sink heuristic freezes a model's only output.**
-  *Fixed 2026-09-05, wiring Kallenberger into the multi-hallmark composite.*
-  Three parts: `SBMLProcess.with_unfrozen(*species)` is the explicit opt-out
-  (`_frozen_indices` is static, so this rebuilds rather than `tree_at`);
-  `Composite` calls `_unfreeze_coupled_sinks` after event expansion, which
-  restores any frozen sink another process *reads* — being wired to a reader is
-  unambiguous evidence the heuristic misfired, so no call site has to know; and
-  the import warning now says the frozen species are unusable as coupling
-  sources or reporter observables and names the opt-out, instead of implying a
-  tidy-up. Verified on Kallenberger: `tBid` integrates 0 → 186.98 while `Bid`
-  falls 224 → 37.02 over the deposit's own 240-minute window, conserving mass
-  exactly. Filed 2026-09-04.
-  `_frozen_sink_indices` (`sbml_import.py:1218`) freezes
-  species that reactions write and nothing reads, so they cannot accumulate and
-  wreck the state scaling. The heuristic is self-defeating for exactly the case
-  the framework exists to serve: a **source process whose output is a terminal
-  product** has, by construction, a downstream-facing species that nothing
-  *inside that model* reads.
-
-  Measured on Kallenberger 2014 (BIOMD0000000524): **six** states are frozen
-  to zero — `tBid`, `mCherry`, `mGFP`, `PrNES`, `PrER`, `p18inactive` — of
-  which `tBid` is the apoptosis-commitment readout and the only thing a
-  downstream process would sensibly consume, and four of the others are the
-  paper's measured fluorescent reporters. `Bid` falls 224 → 37.02 over 240 min
-  while `tBid` stays at exactly 0.0. The mass is recoverable by balance and
-  the freeze does warn, but a user composing this to read `tBid` gets a flat
-  zero and a log line.
-
-  **There is no opt-out**: `_frozen_indices` is a static field, so `eqx.tree_at`
-  cannot reach it and a caller cannot un-freeze a species it means to export.
-
-  *Fix:* the freeze needs an opt-out — a species named as a composition output
-  must not be frozen — and the warning should say which species are being
-  frozen *and* that this makes them unusable as coupling sources. Better: infer
-  from the topology, since a frozen sink wired to another process's INPUT port
-  is unambiguous evidence the heuristic is wrong for that model.
-
 - [ ] **P0.43 — A driver and its consumer in different `auto_groups` buckets
   makes the consumer read a static default forever, while the driver's saved
   trajectory still shows the correct signal.** Filed 2026-09-04, and it is the
@@ -578,30 +342,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   over the screening horizon, and the parameters reachable only through it,
   should be named in `ScreenReport`.
 
-- [x] **P0.44 — `native_time_seconds` cannot be set at import, so correcting a
-  guessed clock needs `eqx.tree_at` on a private field.**
-  *Fixed 2026-09-05.* `process_from_sbml(..., native_time_seconds=60.0)` is the
-  front door. The boolean `native_time_declared` is replaced by a three-valued
-  `native_time_source` — `"declared"` (the file asserts it), `"supplied"` (the
-  caller knows what the file omits), `"assumed"` (the tool default) — which is
-  the distinction P0.40 asks for, so a supplied clock is not laundered into a
-  declared one. A supplied value that contradicts a declared one warns. Verified
-  on Kallenberger: `reconciled_to(86400)` returns 1440, where it returned 86400.
-  Filed 2026-09-04.
-  `process_from_sbml` takes `timescale` and `parameters` but has no argument
-  for the model's native clock, so when a file declares no time unit — which
-  is most of them — the only way to supply the right value is to reach into
-  the process afterwards. Kallenberger 2014 declares zero `unitDefinition`
-  elements; its rate laws are in minutes, so `reconciled_to(86400)` returns
-  `time_scale = 86400` where the correct value is **1440**.
-
-  CLAUDE.md records that a wrong clock has cost this project three times.
-  A failure with that history should be correctable at the front door.
-
-  *Fix:* `process_from_sbml(..., native_time_seconds=60.0)`, which also gives
-  the natural place to record that the value was supplied rather than
-  declared — the distinction P0.40 asks for.
-
 - [ ] **P0.46 — An undriven imported constant keeps the deposit's own
   experimental dose, so an unwired control arm is silently a dosed one.**
   Filed 2026-09-05. A deposit's stored constants encode *the experiment the
@@ -623,159 +363,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   composing should say which of those went undriven. `native_input_exposure`
   already knows a constant's flat exposure (extended 2026-09-05); the missing
   piece is naming the set and surfacing it, not computing it.
-
-- [x] **P0.47 — Timescale splitting cuts feedback loops, silently, with no
-  diagnostic and no way to make the split accurate.** Filed 2026-09-05, found
-  wiring Kallenberger in.
-
-  DP14 (86400 s) and GZ06 (3600 s) are within `max_ratio`, so the composite was
-  **one group** and the Scheduler took the single-solve fast path — the
-  `damage_bridge -> dp14 -> gz06 -> p53_cdkn1a` feedback loop was integrated
-  exactly. Adding Kallenberger (60 s) pushed the ratio to 1440 and split the
-  composite straight through that loop.
-
-  A cycle has no topological order, so whichever group runs first reads the
-  other's previous-step value. `_order_by_coupling` **already detected this** —
-  `if not ready: # cycle: keep the remaining timescale order` — and proceeded.
-  Measured against the exact single-group solve:
-
-  | config | macro_dt 3.5 | 1.75 | 1.0 | 0.5 |
-  |---|---|---|---|---|
-  | Lie, fast group first (current) | **10.00%** | 3.07% | 1.96% | 1.30% |
-  | Lie, slow group first | 14.03% | 2.85% | 1.58% | **0.77%** |
-  | Strang | 72.0% | — | 29.2% | 8.8% |
-  | Lie + `adaptive_dt` | 65.2% | — | 38.6% | — |
-
-  CDKN1A@14 is the casualty at the demo's own step: 23.44 against 26.03
-  converged — the same reporter P0.2 names, for the same reason.
-
-  **Nothing available today fixes it.** Group order changes it by <2x and
-  reverses sign with `macro_dt`. Strang is 7x worse (see P0.2). `adaptive_dt`
-  is 6-20x worse (P0.49). `coupling_mode="interpolated"` is bit-identical to
-  `frozen` — **and that reading was wrong on both counts, corrected
-  2026-09-05.**
-
-  It was P0.23 after all. The bit-identical result came from a *three*-group
-  composite whose driving edge was non-adjacent, so the interpolant (which
-  carried only the previous group) never reached it. Cyclicity was a
-  coincidence of that composite, not the cause. With P0.23 fixed, interpolated
-  and frozen differ on a cycle and interpolation is worth roughly half the
-  error — 11x at the coarsest step:
-
-  ```
-    macro_dt   frozen err   interp err
-       2.000       7.127%       0.651%
-       0.500       3.811%       1.911%
-  ```
-
-  The reasoning was wrong in principle too: a cycle only denies an interpolant
-  to the group that runs **first**. Every later group has the earlier groups'
-  freshly-computed trajectories available over the window. A cycle disables
-  half the interpolation, not all of it.
-
-  **Strang is not 7x worse either** — it was measured outside its asymptotic
-  regime. Observed order from successive halvings over `dt` 0.5 -> 0.25 ->
-  0.125 is **p = 2.33 then 2.07**, second order as designed. It is useless
-  above `dt ~ 1.0` (8.9%, 8.0%), then falls to 0.199% at 0.5; at `dt = 0.125`
-  it is **0.0094% against Lie's 0.986%, 105x better**. The driver's period is
-  ~1.05, so at `dt >= 1` no splitting scheme is asymptotic — and the table
-  above samples 3.5/1.0/0.5, almost entirely that band. P0.2 needs the same
-  correction.
-
-  So "nothing available today fixes it" is false. What remains true is that the
-  cycle's backward edge holds the scheme at first order (p ~ 0.9 measured), and
-  that is what waveform relaxation removes.
-
-  *Not fixed by merging the groups.* That was the first attempt and it is an
-  avoidance: multi-rate splitting is the capability being demonstrated, and a
-  composite whose biology is feedback-coupled is exactly the case it has to
-  serve. Backed out; `auto_groups` keeps the split and now warns, and
-  `Composite.cyclic_group_sets()` reports which group sets a cycle runs
-  through so the condition is queryable rather than folklore.
-
-  **Fixed 2026-09-05: `Scheduler(waveform_sweeps=k)`.** Suggestion #4 built.
-  Each macro step re-solves the window k times; within a sweep, group `gi`
-  reads groups before it from *this* sweep and groups after it from the *last*
-  one. That second half is what a one-pass Lie split never has, and it is
-  exactly the backward edge of the loop.
-
-  Measured on a two-group cycle, error vs a converged reference, and the
-  observed order from successive halvings:
-
-  ```
-              scheme       2.0       1.0       0.5      0.25     0.125
-  lie / interpolated   1.5223%   1.5186%   2.7933%   1.9326%   1.0210%
-    observed order p      0.00     -0.88      0.53      0.92
-         waveform x2   0.0556%   0.0215%   0.0057%   0.0011%   0.0003%
-    observed order p      1.37      1.93      2.41      2.03
-  ```
-
-  **Error drops 27x at `macro_dt` 2.0 and 3400x at 0.125**; eager path 17x / 71x.
-
-  *What the sweeps do and do not buy — corrected after checking convergence
-  properly.* The iteration **does** reach a fixed point: at `macro_dt` 0.25 the
-  sweep-to-sweep change is exactly 0 by k=8, and k=2 is already within 2% of
-  the converged answer.
-
-  ```
-    sweeps        error   change vs prev sweep
-         1    1.932600%
-         2    0.001063%             1.9315364%
-         4    0.001041%             0.0000226%
-         8    0.001041%             0.0000000%
-  ```
-
-  But the fixed point is **not** the exact solution — it sits at 0.001041%
-  against a ~1e-4% solver floor. The residual is the *interpolant's* sample
-  count, not the splitting: at the converged k=8, varying
-  `coupling_interp_points` moves it directly, while more sweeps do not.
-
-  ```
-   interp_pts        error (k=8, macro_dt 0.25)
-            8    0.006022%
-           16    0.001041%   <- default
-           64    0.000439%
-          128    0.000384%
-  ```
-
-  So the two knobs are separable and both are needed: **sweeps remove the
-  stale-edge error, interpolation points set the floor they converge to.**
-  Reporting this as "second order" was a mis-read — the observed p ~ 2 is the
-  floor's own scaling, not a convergence rate of the iteration.
-
-  *Not verified:* at `macro_dt` 1.0 the sweep-to-sweep change **grows**
-  (0.0013% -> 0.0026% -> 0.0056% over k=4/8/16) rather than contracting, so the
-  iteration does not cleanly converge at coarse steps. Whether that is
-  contraction failure or interpolation noise is untested.
-
-  On a **feed-forward** composite it is bit-identical to one pass, correctly:
-  with no cycle there is no stale edge to converge, so the extra passes cost
-  k x and buy nothing. Default stays `waveform_sweeps=1`; use
-  `Composite.cyclic_group_sets()` to decide where it is worth paying.
-
-  A fixed sweep count rather than the suggestion's `until residual < epsilon`:
-  a data-dependent `while` inside `lax.scan` is not reverse-differentiable, and
-  end-to-end differentiability is a hard invariant. `coupling_mode="frozen"`
-  with `sweeps>1` **raises** — a frozen fill is the same constant every sweep,
-  so it would cost k x and change nothing.
-
-  *Fix:* **waveform relaxation — already designed, as suggestion #4 in
-  [crossgen-suggestions.md](crossgen-suggestions.md)** (~40 lines wrapping the
-  existing Lie loop, Anderson acceleration ~30 more). This entry is what that
-  suggestion was waiting for: a measured trigger and cost. The condition is
-  narrower than "one-pass Lie loses cross-coupling" — splitting is fine on an
-  acyclic group DAG, and only a **cycle spanning groups** forces a permanently
-  stale edge, so `cyclic_group_sets()` says where to spend the iteration and
-  where to skip it.
-
-  Two constraints recorded there and not in the original pseudocode: a
-  residual-tested trip count needs `lax.while_loop`, which is **not
-  reverse-differentiable**, so it would foreclose Calibrator unless #6 (IFT at
-  sync boundaries) lands with it; a *static* sweep count unrolls, differentiates
-  and keeps one compiled executable. Land with P0.23 — same two functions.
-
-  Until then, size `macro_dt` from the table above whenever
-  `cyclic_group_sets()` is non-empty.
 
 - [ ] **P0.49 — `adaptive_dt=True` makes a cycle-split composite 6-20x less
   accurate, and costs more.** Filed 2026-09-05. It is documented as
@@ -860,71 +447,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `y0` instead of BNIP3, DDB2 and MDM2 — correct data, unreadable labels. It
   now takes `labels` and `calibration_report` passes the gene symbols.
 
-- [x] **P0.58 — FIXED 2026-09-06. `build_initial_store` compared port initial
-  values with exact equality, so a 1e-26 difference blocks the import outright.**
-  Filed 2026-09-06. **Stop rule fired**: the triage reported EXPLODING and
-  `sbmltoodejax` integrated the same model bounded.
-
-  Dwivedi2014 (BIOMD0000000534-537) is a curated IL-6 QSP model — 41 species,
-  71 reactions, 51 parameters, 100% ontology coverage — and the only deposit
-  found in a 119-model screen that emits IL6 kinetically. All four arms
-  **reject**. The reason is not numerical:
-
-      ValueError: dwi/mwf345ed7a_... is claimed by 5 ports of the same role
-      with differing initial values [0.0, 1e-26]
-
-  Four SBML `<event>`s assign the same species; each expanded event port
-  declares an initial value, and `store.py:159` rejects on
-  `np.all(a == b)` (`_same_default`, `store.py:183`). The values differ by
-  **1e-26** against a trajectory whose `max|y|` is 234 — 1e-28 relative. That
-  is a CellDesigner export artefact, not "a modelling decision", which is what
-  the error message calls it.
-
-  Declaring the value by hand makes all of them run, bounded and finite:
-
-  | model | with `Composite(initial={...: 0.0})` |
-  |---|---|
-  | BIOMD0000000534 | RAN, finite, `max|y|` = 234.6 |
-  | BIOMD0000000537 | RAN, finite, `max|y|` = 703.8 |
-  | BIOMD0000000873 | RAN, finite, `max|y|` = 1.4e5 |
-
-  *Two candidate fixes, and the second is the one:*
-  (a) compare within a tolerance — a patch, and the tolerance is unit-dependent
-  (1e-26 M is a legitimate concentration);
-  (b) **an event-assignment port should not declare an initial value at all.**
-  An event writes its target when it fires; it does not own where the target
-  starts. The owning species does. Under (b) there is no disagreement to
-  tie-break and no tolerance to choose.
-
-  Note `_same_default`'s docstring says it "drives a warning and nothing else",
-  which the raising call site contradicts.
-
-  **Fixed** by (b): `SBMLEvent.ports_schema` gives a species target
-  `default=None` — the abstain the `Port` docstring already documents for
-  exactly this case — and keeps the published value for a parameter target,
-  which has no other owner. All four Dwivedi arms now **PASS** with
-  `rest_residual` ~1e-15. Covered by `tests/unit/test_sbml_events.py`, which
-  did not exist: `sbml_events` had no tests at all.
-
-- [x] **P0.59 — FIXED 2026-09-06. The numerical screen reported a construction
-  failure as EXPLODING with `max|y| = inf`.** Filed 2026-09-06, found alongside P0.58.
-
-  Dwivedi2014 never reached a solver: `Composite.initial_state_vec` raised, so
-  no trajectory exists. The screen recorded
-  `EXPLODING + TOLERANCE-SENSITIVE max|y|=inf tol-rel-diff=inf` and rejected on
-  it. A model that never ran cannot have exploded, and "exploding" sends the
-  reader to solver tolerances instead of to the one-line construction error.
-
-  The FRAMEWORK-SUSPECT annotation did fire and did say `sbmltoodejax
-  integrates it bounded` — that annotation is the only reason this was caught,
-  and it is doing more work than the verdict it qualifies.
-
-  **Fixed:** `ScreenReport.did_not_construct`, set by building the composite
-  in its own guarded step before the tight/loose solves, carrying the
-  construction exception instead of sentinel infinities. Same family as the
-  three `screen_produced_species` defects fixed the same day: a confident
-  verdict about something that was never examined.
-
 - [ ] **P0.63 — A large integer literal in an SBML file overflows on import,
   and the model is rejected as EXPLODING.** Filed 2026-09-06.
 
@@ -941,31 +463,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
 
   *Fix:* coerce numeric SBML literals to float at import. One line, and it
   recovers a curated deposit.
-
-- [x] **P0.64 — FIXED 2026-09-06. A combinatorial propensity used as an ODE
-  rate law goes negative, and it is machine-checkable.** Third occurrence.
-
-  A rate law of the form `k*x*(x-1)*0.5` is a **Gillespie propensity**: the
-  number of distinct pairs among `x` molecules. Integrated as an ODE it is
-  negative for `0 < x < 1`, and small pools sit there.
-
-  | deposit | rate law | consequence |
-  |---|---|---|
-  | Hui 2016 | `kdimerAlk5 * Alk5 * (Alk5 - 1) * 0.5` | mean-field wrong by `1/Alk5`, 3.3% at its own 30.5 molecules |
-  | Proctor 2013 | `kdimercJun * cJun_P * (cJun_P - 1) * 0.5` | `cJun_dimer` reaches **-3.302e-4**, invariant to the sixth significant figure across rtol 1e-3…1e-10 — structural, not numerical. Persists 14 days and inverts seven transcription rate laws that read it linearly. |
-
-  Both papers say why: they wanted stochastic *and* deterministic runs from one
-  file. So the deposit is faithful and the defect belongs to the modelling
-  choice — which is exactly what P0.57's stochastic-intent check is about,
-  reached from the rate laws instead of the units.
-
-  **Fixed:** `intake.combinatorial_propensities` scans the kinetic laws for
-  an `x*(x-1)` factor where `x` is a species, and `triage_process` reports it
-  with the mean-field correction. One pass over the MathML, no solve.
-  Measured: Hui 2016 `Alk5Dimerisation` 1 hit, Proctor 2013 `cJunDimerisation`
-  1 hit, Dwivedi 2014 0 hits. Reports rather than blocks — a deposit written
-  for Gillespie is a legitimate object, and P0.57 is the check for whether it
-  should be an ODE at all. Covered by `tests/unit/test_propensity_scan.py`.
 
 - [ ] **P0.65 — A coupling edge with `timescale=None` gets its own scheduler
   group, so `macro_dt = span` freezes the model it couples.** Filed
@@ -989,39 +486,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   *Fix:* an edge should inherit the timescale of what it drives, or grouping
   should refuse to isolate a process whose ports all bind another group's
   paths. Failing both, warn when a group contains only edges.
-
-- [x] **P0.66 — FIXED 2026-09-07 (`<log/>` with a base rewrites to `ln/ln` in `_preprocess_sbml`; Konrath 2020 imports). `log10()` in a rate law fails the import outright.** Filed
-  2026-09-06. `MODEL2004300002` (Konrath 2020, p53/ATM/Wip1, 7 species)
-  rejects with `calls function(s) outside sbmltoodejax's mathFuncs table:
-  log10()`. `log10(x)` is `log(x)/log(10)`; the pre-processing that already
-  flattens function definitions can rewrite it. Same class as P0.63 — a
-  curated-quality deposit lost to a one-line translation gap.
-
-- [x] **P0.67 — FIXED 2026-09-07. A batched `y0` was refused whenever the
-  composite held a DISCRETE process.** The eager loop gathered a process's
-  port view with `state[i]` and scattered its delta with `state.at[idxs]`,
-  both leading-axis on a `(batch, n_vars)` state, so the guard refused the
-  batch outright. Both now index the trailing axis; a delta entry is a scalar
-  (every member) or `(batch,)` (one per member). The regression exposed a
-  second one on the continuous side: `_FlatRHS` stacked a state-independent
-  derivative (a constant source returns a scalar) next to a per-member one and
-  failed on the stack, so any batched run with a constant source was already
-  broken. Every piece is now broadcast to the batch shape before the single
-  scatter, a no-op unbatched. EVENT processes were refused for the same
-  reason one layer up: `condition` was reduced through Python `bool`, one
-  verdict for the whole batch. The edge is now computed per member
-  (`cond & ~was_active` as arrays), the handler's delta is masked to the
-  members that fired, and `EventRecord.members` carries the mask.
-  Regressions: `TestSchedulerBatchedGuards::test_batched_y0_with_discrete_matches_solo`
-  and `::test_batched_y0_with_event_matches_solo`.
-
-- [x] **P0.69 — FIXED 2026-09-07. Any `<root/>` in a rule failed the import: sbmltoodejax's function table maps `sqrt` to the misspelt `no.sqrt`, so the generated code raised `NameError` at the first assignment rule. `_preprocess_sbml` now rewrites roots as powers (and logs with a base as `ln/ln`), and the cache is versioned so old translations are redone. Erguler 2013 imports (38 species, 87 parameters, FLAG: not at rest) and its Goldbeter–Koshland `piecewise` evaluates to the hand computation at three PERK levels.** Originally filed as a piecewise failure:
-  Filed 2026-09-07. BIOMD0000000446 (Erguler 2013, unfolded protein response,
-  27 species) is the only kinetic ER-stress deposit in any repository and its
-  readouts move in the benchmark (DDIT3 +0.23/+0.54, ATF3 +0.37/+0.74). Its
-  eIF2α rule uses a Goldbeter–Koshland function written as a piecewise that
-  sbmltoodejax cannot translate. Same class as P0.63/P0.66: a translation
-  gap, not a modelling one.
 
 - [ ] **P0.68 — BIOMD0000000105 (Proctor 2007, ubiquitin–proteasome) ships
   `k69 = 0`, against the paper's `1.0E-3 s^-1`.** Filed 2026-09-07. `k69`
@@ -1489,190 +953,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   bistable?" rather than answering it wrongly. Until (b) exists, no
   no-hysteresis claim from a continuation sweep is admissible evidence.
 
-- [x] **P0.16 — `bifurcation.equilibrium` and `hopf_scan` report zero equilibria
-  for any model with a conserved moiety.** *Fixed 2026-08-28.* `equilibrium`,
-  `spectrum`, `critical_eigenvalue`, `first_lyapunov_coefficient`,
-  `fold_coefficient` and `codim1_scan` all take `laws=`. With it the Newton
-  runs on the pinned residual (`steady_state.pin_conserved`, one definition
-  shared with `steady_state`) and the spectrum is read on the leaf tangent
-  space (`steady_state.leaf_basis`). Without it a singular Newton step now
-  logs what is wrong instead of returning `None` in silence.
-  On DallePezze (6 laws over 23 states) the search returns the
-  late-senescence fixed point — SA-β-gal 9.0315, DNA_damage 7.2781, ROS 19.9426
-  — and the spectrum splits into the 6 conserved zeros and 17 real modes at
-  max Re λ = −0.072969, reproducing the referee's hand-derived −0.0730.
-  The second half — real crossings, which is every crossing in that model —
-  is covered by `codim1_scan` replacing `hopf_scan`: detection is by change in
-  unstable dimension rather than by watching one complex pair, a vanished
-  branch is bisected and kept only if the critical eigenvalue really reached
-  zero, and each crossing is classified fold or Hopf with its normal-form
-  coefficient plus, for a fold, the parameter transversality that separates a
-  saddle-node from a transcritical or pitchfork crossing.
-  Regression: `test_bifurcation.py` — the analytic two-state moiety, the
-  DallePezze endpoint, and the three real normal forms.
-  **Remaining limit** (documented, not a defect): continuation is plain
-  Newton, so a branch is followed only until it folds. Where a fold joins two
-  *stable* branches, Newton steps across to the other arm and the scan sees
-  no change; tracing a full hysteresis loop needs a multi-seed sweep per
-  parameter value.
-
-- [x] **P0.24 — `write_param` undid the array coercion, so every parameter
-  value recompiled.** ✓ External project, 2026-08-29. `write_param`
-  (`process.py:82`) is `eqx.tree_at` throughout, and equinox skips
-  `__check_init__` on `tree_unflatten` — which `__check_init__`'s own docstring
-  states. So construction coerced floats to arrays and the *supported setter*
-  handed them straight back as Python floats: static leaves, one compile per
-  distinct value. Measured 2.5–2.7 s per `with_params` call at N=1,000 under
-  `jax.log_compiles`; compile counts for values 0.02/0.05/0.02 were 1/1/0 with a
-  float and 0/0/0 with `jnp.asarray`. This is the exact invariant CLAUDE.md's
-  "structure is static, values are traced" exists to protect, on the route P0.9
-  added to be the one supported way to set a parameter.
-  **Why the guard missed it:** `test_parameter_change_does_not_recompile` built
-  its sweep with `eqx.tree_at(..., jnp.asarray(r))` — applying the coercion
-  inside the test, so it exercised the hand-rolled route `write_param`'s
-  docstring tells callers not to use, with the defect pre-fixed.
-  *Fixed 2026-08-29:* `write_param` coerces through `_as_traced`;
-  `test_with_params_yields_a_traced_array` and
-  `test_with_params_sweep_does_not_recompile` go through the public route with a
-  plain Python float, and both fail without the fix.
-
-- [x] **P0.25 — An unrecognised topology entry is skipped silently, and it
-  decides splitting order.** ✓ External project, 2026-08-29, found by running
-  rather than by grep. `scheduler.py:1068` passes over a topology entry it does
-  not recognise without warning, and that loop determines group ordering and
-  frozen-vs-interpolated coupling. A composite half-migrated to any new port
-  form therefore runs, returns finite numbers, and has mis-ordered its
-  operator splitting. *Fixed 2026-08-29:* raises on an unrecognised entry, which also makes a
-  port-representation migration safe to do incrementally.
-
-- [x] **P0.21 — A coupling edge could be dead, saturated or sign-inverted and
-  only warn.** ✓✓✓ Found across all three NF-κB reviews, 2026-08-31, and the
-  fourth instance of the same pattern: the framework printed a correct warning
-  and nothing acted on it. `psi_bridge` sat at `K = 52` against a driver
-  reaching 27.18 for the whole of its life; `ikkbeta_nfkb` activated on
-  `dp14/IKKbeta`, which is **higher in control (33.65 / 22.3 / u=0.1106,
-  three reviewers) than in DDIS (22.44 / 18.0 / u=0.1038)**, so it fired
-  hardest where the perturbation was absent.
-
-  *Fixed 2026-08-31:* `check_hill_gates` now **raises**. A gate outside its
-  driver's realised range and an activating edge whose driver is higher in
-  every reference condition than in any perturbed one are both definite
-  defects — no value of `K` repairs a sign — and a warning about a definite
-  defect is a warning nobody acts on. `allow_dead_edges=True` is the hatch,
-  mirroring `allow_unidentifiable`. Both checks reuse the operating ranges
-  `check_hill_gates` already computes, so they cost nothing extra. The
-  composite as it stood on 2026-08-30 would now refuse to construct, twice.
-
-- [x] **P0.22 — Ihekwaba 2004 removed from the multi-hallmark composite.**
-  ✓✓✓ Refereed by all three panel agents (`docs/review-ihekwaba2004-wetlab.md`,
-  `docs/review-nfkb-maths.md`, `docs/review-nfkb-physics.md`). The deposit
-  itself is sound — maths returned "accept", and the undeclared time unit turned
-  out to be seconds, confirmed three ways (58/64 constants are Hoffmann 2002 ÷
-  60; period 98 min against a measured ~100). What failed was every seam:
-
-  - **Inert.** 19/24 with both edges live, ablated, or ×10; bit-identical arms
-    when ablated.
-  - **Driven, not perturbed.** `v64` is an IKK sink with no source anywhere, so
-    the edges supplied 100% of the module's IKK; solo it decays to 1.3e-14, and
-    `[IKK]* = u/10.368` predicts all three arms to <1%. A 24-state oscillator
-    collapsing to a one-dimensional static curve.
-  - **Backwards edge** (P0.21 above).
-  - **No SASP.** Its only NF-κB-inducible transcript is its own inhibitor — no
-    IL6, CXCL8, IL1A, CCL2 or MMP — so it could not emit what the data actually
-    moves: **CCL2 +3.05, CXCL1 +2.68, ICAM1 +2.55, IL8/IL6 +1.73** log2FC at
-    D14, nine SASP genes above the 96th percentile of 23,104.
-  - **Wrong reporter class.** NFKBIA flips sign (−0.36 at D07, +0.32 at D14) —
-    IκBα is the early, dose-independent, pulse-tracking target, while the SASP
-    genes are the late persistence-requiring class.
-
-  *Consequences of the removal, all measured:* the composite drops to
-  **16/20 against an 18/20 majority null** (it had tied at 19/24), because
-  NFKBIA had been supplying **3 of the 5 correct down-calls by predicting
-  "down" constantly** — scoring like a null while being one. Only **2 negative
-  calls remain in the whole evaluation set**, so specificity is estimated from
-  n=2 and the metric can no longer discriminate. Fixing that needs reporters
-  with real dynamic range in both directions; the data offers an obvious
-  down-program — **MKI67 −3.60, TOP2A −3.57, BUB1 −3.28, CCNA2 −3.10, LMNB1
-  −2.79**, nine cell-cycle genes below the 1st percentile.
-
-  *Unexpected and load-bearing:* dropping 24 states took the composite from
-  three timescale groups to **one**, so it now uses the single-group fast path.
-  No operator splitting, no `macro_dt` (verified: bit-identical across an 8×
-  refinement), and therefore **P0.2's 17% Lie error and P0.20's span truncation
-  no longer apply to it**. Every day-14 number produced while it had three
-  groups carries that splitting error.
-
-- [x] **P0.20 — The multi-group scan silently ran a shorter span than it was
-  asked for.** ✓✓ Found 2026-08-30 by the NF-κB physics review, reproduced on a
-  two-process toy. `scheduler.py:1121` sized the fixed-length `lax.scan` as
-  `int(round((t1 - t0) / macro_dt))`, i.e. the *nearest* whole number of macro
-  windows rather than enough to reach `t1`. The scan body already clamped its
-  last window (`jnp.minimum(t_start + macro_dt, t1)`), so a short final window
-  was supported — only the count was wrong. Nothing raised.
-
-  The multi-hallmark demo sat exactly on it: `t_start=-1.0`, `t_end=14.0`,
-  `macro_dt=3.5`, so `round(15/3.5) = 4` windows covered 14.0 of 15.0 and the
-  run **stopped at t = 13.0**. Every day-14 reporter was the day-13 value, read
-  by `jnp.interp` clamping to the last sample — and all five of the run's sign
-  errors were at day 14 while both day-7 panels scored 6/6. Rounding could
-  overshoot as easily as undershoot; only the sequential path was safe, because
-  it steps `while t < t1 - _TIME_EPS`.
-
-  *Fixed 2026-08-30:* add a window when the rounded count does not reach `t1`.
-  The three sibling `round()` sites are fine and were checked — `_save_grid`
-  uses `linspace(t0, t1, n)`, which pins both endpoints whatever `n` is; the
-  subsample stride re-appends `n_macro` explicitly; the discrete-firing check
-  floors with an exact-alignment branch. Guarded by
-  `TestSpanIsCoveredWhenMacroDtDoesNotDivideIt`, which asserts the *integrated
-  value* as well as the endpoint, since a run can label its last sample `t1`
-  while having integrated less.
-
-  **It did not change the headline.** Re-scored, the composite is still 19/24;
-  every day-14 value moved further in the relaxing direction and no sign
-  flipped, so "the model produces an acute response and no durable senescent
-  state" is reinforced rather than overturned. Day-7 values moved ≤0.4%, from
-  the macro-window boundaries shifting — which incidentally bounds the Lie
-  splitting error here at well under a percent.
-
-- [x] **P0.19 — A device OOM is reported as a tracing failure and answered by
-  choosing the wrong solver.** ✓ External project, 2026-08-29.
-  `scheduler.py:1490` catches bare `RuntimeError`, and
-  `issubclass(JaxRuntimeError, RuntimeError)` is `True`. An OOM inside
-  `stiffness.py:112` at 10,001 store paths was swallowed and
-  `scheduler.py:1503-1518` logged *"cannot measure group stiffness under tracing
-  (grad/jvp/vmap)"* with no tracing in progress, then degraded every group to
-  `Kvaerno5` — routing the composite onto a dense 10,001×10,001 Newton solve it
-  had just proved it could not allocate. The measured spectral abscissa is flat
-  at 20 (pure neural) / 70 (mixed) across N=100…3,000, so `Tsit5` is correct at
-  every N. The remedy the message suggests, `warm_up`, is the call that failed.
-  *Fixed 2026-08-29, verified by measurement:* `stiffness.py` raises a named
-  `StiffnessNotConcrete` (a `RuntimeError` subclass) at both sites and the
-  scheduler catches that, so resource errors propagate. Re-running the N=10,000
-  probe, the same `RESOURCE_EXHAUSTED` now surfaces from `analyze_groups`,
-  `scheduler_warm_up` and `scheduler_run_eager` instead of being reported as a
-  cold trace, and solver routing is absent rather than a wrong `Kvaerno5`. Narrowing the `except` by ordering would have kept
-  the discrimination-by-coincidence: in JAX 0.10 every *tracer* error is a
-  `TypeError`, and the `RuntimeError` the scheduler wanted was one
-  `stiffness.py` raises deliberately.
-
-- [x] **P0.26 — A batched `y0` writing an ASSIGNED path is silently ignored.**
-  ✓ External project, 2026-08-29. Four distinct per-member setpoints written
-  into a batched `y0` produced an endpoint spread of exactly 0.0 with no
-  warning: the path was ASSIGNED, so `composite.py:169` overwrites the column
-  from the process parameter on every RHS call. A population study that varies
-  an assigned quantity per member therefore returns one repeated trajectory that
-  looks like a legitimate null result.
-  *Fixed 2026-08-31.* Reproduced first — four members given setpoints
-  0.1/0.4/0.7/1.0 all ended at the process's own 0.5, spread exactly 0.0, no
-  warning. `Scheduler.run` now refuses, as one more entry in the existing
-  `is_batched` blockers so a caller with several batching problems gets one
-  message, and it names the offending path. It fires only when the column
-  actually *varies* across members; a uniform value is just the default.
-  Regressions in `test_multiscale.py::TestBatchedAssignedPaths`.
-  **Known hole:** the check reads concrete values, so it is a no-op when `y0`
-  is traced under `vmap`/`jit` — it guards the eager path only, the same shape
-  of gap as P0.1.
-
 - [ ] **P0.27 — An affine unit yields a garbage multiplier, silently.**
   `conversion_factor` (`units.py:25`) returns
   `parse_expression(from).to(to).magnitude`, which is **f(1)**. That is the
@@ -1694,54 +974,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   d/dt(ax + b) = a dx/dt, so the offset must be applied on reads and on
   ASSIGNED/LATCHED/INPUT values but **never** on an EVOLVED write. Applying it
   there is a second silent-wrong.
-
-- [x] **P0.17 — FIXED 2026-09-06. `atol_scale` froze the tolerance on a
-  decaying state, and the solve returned 10⁵⁷ with `ok=True`.** ✓✓ From an off-attractor IC on GZ06,
-  HallSim returns **−1.53e57** where scipy Radau / LSODA / DOP853 at rtol 1e-10
-  all return **+9.9584e-6**, at every horizon ≥ 100 with `macro_dt ≥ 100`:
-
-  ```
-  t_end ≤  50   HallSim  9.98e-06   scipy 9.9584e-06   agree
-  t_end = 100   HallSim -4.749e+03  scipy 9.9584e-06   ok=True
-  t_end = 2000  HallSim -1.530e+57  scipy 9.9584e-06   ok=True
-  macro_dt 10 or 1 → correct;  macro_dt 100+ → diverged, ok=True
-  ```
-
-  Cause: `scheduler.py:1566`, `atol_vec = max(atol, atol_scale·|y₀|)` with
-  `DEFAULT_ATOL_SCALE = 1e-6`. At `x(0) = 13.57` the tolerance on x freezes at
-  1.357e-5 for the whole solve — larger than the value x decays to, and 14% of
-  the distance to that model's pole at `x = −k = −1e-4`. Confounds separated:
-  rtol ±6 orders, `newton_atol` ±8 orders, `dt0` and `max_steps` change nothing;
-  pinning `Kvaerno5` fixes it; `atol_scale ≤ 1e-7` is correct.
-  **The failure is tolerance-insensitive**, so the loose-vs-tight screen calls it
-  converged, and `_guard_result` inspects only diffrax's RESULTS code, never the
-  values.
-  **The "not currently active" reading was wrong.** Re-found 2026-09-06 from the
-  other end — a Dwivedi 2014 review measured `jax.jacfwd` through
-  `Scheduler.run` as 0.40% off central differences **from the deposit's own
-  IC**, invariant to `rtol` 1e-6…1e-12 and `newton_atol` 1e-6…1e-14. That is
-  this entry: not a broken AD path but a correct gradient of a trajectory
-  integrated to the wrong tolerance. On a 2-state stiff probe
-  (`scratch/2026-09-06-gradient/`) the default cost **4.5% on the value and
-  2.6% on the gradient**, resolving a state that had decayed to 1.66e-6
-  against an `atol` frozen at 1e-6 — 60% of the answer. It reaches every
-  calibration through a stiff group, which is most of them.
-
-  **Fixed by removing the state scaling outright**, not by lowering the
-  constant. `rtol` already scales the error allowance by the *current* state,
-  which is what `atol_scale·|y₀|` was doing with stale data; `atol` is now a
-  true floor near zero, shared by every group. `DEFAULT_ATOL_SCALE`, the
-  `atol_scale` argument and `Scheduler._scaled_tolerances` are gone.
-
-  Measured cost of the removal: DP14 34.2 → 38.8 ms, GZ06 26.2 → 27.5 ms, both
-  trajectories moving ~1e-5 relative. The DP14 13.3 s → 1.7 s speedup this
-  scaling was credited with came from **stiffness routing** (Kvaerno5 over
-  Tsit5), which is untouched. After: value error 4.5% → 0.019%, gradient
-  2.6% → 0.0054%. Regression test in
-  `tests/unit/test_stiffness_routing.py::TestToleranceIsNotStateDerived`.
-
-  *Still open from this entry:* `_guard_result` inspects only diffrax's RESULTS
-  code, never the values, so a diverged solve can still report `ok=True`.
 
 - [ ] **P0.18 — `suggest_hill_gate` exists and no one runs it, so a coupling
   edge can be placed outside its driver's entire range.** ✓✓ `psi_bridge` gates
@@ -1792,28 +1024,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   one. See the 2026-08-30 (night) diary entry. The r = 1.26 finding above
   survives intact and still bounds the result: the admissible K window is
   5.53–7.00, so the control arm sits only 12% clear of the Hopf.
-
-- [x] **P0.28 — A cold stiffness cache under `jit`/`grad`/`vmap` crashed with a
-  numpy message instead of degrading.** Found 2026-08-30 taking a gradient
-  through a perturbation sweep — the first time `Scheduler.run` was called
-  inside a transform with an unresolved cache. `stiffness.py:280` did
-  `np.asarray(composite.evolved_indices(...))`, and under a transform those
-  indices arrive traced, so it raised
-  `TracerArrayConversionError: The numpy.ndarray conversion method __array__()
-  was called on traced array with shape int32[200]` — uncaught, because it is a
-  `TypeError` and the scheduler catches `StiffnessNotConcrete`. The degradation
-  path that P0.19 established existed but was unreachable: the raise happens one
-  site *earlier* than `_restricted_jacobian`, which is where P0.19 put the
-  named exception.
-  *Fixed 2026-08-30:* that conversion goes through `_concrete`, so it raises
-  `StiffnessNotConcrete` and the scheduler degrades as designed. The shared
-  message now names the remedy (`call Scheduler.warm_up(y0) once eagerly before
-  differentiating`) rather than describing a Jacobian, since it covers both
-  sites.
-  **What it cost, measured on the same sweep:** degraded (all groups
-  `Kvaerno5`) 571.5 ms/arm; after an eager `warm_up` resolving to `Tsit5`,
-  **22.5 ms/arm — 19x.** That is the practical price of P0.1's open half, on a
-  real workload rather than the demo.
 
 - [~] **P0.29 — `Scheduler`'s three caches are keyed on a signature that does
   not identify the composite, so a reused `Scheduler` returns another
@@ -1986,28 +1196,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   artefact rather than a log line no handler is listening for (~2 h).
   (4) The structural fix is the equivalence test in P1.16.
 
-- [ ] **P0.31 — `derivative()` or `assign()` returning an undeclared port is
-  silently dropped.** Found 2026-08-31 (external systems review).
-  `_FlatRHS.__call__` (`composite.py:325-331`) iterates `write_map.ports` and
-  does `if port not in raw: continue`; nothing checks the converse.
-  `assign()` has the same shape at `composite.py:262-264`. Measured — a process
-  declaring only `x` and returning `{"x": -s["x"], "typo_port": 99.0}` gives
-  `rhs(0, y0) == [-1.]`, the 99.0 contribution gone with no warning. A renamed
-  or mistyped port name is the single most likely authoring error and the one a
-  generated `Process` will make.
-  **Free to fix.** `_FlatRHS.__call__` runs in Python at *trace* time, so a set
-  comparison there never enters the jaxpr and costs nothing at runtime:
-  `extra = raw.keys() - set(write_map.ports)` → raise naming the undeclared
-  ports and the declared set. ~10 lines across `derivative` and `assign`, 1 hour.
-  Same rule as P0.4 (`dose_window=None` silently deleting a hallmark dial):
-  **an operation that resolves to nothing must say so.** Worth fixing as one
-  rule rather than two instances.
-  *Related but not a raise:* omitting a *declared* EVOLVED port from
-  `derivative()` silently freezes that state (a process declaring `x` and `z`
-  but returning only `x` gives `[-1., 0.]`). That is legitimately allowed — a
-  process may contribute conditionally — so the answer is the per-path
-  contributor report in P2.7, not an error.
-
 - [ ] **P0.32 — `semantic_validation={}` silently disables the entire
   validation layer.** Found 2026-08-31 (external systems review).
   `composite.py:400` is `if semantic_validation:`, and `{}` is falsy. Measured
@@ -2059,50 +1247,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   event-condition evaluation outside jit. Until this is closed, no timing
   number from an event composite means anything, and the multi-rate path
   cannot be recommended for the models it was built for.
-
-- [x] **P0.51 — the stop rule fired a second time, on the *continuous* path:
-  a parameter sweep re-resolved the solver on every arm.** Measured and
-  **fixed 2026-09-05**. Distinct from P0.35, which is the event machinery.
-
-  Hand-rolled `dfx.diffeqsolve` beat `Scheduler.run` by **4.1x and 5.9x** per
-  warm arm on BIOMD703 and BIOMD318, with **92 and 166 XLA compiles against 2**,
-  at identical solver step counts (37/38.5 and 155/155) and endpoints agreeing
-  to 1.2e-7 and 1.6e-9. Same maths, same work.
-
-  **Cause, measured by neutralising each candidate** (stiff 8-state composite,
-  6 arms, `HALLSIM_COMPILATION_CACHE_DIR=off`):
-
-  ```
-  hand-rolled (one filter_jit)   0.0016 s/arm    7 compiles first / 0 warm
-  Scheduler, before              0.0327 s/arm   78 compiles first / 0 warm
-  Scheduler, digest neutralised  0.0038 s/arm    1 compile  first / 0 warm
-  ```
-
-  The P0.29 parameter digest is **~90%** of it. Keying the stiffness verdict on
-  concrete parameter values is correct — the verdict *is* a function of them —
-  but a sweep changes a value every arm by construction, so every arm missed
-  and re-resolved. The remaining **2.4x** is eager orchestration around the
-  compiled core.
-
-  **Calibration was never affected**, contrary to the obvious worry: under
-  `jax.grad` the parameters are tracers, the digest abstains, and the warm-up
-  verdict is reused. Verified by counting `analyze_groups` calls — **6 optimiser
-  steps, 0 analyses**, against 6 analyses for 6 eager arms. (The first attempt
-  at that instrument patched `hallsim.stiffness.analyze_groups`, which the
-  scheduler binds at import, so it counted zero everywhere and read as "nothing
-  happened". Patch `hallsim.scheduler.analyze_groups`.)
-
-  *Fixed:* `run(plan, params_from=composite)` substitutes parameter values into
-  a plan's existing resolution, guarded by `structural_fingerprint()` so only
-  values may differ. **0.0327 -> 0.0038 s/arm, 8.6x, compiles 78 -> 1** —
-  identical to ignoring parameter values, except the caller now *asserts* the
-  verdict holds instead of a cache silently assuming it.
-  `Scheduler.verify_plan(plan, composite)` measures that assertion and returns
-  the groups whose verdict moved; run it against fitted parameters at the end of
-  a fit. That closes review open question 3.
-  Bit-exactness: 28 reference arrays, **0.000e+00** against HEAD without the
-  change.
-  **Still open:** the 2.4x orchestration residual, now the whole remaining gap.
 
 - [ ] **P0.52 — `single_process_composite` cannot run 4% of BioModels.**
   Found 2026-09-05 while building a Jacobian corpus. The shipped helper for
@@ -2265,26 +1409,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   of those failed and, for a non-`calibratable` field, that fitting it is
   unsupported. The check is cheap and the failure it replaces is unreadable.
 
-- [x] **P1.12 — `screen_process` passes a model sitting 67 384 units/day from
-  its own rest state.** *Fixed 2026-08-25.* Fourth failure mode `not_at_rest`,
-  reported as a time: `ScreenReport.rest_tau` / `.rest_state` from the new
-  public `diagnostics.rest_timescale(composite, y0)`. Flags when the fastest
-  state's τ falls below the save interval — that state has relaxed before the
-  first sample, so nothing saved is the declared IC. Advisory (does not gate
-  `ok`), and a live time-dependent term at t=0 is named in the detail rather
-  than counted as disequilibrium, via the new `steady_state.is_autonomous`
-  predicate split out of `warn_if_time_dependent`. DallePezze now screens
-  `NOT-AT-REST` at **τ = 0.000148 d = 12.8 s on `dp14/Mitophagy`**, matching
-  the reviewer's hand-derived 13 s. Added to the intake protocol in
-  `CLAUDE.md` beside the other three.
-  What it replaces: the screen checked exploding, vanishing and
-  tolerance-sensitivity, none of which notice that a declared initial condition
-  is nowhere near a steady state. One RHS evaluation would have caught P0.14 at
-  import, before any composite was built. Three independent parties — two
-  reviewers, an outside calibration agent, and an outside model-building agent
-  that chose a 30-day equilibration blind — each hand-rolled this measurement
-  because nothing reported it.
-
 - [ ] **P1.13 — Structurally redundant parameters are invisible before a fit.**
   DallePezze's `k33` and `k34` carry the *identical* rate law
   `k·Mito_mass_turnover·mTORC1_pS2448` — the field is invariant under
@@ -2429,22 +1553,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   Assignment-rule species report stale constants; a model's own conservation is
   visibly violated in the output with no warning. Fluxes are unreadable and
   unusable as coupling sources.
-- [x] **P2.6 — Three documents describe three different reporter sets**, none
-  matching the code. *Fixed 2026-08-23.* All three now state the live set —
-  CDKN1A, GLB1, BNIP3, DDB2, MDM2, NFKBIA with their real store paths — and
-  `tests/unit/test_gene_reporters.py::TestPublishedReporterTable` parses each
-  one and compares it to `MULTI_HALLMARK_REPORTERS`, so they fail rather than
-  drift. The two markdown tables sit inside `<!-- reporters:start/end -->`
-  markers, leaving prose elsewhere free to name any gene. Also corrected while
-  in there: `dataset.md` described the held-out arm as `RAPA_vs_DDIS` against a
-  time-matched comparator, where the code runs `RAPA_vs_ctrl` normalised within
-  the arm to `ETOPOSIDE_D00`; `calibration.md`'s worked example said the same
-  and described summaries as co-solved `RunningIntegral`s, which the multi-hallmark demo
-  stopped using in favour of post-hoc zero-phase filters.
-  **Found while fixing, not fixed:** `demos/multi_hallmark_hybrid.py:492` reads
-  `gz06/x2_integral`, a store path the composite no longer has — that demo
-  cannot run.
-
 - [ ] **P2.7 — The `ValidationReport` is computed on every construction and
   thrown away, including the interaction graph P2.1 is asking for.** Found
   2026-08-31 (external systems review). `Composite.__init__` builds a full
@@ -2484,33 +1592,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
 ---
 
 ## P3 — capability gaps
-
-- [x] **P3.0 — SBML events that assign to a parameter are silently skipped,
-  so a constituent cannot run its own published experiment.** *Fixed
-  2026-09-04.* `translate_events` keeps a parameter target and records it in
-  `_param_targets`; `expand_events` promotes it on the owning process through
-  the existing `ImportedODEProcess.with_param_input`, so the assignment
-  reaches the rate laws through a store path. The event gets an INPUT read
-  port for the target as well, because the handler applies an assignment as a
-  delta and needs the current value, and the LATCHED write port starts at the
-  parameter's published value rather than zero.
-  `expand_events` now returns the promoted owner alongside the event
-  processes, and its topology row carries only the promoted-parameter
-  entries for the caller to merge.
-  Two further defects surfaced on the same path and are fixed with it:
-  **a zero delay was read as a delay** (COPASI writes `<delay>0</delay>` on
-  every event it exports, so every COPASI model with events was refused for a
-  delay it does not have — only a nonzero delay raises now, and a
-  state-dependent one still does), and **rule-defined ModelValues would not
-  resolve** (COPASI exports a constant as a non-constant parameter plus an
-  assignment rule, e.g. `DNAdamagefoci_0 = Gy * FociPerGy`, which was absent
-  from the constant table; `fold_constant_rules` folds those to a fixpoint and
-  leaves genuinely dynamic rules alone).
-  Verified on both models this blocked. Yao 2008 (BIOMD0000000318): `e1`/`e2`
-  translate, targets `['S']`. Kollarovic 2016 (BIOMD0000000632): imports
-  `[PASS]` with ‖f(y₀)‖/‖y₀‖ = 1.3e-16, and the dose now lands — at 0/5/20 Gy
-  `TAF` goes 0.506/2.684/4.861, p21 1.00/3.66/10.31 and CycE-Cdk2 activity
-  2.28/0.008/0.00006.
 
 - [ ] **P3.1 — Severity cannot be a state.** A hallmark dial is a constant set
   before the run, so aging is imposed as an initial condition. For an attractor
@@ -2664,71 +1745,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   the mutually-coupled block once is also the more useful report. **The
   annotation-granularity half of this entry is still open** — there is still no
   per-Process port declaration and no per-process opt-out.
-
-- [x] **P3.12 — A port is structurally a scalar store path, so an N-dimensional
-  field costs N ports.** *Closed 2026-08-31.* ✓ External project, 2026-08-29. `Port`
-  (`process.py:176-215`) has no shape field, so a Process writing a 10,000-gene
-  field declares 10,000 ports and `_port_view` (`composite.py:159`) rebuilds them
-  as 10,000 traced scalars on every RHS call. Measured RHS jaxpr size grows at
-  **6.00 equations per gene** — 1,631 / 2,831 / 7,031 / 19,031 / 61,031 at
-  N = 100 / 300 / 1,000 / 3,000 / 10,000 — against **54, flat at every N**, for
-  hand-rolled JAX/Diffrax doing identical maths. At N=1,000 the graph is ~96 %
-  `slice` + `squeeze` + `mul`. The whole slope comes from one process; the cost
-  is trace and compile, not run (at N=3,000 the reverse pass is 244× on compile
-  and 5.9× on run, and the run ratio *falls* with N).
-  The per-port work carries real semantics — `idx`, and the `rf`/`wf` unit
-  conversion factors — but all three are `eqx.field(static=True)` and therefore
-  known at build time, so this is a static contract being re-enforced as traced
-  graph nodes on every call.
-  *Fix — array-valued ports, prototyped 2026-08-29 in a patched copy:* **243
-  jaxpr equations at every N from 100 to 10,000**; at N=10,000 the reverse pass
-  goes 304.6 s of trace+compile → 1.13 s (269×), `Scheduler.warm_up` 15.6 → 2.8 s,
-  and the endpoint is **bit-exact** through a full Diffrax solve
-  (`max_abs_diff = 0.0`). Write semantics survive by measurement: a duplicate
-  index inside a block still sums, vector∩vector and vector∩scalar overlaps sum,
-  and an EXCLUSIVE clash one element deep raises and names the element —
-  provided validation iterates `(port, path)` pairs.
-  Two constraints on doing it:
-  - **One `ontology` ID for a block breaks merge-or-couple.**
-    `analyze_composability` would propose merging two unrelated 10,000-element
-    blocks annotated with the same SBO term. Either exclude array ports from
-    ontology matching or add an `element_ontology`.
-  - **The migration is not incremental until P0.25 is fixed**, because a
-    half-migrated composite silently mis-orders its splitting rather than
-    failing.
-  **Closed 2026-08-31.** A port binds a *list* of store paths:
-  `topology[proc][port]` is always a tuple, normalised once in
-  `Composite.__init__`, and `Port(elements=...)` declares a block gathered and
-  scattered as one slice. Measured on the VCC composite, CPU, against the CPU
-  baseline: **871 jaxpr equations at N=300, 3,000 and 10,000 alike**, against
-  2,831 / 7,031 / 61,031 — slope 6.00 -> 0.00. At N=1,000 the gradient path is
-  **85.2 s -> 8.95 s (9.5x)**, RHS trace 11.8x, grad trace 11.3x. Block and
-  scalar spellings agree to exactly 0.0 on store order, initial state and RHS
-  output. The LLVM compile wall at N=10,000 is structurally gone. Guarded by
-  `test_block_port_rhs_is_flat_in_width` and — because the first scatter
-  rewrite silently cost the *scalar* path a broadcast per port —
-  `test_scalar_port_cost_per_port_does_not_regress`.
-  *Superseded detail — partially addressed 2026-08-29, the multiply half.* Port maps are now
-  `(ports, indices, factors)` and `_port_view` does one gather plus one
-  elementwise multiply per *process*; the write side stacks once before one
-  vector multiply. Framework multiplies went from 2N to **2, independent of N**.
-  Re-measured on the same probe: **slope 6.00 -> 4.00 eqns/gene** (1,631->1,342,
-  7,031->4,942, 61,031->40,942 at N = 100 / 1,000 / 10,000 — exactly 2N at each).
-  At N=1,000 the full gradient path is **107 s -> 70 s** (grad trace 73.71->39.82,
-  batch_grad_compile 66.46->51.57). **Run time is unchanged** — XLA already folded
-  the identity multiplies — so this is trace/compile only.
-  The residual per-gene framework cost is `slice` + `squeeze` — the
-  dict-of-scalars interface itself — which only array ports remove. The factor
-  arrays this builds are what an array port consumes, so it is a step in, not
-  work to unwind.
-  **Priority note (written 2026-08-29, superseded):** array ports buy throughput
-  but do not change what gets allocated, so they no longer head the queue —
-  P3.10's dense Jacobian is what blocks N=10,000 outright. That held until the
-  matrix-free stiffness path landed on 2026-08-31; see P3.10.
-  Refuted alternative: keeping scalar ports and grouping contiguous index runs
-  inside `_port_view` measures 9 equations *worse* than the free fix of eliding
-  the identity unit multiply, with an identical slope and `slice` unchanged at
-  2,203 — it cannot work while `derivative` receives `dict[str, scalar]`.
 
 - [~] **P3.13 — P3.12 flattened the per-*port* slope; the per-*process* slope is
   still there, unmeasured, and superlinear in compile.**

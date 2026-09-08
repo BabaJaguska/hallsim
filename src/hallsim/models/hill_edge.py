@@ -37,7 +37,7 @@ class HillEdge(Process):
     )
     # Per-source, so not scalars, and `calibratable` is a scalar surface
     # (`Process.calibratable_params` floats the field). Place them with
-    # `place_hill_gate` instead of fitting them. See P0.54.
+    # `place_hill_gate` instead of fitting them.
     K: tuple = (1.0,)  # per-source half-saturation threshold
     n: tuple = (2.0,)  # per-source Hill cooperativity
 

@@ -1016,7 +1016,7 @@ class TestSolveStatus:
 
     @pytest.mark.xfail(
         strict=True,
-        reason="Known failure, tracked as P0.1 in docs/known-problems.md. A "
+        reason="Known failure, in the defect worklist. A "
         "batched run traces, so stiffness cannot be measured and the fallback "
         "takes the implicit solver; a solo run measures and takes the "
         "explicit one. Same problem, two solvers, 1.1e-4 apart. Closing it "
@@ -2016,8 +2016,8 @@ def test_plan_reuse_matches_a_fresh_run_per_parameter_value():
 
 def test_plan_reuse_refuses_a_different_structure():
     """Only values may differ. A different wiring reuses column indices and a
-    traced core that belong to another composite — the P0.29 failure, which
-    the structural fingerprint exists to make unreachable."""
+    traced core that belong to another composite — the failure the structural
+    fingerprint exists to make unreachable."""
     from hallsim.scheduler import Scheduler
 
     sched = Scheduler()

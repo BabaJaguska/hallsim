@@ -56,7 +56,7 @@ class TestHillEdge:
 
     def test_the_calibratable_surface_is_the_scalar_rate_law(self):
         """`K`/`n` are per-source tuples; the calibratable surface is scalar
-        (P0.54), so they are placed rather than fitted."""
+        so they are placed rather than fitted."""
         assert {p.field for p in _edge().calibratable_params()} == {
             "basal",
             "hi",

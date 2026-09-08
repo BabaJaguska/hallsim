@@ -1037,7 +1037,7 @@ def test_event_and_discrete_order_survives_a_pytree_round_trip():
     """Firing order is semantic — the Scheduler applies each delta immediately,
     so a later process reads what an earlier one wrote. JAX sorts dict keys on
     any flatten/unflatten, so insertion order would differ between a solo run
-    and a jitted or batched one (P0.41)."""
+    and a jitted or batched one."""
     import equinox as eqx
     import jax
 
@@ -1073,3 +1073,88 @@ def test_event_and_discrete_order_survives_a_pytree_round_trip():
         list(eqx.tree_at(lambda c: c.initial, comp, {}).event_processes())
         == expected
     )
+
+
+class TypoDerivative(Process):
+    """Declares ``x``, returns ``x`` plus a port that does not exist."""
+
+    def ports_schema(self):
+        return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+    def derivative(self, t, state):
+        return {"x": -state["x"], "typo_port": 99.0}
+
+
+class TypoAssign(Process):
+    """Declares ASSIGNED ``a``, assigns ``a`` plus a port that does not
+    exist."""
+
+    def ports_schema(self):
+        return {
+            "a": Port(role=PortRole.ASSIGNED, default=1.0),
+            "src": Port(role=PortRole.INPUT, default=0.0),
+        }
+
+    def assign(self, t, state):
+        return {"a": 2.0 * state["src"], "typo_port": 99.0}
+
+
+class TestUndeclaredPortsRaise:
+    """A returned port with no column in the scatter is dropped, and a
+    dropped term is indistinguishable downstream from one never modelled."""
+
+    def test_derivative_naming_an_undeclared_port_raises(self):
+        comp = Composite(
+            processes={"p": TypoDerivative()},
+            topology={"p": {"x": "x"}},
+            validate=False,
+        )
+        rhs, keys = comp.build_rhs()
+        with pytest.raises(ValueError, match=r"typo_port"):
+            rhs(0.0, comp.initial_state_vec(keys))
+
+    def test_assign_naming_an_undeclared_port_raises(self):
+        comp = Composite(
+            processes={"p": TypoAssign()},
+            topology={"p": {"a": "a", "src": "s"}},
+            validate=False,
+        )
+        rhs, keys = comp.build_rhs()
+        with pytest.raises(ValueError, match=r"typo_port"):
+            rhs(0.0, comp.initial_state_vec(keys))
+
+    def test_the_message_names_the_process_and_what_is_declared(self):
+        comp = Composite(
+            processes={"decayer": TypoDerivative()},
+            topology={"decayer": {"x": "x"}},
+            validate=False,
+        )
+        rhs, keys = comp.build_rhs()
+        with pytest.raises(ValueError) as excinfo:
+            rhs(0.0, comp.initial_state_vec(keys))
+        msg = str(excinfo.value)
+        assert "decayer.derivative()" in msg
+        assert "['x']" in msg
+
+    def test_omitting_a_declared_port_is_still_allowed(self):
+        """A process may contribute conditionally, so a *missing* declared
+        port freezes that state rather than raising — the converse case."""
+
+        class Partial(Process):
+            def ports_schema(self):
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=1.0),
+                    "z": Port(role=PortRole.EVOLVED, default=1.0),
+                }
+
+            def derivative(self, t, state):
+                return {"x": -state["x"]}
+
+        comp = Composite(
+            processes={"p": Partial()},
+            topology={"p": {"x": "x", "z": "z"}},
+            validate=False,
+        )
+        rhs, keys = comp.build_rhs()
+        dy = rhs(0.0, comp.initial_state_vec(keys))
+        assert jnp.allclose(dy, jnp.array([-1.0, 0.0]))

@@ -77,13 +77,20 @@ def alpha_arpack(J):
 
     k = max(1, min(stiff_mod.ITERATIVE_EIGS_K, n - 2))
     try:
-        ev = eigs(J.astype(float), k=k, which="LM",
-                  return_eigenvectors=False, maxiter=n * 100)
+        ev = eigs(
+            J.astype(float),
+            k=k,
+            which="LM",
+            return_eigenvectors=False,
+            maxiter=n * 100,
+        )
     except Exception as exc:
         return None, f"{type(exc).__name__}"
     decay = -ev.real
     pos = decay[decay > 0]
-    return (float(pos.max()) if pos.size else 0.0), float(np.abs(ev.imag).max())
+    return (float(pos.max()) if pos.size else 0.0), float(
+        np.abs(ev.imag).max()
+    )
 
 
 def label_of(key):
@@ -100,8 +107,11 @@ def label_of(key):
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout,
-                        format="%(asctime)s %(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format="%(asctime)s %(levelname)s: %(message)s",
+    )
     files = sorted(CACHE.glob("*.npz"))
     if not files:
         sys.exit(f"no corpus at {CACHE}; run build_jacobian_corpus.py first")
@@ -109,7 +119,11 @@ def main():
     rows = []
     for f in files:
         J = np.load(f, allow_pickle=True)["J"]
-        if J.ndim != 2 or J.shape[0] != J.shape[1] or not np.all(np.isfinite(J)):
+        if (
+            J.ndim != 2
+            or J.shape[0] != J.shape[1]
+            or not np.all(np.isfinite(J))
+        ):
             continue
         t = time.perf_counter()
         a = alpha_exact(J)
@@ -122,33 +136,53 @@ def main():
         t_arp = time.perf_counter() - t
         im_exact = float(np.abs(np.linalg.eigvals(J).imag).max())
 
-        rows.append({
-            "key": f.stem, "n": int(J.shape[0]), "class": label_of(f.stem),
-            "alpha_exact": a, "omega_sym": w, "alpha_arpack": a_arp,
-            "max_abs_im_exact": im_exact,
-            "max_abs_im_arpack": im_arp if isinstance(im_arp, float) else None,
-            "t_exact_s": t_exact, "t_omega_s": t_omega, "t_arpack_s": t_arp,
-            "dt_cross_exact": THRESH / a if a > 0 else None,
-            "dt_cross_omega": THRESH / w if w > 0 else None,
-        })
+        rows.append(
+            {
+                "key": f.stem,
+                "n": int(J.shape[0]),
+                "class": label_of(f.stem),
+                "alpha_exact": a,
+                "omega_sym": w,
+                "alpha_arpack": a_arp,
+                "max_abs_im_exact": im_exact,
+                "max_abs_im_arpack": (
+                    im_arp if isinstance(im_arp, float) else None
+                ),
+                "t_exact_s": t_exact,
+                "t_omega_s": t_omega,
+                "t_arpack_s": t_arp,
+                "dt_cross_exact": THRESH / a if a > 0 else None,
+                "dt_cross_omega": THRESH / w if w > 0 else None,
+            }
+        )
 
     (OUT / "abscissa_methods.json").write_text(json.dumps(rows, indent=1))
 
     # --- 1. soundness -----------------------------------------------------
     tol = 1e-9
-    viol = [r for r in rows
-            if r["omega_sym"] < r["alpha_exact"] * (1 - tol) - tol]
-    print(f"\n  === 1. soundness: omega >= alpha ===")
+    viol = [
+        r for r in rows if r["omega_sym"] < r["alpha_exact"] * (1 - tol) - tol
+    ]
+    print("\n  === 1. soundness: omega >= alpha ===")
     print(f"  Jacobians            : {len(rows)}")
     print(f"  violations           : {len(viol)}")
     for r in viol[:5]:
-        print(f"    {r['key']:22s} n={r['n']:4d} omega={r['omega_sym']:.6g} "
-              f"< alpha={r['alpha_exact']:.6g}")
+        print(
+            f"    {r['key']:22s} n={r['n']:4d} omega={r['omega_sym']:.6g} "
+            f"< alpha={r['alpha_exact']:.6g}"
+        )
 
-    ratios = np.array([r["omega_sym"] / r["alpha_exact"] for r in rows
-                       if r["alpha_exact"] > 0])
-    print(f"  omega/alpha          : median {np.median(ratios):.3f}  "
-          f"p90 {np.percentile(ratios, 90):.3f}  max {ratios.max():.3g}")
+    ratios = np.array(
+        [
+            r["omega_sym"] / r["alpha_exact"]
+            for r in rows
+            if r["alpha_exact"] > 0
+        ]
+    )
+    print(
+        f"  omega/alpha          : median {np.median(ratios):.3f}  "
+        f"p90 {np.percentile(ratios, 90):.3f}  max {ratios.max():.3g}"
+    )
     print(f"  exact within 1%      : {(ratios < 1.01).sum()}/{ratios.size}")
 
     # --- 2. verdict impact ------------------------------------------------
@@ -156,27 +190,47 @@ def main():
     both = [r for r in rows if r["dt_cross_exact"] and r["dt_cross_omega"]]
     band = np.array([r["dt_cross_exact"] / r["dt_cross_omega"] for r in both])
     print(f"  models with a crossing point : {len(both)}")
-    print(f"  dt band width (exact/omega)  : median {np.median(band):.3f}  "
-          f"p90 {np.percentile(band, 90):.3f}  max {band.max():.3g}")
+    print(
+        f"  dt band width (exact/omega)  : median {np.median(band):.3f}  "
+        f"p90 {np.percentile(band, 90):.3f}  max {band.max():.3g}"
+    )
     print(f"  band within 10%              : {(band < 1.1).sum()}/{band.size}")
 
     # --- 3. does ARPACK LM recover the abscissa? --------------------------
-    print(f"\n  === 3. shipped ARPACK which='LM' vs exact ===")
-    print(f"  {'class':>14} {'n':>4} {'arpack/exact':>13} {'im arpack/exact':>16}")
-    for cls in ("oscillatory", "settled", "non-normal", "unclassified",
-                "vendored"):
-        sel = [r for r in rows if r["class"] == cls
-               and isinstance(r["alpha_arpack"], float)
-               and r["alpha_exact"] > 0]
+    print("\n  === 3. shipped ARPACK which='LM' vs exact ===")
+    print(
+        f"  {'class':>14} {'n':>4} {'arpack/exact':>13} {'im arpack/exact':>16}"
+    )
+    for cls in (
+        "oscillatory",
+        "settled",
+        "non-normal",
+        "unclassified",
+        "vendored",
+    ):
+        sel = [
+            r
+            for r in rows
+            if r["class"] == cls
+            and isinstance(r["alpha_arpack"], float)
+            and r["alpha_exact"] > 0
+        ]
         if not sel:
             continue
         rat = np.array([r["alpha_arpack"] / r["alpha_exact"] for r in sel])
-        imr = np.array([(r["max_abs_im_arpack"] or 0.0)
-                        / max(r["max_abs_im_exact"], 1e-300) for r in sel])
+        imr = np.array(
+            [
+                (r["max_abs_im_arpack"] or 0.0)
+                / max(r["max_abs_im_exact"], 1e-300)
+                for r in sel
+            ]
+        )
         miss = int((rat < 0.99).sum())
-        print(f"  {cls:>14} {len(sel):4d} "
-              f"median {np.median(rat):.3f}, under-reports {miss:2d} "
-              f"  median {np.median(imr):.3f}")
+        print(
+            f"  {cls:>14} {len(sel):4d} "
+            f"median {np.median(rat):.3f}, under-reports {miss:2d} "
+            f"  median {np.median(imr):.3f}"
+        )
 
     # --- timing -----------------------------------------------------------
     big = [r for r in rows if r["n"] >= 32]
@@ -184,8 +238,10 @@ def main():
         te = sum(r["t_exact_s"] for r in big)
         to = sum(r["t_omega_s"] for r in big)
         print(f"\n  === timing, n >= 32 ({len(big)} models) ===")
-        print(f"  eigvals total {te * 1e3:8.1f}ms   omega total "
-              f"{to * 1e3:8.1f}ms   speedup {te / max(to, 1e-12):.1f}x")
+        print(
+            f"  eigvals total {te * 1e3:8.1f}ms   omega total "
+            f"{to * 1e3:8.1f}ms   speedup {te / max(to, 1e-12):.1f}x"
+        )
 
 
 if __name__ == "__main__":
