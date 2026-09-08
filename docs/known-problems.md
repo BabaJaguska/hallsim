@@ -438,23 +438,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `y0` instead of BNIP3, DDB2 and MDM2 — correct data, unreadable labels. It
   now takes `labels` and `calibration_report` passes the gene symbols.
 
-- [ ] **P0.63 — A large integer literal in an SBML file overflows on import,
-  and the model is rejected as EXPLODING.** Filed 2026-09-06.
-
-  Proctor 2010 (BIOMD0000000293, 140 species, 88% annotated, curated) fails
-  with `OverflowError: ... Got <class 'int'> with value 11390625000000000000`
-  — 1.139e19, past int64's 9.22e18. It is a rate constant, not an index, so
-  it should be imported as a float; SBML has no integer type for parameters
-  and the value is only an int because it was written without a decimal point.
-
-  Rejected as `EXPLODING + TOLERANCE-SENSITIVE, max|y| = inf`, which is the
-  P0.59 pattern again — a construction failure reported as a numerical one.
-  P0.59's `did_not_construct` covers the composite-build step; this one raises
-  inside the solve, so it slips past.
-
-  *Fix:* coerce numeric SBML literals to float at import. One line, and it
-  recovers a curated deposit.
-
 - [ ] **P0.65 — A coupling edge with `timescale=None` gets its own scheduler
   group, so `macro_dt = span` freezes the model it couples.** Filed
   2026-09-06 (Proctor 2013 maths review, FW3).
@@ -1433,42 +1416,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   to a defect a reviewer agrees with, across the composites on hand — and rank
   that above further cost work on this checker.
 
-- [ ] **P1.19 — A composite is not bit-reproducible across a JAX pytree
-  round-trip.** Found 2026-08-31 (external systems review).
-  `store.build_initial_store` (`store.py:119-123`) documents this hazard and
-  guards it: *"The tie-break is by name rather than by dict order on purpose:
-  JAX sorts dict keys when it flattens a pytree, so `processes` comes back
-  sorted from any `jax.jit` / `vmap` / `eqx.tree_at` round-trip."* The same
-  hazard is unguarded in `build_rhs` (`composite.py:558`), `_assignment_pre`
-  (`:479`), `auto_groups` (`:748`) and `evolved_indices` (`:600`), all of which
-  iterate `self.processes` / `continuous_processes()` in dict order. Measured,
-  six processes inserted unsorted, all writing one EVOLVED path:
-
-  ```
-  insertion order         : ['zeta','alpha','mu','beta','omega','gamma']
-  after eqx.tree_at       : ['alpha','beta','gamma','mu','omega','zeta']
-  after eqx.filter_jit    : ['alpha','beta','gamma','mu','omega','zeta']
-  RHS at y0: orig = -0.600000015  roundtrip = -0.600000014  bit-identical = False
-  ```
-
-  The scatter-add accumulation order changes, so the RHS differs in the last ULP.
-  Through a full solve on a six-oscillator composite the divergence stayed
-  bounded — 4.8e-15 relative at t=50, 1.8e-14 at t=200, 1.2e-14 at t=1000 — so
-  on this evidence it is a **reproducibility** defect, not a correctness one. No
-  case was found where the adaptive controller amplified it into a step-sequence
-  divergence, and none is claimed to exist.
-  Why it matters anyway: `Composite.with_params` (`composite.py:875-899`) is
-  implemented with `eqx.tree_at`, so *every ablation and every sweep arm* is a
-  round-tripped composite compared against a non-round-tripped baseline — and
-  the diary's several "bit-exact" / "max_abs_diff = 0.0" verifications depend on
-  which side of a round-trip each ran on, which nothing records.
-  *Fix:* iterate `sorted(self.processes)` at the four sites. One line each, no
-  behaviour change beyond making the order canonical, matching the precedent
-  `build_initial_store` already sets. 1 hour including a test that round-trips
-  through `filter_jit` and asserts `build_rhs` is bit-identical.
-
----
-
 ## P2 — cannot see what was built
 
 - [ ] **P2.1 — No wiring report.** Nothing lists, per store path, who writes it
@@ -1510,22 +1457,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   on the first trace is known at trace time and currently discarded. Recording
   it per store path is what turns "a declared EVOLVED port silently frozen" into
   something visible, and it is the same report.
-
-- [ ] **P2.8 — The CLI configures no logging, so every `log.info` in the
-  framework is invisible from the documented entry point.** Found 2026-08-31
-  (external systems review). `src/hallsim/cli.py` contains **zero** `logging`
-  references, while CLAUDE.md insists `simulate <command>` is *the* way to invoke
-  anything. So: every `log.info` is dropped — including the auto-reduced
-  `save_dt` notice (P0.30), the per-group stiffness verdicts under `debug=True`,
-  and the group-ordering decisions; every `log.warning` surfaces through
-  `logging.lastResort` as bare stderr text with no level prefix, logger name or
-  timestamp, and no way to filter or redirect; and there is no `--verbose` /
-  `--quiet` on any command.
-  *Fix:* `logging.basicConfig` plus `-v/-q` on the `simulate` group callback.
-  ~1 hour, and it converts a large amount of already-written diagnostic text
-  from invisible to usable.
-
----
 
 ## P3 — capability gaps
 

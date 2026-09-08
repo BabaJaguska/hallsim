@@ -1215,3 +1215,29 @@ class TestHallmarkWithNoTarget:
         )
         out = handle.apply({"present": Production(rate=1.0)}, 1.0)
         assert float(out["present"].rate) == pytest.approx(2.0)
+
+
+def test_a_pytree_round_trip_leaves_the_rhs_bit_identical():
+    """JAX sorts dict keys on any flatten/unflatten, so a composite built in
+    another order would scatter-add in a different order after one
+    `filter_jit` — and `with_params` round-trips every sweep arm while the
+    baseline does not. The constructor sorting makes the two the same object
+    order, which this pins."""
+    import equinox as eqx
+
+    names = ["zeta", "alpha", "mu", "beta", "omega", "gamma"]
+    composite = Composite(
+        processes={n: Decay(rate=0.1 * (i + 1)) for i, n in enumerate(names)},
+        topology={n: {"x": "pool/x"} for n in names},
+        validate=False,
+        semantic_validation=False,
+    )
+    assert list(composite.processes) == sorted(names)
+    round_tripped = eqx.filter_jit(lambda c: c)(composite)
+    assert list(round_tripped.processes) == list(composite.processes)
+
+    keys = composite.store_keys()
+    y0 = composite.initial_state_vec(keys)
+    before = composite.build_rhs()[0](0.0, y0)
+    after = round_tripped.build_rhs()[0](0.0, y0)
+    assert jnp.array_equal(before, after)

@@ -47,18 +47,41 @@ def test_rewrite_prints_natural_logs(base):
         doc.getModel().getReaction(0).getKineticLaw().getMath()
     )
     assert "log10" in formula or "log(" in formula
-    assert _rewrite_math_functions(doc.getModel()) == 1
+    assert _rewrite_math_functions(doc.getModel()) >= 1
     rewritten = libsbml.formulaToString(
         doc.getModel().getReaction(0).getKineticLaw().getMath()
     )
     assert "log10" not in rewritten
-    assert rewritten == f"log(x) / log({base or 10})"
+    # The base prints in exponent form, which is what makes it a float once
+    # the translator emits it as Python source.
+    assert rewritten == f"log(x) / log({base or 10}e0)"
 
 
 def test_rewrite_is_idempotent_on_natural_logs():
     doc = _model_with_log(10)
     _rewrite_math_functions(doc.getModel())
     assert _rewrite_math_functions(doc.getModel()) == 0
+
+
+def test_an_integer_literal_becomes_a_float_but_an_exponent_does_not():
+    """``pow(1500, 6)`` folds to 1.139e19 and overflows int64, rejecting the
+    whole model. Coercing the base fixes it; coercing the exponent would
+    change ``x ** 6`` from defined at negative ``x`` to NaN."""
+    doc = _model_with_log(10)
+    kl = doc.getModel().getReaction(0).getKineticLaw()
+    kl.setMath(
+        libsbml.readMathMLFromString(
+            '<math xmlns="http://www.w3.org/1998/Math/MathML"><apply><power/>'
+            "<cn type='integer'>1500</cn><cn type='integer'>6</cn>"
+            "</apply></math>"
+        )
+    )
+    _rewrite_math_functions(doc.getModel())
+    out = libsbml.formulaToString(kl.getMath())
+    assert out == "pow(1500e0, 6)", out
+    # The base is float, so the fold is float and 1.139e19 is representable;
+    # the exponent stays an int, so a negative base would still be defined.
+    assert isinstance(eval(out), float)
 
 
 def test_log_base_model_imports_and_evaluates(tmp_path):

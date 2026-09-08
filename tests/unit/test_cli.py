@@ -55,3 +55,58 @@ def test_clamp_options_name_real_config_keys():
 
     offered = {p.name for p in simulate.commands["clamp"].params} - {"help"}
     assert offered and offered <= set(DEFAULTS)
+
+
+class TestVerbosity:
+    """The CLI is the documented entry point, and it configured no logging at
+    all: every `log.info` was dropped and every `log.warning` arrived through
+    `logging.lastResort` as bare stderr with no level or logger name."""
+
+    @staticmethod
+    def _levels(argv):
+        import logging
+
+        CliRunner().invoke(simulate, argv + ["info"])
+        return (
+            logging.getLogger().level,
+            logging.getLogger("hallsim").getEffectiveLevel(),
+        )
+
+    def test_default_is_warnings(self):
+        import logging
+
+        root, hallsim = self._levels([])
+        assert root == logging.WARNING
+        assert hallsim == logging.WARNING
+
+    def test_verbose_lifts_hallsim_only(self):
+        """-v means "what HallSim decided", not JAX's backend probing, so the
+        root stays where it was."""
+        import logging
+
+        root, hallsim = self._levels(["-v"])
+        assert hallsim == logging.INFO
+        assert root == logging.WARNING
+
+    def test_vv_reaches_debug(self):
+        import logging
+
+        assert self._levels(["-vv"])[1] == logging.DEBUG
+
+    def test_quiet_silences_both(self):
+        import logging
+
+        root, hallsim = self._levels(["-q"])
+        assert root == logging.ERROR
+        assert hallsim == logging.ERROR
+
+    def test_a_handler_is_installed_and_names_level_and_logger(self):
+        """Without one, records reached stderr via `logging.lastResort` as
+        bare text: no level, no logger name, nothing to filter on."""
+        import logging
+
+        CliRunner().invoke(simulate, ["info"])
+        handlers = logging.getLogger().handlers
+        assert handlers, "no handler installed; records fall to lastResort"
+        fmt = handlers[0].formatter._fmt
+        assert "%(levelname)s" in fmt and "%(name)s" in fmt

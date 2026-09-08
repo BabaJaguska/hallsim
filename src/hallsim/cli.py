@@ -1,12 +1,38 @@
 import json
+import logging
 
 import click
 
+#: -q, none, -v, -vv. The default is WARNING because the framework's warnings
+#: are the ones a user must not miss; INFO carries the decisions it made
+#: (auto-reduced save_dt, stiffness verdicts, group ordering).
+_LEVELS = [logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG]
+
 
 @click.group()
-def simulate():
+@click.option(
+    "-v",
+    "--verbose",
+    count=True,
+    help="Show what the framework decided (-v) and how (-vv).",
+)
+@click.option(
+    "-q", "--quiet", is_flag=True, help="Errors only; suppress warnings."
+)
+def simulate(verbose, quiet):
     """HallSim simulation commands."""
-    pass
+    level = _LEVELS[0 if quiet else min(1 + verbose, len(_LEVELS) - 1)]
+    # force=True so the level a user asked for wins over any basicConfig a
+    # demo module ran at import; without a handler every log.warning arrives
+    # through logging.lastResort as bare stderr with no level or logger name.
+    # The root stays at warnings so -v means "what HallSim decided" and not
+    # JAX's backend probing; -q quietens everything.
+    logging.basicConfig(
+        level=logging.ERROR if quiet else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+    logging.getLogger("hallsim").setLevel(level)
 
 
 # ── Composable architecture commands ─────────────────────────────────────

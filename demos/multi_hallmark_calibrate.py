@@ -855,12 +855,15 @@ def run_unscored(equilibrate: bool, out_dir: Path):
 
 
 def cmd_run(args) -> None:
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="%(asctime)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    logging.getLogger("hallsim").setLevel(logging.INFO)
+    # Only when run as a script: under `simulate` the CLI group owns the
+    # level the user asked for, and reconfiguring here would override it.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.WARNING,
+            format="%(asctime)s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
+        logging.getLogger("hallsim").setLevel(logging.INFO)
     equilibrate = getattr(args, "equilibrate", False)
     proteostasis = getattr(args, "proteostasis", False)
     if not SERIES_MATRIX.exists():

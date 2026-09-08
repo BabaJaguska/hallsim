@@ -668,7 +668,7 @@ def _source_stamp(sbml_path: str):
 
 # Bump when a conversion pass changes, so cached copies made by the previous
 # passes are redone rather than served.
-_CONVERT_VERSION = 3
+_CONVERT_VERSION = 6
 
 
 def _cached_convert(sbml_path: str, out_name: str, transform) -> str:
@@ -769,6 +769,11 @@ def _rewrite_math_functions(sbml_model) -> int:
       becomes ``x ^ (1/degree)``: the translator's ``sqrt`` entry is the
       misspelt ``no.sqrt``, so every deposit taking a root in a rule fails
       on a ``NameError`` (Erguler 2013).
+    * A literal with an integral value is re-emitted in exponent form, so a
+      constant power folds in float rather than overflowing int64 —
+      ``pow(1500, 6)`` is 1.139e19, past 9.22e18, and the whole model is
+      rejected for it. An *exponent* is left alone: ``x ** 6`` is defined at
+      negative ``x`` and ``x ** 6.0`` is not.
     """
     import libsbml
 
@@ -778,16 +783,30 @@ def _rewrite_math_functions(sbml_model) -> int:
         return node
 
     def number(value):
-        node = libsbml.ASTNode(libsbml.AST_REAL)
-        node.setValue(float(value))
+        # AST_REAL_E, not AST_REAL: libsbml prints a real with an integral
+        # value as "1500", which the translator then emits as a Python int
+        # and the coercion is undone at the only place it mattered.
+        node = libsbml.ASTNode(libsbml.AST_REAL_E)
+        node.setValue(float(value), 0)
         return node
 
-    def rewrite(node):
+    def rewrite(node, is_exponent=False):
         if node is None:
             return node, 0
+        kind_now = node.getType()
+        integral_literal = kind_now == libsbml.AST_INTEGER or (
+            kind_now == libsbml.AST_REAL
+            and float(node.getValue()).is_integer()
+        )
+        if integral_literal and not is_exponent:
+            return number(node.getValue()), 1
         count = 0
+        power = node.getType() in (
+            libsbml.AST_POWER,
+            libsbml.AST_FUNCTION_POWER,
+        )
         for i in range(node.getNumChildren()):
-            child, n = rewrite(node.getChild(i))
+            child, n = rewrite(node.getChild(i), power and i == 1)
             count += n
             if n and child is not node.getChild(i):
                 node.replaceChild(i, child)
