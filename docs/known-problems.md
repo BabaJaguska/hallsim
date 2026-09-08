@@ -156,15 +156,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   would look at the normalizer, which is why the default has to change rather
   than be documented.
 
-- [ ] **P0.4 — `dose_window=None` silently deletes a hallmark dial.**
-  Documented as "sustained drive". `drive_pulse` is skipped, the pulse process
-  never exists, and `HallmarkHandle.apply` skips mappings whose target is
-  absent. Sweeping severity 0→50 returns the identical attractor to 4 s.f.
-  **The exposed surface doubled on 2026-08-29:** Deregulated Nutrient Sensing
-  now targets `nutrient_drive.after` the same way, so a composite built without
-  that source silently loses the mTOR dial too.
-  *Fix:* raise when every mapping of an applied hallmark misses its target.
-
 - [ ] **P0.13 — `timescale` is a declared unit, not a rate.** Split from P0.6,
   whose execution-order half is fixed. An SBML import sets `timescale =
   native_time_seconds` — the model's declared time unit, not how fast it
@@ -594,21 +585,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `recommend_reporters` offers regulon candidates for genes the composite does
   not contain, and no identity mappings.
 
-- [ ] **P0.55 — `steady_state` returns NaNs silently: the guard is `res > tol`,
-  and `NaN > tol` is False.** Filed 2026-09-05, found by the mathematician
-  refereeing Hui 2016. `steady_state.py:548` warns only when the Newton
-  residual exceeds tolerance. A diverged solve produces `res = nan`, the
-  comparison is False, and the caller gets a state vector of NaNs with no
-  warning at all — the one case where the warning matters most.
-
-  Hit live: Hui 2016 has `d(AGEprod)/dt` identically 1e-6 at every state, so
-  no fixed point exists, and `steady_state` returned **62 NaNs** without
-  comment.
-
-  *Fix:* guard on `not (res <= tol)`, which catches NaN, and say in the warning
-  that a non-finite residual means no fixed point was approached rather than
-  one was missed.
-
 - [ ] **P0.56 — `triage_sbml` judges "not at rest" at `t_end=10` in units it
   does not know.** Filed 2026-09-05. `intake.py:188` defaults `t_end=10.0`, and
   the rest verdict is taken over that window — but the flag immediately above
@@ -953,28 +929,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   bistable?" rather than answering it wrongly. Until (b) exists, no
   no-hysteresis claim from a continuation sweep is admissible evidence.
 
-- [ ] **P0.27 — An affine unit yields a garbage multiplier, silently.**
-  `conversion_factor` (`units.py:25`) returns
-  `parse_expression(from).to(to).magnitude`, which is **f(1)**. That is the
-  scale only for a linear (ratio-scale) unit; for an affine one, f(x) = ax + b,
-  it returns a + b, which is not a scale at all. Measured:
-  `degC -> kelvin` returns **274.15** (so 0 degC maps to 0 K rather than 273.15,
-  and 100 degC to 27,415 K); `degF -> degC` returns **-17.22**, a negative
-  multiplier that flips the sign of every value. The RHS then applies it per
-  port on every call, with no warning — `except Exception: return 1.0` catches
-  only unparseable units, not this.
-  Latent today because concentrations, rates and amounts are all ratio-scale.
-  It fires the moment a model declares a temperature (Arrhenius kinetics,
-  thermal stress) or a clinical scale such as HbA1c NGSP% <-> IFCC mmol/mol.
-  *Fix, minimum:* detect non-multiplicative units and raise. Linearity is
-  testable without library internals — f(2) == 2*f(1) for a linear unit — and
-  the same two probes give the real pair, scale `f(2) - f(1)` and offset `f(0)`.
-  *Fix, full:* carry `(scale, offset)` per port instead of a scalar. Note the
-  offset is **role-dependent**: an EVOLVED port carries a derivative, and
-  d/dt(ax + b) = a dx/dt, so the offset must be applied on reads and on
-  ASSIGNED/LATCHED/INPUT values but **never** on an EVOLVED write. Applying it
-  there is a second silent-wrong.
-
 - [ ] **P0.18 — `suggest_hill_gate` exists and no one runs it, so a coupling
   edge can be placed outside its driver's entire range.** ✓✓ `psi_bridge` gates
   GZ06's ψ on `dp14/DNA_damage` at `K = 52`, `n = 2`. Crossing the p53 Hopf
@@ -1195,24 +1149,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   put the *resolved* `save_dt` into `SchedulerResult.stats` so it lands in the
   artefact rather than a log line no handler is listening for (~2 h).
   (4) The structural fix is the equivalence test in P1.16.
-
-- [ ] **P0.32 — `semantic_validation={}` silently disables the entire
-  validation layer.** Found 2026-08-31 (external systems review).
-  `composite.py:400` is `if semantic_validation:`, and `{}` is falsy. Measured
-  on a composite with a genuine `uM` vs `mol` conflict at a shared path:
-
-  ```
-  semantic_validation=True (default)    -> ValueError: Semantic validation failed
-  semantic_validation={'strict': True}  -> ValueError: Semantic validation failed
-  semantic_validation={}                -> CONSTRUCTED (no error)
-  semantic_validation=False             -> CONSTRUCTED (no error)
-  ```
-
-  `docs/architecture.md` teaches the dict form ("opt out per subsystem with
-  `semantic_validation={...}`"), so `{}` reads as "dict form, no overrides, i.e.
-  defaults" and means the opposite.
-  *Fix:* `if semantic_validation is not False and semantic_validation is not
-  None:`. 15 minutes.
 
 ## P0.35 — the stop rule fired: the Scheduler is 2395× slower than the
 ## hand-rolled path on an event composite

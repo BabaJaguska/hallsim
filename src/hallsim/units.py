@@ -12,6 +12,8 @@ Dimensionally *incompatible* units are a hard error (raised here and by the
 
 from __future__ import annotations
 
+import math
+
 import pint
 
 from hallsim.store import as_paths
@@ -30,19 +32,39 @@ def conversion_factor(from_u: str | None, to_u: str | None) -> float:
     ``1.0`` when either unit is unspecified, they are identical, or a unit
     string cannot be parsed (the validator warns about unparseable units;
     the RHS must not silently rescale on a guess). Raises ``ValueError`` on
-    dimensionally incompatible units.
+    dimensionally incompatible units, and on an affine one: ``f(x) = ax + b``
+    has no single multiplier, and ``f(1) = a + b`` is not it.
     """
     a, b = _clean(from_u), _clean(to_u)
     if not a or not b or a == b:
         return 1.0
     try:
-        return float(
-            UREG.parse_expression(a).to(UREG.parse_expression(b)).magnitude
-        )
+        src, dst = UREG.parse_expression(a), UREG.parse_expression(b)
+    except Exception:
+        return 1.0
+    try:
+        one = float(src.to(dst).magnitude)
     except pint.DimensionalityError as e:
         raise ValueError(f"incompatible units {a!r} -> {b!r}: {e}") from e
     except Exception:
         return 1.0
+    # A ratio-scale unit satisfies f(2) == 2 f(1). An affine one does not, and
+    # pint refuses the doubling outright — either answer means "not a scale".
+    try:
+        two = float((2 * src).to(dst).magnitude)
+        linear = math.isclose(two, 2.0 * one, rel_tol=1e-9, abs_tol=0.0)
+    except pint.DimensionalityError as e:
+        raise ValueError(f"incompatible units {a!r} -> {b!r}: {e}") from e
+    except Exception:
+        linear = False
+    if not linear:
+        raise ValueError(
+            f"{a!r} -> {b!r} is an affine conversion, which has no single "
+            f"multiplier: f(1) = {one:g} is scale plus offset, and applying "
+            "it per port would rescale every value wrongly. Declare the port "
+            "in a ratio-scale unit."
+        )
+    return one
 
 
 def canonical_units(

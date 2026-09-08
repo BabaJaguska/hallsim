@@ -29,6 +29,7 @@ a conservation law means.
 from __future__ import annotations
 
 import logging
+import math
 from fractions import Fraction
 from functools import reduce
 from math import gcd, lcm
@@ -545,14 +546,24 @@ def steady_state(
     y_star = jax.lax.custom_root(g, y0, solve, tangent_solve)
     if not isinstance(y_star, jax.core.Tracer):
         res = float(jnp.max(jnp.abs(g(y_star))))
-        if res > tol:
+        # `not (res <= tol)` rather than `res > tol`: a diverged solve gives
+        # res = NaN, every comparison with it is False, and the caller would
+        # get a state vector of NaNs with no warning at all.
+        if not (res <= tol):
             log.warning(
                 "steady_state: Newton stopped at |f| = %.3g, above tol = "
-                "%.3g, after at most %d iterations. The returned state is "
-                "not a fixed point — seed y_guess closer (e.g. a short "
-                "forward pre-solve) or raise max_iter.",
+                "%.3g, after at most %d iterations. %s",
                 res,
                 tol,
                 max_iter,
+                (
+                    "A non-finite residual means the solve diverged and no "
+                    "fixed point was approached — check the system has one "
+                    "(a state with a constant non-zero derivative has none)."
+                    if not math.isfinite(res)
+                    else "The returned state is not a fixed point — seed "
+                    "y_guess closer (e.g. a short forward pre-solve) or "
+                    "raise max_iter."
+                ),
             )
     return y_star

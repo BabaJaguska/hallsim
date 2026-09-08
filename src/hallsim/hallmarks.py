@@ -142,6 +142,18 @@ class HallmarkHandle:
         ``param_name`` reaches inside a dict-valued field, which is how a
         hallmark drives one SBML rate constant."""
         result = dict(processes)
+        if self.mappings and not any(
+            m.process_name in result for m in self.mappings
+        ):
+            raise KeyError(
+                f"Hallmark {self.name!r} has no target in this composite: "
+                f"none of {sorted({m.process_name for m in self.mappings})} "
+                f"is a process here (it has "
+                f"{sorted(result)}). Setting its severity would change "
+                "nothing and every arm would run identically. Build the "
+                "composite with the process the dial drives, or drop the "
+                "hallmark from the condition."
+            )
         for mapping in self.mappings:
             pname = mapping.process_name
             if pname not in result:

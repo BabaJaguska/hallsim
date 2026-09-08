@@ -1003,3 +1003,91 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   `test_composition.py::TestUndeclaredPortsRaise`, including the converse:
   omitting a declared port still freezes that state rather than raising.
 
+- [x] **P0.4 — `dose_window=None` silently deletes a hallmark dial.**
+  Documented as "sustained drive". `drive_pulse` is skipped, the pulse process
+  never exists, and `HallmarkHandle.apply` skips mappings whose target is
+  absent. Sweeping severity 0→50 returns the identical attractor to 4 s.f.
+  **The exposed surface doubled on 2026-08-29:** Deregulated Nutrient Sensing
+  now targets `nutrient_drive.after` the same way, so a composite built without
+  that source silently loses the mTOR dial too.
+  *Fix:* raise when every mapping of an applied hallmark misses its target.
+  **Fixed 2026-09-08.** `HallmarkHandle.apply` raises when *every* mapping
+  misses its target, naming the targets it wanted and the processes present.
+  A partial miss stays legal: one hallmark spans composites that hold
+  different subsets. Severity 0 raises too — the composite is misconfigured
+  either way, and a dial that cannot turn is not made acceptable by sitting
+  at its centre. `test_composition.py::TestHallmarkWithNoTarget`, and
+  `test_models.py` had a test asserting the old ignore-silently behaviour,
+  now inverted.
+
+- [x] **P0.27 — An affine unit yields a garbage multiplier, silently.**
+  `conversion_factor` (`units.py:25`) returns
+  `parse_expression(from).to(to).magnitude`, which is **f(1)**. That is the
+  scale only for a linear (ratio-scale) unit; for an affine one, f(x) = ax + b,
+  it returns a + b, which is not a scale at all. Measured:
+  `degC -> kelvin` returns **274.15** (so 0 degC maps to 0 K rather than 273.15,
+  and 100 degC to 27,415 K); `degF -> degC` returns **-17.22**, a negative
+  multiplier that flips the sign of every value. The RHS then applies it per
+  port on every call, with no warning — `except Exception: return 1.0` catches
+  only unparseable units, not this.
+  Latent today because concentrations, rates and amounts are all ratio-scale.
+  It fires the moment a model declares a temperature (Arrhenius kinetics,
+  thermal stress) or a clinical scale such as HbA1c NGSP% <-> IFCC mmol/mol.
+  *Fix, minimum:* detect non-multiplicative units and raise. Linearity is
+  testable without library internals — f(2) == 2*f(1) for a linear unit — and
+  the same two probes give the real pair, scale `f(2) - f(1)` and offset `f(0)`.
+  *Fix, full:* carry `(scale, offset)` per port instead of a scalar. Note the
+  offset is **role-dependent**: an EVOLVED port carries a derivative, and
+  d/dt(ax + b) = a dx/dt, so the offset must be applied on reads and on
+  ASSIGNED/LATCHED/INPUT values but **never** on an EVOLVED write. Applying it
+  there is a second silent-wrong.
+  **Fixed 2026-09-08 (the minimum fix).** `conversion_factor` probes
+  linearity with `f(2) == 2 f(1)` and raises on an affine pair; pint refuses
+  the doubling outright for an offset unit, which is the same answer. Ratio
+  scales are unaffected (`day -> second` 86400, `uM -> mol/L` 1e-6).
+  Carrying `(scale, offset)` per port is still not done, so a model that
+  genuinely needs a temperature port raises rather than converting — the
+  role-dependent offset in the entry above is what that would take.
+  `test_validation.py::TestAffineUnitsAreRejected`.
+
+- [x] **P0.32 — `semantic_validation={}` silently disables the entire
+  validation layer.** Found 2026-08-31 (external systems review).
+  `composite.py:400` is `if semantic_validation:`, and `{}` is falsy. Measured
+  on a composite with a genuine `uM` vs `mol` conflict at a shared path:
+
+  ```
+  semantic_validation=True (default)    -> ValueError: Semantic validation failed
+  semantic_validation={'strict': True}  -> ValueError: Semantic validation failed
+  semantic_validation={}                -> CONSTRUCTED (no error)
+  semantic_validation=False             -> CONSTRUCTED (no error)
+  ```
+
+  `docs/architecture.md` teaches the dict form ("opt out per subsystem with
+  `semantic_validation={...}`"), so `{}` reads as "dict form, no overrides, i.e.
+  defaults" and means the opposite.
+  *Fix:* `if semantic_validation is not False and semantic_validation is not
+  None:`. 15 minutes.
+  **Fixed 2026-09-08.** The gate is `is not False and is not None`, so only
+  those two opt out and `{}` means what the docs teach.
+  `test_validation.py::TestEmptyValidationConfig`.
+
+- [x] **P0.55 — `steady_state` returns NaNs silently: the guard is `res > tol`,
+  and `NaN > tol` is False.** Filed 2026-09-05, found by the mathematician
+  refereeing Hui 2016. `steady_state.py:548` warns only when the Newton
+  residual exceeds tolerance. A diverged solve produces `res = nan`, the
+  comparison is False, and the caller gets a state vector of NaNs with no
+  warning at all — the one case where the warning matters most.
+
+  Hit live: Hui 2016 has `d(AGEprod)/dt` identically 1e-6 at every state, so
+  no fixed point exists, and `steady_state` returned **62 NaNs** without
+  comment.
+
+  *Fix:* guard on `not (res <= tol)`, which catches NaN, and say in the warning
+  that a non-finite residual means no fixed point was approached rather than
+  one was missed.
+  **Fixed 2026-09-08.** The guard is `not (res <= tol)`, which catches NaN,
+  and the warning now distinguishes a non-finite residual (the solve
+  diverged, no fixed point was approached) from a merely loose one. The
+  regression uses a system whose residual runs to infinity; a toy that
+  reaches NaN through this Newton was not found, the reproducer being
+  Hui 2016. `test_steady_state.py::test_a_non_finite_residual_warns_and_says_what_it_means`.

@@ -1158,3 +1158,60 @@ class TestUndeclaredPortsRaise:
         rhs, keys = comp.build_rhs()
         dy = rhs(0.0, comp.initial_state_vec(keys))
         assert jnp.allclose(dy, jnp.array([-1.0, 0.0]))
+
+
+class TestHallmarkWithNoTarget:
+    """A dial whose every target is absent turns nothing. Severity 0 and
+    severity 1 then give the identical trajectory, which reads as "this
+    hallmark does not matter here" rather than "it was never wired"."""
+
+    @staticmethod
+    def _handle():
+        from hallsim.hallmarks import HallmarkHandle, ParameterMapping
+
+        return HallmarkHandle(
+            name="Test Dial",
+            mappings=[
+                ParameterMapping(
+                    process_name="absent",
+                    param_name="rate",
+                    floor=1.0,
+                    slope=1.0,
+                )
+            ],
+        )
+
+    def test_applying_it_raises_and_names_what_is_missing(self):
+        with pytest.raises(KeyError, match="no target in this composite"):
+            self._handle().apply({"present": Production()}, 1.0)
+
+    def test_it_raises_at_severity_zero_too(self):
+        """The composite is misconfigured either way; a dial that cannot
+        turn is not made acceptable by being left at its centre."""
+        with pytest.raises(KeyError):
+            self._handle().apply({"present": Production()}, 0.0)
+
+    def test_one_reachable_mapping_is_enough(self):
+        """A hallmark may span composites that hold different subsets, so a
+        partial hit stays legal — only a total miss is the defect."""
+        from hallsim.hallmarks import HallmarkHandle, ParameterMapping
+
+        handle = HallmarkHandle(
+            name="Test Dial",
+            mappings=[
+                ParameterMapping(
+                    process_name="absent",
+                    param_name="rate",
+                    floor=1.0,
+                    slope=1.0,
+                ),
+                ParameterMapping(
+                    process_name="present",
+                    param_name="rate",
+                    floor=1.0,
+                    slope=1.0,
+                ),
+            ],
+        )
+        out = handle.apply({"present": Production(rate=1.0)}, 1.0)
+        assert float(out["present"].rate) == pytest.approx(2.0)

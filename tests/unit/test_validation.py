@@ -869,3 +869,61 @@ class TestAnalyzeComposability:
         assert merged.topology["eriq.prod"]["ros"] == ("eriq/pool/ros",)
         assert merged.topology["dp14.prod"]["ros"] == ("eriq/pool/ros",)
         assert merged.store_paths() == {"eriq/pool/ros"}
+
+
+class TestEmptyValidationConfig:
+    """``{}`` is the documented dict form with no overrides, so it has to
+    mean defaults. Treating it as falsy turned the whole layer off in the one
+    call that reads as asking for it."""
+
+    @staticmethod
+    def _conflicting():
+        return (
+            {"a": ROSProducerMicromolar(), "b": ROSProducerKilograms()},
+            {"a": {"ros": "pool/ros"}, "b": {"ros": "pool/ros"}},
+        )
+
+    def test_empty_dict_still_validates(self):
+        procs, topo = self._conflicting()
+        with pytest.raises(ValueError, match="Semantic validation failed"):
+            Composite(procs, topo, semantic_validation={})
+
+    @pytest.mark.parametrize("opt_out", [False, None])
+    def test_only_false_and_none_opt_out(self, opt_out):
+        procs, topo = self._conflicting()
+        assert Composite(procs, topo, semantic_validation=opt_out) is not None
+
+
+class TestAffineUnitsAreRejected:
+    """``conversion_factor`` returns a multiplier, and an affine unit has
+    none: ``f(x) = ax + b`` returns ``a + b`` at 1, which is a scale for no
+    value at all. The RHS applies it per port on every call."""
+
+    @pytest.mark.parametrize(
+        "pair", [("degC", "kelvin"), ("degF", "degC"), ("kelvin", "degC")]
+    )
+    def test_an_affine_pair_raises(self, pair):
+        from hallsim.units import conversion_factor
+
+        with pytest.raises(ValueError, match="affine"):
+            conversion_factor(*pair)
+
+    @pytest.mark.parametrize(
+        "pair,expected",
+        [
+            (("uM", "mol/L"), 1e-6),
+            (("day", "second"), 86400.0),
+            (("kelvin", "kelvin"), 1.0),
+            (("mm", "m"), 1e-3),
+        ],
+    )
+    def test_ratio_scale_pairs_are_unaffected(self, pair, expected):
+        from hallsim.units import conversion_factor
+
+        assert conversion_factor(*pair) == pytest.approx(expected)
+
+    def test_incompatible_dimensions_still_raise_as_such(self):
+        from hallsim.units import conversion_factor
+
+        with pytest.raises(ValueError, match="incompatible"):
+            conversion_factor("uM", "second")

@@ -550,7 +550,14 @@ class Composite(eqx.Module):
                     "Topology validation failed:\n"
                     + "\n".join(f"  - {e}" for e in errors)
                 )
-        if semantic_validation:
+        # `is not False`, not truthiness: `{}` is the documented dict form
+        # with no overrides, and reads as "defaults", so treating it as falsy
+        # turned the whole layer off in the one call that looks like it asked
+        # for it. Only False and None opt out.
+        if (
+            semantic_validation is not False
+            and semantic_validation is not None
+        ):
             from hallsim.validation import CompositeValidator
 
             if isinstance(semantic_validation, dict):

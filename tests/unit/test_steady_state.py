@@ -340,3 +340,31 @@ def test_moiety_composite_still_samples_and_finds_its_law(monkeypatch):
     laws = conservation_laws(comp, comp.initial_state_vec())
     assert laws.shape[0] == 1
     assert calls, "guard rejected a composite that has a conservation law"
+
+
+class NoRealRoot(Process):
+    """dx/dt = x**2 + 1 — no real fixed point, and the Newton step is
+    singular at the seed, so the residual leaves the finite range."""
+
+    def ports_schema(self):
+        return {"x": Port(role=PortRole.EVOLVED, default=0.0)}
+
+    def derivative(self, t, state):
+        return {"x": state["x"] ** 2 + 1.0}
+
+
+def test_a_non_finite_residual_warns_and_says_what_it_means(caplog):
+    """The guard is `not (res <= tol)`, not `res > tol`: every comparison
+    with NaN is False, so a diverged solve returned a state vector of NaNs
+    with no warning at all. This fixture diverges to an infinite residual —
+    the same branch, and the one reachable from a toy system."""
+    comp = Composite(
+        processes={"p": NoRealRoot()},
+        topology={"p": {"x": "x"}},
+        validate=False,
+    )
+    keys = comp.store_keys()
+    with caplog.at_level("WARNING", logger="hallsim.steady_state"):
+        y = steady_state(comp, y_guess=comp.initial_state_vec(keys))
+    assert not np.all(np.isfinite(np.asarray(y)))
+    assert "no fixed point was approached" in caplog.text

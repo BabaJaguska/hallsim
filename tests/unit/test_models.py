@@ -278,14 +278,15 @@ class TestHallmarkHandles:
             1.0 + 0.5 * 0.5
         )
 
-    def test_missing_process_ignored(self):
+    def test_a_hallmark_with_no_target_at_all_raises(self):
+        """Applying it would change nothing, so every arm of the sweep would
+        run identically and the dial would read as inert biology."""
         from hallsim.hallmarks import HALLMARK_REGISTRY
 
         handle = HALLMARK_REGISTRY["Genomic Instability"]
-        # "damage_repair" process doesn't exist → should not crash
         procs = {"something_else": ERiQOxidativeStress()}
-        modified = handle.apply(procs, severity=0.5)
-        assert "something_else" in modified
+        with pytest.raises(KeyError, match="no target in this composite"):
+            handle.apply(procs, severity=0.5)
 
     def test_summary(self):
         from hallsim.hallmarks import HALLMARK_REGISTRY
