@@ -55,6 +55,7 @@ from __future__ import annotations
 from hallsim.composite import Composite
 from hallsim.models.forcing import drive_pulse, drive_step
 from hallsim.models.gain_edge import GainEdge, place_gain
+from hallsim.models.running_integral import RunningIntegral
 from hallsim.models.hill_edge import (
     HillEdge,
     place_hill_gate_for_crossing,
@@ -86,6 +87,15 @@ PROCTOR07_MISFOLDING_RATE_NAME = "k2"
 PROCTOR07_SYNTHESIS_RATE_NAME = "k1"
 DP14_ROS_NAME = "ROS"
 DP14_MTORC1_ACTIVE_NAME = "mTORC1_pS2448"
+# Fraction of protein synthesis that follows mTORC1: complete mTORC1
+# inhibition (Torin1) halves synthesis in MEFs, Thoreen et al. 2012, Nature
+# 485:109–113. The rest is the offset the synthesis gain keeps at zero mTORC1.
+PROCTOR07_SYNTHESIS_MTOR_FRACTION = 0.5
+# PSMB5 transcript: mTORC1 → NRF1 → proteasome subunit genes (Zhang et al.
+# 2014, Nature 513:440–443), read as a first-order transcript relaxing toward
+# phospho-mTORC1 with the median mammalian mRNA half-life of 9 h
+# (Schwanhäusser et al. 2011, Nature 473:337–342): tau = 9 h / ln 2.
+PSMB5_MRNA_TAU_DAYS = 9.0 / 24.0 / 0.6931
 # SBML defaults, named at module level so hallsim.hallmarks can target the
 # same constants. DallePezze 2014 supplementary Table S2.
 DP14_MTOR_PHOS_RATE_DEFAULT = 162.471039450073
@@ -115,10 +125,8 @@ DP14_IRRADIATION_RATE_NAME = "DNA_damaged_by_irradiation"
 # DDIS until this day; the nutrient drive's StepSource switches level there.
 RAPA_INTERVENTION_DAY = DDIS_ETOPOSIDE_DOSE_WINDOW[1]
 
-# DP14 pins `Amino_Acids` (and `Insulin`, not driven here) at 1 for all time,
-# so no arm can lower mTOR drive without driving the input.
-DP14_NUTRIENT_INPUT_NAME = "Amino_Acids"
-DP14_NUTRIENT_BASAL = 1.0
+# DP14 pins `Amino_Acids` and `Insulin` at 1 for all time; neither is driven
+# here. Rapamycin acts on the mTORC1 kinase rate, DP14_MTOR_PHOS_RATE_NAME.
 
 # GZ06's `psi` is the paper's ξ, a noise gain on protein production, and stays
 # at its published 1.0. Damage enters on `alpha_x`, the Mdm2-independent p53
@@ -260,16 +268,18 @@ def build_multi_hallmark_composite(
                 DP14_SBML_IRRADIATION_RATE,
             ),
         )
-    # severity=0 leaves before == after, so ctrl/DDIS keep the deposit's drive.
+    # Rapamycin inhibits the mTORC1 kinase, so the step holds DP14's S2448
+    # phosphorylation rate; severity=0 leaves before == after, so ctrl/DDIS
+    # keep the published rate. Amino_Acids stays at the deposit's own level.
     drive_step(
         processes,
         topology,
         target="dp14",
-        input_name=DP14_NUTRIENT_INPUT_NAME,
+        input_name=DP14_MTOR_PHOS_RATE_NAME,
         t_step=RAPA_INTERVENTION_DAY,
-        before=DP14_NUTRIENT_BASAL,
-        after=DP14_NUTRIENT_BASAL,
-        source_name="nutrient_drive",
+        before=DP14_MTOR_PHOS_RATE_DEFAULT,
+        after=DP14_MTOR_PHOS_RATE_DEFAULT,
+        source_name="rapamycin_drive",
         hallmark="Deregulated Nutrient Sensing",
     )
     return Composite(
@@ -315,11 +325,12 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
         reference="Proctor et al. 2007, BMC Syst Biol 1:17, Table 2",
         description="ROS → protein misfolding (DP14 ROS drives Proctor k2).",
     )
+    f = PROCTOR07_SYNTHESIS_MTOR_FRACTION
     processes["mtor_synthesis"] = GainEdge(
         mode="level",
         timescale=ups.timescale,
-        offset=0.0,
-        gain=place_gain(mtor_rest, k1_pub),
+        offset=(1.0 - f) * k1_pub,
+        gain=place_gain(mtor_rest, f * k1_pub),
         source_description="DP14 phospho-mTORC1 (S2448)",
         target_description=(
             "Proctor 2007 synthesis rate k1, rescaled to DP14 phospho-mTORC1."
@@ -331,6 +342,12 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
             "Proctor k1)."
         ),
     )
+    processes["psmb5_mrna"] = RunningIntegral(
+        timescale=dp14.timescale,
+        power=1.0,
+        tau=PSMB5_MRNA_TAU_DAYS,
+        initial=PSMB5_MRNA_TAU_DAYS * mtor_rest,
+    )
     topology["ups"] = {"k2_in": "ups/k2_signal", "k1_in": "ups/k1_signal"}
     topology["ros_misfolding"] = {
         "source": f"dp14/{DP14_ROS_NAME}",
@@ -339,4 +356,8 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
     topology["mtor_synthesis"] = {
         "source": f"dp14/{DP14_MTORC1_ACTIVE_NAME}",
         "signal": "ups/k1_signal",
+    }
+    topology["psmb5_mrna"] = {
+        "source": f"dp14/{DP14_MTORC1_ACTIVE_NAME}",
+        "integral": "psmb5_mrna/integral",
     }

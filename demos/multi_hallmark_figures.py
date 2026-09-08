@@ -65,6 +65,14 @@ def load_fit() -> dict:
     return {k: float(v) for k, v in params.items()}
 
 
+def _problem(args):
+    """The same problem the calibration built, so every figure sees the
+    composite, reporters and fitted parameters the checkpoint belongs to."""
+    from demos.multi_hallmark_calibrate import build_problem
+
+    return build_problem(proteostasis=getattr(args, "proteostasis", False))
+
+
 # ── schematic ────────────────────────────────────────────────────────────
 def fig_schematic(args):
     from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
@@ -363,7 +371,6 @@ def fig_trajectories(args):
 
 # ── reporter-levels ──────────────────────────────────────────────────────
 def fig_reporter_levels(args):
-    from demos.multi_hallmark_calibrate import build_problem
 
     conds = {
         "ctrl": ("control", "#9a9a95"),
@@ -391,7 +398,7 @@ def fig_reporter_levels(args):
         trajs = jnp.stack([res.ys[..., i] for i in problem._reporter_indices])
         return np.asarray(problem._reporter_summaries(res.ts, trajs, qt))
 
-    problem = build_problem()
+    problem = _problem(args)
     fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
     qt = jnp.arange(0.5, t_end + 1e-6, 0.5)
     genes = [r.gene_symbol for r in problem.reporters]
@@ -461,8 +468,6 @@ def fig_concordance(args):
     from matplotlib.lines import Line2D
     from hallsim.calibration_report import rows_by_gene
 
-    from demos.multi_hallmark_calibrate import build_problem
-
     C_DATA, C_MODEL, INK, DIM, BAND = (
         "#2563eb",
         "#d97706",
@@ -470,7 +475,7 @@ def fig_concordance(args):
         "#6b7280",
         "#f1f5f9",
     )
-    problem = build_problem()
+    problem = _problem(args)
     short = {
         "DDIS_vs_ctrl": "DDIS",
         "RAPA_vs_ctrl": "RAPA",
@@ -614,10 +619,7 @@ def fig_concordance(args):
 
 # ── temporal (oob → calibrated log2FC vs data) ───────────────────────────
 def fig_temporal(args):
-    from demos.multi_hallmark_calibrate import (
-        build_problem,
-        _annotate_interventions,
-    )
+    from demos.multi_hallmark_calibrate import _annotate_interventions
 
     C_OOB, C_FIT, C_DATA, grid_c = "#9a9a95", "#2a78d6", "#0b0b0b", "#e6e6e2"
     # Subtitles for the arms this problem may carry; only the ones it actually
@@ -719,7 +721,7 @@ def fig_temporal(args):
         plt.close(fig)
         print(f"wrote {stem}.png/.pdf", flush=True)
 
-    problem = build_problem()
+    problem = _problem(args)
     init = problem.initial_params()
     fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
     OUT_CAL.mkdir(parents=True, exist_ok=True)
@@ -733,10 +735,7 @@ def fig_temporal_compare(args):
     """One panel per reporter overlaying the calibrated DDIS (etoposide) and
     RAPA (etoposide + rapamycin @ day 2) trajectories, with each arm's measured
     points. Directly visualizes the held-out rapamycin effect per reporter."""
-    from demos.multi_hallmark_calibrate import (
-        build_problem,
-        _annotate_interventions,
-    )
+    from demos.multi_hallmark_calibrate import _annotate_interventions
 
     ARM_STYLE = {
         "DDIS_vs_ctrl": ("DDIS", "#c0392b"),
@@ -747,7 +746,7 @@ def fig_temporal_compare(args):
     t_end = 14.0
     qt = np.arange(0.1, t_end + 1e-6, 0.1)
 
-    problem = build_problem()
+    problem = _problem(args)
     arms = {a: ARM_STYLE.get(a, (a, "#6b7280")) for a in problem.data}
     init = problem.initial_params()
     fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
@@ -853,7 +852,6 @@ def fig_before_after(args):
     actually calibrated. Constituent BEFORE ≈ composite AFTER means the
     coupling only adds the intended edges.
     """
-    from demos.multi_hallmark_calibrate import build_problem
     from hallsim.sbml_import import process_from_sbml
     from demos.models.multi_hallmark import (
         CANONICAL_TIME_SECONDS,
@@ -866,7 +864,7 @@ def fig_before_after(args):
     # save_dt is decoupled from macro_dt: sample fine enough for the fastest
     # row (NF-kB, ~100 min period) without changing the solve.
     t_end, macro_dt, save_dt = float(getattr(args, "t_end", 14.0)), 0.1, 0.001
-    problem = build_problem()
+    problem = _problem(args)
     if getattr(args, "params", "init") == "fit":
         pvals, tag = load_fit(), "calibrated fit"
     else:
@@ -1133,6 +1131,12 @@ def main():
         default="init",
         help="before-after parameterization: calibration init "
         "(out-of-the-box) or the saved fit.",
+    )
+    ap.add_argument(
+        "--proteostasis",
+        action="store_true",
+        help="the composite with Proctor 2007 attached, as the calibration "
+        "that wrote the checkpoint was run.",
     )
     args = ap.parse_args()
     todo = FIGURES.values() if args.figure == "all" else [FIGURES[args.figure]]

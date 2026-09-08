@@ -137,6 +137,57 @@ ARM_PAIRS = {
 ARM_CONDITIONS = {arm: cond for arm, (cond, _) in ARM_PAIRS.items()}
 
 
+def _default_fit_params(composite, published, proteostasis: bool) -> dict:
+    """The fitted set: one parameter per reporter axis the data constrains,
+    each with a log-normal MAP prior at its published or placed value. With
+    Proctor 2007 attached, the two its identifiability screen kept
+    (2026-09-07): the mTORC1→synthesis gain, which the two gains are
+    confounded through, and proteasome activity k69."""
+    params = {
+        "sa_beta_gal_decay": ParameterRef(
+            "dp14",
+            "parameters.sen_ass_beta_gal_dec",
+            prior=0.1548,
+            prior_sigma=0.5,
+        ),
+        "CDKN1A_transcr": ParameterRef(
+            "dp14",
+            "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
+            prior=0.085,
+            prior_sigma=0.5,
+        ),
+        # GZ06's Mdm2 degradation: the only knob on MDM2's own path, and
+        # the most identifiable parameter in the fit.
+        "mdm2_degradation": ParameterRef(
+            "gz06",
+            "parameters.alpha_y",
+            prior=published("gz06", "alpha_y"),
+            prior_sigma=0.5,
+        ),
+        "alpha_x_control": ParameterRef(
+            "damage_bridge",
+            "basal",
+            prior=GZ06_ALPHA_X_CONTROL,
+            prior_sigma=0.5,
+        ),
+        # No parameter on BNIP3's path: FoxO3a synthesis (the most sensitive
+        # of DP14's six) scales the level, not the time course, and fitting
+        # it lowered the loss while sign agreement fell on three of four
+        # arm-days (2026-09-07). DP14's active FoxO3a cannot rise under
+        # damage; that is the model, not a parameter.
+    }
+    if proteostasis:
+        # k69 (proteasome activity) is left out: at the fit it moves no
+        # reporter (structural, per the fit's identifiability check).
+        params["mtor_synthesis_gain"] = ParameterRef(
+            "mtor_synthesis",
+            "gain",
+            prior=float(composite.processes["mtor_synthesis"].gain),
+            prior_sigma=0.5,
+        )
+    return params
+
+
 def build_problem(
     composite=None,
     reporters=None,
@@ -183,9 +234,9 @@ def build_problem(
                 # Homeostasis is not "mTOR off" — DP14's drive stays at basal.
                 {"Genomic Instability": 1.0},
             ),
-            # Rapamycin at washout: the nutrient_drive StepSource carries the
-            # switch time, the severity the post-step level. Arms differ only
-            # in u(t) — no rate constant, no timed parameter intervention.
+            # Rapamycin at washout: the rapamycin_drive StepSource carries the
+            # switch time, the severity the post-step level of DP14's mTORC1
+            # phosphorylation rate. Arms differ only in u(t).
             "RAPA": Condition(
                 "RAPA",
                 {
@@ -236,34 +287,7 @@ def build_problem(
         params=(
             parameters
             if parameters is not None
-            else {
-                "sa_beta_gal_decay": ParameterRef(
-                    "dp14",
-                    "parameters.sen_ass_beta_gal_dec",
-                    prior=0.1548,
-                    prior_sigma=0.5,
-                ),
-                "CDKN1A_transcr": ParameterRef(
-                    "dp14",
-                    "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
-                    prior=0.085,
-                    prior_sigma=0.5,
-                ),
-                # GZ06's Mdm2 degradation: the only knob on MDM2's own path, and
-                # the most identifiable parameter in the fit.
-                "mdm2_degradation": ParameterRef(
-                    "gz06",
-                    "parameters.alpha_y",
-                    prior=published("gz06", "alpha_y"),
-                    prior_sigma=0.5,
-                ),
-                "alpha_x_control": ParameterRef(
-                    "damage_bridge",
-                    "basal",
-                    prior=GZ06_ALPHA_X_CONTROL,
-                    prior_sigma=0.5,
-                ),
-            }
+            else _default_fit_params(composite, published, proteostasis)
         ),
         fit_arms=["DDIS_vs_ctrl"],
         held_out_arms=["RAPA_vs_ctrl"],

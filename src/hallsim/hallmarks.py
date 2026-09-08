@@ -326,14 +326,14 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
                 slope=0.5,
                 description="Glycolytic flux scales 1x→1.5x with nutrient dysregulation (ERiQ-based composites)",
             ),
-            # DP14-based composites: severity is the nutrient/mTOR drive
-            # level on DP14's `Amino_Acids` input (`forcing.drive_step` adds
-            # the "nutrient_drive" StepSource), never a rate constant — so
-            # arms differ only in u(t). The phosphorylation rate per unit
-            # drive stays a mechanism parameter Calibrator fits.
+            # DP14-based composites: severity is the level a StepSource
+            # ("rapamycin_drive", `forcing.drive_step`) holds DP14's mTORC1
+            # S2448 phosphorylation rate at after the step — the kinase
+            # rapamycin inhibits, not the amino-acid input, which rapamycin
+            # leaves alone. Arms still differ only in u(t).
             # Skipped for composites without the source.
             ParameterMapping(
-                process_name="nutrient_drive",
+                process_name="rapamycin_drive",
                 param_name="after",
                 floor=1.0,
                 slope=FittableCoeff(
@@ -341,12 +341,12 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
                     clamp=(0.05, 0.95),
                     prior=0.7,
                     prior_sigma=0.3,
-                    description="mTOR/nutrient suppression gain (severity=-1 → (1-gain)x basal drive under rapamycin)",
+                    description="mTORC1 inhibition gain (severity=-1 → (1-gain)x the published S2448 phosphorylation rate under rapamycin)",
                 ),
                 description=(
-                    "Nutrient/mTOR drive level (DP14 Amino_Acids input): "
-                    "basal at severity=0, (1-gain)x basal at severity=-1 "
-                    "(rapa-suppressed), (1+gain)x at severity=+1"
+                    "DP14 mTORC1 S2448 phosphorylation rate after the step: "
+                    "published at severity=0, (1-gain)x at severity=-1 "
+                    "(rapamycin), (1+gain)x at severity=+1"
                 ),
             ),
         ],

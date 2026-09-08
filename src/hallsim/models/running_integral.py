@@ -71,12 +71,16 @@ class RunningIntegral(Process):
     # average read via leaky_rms. For a stable-product reporter that filters
     # a pulsing drive into a smooth envelope.
     tau: float | None = None
+    # Starting value of the integral. A leaky integral meant to begin at rest
+    # starts at tau * source(0)**power, so its reference point carries no
+    # start-up relaxation.
+    initial: float = 0.0
 
     def ports_schema(self):
         return {
             "integral": Port(
                 role=PortRole.EVOLVED,
-                default=0.0,
+                default=self.initial,
                 units="dimensionless",
                 description="Time-integral of source**power (flat or leaky)",
                 reads_value=self.tau is not None,  # leaky term reads A

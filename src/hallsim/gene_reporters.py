@@ -580,28 +580,18 @@ PROTEOSTASIS_REPORTERS: list[GeneReporter] = [
         reference="Morimoto 1998, Genes Dev 12:3788–3796",
     ),
     GeneReporter(
-        observable="ups/AggP",
-        gene_symbol="SQSTM1",
-        sign=+1,
-        summary=zerophase_mean(tau=2.0),
-        description=(
-            "p62/SQSTM1 — the aggregate-binding autophagy receptor, "
-            "transcriptionally induced by proteotoxic stress via NRF2; reads "
-            "Proctor 2007's aggregated protein AggP."
-        ),
-        reference="Jain et al. 2010, J Biol Chem 285:22576–22591",
-    ),
-    GeneReporter(
-        observable="ups/Proteasome",
+        observable="psmb5_mrna/integral",
         gene_symbol="PSMB5",
         sign=+1,
         summary=zerophase_mean(tau=2.0),
         description=(
-            "PSMB5 — the chymotrypsin-like β5 subunit, the textbook single-"
-            "gene proteasome readout; reads Proctor 2007's free proteasome "
-            "pool, which falls as aggregates sequester it."
+            "PSMB5 — the chymotrypsin-like β5 subunit. mTORC1 drives "
+            "proteasome subunit transcription through NRF1, so the reporter "
+            "reads a first-order transcript relaxing toward DP14's "
+            "phospho-mTORC1, not the free proteasome pool (a physical "
+            "entity a transcript cannot track)."
         ),
-        reference="Chondrogianni et al. 2005, J Biol Chem 280:11840–11850",
+        reference="Zhang et al. 2014, Nature 513:440–443",
     ),
 ]
 
