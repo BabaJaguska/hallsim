@@ -24,8 +24,8 @@ multi-hallmark composite's reporters:
 | `BNIP3` | `dp14/FoxO3a` | zero-phase mean, τ=2.0 | FoxO3 target; reads the FoxO-driven mitophagy arm downstream of nutrient sensing |
 | `DDB2` | `gz06/x` | zero-phase **RMS** `√⟨x²⟩`, τ=0.75 | p53 target; GZ06's mean p53 is analytically damage-blind, so DDB2 reads pulse amplitude — see [gz06-basal-p53.md](gz06-basal-p53.md) |
 | `MDM2` | `gz06/y0` | zero-phase mean, τ=0.75 | p53 target; `y0` is the paper's Mdm2 precursor, "representing, for example, Mdm2 mRNA" — the transcript, not the protein `y` |
-| `HSPA1A` | `ups/MisP` | zero-phase mean, τ=2.0 | *(--proteostasis)* HSP70, the canonical HSF1 target induced by misfolded load; reads Proctor's free misfolded pool — the load the heat-shock response would answer, not the response |
-| `UBB` | `ups/Ub` | zero-phase mean, τ=2.0, **sign −1** | *(--proteostasis)* polyubiquitin B, induced when the free ubiquitin pool is drawn down by conjugation and sequestration; ubiquitin is the conserved quantity the UPS model is built around |
+| `HSPA1A` | `p07/MisP` | zero-phase mean, τ=2.0 | *(--proteostasis)* HSP70, the canonical HSF1 target induced by misfolded load; reads Proctor's free misfolded pool — the load the heat-shock response would answer, not the response |
+| `UBB` | `p07/Ub` | zero-phase mean, τ=2.0, **sign −1** | *(--proteostasis)* polyubiquitin B, induced when the free ubiquitin pool is drawn down by conjugation and sequestration; ubiquitin is the conserved quantity the UPS model is built around |
 
 <!-- reporters:end -->
 
@@ -124,7 +124,7 @@ def natp(k1):
     comp = base.with_params({"ups.parameters.k1": k1})
     return Scheduler().run(comp, t_span=(0.0, T_END), macro_dt=T_END,
                            y0=comp.initial_state_vec(),
-                           save_dt=T_END / 50).get("ups/NatP")
+                           save_dt=T_END / 50).get("p07/NatP")
 
 target = natp(0.012)
 

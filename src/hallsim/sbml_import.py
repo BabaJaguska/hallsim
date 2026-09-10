@@ -18,6 +18,7 @@ Requires ``sbmltoodejax`` to be installed::
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import equinox as eqx
@@ -28,6 +29,108 @@ from hallsim.imported import ImportedODEProcess
 from hallsim.process import Port, PortRole
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SBMLReactionChannel:
+    """Source-level reaction data preserved for stochastic execution."""
+
+    reaction_id: str
+    rate_law: str
+    stoichiometry: tuple[tuple[str, float], ...]
+
+
+def _compile_sbml_rate_law(
+    rate_law: str,
+    *,
+    model_data,
+    runtime_model,
+    reaction_id: str,
+):
+    """Compile one parsed SBML kinetic law using sbmltoodejax conventions.
+
+    This intentionally shares the generated model's vector layout rather than
+    deriving rates from the aggregate ODE.  It is a small execution view over
+    the source reaction and is not yet a claim that every SBML kinetic law is
+    a molecule-count propensity.
+    """
+    import re
+
+    from sbmltoodejax import jaxfuncs
+
+    math_funcs = {
+        "abs": "jnp.abs",
+        "max": "jnp.max",
+        "min": "jnp.min",
+        "pow": "jnp.power",
+        "exp": "jnp.exp",
+        "floor": "jnp.floor",
+        "ceiling": "jnp.ceil",
+        "ln": "jnp.log",
+        "log": "jnp.log10",
+        "factorial": "jaxfuncs.factorial",
+        "sqrt": "jnp.sqrt",
+        "sin": "jnp.sin",
+        "cos": "jnp.cos",
+        "tan": "jnp.tan",
+        "sinh": "jnp.sinh",
+        "cosh": "jnp.cosh",
+        "tanh": "jnp.tanh",
+        "true": "True",
+        "false": "False",
+        "pi": "jnp.pi",
+    }
+    species = model_data.species
+    compartments = model_data.compartments
+    y_indexes = runtime_model.y_indexes
+    w_indexes = runtime_model.w_indexes
+    c_indexes = runtime_model.c_indexes
+    local_names = {
+        name: f"{reaction_id}_{name}"
+        for name, _ in model_data.reactions[reaction_id].rxnParameters
+    }
+    pieces: list[str] = []
+    cursor = 0
+    for match in re.finditer(r"\b[A-Za-z_]\w*", rate_law):
+        pieces.append(rate_law[cursor : match.start()])
+        name = local_names.get(match.group(), match.group())
+        if name in c_indexes:
+            pieces.append(f"c[{c_indexes[name]}]")
+        elif name in w_indexes:
+            pieces.append(f"w[{w_indexes[name]}]")
+        elif name in y_indexes:
+            if (
+                name in species
+                and species[name].valueType == "Concentration"
+                and not species[name].hasOnlySubstanceUnits
+            ):
+                compartment = compartments[species[name].compartment].size
+                pieces.append(f"(y[{y_indexes[name]}] / {compartment})")
+            else:
+                pieces.append(f"y[{y_indexes[name]}]")
+        elif name in species:
+            raise UnsupportedSBMLFeatureError(
+                f"reaction {reaction_id!r} references species {name!r} "
+                "that is not present in the generated state vectors"
+            )
+        elif name in math_funcs:
+            pieces.append(math_funcs[name])
+        elif name == "time":
+            pieces.append("t")
+        else:
+            raise UnsupportedSBMLFeatureError(
+                f"reaction {reaction_id!r} references unsupported symbol "
+                f"{name!r} in rate law {rate_law!r}"
+            )
+        cursor = match.end()
+    pieces.append(rate_law[cursor:])
+    expression = "".join(pieces).replace("^", "**")
+    namespace = {"jnp": jnp, "jaxfuncs": jaxfuncs}
+    return eval(
+        f"lambda y, t, w, c: {expression}",
+        {"__builtins__": {}},
+        namespace,
+    )
 
 
 class UnsupportedSBMLFeatureError(Exception):
@@ -269,6 +372,11 @@ class SBMLProcess(ImportedODEProcess):
     # Species × reaction stoichiometry from the source SBML — the exact,
     # parameter-independent basis for conserved-moiety analysis.
     _stoichiometry: dict = eqx.field(static=True, default=None)
+    _reaction_channels: tuple[SBMLReactionChannel, ...] = eqx.field(
+        static=True, default=()
+    )
+    _reaction_propensity_functions: tuple = eqx.field(static=True, default=())
+    _stochastic_enabled: bool = eqx.field(static=True, default=False)
     _model: Any = None  # sbmltoodejax model object
     _w0: Any = None
     _c: Any = None
@@ -328,6 +436,67 @@ class SBMLProcess(ImportedODEProcess):
         if not self._stoichiometry or not self._stoichiometry["species"]:
             return None
         return self._stoichiometry
+
+    def reaction_channels(self) -> tuple[SBMLReactionChannel, ...]:
+        """Return reaction stoichiometry and source rate laws.
+
+        This is deliberately separate from :meth:`derivative`: an SBML
+        reaction network can support a stochastic SSA interpretation, while
+        the deterministic ODE remains the default execution mode.
+        """
+        return self._reaction_channels
+
+    def as_stochastic(self) -> "SBMLProcess":
+        """Return a copy selecting reaction-level execution in Scheduler."""
+        import copy
+
+        new = copy.copy(self)
+        object.__setattr__(new, "_stochastic_enabled", True)
+        return new
+
+    def reaction_propensities(self, t, state):
+        """Evaluate source reaction rates without collapsing them into ``dy``.
+
+        The returned vector follows :meth:`reaction_channels` order.  These
+        values are the imported SBML kinetic laws; an SSA caller must still
+        validate that the source law has the molecule-count units and
+        combinatorial interpretation required for a propensity.
+        """
+        y = jnp.stack([state[name] for name in self._species_names])
+        c = self._constants(t)
+        if self._param_drivers:
+            driven = self._driven_param_values(state)
+            names = list(driven)
+            indexes = jnp.asarray(
+                [
+                    self._param_indexes[self._param_names.index(n)]
+                    for n in names
+                ]
+            )
+            c = c.at[indexes].set(jnp.stack([driven[n] for n in names]))
+        t_native = t * self.time_scale
+        assignmentfunc = getattr(self._model, "assignmentfunc", None)
+        w = (
+            assignmentfunc(y, self._w0, c, t_native)
+            if assignmentfunc is not None
+            else self._w0
+        )
+        if self._input_drivers:
+            name_to_widx = dict(zip(self._w_names, self._w_indexes))
+            for input_name, port in self._input_drivers:
+                w = w.at[name_to_widx[input_name]].set(state[port])
+        if any(fn is None for fn in self._reaction_propensity_functions):
+            raise UnsupportedSBMLFeatureError(
+                "an SBML reaction uses a kinetic-law feature that the "
+                "stochastic execution view cannot evaluate"
+            )
+        values = jnp.stack(
+            [
+                fn(y, t_native, w, c)
+                for fn in self._reaction_propensity_functions
+            ]
+        )
+        return values * self.time_scale
 
     def with_param_step(
         self, param_name: str, t_step: float, value_before: float
@@ -415,8 +584,8 @@ class SBMLProcess(ImportedODEProcess):
         them. Each port keeps the species' name and ontology and becomes
         INPUT, so the topology can point it at another model's pool::
 
-            ups = process_from_sbml(105).with_species_input("ROS")
-            topology["ros_link"] = {"source": "dp14/ROS", "signal": "ups/ROS"}
+            p07 = process_from_sbml(105).with_species_input("ROS")
+            topology["ros_link"] = {"source": "dp14/ROS", "signal": "p07/ROS"}
 
         This is the composition move for one entity that two deposits both
         carry — SBML comp's replaced element: one model owns the pool, this
@@ -1117,6 +1286,35 @@ def _extract_stoichiometry(xml_path: str) -> dict:
     }
 
 
+def _extract_reaction_channels(
+    xml_path: str,
+) -> tuple[SBMLReactionChannel, ...]:
+    """Preserve SBML reaction channels for a later SSA execution path."""
+    from sbmltoodepy.parse import ParseSBMLFile
+
+    try:
+        model = ParseSBMLFile(str(xml_path))
+    except Exception as exc:
+        log.warning(
+            "Could not preserve SBML reactions from %s: %s", xml_path, exc
+        )
+        return ()
+
+    channels = []
+    for reaction_id, reaction in model.reactions.items():
+        channels.append(
+            SBMLReactionChannel(
+                reaction_id=str(reaction_id),
+                rate_law=str(reaction.rateLaw),
+                stoichiometry=tuple(
+                    (str(species), float(coefficient))
+                    for coefficient, species in reaction.reactants
+                ),
+            )
+        )
+    return tuple(channels)
+
+
 def _extract_coupling_metadata(xml_path: str) -> dict:
     """Structure a coupling-wiring checker needs to judge what may drive what.
 
@@ -1739,6 +1937,29 @@ def process_from_sbml(
     coupling_meta = _extract_coupling_metadata(xml_path)
     compartment_names = _extract_compartment_names(xml_path)
     stoichiometry = _extract_stoichiometry(xml_path)
+    reaction_channels = _extract_reaction_channels(xml_path)
+    from sbmltoodepy.parse import ParseSBMLFile
+
+    model_data = ParseSBMLFile(str(xml_path))
+    reaction_propensity_functions = []
+    for channel in reaction_channels:
+        try:
+            fn = _compile_sbml_rate_law(
+                channel.rate_law,
+                model_data=model_data,
+                runtime_model=model,
+                reaction_id=channel.reaction_id,
+            )
+        except UnsupportedSBMLFeatureError as exc:
+            log.warning(
+                "%s: stochastic reaction view unavailable for %s: %s",
+                name,
+                channel.reaction_id,
+                exc,
+            )
+            fn = None
+        reaction_propensity_functions.append(fn)
+    reaction_propensity_functions = tuple(reaction_propensity_functions)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
     _species_label_map = _extract_species_labels(xml_path)
 
@@ -1783,6 +2004,8 @@ def process_from_sbml(
         _species_ontology=species_ontology,
         _coupling_meta=coupling_meta,
         _stoichiometry=stoichiometry,
+        _reaction_channels=reaction_channels,
+        _reaction_propensity_functions=reaction_propensity_functions,
         native_time_seconds=native_time_seconds,
         native_time_source=native_time_source,
         time_scale=1.0,

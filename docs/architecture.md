@@ -274,8 +274,18 @@ result = Scheduler().run(comp, t_span=(0.0, 50.0), macro_dt=5.0, y0=y0)
 result.get("dp14/CDKN1A").shape                      # (n_time, 1024)
 ```
 
-Near-flat in `batch` on GPU (kernel launch dominates); sub-linear on CPU
-(Python overhead amortizes across the batch). Every process kind rides the
+Near-flat in `batch` on GPU (kernel launch dominates) is the design intent
+and is unmeasured. On CPU it is measured and it is not what the design
+intends: on the 79-state multi-hallmark composite over 14 days, per-member
+cost is 329 ms at 64 members, 442 ms at 256 and 707 ms at 1024, at which
+point one batched run is slower than 1024 sequential ones. One vmapped
+solver loop has one trip count, so every member steps as many times as the
+slowest, and a 10% jitter on the initial condition spreads adaptive step
+counts 1.6–3.6× between members. For launched populations whose dynamics
+tolerate a validated fixed step, `Scheduler(fixed_dt=...)` provides lockstep
+integration; it replaces error control, so compare its readouts with an
+adaptive reference first. Otherwise, run populations in chunks of about 64.
+Every process kind rides the
 batch axis: a discrete `update` and an event `condition`/`handler` see
 `(batch,)` per port, a delta may be a scalar for every member or one per
 member, and an event fires for exactly the members whose condition just

@@ -1152,6 +1152,56 @@ The framework returns a plausible number and nothing indicates it is wrong.
   single-model diagnostic goes through, so those models cannot be screened at
   all.
 
+- [ ] **P0.70 — The stop rule fired on the batch path: 1024 composites in one
+  batched run are slower than 1024 sequential runs, and a Python loop of
+  64-member chunks beats both.** Filed 2026-09-10. Proteostasis composite, 79
+  states, control arm, 14 days, initial conditions jittered log-normally
+  (σ = 0.1), CPU, 11 cores, second call timed: B = 64 → 329 ms per member
+  (1.6× over singles), 256 → 442 ms (1.2×), **1024 → 707 ms, 724 s against
+  540 s for 1024 singles and 418 s for 16 chunks of 64**. Every member
+  solved. The mechanism is measured, not inferred: per-member solver step
+  counts inside one chunk of 64 spread from ~165 to 258–590, the chunk's wall
+  time tracks its maximum (20.8 s at max 258, 30.9 s at max 590), and one
+  vmapped `while_loop` has one trip count, so every member steps as many
+  times as the slowest and the one-shot 1024 stepped ≥ 590 times for a
+  median member that needs ~170. The three members that left the basin did
+  not sit in the slowest chunks; the waste is the ordinary spread of an
+  adaptive solver over a population. The batch used 3.7 of 11 cores. The
+  README's "sub-linear on CPU" holds to about 64 and is false past 256.
+  Scripts in `scratch/2026-09-10-batch/`.
+  *Sharding from outside does not work on the installed stack (measured
+  2026-09-10).* `jax.shard_map` over 8 host devices fails inside the implicit
+  solver's linear solve — lineax's LU `ravel_vector` raises "pytree does not
+  match out_structure" from `Scheduler._reduced_solve` — at 16 and 256
+  members, at 1- and 14-day horizons, and with an unsharded warm-up at the
+  per-shard width beforehand (the compiled core is keyed on the batch shape,
+  so a sharded call builds its core inside the shard trace). With JAX's
+  varying-axes check left on, the failure is an earlier `select_n` check
+  that JAX's own message says to disable. JAX 0.10.2, lineax as installed;
+  the 2.4× in `docs/benchmarks.md` was measured on an earlier JAX and is not
+  reproducible today.
+  `pmap` over the same 8 host devices fails on the same lineax line.
+  **Worker processes work, and are the number to beat: the 1024 as 16 chunks
+  of 64 over 3 spawned processes, each with its own Scheduler, take 266 s
+  including each process's compile — 260 ms per member, 2.7× faster than
+  the one batched call and 1.6× faster than the chunks run one after
+  another** (`scratch/2026-09-10-batch/procs_1024.py`). Nothing is traced
+  across members, so nothing can fail; the cost is one compile per process.
+  *Fix, in order of what is known to work:* (1) `Scheduler(fixed_dt=...)`
+  now uses lockstep integration for non-stiff groups while retaining adaptive
+  control for stiffness-routed implicit groups, so selecting population mode
+  does not make the published Proctor launch transient fail. (2) a population
+  entry point on
+  the Scheduler that chunks a batched `y0` and runs the chunks in spawned
+  worker processes — chunk size from this measurement (about 64), worker
+  count from the cores a single solve uses (3.7 of 11 here) — so the
+  measured route is the framework's route and not a script. (3)
+  Re-batching by observed step counts between macro steps, which the stats
+  already carry per member. The lockstep route is the structural answer for
+  a GPU, but it still needs a population entry point and a validated
+  per-member step policy.
+
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -1916,6 +1966,27 @@ The check that would catch a mistake does not exist, does not run, or fails open
   an observable fact rather than an inference. The `stats` half is worth doing
   first and independently — it is a few hours and it makes P0.30/P0.23-class
   divergences visible instead of silent.
+
+- [ ] **P3.19 — A run cannot be placed under `pmap` or `shard_map`, so one
+  loop per device — the multi-GPU shape and the CPU shape that beats one
+  vmapped loop — is unreachable, and the cause is upstream.** Filed
+  2026-09-10 while chasing P0.70. `Scheduler.run` inside `jax.shard_map` or
+  `jax.pmap` over host devices raises "pytree does not match out_structure"
+  from lineax's LU `ravel_vector`, reached through the implicit solver's
+  Newton step in `_reduced_solve`; every width, horizon and warm-up tried
+  fails the same way. Reproduced without HallSim: a bare `diffrax.Kvaerno5`
+  with `optimistix.Newton` on Robertson runs under `vmap` and fails on the
+  identical lineax line under `shard_map`. JAX 0.10.2, diffrax 0.7.2, lineax
+  0.1.0, optimistix 0.1.0. So it is not the Scheduler's structure; any
+  implicit diffrax solve is affected on this stack, and until it is fixed
+  upstream or worked around, the only per-device parallelism available is
+  worker processes (P0.70's fix).
+  *Fix:* check newer lineax / diffrax releases against the bare
+  reproduction, pin what passes, and add that reproduction as a
+  `slow`-marked test so the stack cannot regress silently; failing an
+  upstream fix, a `Scheduler` population entry point over worker processes
+  is the route on every device count.
+
 
 ## Review notes — 2026-08-31 external systems review
 

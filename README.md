@@ -106,6 +106,7 @@ published models — not a model of senescence to build on:
 simulate multi-hallmark run        # score it out of the box, no fitting
 simulate multi-hallmark calibrate  # fit, then evaluate on held-out arms
 simulate multi-hallmark sweep      # two-hallmark severity sweep
+simulate multi-hallmark-ssa        # one-way DP14/GZ06 + Proctor SSA hybrid
 ```
 
 ## What you can do with it
@@ -113,7 +114,7 @@ simulate multi-hallmark sweep      # two-hallmark severity sweep
 - **Compose published models.** Search BioModels, JWS Online, ModelDB, BioSimulations, Physiome and Europe PMC supplements from one call, filtered by what a deposit *emits*; import SBML, COPASI `.cps` or XPPAUT `.ode`. The full mechanism surface auto-populates and is discoverable, and every candidate screened out is recorded with its reason in [docs/rejections.md](docs/rejections.md). → [docs/architecture.md#sbml-import](docs/architecture.md#sbml-import)
 - **Turn hallmark severities.** 0–1 differentiable handles that modulate the right parameters across models; interventions (rapamycin, CR) live on the hallmark layer they perturb. → [docs/architecture.md#hallmark-handles](docs/architecture.md#hallmark-handles)
 - **Calibrate against data with held-out validation.** Gene-reporter concordance, log2-fold-change loss, MAP priors, differentiation through the stiff solve. → [docs/calibration.md](docs/calibration.md)
-- **Run batched population studies.** A `(batch, n_vars)` `y0` flows through the solve as one computation — no `vmap` — near-flat on GPU. → [docs/architecture.md#population-studies-via-batched-y0](docs/architecture.md#population-studies-via-batched-y0)
+- **Run batched population studies.** A `(batch, n_vars)` `y0` flows through the solve as one computation — no `vmap` to write. Measured on CPU it pays off to about 64 members and not beyond, because one adaptive loop takes the slowest member's step count; the GPU claim is unmeasured. Numbers in [docs/benchmarks.md](docs/benchmarks.md). → [docs/architecture.md#population-studies-via-batched-y0](docs/architecture.md#population-studies-via-batched-y0)
 
 ## License
 

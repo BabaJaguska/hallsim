@@ -13,8 +13,9 @@ window inside a coffee break and the paper's own 30-month horizon overnight.
 
 ## What is already built
 
-`sbmltoodejax` generates both halves of the reaction-channel decomposition for
-every model it converts, and HallSim keeps only the collapsed sum:
+`sbmltoodejax` generates the reaction stoichiometric matrix and evaluates the
+reaction velocity vector inside its ODE RHS, while HallSim originally kept
+only the collapsed sum:
 
 ```
 r.stoichiometricMatrix            # (62, 117)  N
@@ -30,7 +31,16 @@ rateOfSpeciesChange = N @ v + rateRuleVector
   `GroupIntegrator` (`scheduler.py:102`), and already has a non-Diffrax lane
   for DISCRETE processes fired on a `dt_step` grid (`scheduler.py:1191`).
 
-Exposing the propensity vector is an accessor, not new mathematics.
+HallSim now preserves source reaction IDs and rate-law strings and exposes an
+executable `reaction_propensities(t, state)` view when every reaction law can
+be translated. Models with unsupported custom functions still import
+deterministically, but their stochastic view raises explicitly when used.
+`simulate_ssa` is currently a direct-method single-process runner; the
+Scheduler now also recognizes an explicitly selected
+`SBMLProcess.as_stochastic()` in an eager single-stochastic-process lane.
+The direct runner remains useful for one-way hybrid inputs; batched stochastic
+groups, multiple stochastic processes, and fully coupled hybrid splitting
+remain unfinished.
 
 ## The gap
 

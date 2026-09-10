@@ -194,7 +194,7 @@ live target rather than a curiosity.
 | `--xla_cpu_multi_thread_eigen=false` | 2.247 → 2.276 s. Nil — the solve is single-threaded and has no parallelism to exploit |
 | `--xla_cpu_enable_fast_math=true` | 2.247 → 2.100 s (6.5%). Not worth FTZ and no-NaN reassociation at `atol=1e-9` with curated oscillators |
 | Lowering `max_steps` to shrink the reverse-mode checkpoint count | 32.1 s vs 27.7 s at the 4M default. `DEFAULT_MAX_STEPS` is not the lever |
-| Sharding the *existing vmapped* batch axis | 0.83× — slower than doing nothing. One vmapped `while_loop` has one trip-count predicate, so SPMD adds a cross-device reduce instead of splitting the loop. Needs `shard_map` (2.4×) |
+| Sharding the *existing vmapped* batch axis | 0.83× — slower than doing nothing. One vmapped `while_loop` has one trip-count predicate, so SPMD adds a cross-device reduce instead of splitting the loop. Needs `shard_map` (2.4×) — **not reproducible on JAX 0.10.2 (2026-09-10): `shard_map` around `Scheduler.run` fails inside lineax's LU solve; see §6 and P0.70** |
 | Parallelising forward-mode parameter directions | 1.09×. The vmapped JVP already shares one primal solve |
 
 **A caveat on every absolute number above.** Re-running the same measurement
@@ -204,6 +204,52 @@ only when its arms were interleaved serially in one session on an idle machine;
 treat a *level* as needing a re-measure.
 
 ---
+
+## 6. Batched populations on CPU: measured, and the claim does not hold past 64
+
+Multi-hallmark composite with Proctor 2007 attached — 79 states, 60 of them
+integrated, 9 processes, 2 stiff groups — control arm over 14 days,
+`macro_dt` 0.5, `save_dt` 0.5, initial conditions jittered log-normally
+(σ = 0.1) on the integrated states, one `Scheduler.run` per size, second call
+timed as warm. Apple Silicon, 11 cores, no GPU; the batch used 3.7 cores.
+`scratch/2026-09-10-batch/batch_1024.py`.
+
+| batch | cold | warm | per member | against B single runs |
+|---|---|---|---|---|
+| 1 | 10.2 s | 0.5 s | 528 ms | — |
+| 64 | 30.5 s | 21.0 s | 329 ms | 1.6× faster |
+| 256 | 118 s | 113 s | 442 ms | 1.2× faster |
+| 1024 | 693 s | 724 s | 707 ms | **0.7× — slower** |
+
+Every member solved at every size. The same 1024 population as 16 chunks of
+64 takes 418 s, 1.7× less than the one-shot batch and 1.3× less than 1024
+single runs, so a Python loop over chunks beats the framework's batch path
+(P0.70).
+
+**Mechanism, measured.** Inside one chunk of 64 the per-member solver step
+counts spread from ~165 to 258–590 in the slow group (rejections 7 to 68),
+and the chunk's wall time tracks its *maximum*: 20.8 s at max 258, 30.9 s
+at max 590. One vmapped `while_loop` has one trip count, so every member
+steps as many times as the slowest; the one-shot 1024 stepped ≥ 590 times
+for a median member that needs ~170. A 10% jitter on the initial condition
+is enough to open that spread. The three members that left the basin
+(Proctor's runaway-aggregation state, reached deterministically) sat in
+chunks that were not the slowest, so this is the ordinary spread of an
+adaptive solver over a population, not a pathological member.
+
+**What does work on this machine: worker processes over chunks.** The same
+1024 as 16 chunks of 64 over 3 spawned processes, each with its own
+Scheduler and its own compile: **266 s, 260 ms per member**, 2.7× faster
+than the one batched call. Nothing is traced across members. `shard_map`
+and `pmap` over host devices both fail inside lineax's LU solve on this
+stack (P0.70). The GPU claim ("near-flat") is unmeasured on this machine.
+
+| how the 1024 were run | wall time | per member |
+|---|---|---|
+| one batched `Scheduler.run` | 724 s | 707 ms |
+| 1024 single runs | 540 s | 528 ms |
+| 16 chunks of 64, sequentially | 418 s | 408 ms |
+| 16 chunks of 64, 3 worker processes | **266 s** | **260 ms** |
 
 ## Reproducing
 

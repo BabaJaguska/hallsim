@@ -1728,7 +1728,11 @@ def test_newton_rtol_defaults_to_rtol():
 
 
 class TestBatchedAssignedPaths:
-    """A batched y0 cannot carry per-member values on an ASSIGNED path."""
+    """A batched y0 that differs between members *only* on ASSIGNED paths is
+    refused: those values are recomputed before anything reads them, so the
+    population would be identical members returning a plausible null. A real
+    population — one that also differs on an integrated state — runs, and its
+    assigned values are overwritten exactly as they are unbatched."""
 
     class _Setpoint(Process):
         level: float = 0.5
@@ -1766,8 +1770,31 @@ class TestBatchedAssignedPaths:
         keys = comp.store_keys()
         y0 = jnp.stack([comp.initial_state_vec()] * 4)
         y0 = y0.at[:, keys.index("c/s")].set(jnp.array([0.1, 0.4, 0.7, 1.0]))
-        with pytest.raises(ValueError, match="ASSIGNED"):
+        with pytest.raises(ValueError, match="only on ASSIGNED"):
             Scheduler().run(comp, (0.0, 1.0), macro_dt=1.0, y0=y0)
+
+    def test_a_real_population_runs_and_its_assigned_values_are_overwritten(
+        self,
+    ):
+        """Jittering every path of a real population is the natural thing to
+        do, and it must not need the caller to know which paths are assigned.
+        """
+        comp = self._composite()
+        keys = comp.store_keys()
+        base = jnp.stack([comp.initial_state_vec()] * 4)
+        xs = jnp.array([0.0, 1.0, 2.0, 3.0])
+        real = base.at[:, keys.index("c/x")].set(xs)
+        messy = real.at[:, keys.index("c/s")].set(
+            jnp.array([0.1, 0.4, 0.7, 1.0])
+        )
+        run = lambda y: Scheduler().run(  # noqa: E731
+            comp, (0.0, 1.0), macro_dt=1.0, y0=y
+        )
+        clean, overwritten = run(real), run(messy)
+        assert jnp.allclose(overwritten.get("c/x"), clean.get("c/x"))
+        # Every member integrates the setpoint's own value, not the one it
+        # was handed: x(1) = x(0) + 0.5.
+        assert jnp.allclose(overwritten.get("c/x")[-1], xs + 0.5, atol=1e-6)
 
     def test_identical_assigned_values_are_fine(self):
         """Only a *varying* assigned column is a mistake; a uniform one is
@@ -1776,6 +1803,128 @@ class TestBatchedAssignedPaths:
         y0 = jnp.stack([comp.initial_state_vec()] * 4)
         res = Scheduler().run(comp, (0.0, 1.0), macro_dt=1.0, y0=y0)
         assert res.ys[-1].shape[0] == 4
+
+
+class TestFixedStep:
+    """``fixed_dt`` is lockstep mode: no error control, so every member of a
+    batch takes the same number of steps, and the result must still agree
+    with the adaptive solve on a smooth problem."""
+
+    class _Decay(Process):
+        rate: float = 1.3
+
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def derivative(self, t, state):
+            return {"x": -self.rate * state["x"]}
+
+    def _composite(self):
+        return Composite(
+            processes={"d": self._Decay()},
+            topology={"d": {"x": "p/x"}},
+            semantic_validation=False,
+        )
+
+    def test_matches_the_adaptive_solve(self):
+        comp = self._composite()
+        kw = dict(t_span=(0.0, 2.0), macro_dt=0.5, save_dt=0.25)
+        ref = Scheduler().run(comp, **kw).get("p/x")
+        fixed = Scheduler(fixed_dt=0.01).run(comp, **kw).get("p/x")
+        assert jnp.allclose(fixed, ref, atol=1e-5)
+        assert jnp.allclose(fixed[-1], jnp.exp(-1.3 * 2.0), atol=1e-5)
+
+    def test_every_member_of_a_batch_takes_the_same_steps(self):
+        comp = self._composite()
+        keys = comp.store_keys()
+        y0 = jnp.stack([comp.initial_state_vec()] * 4)
+        y0 = y0.at[:, keys.index("p/x")].set(
+            jnp.array([0.1, 1.0, 10.0, 100.0])
+        )
+        res = Scheduler(fixed_dt=0.01).run(
+            comp, t_span=(0.0, 1.0), macro_dt=0.5, y0=y0, save_dt=0.5
+        )
+        groups = [
+            d
+            for d in res.stats.values()
+            if isinstance(d, dict) and "num_solver_steps" in d
+        ]
+        assert groups
+        for d in groups:
+            steps = jnp.asarray(d["num_solver_steps"])
+            assert steps.shape == (4,)
+            assert int(steps.min()) == int(steps.max()) > 0
+
+    def test_stiff_groups_keep_adaptive_control_in_lockstep_mode(self):
+        class _StiffDecay(Process):
+            rate: float = 1000.0
+
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"x": -self.rate * state["x"]}
+
+        comp = Composite(
+            processes={"d": _StiffDecay()},
+            topology={"d": {"x": "p/x"}},
+            semantic_validation=False,
+        )
+        res = Scheduler(fixed_dt=0.1).run(
+            comp, t_span=(0.0, 1.0), macro_dt=0.5, save_dt=0.5
+        )
+        assert bool(jnp.all(res.ok))
+        assert bool(jnp.all(jnp.isfinite(res.get("p/x"))))
+
+    def test_a_jump_on_the_macro_grid_runs_and_one_inside_a_window_refuses(
+        self,
+    ):
+        """A fixed step is never clipped onto a discontinuity, so the macro
+        grid must land on every jump; the plan says so instead of the
+        solver stepping across it."""
+        from hallsim.models.forcing import StepSource
+
+        class _Fed(Process):
+            def ports_schema(self):
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=0.0),
+                    "u": Port(role=PortRole.INPUT, default=0.0),
+                }
+
+            def derivative(self, t, state):
+                return {"x": state["u"]}
+
+        def composite(t_step):
+            return Composite(
+                processes={
+                    "fed": _Fed(),
+                    "src": StepSource(t_step=t_step, before=0.0, after=1.0),
+                },
+                topology={
+                    "fed": {"x": "p/x", "u": "p/u"},
+                    "src": {"signal": "p/u"},
+                },
+                semantic_validation=False,
+            )
+
+        on_grid = Scheduler(fixed_dt=0.01).run(
+            composite(1.0), t_span=(0.0, 2.0), macro_dt=0.5, save_dt=0.5
+        )
+        # x integrates u: zero until the step at t=1, then slope 1. The
+        # stage that lands exactly on the jump samples the post-jump value,
+        # so the last pre-jump step carries a fraction of it; a few percent.
+        assert abs(float(on_grid.get("p/x")[-1]) - 1.0) < 0.05
+        with pytest.raises(ValueError, match="inside a macro step"):
+            Scheduler(fixed_dt=0.01).run(
+                composite(0.7), t_span=(0.0, 2.0), macro_dt=0.5
+            )
+
+    def test_a_per_group_dict_must_name_every_group(self):
+        comp = self._composite()
+        with pytest.raises(KeyError, match="no step"):
+            Scheduler(fixed_dt={"nope": 0.01}).run(
+                comp, t_span=(0.0, 1.0), macro_dt=0.5
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

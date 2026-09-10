@@ -87,7 +87,7 @@ def _proteostasis(args) -> bool:
     off the flag only when no fit has been written yet."""
     saved = _saved_run()
     if "processes" in saved:
-        return "ups" in saved["processes"]
+        return "p07" in saved["processes"]
     return bool(getattr(args, "proteostasis", False))
 
 
@@ -133,7 +133,7 @@ MODEL_BLOCKS = {
         deposit="BIOMD157",
         body=["p53–Mdm2 oscillator"],
     ),
-    "ups": dict(
+    "p07": dict(
         xy=(8.9, 0.72, 3.1, 1.42),
         edge="#0173b2",
         fill="#e7eff7",
@@ -950,15 +950,15 @@ BEFORE_AFTER_ROWS = [
         ],
     ),
     dict(
-        namespace="ups",
+        namespace="p07",
         sbml=PROCTOR07_SBML_PATH,
         ylabel="UPS\nnative / misfolded / Ub",
         logy=True,
         vars=[
-            ("ups/NatP", "native protein", "#0e7490"),
-            ("ups/MisP", "misfolded", "#b91c1c"),
-            ("ups/Ub", "free ubiquitin", "#6d28d9"),
-            ("ups/AggP", "aggregates", "#ca8a04"),
+            ("p07/NatP", "native protein", "#0e7490"),
+            ("p07/MisP", "misfolded", "#b91c1c"),
+            ("p07/Ub", "free ubiquitin", "#6d28d9"),
+            ("p07/AggP", "aggregates", "#ca8a04"),
         ],
     ),
 ]

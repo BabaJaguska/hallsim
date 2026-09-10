@@ -49,8 +49,8 @@ Gene reporters (see :mod:`hallsim.gene_reporters`): CDKN1A → ``dp14/CDKN1A``,
 GLB1 → ``dp14/SA_beta_gal``, BNIP3 → ``dp14/FoxO3a``, DDB2 → ``gz06/x``
 (RMS amplitude), and MDM2 → ``gz06/y0`` — the Mdm2 *precursor*, which GZ06's
 Table I defines as the transcript, not the protein ``y``. With
-``proteostasis``, HSPA1A → ``ups/MisP`` and UBB → ``ups/Ub``; both read
-Proctor states, so freezing the two ``ups/`` edges moves both.
+``proteostasis``, HSPA1A → ``p07/MisP`` and UBB → ``p07/Ub``; both read
+Proctor states, so freezing the two ``p07/`` edges moves both.
 
 ``test_gene_reporters.py`` checks this list against
 ``MULTI_HALLMARK_REPORTERS``, so it fails rather than drifts.
@@ -203,7 +203,7 @@ def build_multi_hallmark_composite(
     ``Irradiation`` at its severity for the whole run instead of washing out.
     ``validate`` covers topology only — semantic validation is configured per
     sub-composite and at the merge. ``proteostasis`` adds Proctor 2007's
-    ubiquitin–proteasome system as ``ups/``, its misfolding rate driven by
+    ubiquitin–proteasome system as ``p07/``, its misfolding rate driven by
     DP14's ROS and its synthesis rate by DP14's phospho-mTORC1.
     """
     gz06 = (
@@ -318,14 +318,14 @@ def build_multi_hallmark_composite(
 
 
 def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
-    """Proctor 2007 as ``ups/``: its ROS pool handed over to DP14's through
+    """Proctor 2007 as ``p07/``: its ROS pool handed over to DP14's through
     an identity edge, and its synthesis rate driven by DP14's phospho-mTORC1
     through a linear gain placed from DP14's declared reference state and
     Thoreen 2012."""
-    ups = (
+    p07 = (
         process_from_sbml(
             str(PROCTOR07_SBML_PATH),
-            name="ups",
+            name="p07",
             parameters={PROCTOR07_K69_NAME: PROCTOR07_K69_PAPER},
             native_time_seconds=PROCTOR07_NATIVE_TIME_SECONDS,
         )
@@ -336,9 +336,9 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
     dp14_ports = dp14.ports_schema()
     ros_ref = float(dp14_ports[DP14_ROS_NAME].default)
     mtor_ref = float(dp14_ports[DP14_MTORC1_ACTIVE_NAME].default)
-    ups_ros_ref = float(ups.ports_schema()[PROCTOR07_ROS_NAME].default)
-    k1_pub = float(ups.parameters[PROCTOR07_SYNTHESIS_RATE_NAME])
-    processes["ups"] = ups
+    p07_ros_ref = float(p07.ports_schema()[PROCTOR07_ROS_NAME].default)
+    k1_pub = float(p07.parameters[PROCTOR07_SYNTHESIS_RATE_NAME])
+    processes["p07"] = p07
     # Identity edge: one entity carried on two arbitrary scales. The gain is
     # the conversion factor SBML comp leaves to the modeller, placed once as
     # the ratio of the two deposits' declared reference levels; zero maps to
@@ -347,9 +347,9 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
     # at the published k2, which is where "no ROS, no misfolding" lives.
     processes["ros_identity"] = GainEdge(
         mode="level",
-        timescale=ups.timescale,
+        timescale=p07.timescale,
         offset=0.0,
-        gain=place_gain(ros_ref, ups_ros_ref),
+        gain=place_gain(ros_ref, p07_ros_ref),
         source_ontology={"chebi": "CHEBI:26523"},
         source_description="DP14 ROS",
         target_ontology={"chebi": "CHEBI:26523"},
@@ -372,7 +372,7 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
     )
     processes["mtor_synthesis"] = GainEdge(
         mode="level",
-        timescale=ups.timescale,
+        timescale=p07.timescale,
         offset=mtor_line.offset,
         gain=mtor_line.gain,
         source_description="DP14 phospho-mTORC1 (S2448)",
@@ -386,13 +386,13 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
             "Proctor k1)."
         ),
     )
-    # ups/ROS keeps its path; the identity edge now owns it and ups reads it.
-    topology["ups"] = {"k1_in": "ups/k1_signal"}
+    # p07/ROS keeps its path; the identity edge now owns it and p07 reads it.
+    topology["p07"] = {"k1_in": "p07/k1_signal"}
     topology["ros_identity"] = {
         "source": f"dp14/{DP14_ROS_NAME}",
-        "signal": f"ups/{PROCTOR07_ROS_NAME}",
+        "signal": f"p07/{PROCTOR07_ROS_NAME}",
     }
     topology["mtor_synthesis"] = {
         "source": f"dp14/{DP14_MTORC1_ACTIVE_NAME}",
-        "signal": "ups/k1_signal",
+        "signal": "p07/k1_signal",
     }

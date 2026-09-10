@@ -752,6 +752,27 @@ def multi_hallmark(
     (cmd_sweep if command == "sweep" else cmd_run)(args)
 
 
+@simulate.command("multi-hallmark-ssa")
+@click.option("--t-end", type=float, default=14.0, show_default=True)
+@click.option("--save-dt", type=float, default=0.1, show_default=True)
+@click.option("--seed", type=int, default=0, show_default=True)
+@click.option("--max-events", type=int, default=10_000_000, show_default=True)
+def multi_hallmark_ssa(t_end, save_dt, seed, max_events):
+    """Run the one-way DP14/GZ06 + Proctor Gillespie hybrid."""
+    from demos.multi_hallmark_ssa import run
+
+    result, _ = run(
+        t_end=t_end,
+        save_dt=save_dt,
+        seed=seed,
+        max_events=max_events,
+    )
+    click.echo(
+        f"SSA events={result.reaction_indices.size} "
+        f"samples={len(result.times)}"
+    )
+
+
 @simulate.command("info")
 def info():
     """Show info about the composable architecture."""

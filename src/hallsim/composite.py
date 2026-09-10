@@ -901,6 +901,16 @@ class Composite(eqx.Module):
             n: p
             for n, p in self.processes.items()
             if p.kind == ProcessKind.CONTINUOUS
+            and not getattr(p, "_stochastic_enabled", False)
+        }
+
+    def stochastic_processes(self) -> dict[str, Process]:
+        """CONTINUOUS processes with an explicit reaction-channel view."""
+        return {
+            n: p
+            for n, p in self.processes.items()
+            if p.kind == ProcessKind.CONTINUOUS
+            and getattr(p, "_stochastic_enabled", False)
         }
 
     def _kind(self, kind: ProcessKind) -> dict[str, Process]:

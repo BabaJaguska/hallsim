@@ -302,6 +302,15 @@ class Process(eqx.Module):
         """
         raise NotImplementedError
 
+    def reaction_channels(self):
+        """Return source reaction channels for a stochastic execution lane.
+
+        Deterministic processes return ``None``. Imported reaction-network
+        processes may return channel metadata and expose a matching propensity
+        evaluator; the Scheduler then advances them outside the ODE RHS.
+        """
+        return None
+
     # --- Interface: ASSIGNED (algebraic) -------------------------------------
 
     def assign(

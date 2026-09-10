@@ -93,8 +93,8 @@ Five mechanistic observables ↔ five canonical reporter genes
 | `BNIP3` | `dp14/FoxO3a` |
 | `DDB2` | `gz06/x` |
 | `MDM2` | `gz06/y0` |
-| `HSPA1A` | `ups/MisP` |
-| `UBB` | `ups/Ub` |
+| `HSPA1A` | `p07/MisP` |
+| `UBB` | `p07/Ub` |
 
 <!-- reporters:end -->
 

@@ -62,6 +62,18 @@ class TestWithParamStep:
         assert not jnp.allclose(_solo_ys(stepped), _solo_ys(_gz06(0.9)))
 
 
+def test_sbml_import_preserves_reaction_channels_for_stochastic_execution():
+    proc = _gz06(1.0)
+    channels = proc.reaction_channels()
+    assert channels
+    assert all(channel.reaction_id for channel in channels)
+    assert all(channel.rate_law for channel in channels)
+    assert any(
+        any(species == "x" for species, _ in channel.stoichiometry)
+        for channel in channels
+    )
+
+
 class TestWithParamInput:
     def _pin(self):
         return process_from_sbml(

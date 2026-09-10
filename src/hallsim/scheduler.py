@@ -219,22 +219,36 @@ class SchedulerResult:
         return key in self._index
 
 
-def _varying_assigned_paths(composite, state, keys) -> list[str]:
-    """ASSIGNED paths whose batched initial values differ between members.
-
-    Such a value never survives the first RHS call, so a population varying
-    one is really a population of identical members — silently, which is what
-    makes it worth refusing.
-    """
-    if is_traced(state):
-        return []
-    assigned = composite.assigned_paths()
-    cols = [i for i, k in enumerate(keys) if k in assigned]
+def _varying_paths(state, keys, cols) -> list[str]:
+    """The paths among ``cols`` whose batched values differ between members."""
     if not cols:
         return []
     flat = np.asarray(state).reshape(-1, np.shape(state)[-1])[:, cols]
     spread = flat.max(axis=0) - flat.min(axis=0)
     return [keys[cols[j]] for j in range(len(cols)) if spread[j] != 0.0]
+
+
+def _batch_varies_only_on_assigned(composite, state, keys) -> list[str]:
+    """The ASSIGNED paths a batch varies on, when it varies on nothing else.
+
+    A per-member value on an ASSIGNED path never survives the first RHS
+    call, so a population that differs *only* there is a population of
+    identical members — silently, which is what makes it worth refusing. A
+    population that also differs on an integrated state is a real one, and
+    the assigned values are simply overwritten as they would be unbatched.
+    """
+    if is_traced(state):
+        return []
+    assigned = composite.assigned_paths()
+    on_assigned = _varying_paths(
+        state, keys, [i for i, k in enumerate(keys) if k in assigned]
+    )
+    if not on_assigned:
+        return []
+    on_integrated = _varying_paths(
+        state, keys, [i for i, k in enumerate(keys) if k not in assigned]
+    )
+    return [] if on_integrated else on_assigned
 
 
 def _build_proc_index_maps(
@@ -435,6 +449,15 @@ class Scheduler:
         Safety limit on solver steps per macro step.
     dt0:
         Initial step size for the adaptive controller.
+    fixed_dt:
+    Lockstep mode for non-stiff groups. A fixed step (one scalar, or
+    ``{group: dt}``) replaces error control there, so every member of a
+    batched ``y0`` takes the same number of steps. Stiffness-routed
+    implicit groups retain adaptive error control for launch transients
+    and Newton convergence; this keeps a valid stiff solve from failing
+    merely because the population mode was selected. Accuracy for
+    lockstep groups is not controlled: compare readouts with an adaptive
+    reference first. ``max_steps`` must cover ``macro_dt / fixed_dt``.
     groups:
         Manual group assignment ``{group_name: [proc_name, ...]}``. ``None``
         uses ``composite.auto_groups()``.
@@ -477,6 +500,7 @@ class Scheduler:
         atol: float = DEFAULT_ATOL,
         max_steps: int = DEFAULT_MAX_STEPS,
         dt0: float = DEFAULT_DT0,
+        fixed_dt: float | dict[str, float] | None = None,
         explicit_solver: dfx.AbstractSolver | None = None,
         implicit_solver: dfx.AbstractSolver | None = None,
         auto_stiffness: bool = True,
@@ -550,7 +574,30 @@ class Scheduler:
         self.max_explicit_substeps = max_explicit_substeps
         self.rtol = rtol
         self.atol = atol
+        if fixed_dt is not None:
+            fixed_steps = (
+                list(fixed_dt.values())
+                if isinstance(fixed_dt, dict)
+                else [fixed_dt]
+            )
+            if not fixed_steps or any(
+                not np.isfinite(float(step)) or float(step) <= 0
+                for step in fixed_steps
+            ):
+                raise ValueError(
+                    "fixed_dt must be a positive finite step size, or a "
+                    "non-empty group-to-step dictionary"
+                )
+        # Lockstep mode: a fixed step per group instead of error control.
+        # Every member of a batch then takes the same number of steps by
+        # construction, so one vmapped loop wastes nothing on its slowest
+        # member; accuracy is checked against an adaptive run, not
+        # controlled. Stiffness routing still picks the solver.
+        self.fixed_dt = fixed_dt
         self.controller = dfx.PIDController(rtol=rtol, atol=atol)
+        self.lockstep_controller = (
+            dfx.ConstantStepSize() if fixed_dt is not None else self.controller
+        )
         # Per-(group structure) cache of resolved integrators. Keyed by a
         # structural signature so the eager resolution (concrete params)
         # is reused under later grad/jvp/vmap tracing, where the Jacobian
@@ -608,6 +655,7 @@ class Scheduler:
         adjoint: dfx.AbstractAdjoint | None = None,
         antialias: bool = True,
         params_from: Composite | None = None,
+        seed: int = 0,
     ) -> SchedulerResult:
         """Run the composite with multi-rate scheduling.
 
@@ -649,6 +697,9 @@ class Scheduler:
             Nyquist guardrail: refine the save grid finer (never coarser) if
             ``save_dt`` would undersample the fastest oscillation and alias a
             raw readout. ``False`` takes the grid verbatim.
+        seed:
+            Seed for the eager direct-SSA lane. It has no effect on purely
+            deterministic composites.
 
         Returns
         -------
@@ -671,7 +722,9 @@ class Scheduler:
                     "resolution they feed (solver routing, save grid, "
                     "discontinuity times) is what a plan *is*."
                 )
-            return self._execute(composite, y0, params_from=params_from)
+            return self._execute(
+                composite, y0, params_from=params_from, stochastic_seed=seed
+            )
         if params_from is not None:
             raise TypeError(
                 "run() got params_from= without a RunPlan. It substitutes "
@@ -683,7 +736,7 @@ class Scheduler:
         plan = self._plan_for(
             composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
         )
-        return self._execute(plan, y0)
+        return self._execute(plan, y0, stochastic_seed=seed)
 
     def plan(
         self,
@@ -768,13 +821,14 @@ class Scheduler:
                 "adaptive_dt=True (coupling residual is a single dt "
                 "for the whole batch and reduces via Python float)"
             )
-        varying = _varying_assigned_paths(composite, state, keys)
-        if varying:
+        only_assigned = _batch_varies_only_on_assigned(composite, state, keys)
+        if only_assigned:
             blockers.append(
-                f"per-member values on ASSIGNED paths {varying} "
+                f"per-member values only on ASSIGNED paths {only_assigned} "
                 "(an assignment is recomputed from its own process "
                 "every step, so those values are overwritten before "
-                "anything reads them and every member would run "
+                "anything reads them; with every integrated state "
+                "identical across members, every member would run "
                 "identically)"
             )
         if blockers:
@@ -824,6 +878,21 @@ class Scheduler:
         # Discontinuities the solver should land on exactly rather than
         # resolve by adaptive step-rejection.
         jump_ts = self._collect_jump_ts(composite, t0, t1)
+        if self.fixed_dt is not None and jump_ts is not None:
+            # A fixed step cannot be clipped onto a jump, so the macro grid
+            # has to land on every one of them.
+            off = [
+                float(j)
+                for j in jump_ts
+                if abs((j - t0) / macro_dt - round((j - t0) / macro_dt)) > 1e-9
+            ]
+            if off:
+                raise ValueError(
+                    f"fixed_dt cannot step onto discontinuities at {off} "
+                    f"inside a macro step of {macro_dt}: a fixed step is "
+                    "never clipped. Choose macro_dt so every jump falls on "
+                    "its grid, or run adaptively."
+                )
 
         # Flat state layout, pinned for the whole run. Batched y0 is
         # (batch, n_vars); the batch axis rides through every group's solve.
@@ -835,6 +904,7 @@ class Scheduler:
         )
 
         groups = self.manual_groups or composite.auto_groups()
+        stochastic_procs = composite.stochastic_processes()
         discrete_procs = composite.discrete_processes()
         event_procs = composite.event_processes()
 
@@ -875,6 +945,7 @@ class Scheduler:
             and not self.adaptive_dt
             and self.splitting == "lie"
             and coupling == "frozen"
+            and not stochastic_procs
         )
         # Scan path: a statically-known macro-step count, so the whole
         # multi-group run is one lax.scan — bounded compile, reverse-mode
@@ -886,6 +957,7 @@ class Scheduler:
             and not self.adaptive_dt
             and coupling in ("frozen", "interpolated")
             and not self.debug
+            and not stochastic_procs
         )
         core = (
             self._continuous_core(
@@ -925,7 +997,11 @@ class Scheduler:
         )
 
     def _execute(
-        self, plan: RunPlan, y0, params_from: Composite | None = None
+        self,
+        plan: RunPlan,
+        y0,
+        params_from: Composite | None = None,
+        stochastic_seed: int = 0,
     ) -> SchedulerResult:
         """Run a resolved :class:`RunPlan` from ``y0``."""
         composite = plan.composite
@@ -952,6 +1028,13 @@ class Scheduler:
         )
         self._reject_unsupported_batch(composite, state, keys)
         key_to_idx = {k: i for i, k in enumerate(keys)}
+        stochastic_procs = composite.stochastic_processes()
+        if len(stochastic_procs) > 1:
+            raise NotImplementedError(
+                "Scheduler currently supports one stochastic reaction "
+                "process per composite; multiple stochastic groups need "
+                "explicit coupling semantics."
+            )
         discrete_procs = composite.discrete_processes()
         event_procs = composite.event_processes()
 
@@ -985,6 +1068,21 @@ class Scheduler:
             group_write_idxs[gname] = composite.evolved_indices(
                 proc_names, keys
             )
+        stochastic_idxs = {
+            name: (
+                _build_proc_index_maps(
+                    proc, composite.topology[name], key_to_idx
+                )[0],
+                tuple(
+                    (port, key_to_idx[path])
+                    for port, port_spec in proc.ports_schema().items()
+                    if port_spec.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
+                    for path in as_paths(composite.topology[name][port])
+                ),
+            )
+            for name, proc in stochastic_procs.items()
+        }
+        stochastic_rng = np.random.default_rng(stochastic_seed)
 
         discrete_idxs = {
             name: _build_proc_index_maps(
@@ -1020,6 +1118,13 @@ class Scheduler:
             }
             for gname in groups
         }
+        for name in stochastic_procs:
+            stats[name] = {
+                "num_events": 0,
+                "result": "not_started",
+                "solver": "GillespieDirect",
+                "stochastic": True,
+            }
 
         def _record(gname: str, diag) -> None:
             result, n_steps, n_rej = diag
@@ -1166,6 +1271,46 @@ class Scheduler:
                             group_dt0_hint[gname] = last_dt
                             _record(gname, diag)
                         stats[gname]["num_macro_steps"] += 1
+
+            if stochastic_procs:
+                from hallsim.stochastic import simulate_ssa
+
+                for proc_name, proc in stochastic_procs.items():
+                    read_pairs, write_pairs = stochastic_idxs[proc_name]
+                    view = {port: state[..., idx] for port, idx in read_pairs}
+                    process_y0 = {
+                        species: float(view[species])
+                        for species in proc._species_names
+                    }
+                    process_y0.update(
+                        {
+                            port: float(value)
+                            for port, value in view.items()
+                            if port not in process_y0
+                        }
+                    )
+                    ssa = simulate_ssa(
+                        proc,
+                        t_span=(t, t_next),
+                        y0=process_y0,
+                        seed=int(stochastic_rng.integers(0, 2**63 - 1)),
+                        max_events=10_000_000,
+                    )
+                    for species, value in zip(
+                        proc._species_names, ssa.states[-1]
+                    ):
+                        if species in proc._species_inputs:
+                            continue
+                        if species not in view:
+                            continue
+                        path_idx = next(
+                            idx for port, idx in write_pairs if port == species
+                        )
+                        state = state.at[path_idx].set(value)
+                    stats[proc_name]["num_events"] += int(
+                        ssa.reaction_indices.size
+                    )
+                    stats[proc_name]["result"] = "successful"
 
             if self.adaptive_dt:
                 num = float(jnp.sum((state - state_before) ** 2))
@@ -1758,7 +1903,9 @@ class Scheduler:
         property of *(composite, span)*, and holding them on the Scheduler made
         it non-reentrant while feeding a cache key set by a previous run.
         """
-        if jump_ts is None:
+        if jump_ts is None or isinstance(controller, dfx.ConstantStepSize):
+            # A fixed step is never clipped; plan() has already required the
+            # jumps to lie on the macro grid, where every solve restarts.
             return controller
         return dfx.ClipStepSizeController(controller, jump_ts=jump_ts)
 
@@ -1893,7 +2040,9 @@ class Scheduler:
 
         if not self.auto_solver:
             integ = {
-                g: GroupIntegrator(self.solver, self.controller, stiff=False)
+                g: GroupIntegrator(
+                    self.solver, self.lockstep_controller, stiff=False
+                )
                 for g in groups
             }
             self._remember_verdict(sig, base, digest, integ)
@@ -1902,7 +2051,9 @@ class Scheduler:
         def _all_explicit():
             return {
                 g: GroupIntegrator(
-                    self.explicit_solver, self.controller, stiff=False
+                    self.explicit_solver,
+                    self.lockstep_controller,
+                    stiff=False,
                 )
                 for g in groups
             }
@@ -1976,7 +2127,7 @@ class Scheduler:
             else:
                 integ[g] = GroupIntegrator(
                     self.explicit_solver,
-                    self.controller,
+                    self.lockstep_controller,
                     stiff=False,
                     info=verdict,
                 )
@@ -2039,7 +2190,10 @@ class Scheduler:
         The single solve site: every path (fast, scan, Strang, eager,
         interpolated) differs only in ``saveat`` and ``fill``.
         """
-        dt0_base = dt0_hint if dt0_hint is not None else self.dt0
+        if isinstance(integ.controller, dfx.ConstantStepSize):
+            dt0_base = self._fixed_step(group_name)
+        else:
+            dt0_base = dt0_hint if dt0_hint is not None else self.dt0
         # throw=False so a failed solve returns its RESULTS code rather than
         # crashing opaquely; _guard_result decides what to do with it.
         sol = dfx.diffeqsolve(
@@ -2072,6 +2226,22 @@ class Scheduler:
         )
         return sol, self._guard_result(
             saved, sol.result, group_name, integ, keys
+        )
+
+    def _fixed_step(self, group_name: str) -> float:
+        """The lockstep step for ``group_name``: the scalar ``fixed_dt``, or
+        its entry in the per-group dict. The interpolated-coupling pass has
+        no group of its own and takes the finest step named."""
+        fd = self.fixed_dt
+        if not isinstance(fd, dict):
+            return float(fd)
+        if group_name in fd:
+            return float(fd[group_name])
+        if group_name == "interpolated":
+            return float(min(fd.values()))
+        raise KeyError(
+            f"fixed_dt names {sorted(fd)} but group {group_name!r} has no "
+            "step; name every group, or pass one scalar for all of them."
         )
 
     def _group_step(

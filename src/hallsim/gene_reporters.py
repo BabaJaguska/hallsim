@@ -567,7 +567,7 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
 
 PROTEOSTASIS_REPORTERS: list[GeneReporter] = [
     GeneReporter(
-        observable="ups/MisP",
+        observable="p07/MisP",
         gene_symbol="HSPA1A",
         sign=+1,
         summary=zerophase_mean(tau=2.0),
@@ -580,7 +580,7 @@ PROTEOSTASIS_REPORTERS: list[GeneReporter] = [
         reference="Morimoto 1998, Genes Dev 12:3788–3796",
     ),
     GeneReporter(
-        observable="ups/Ub",
+        observable="p07/Ub",
         gene_symbol="UBB",
         sign=-1,
         summary=zerophase_mean(tau=2.0),
