@@ -69,13 +69,6 @@ TF_BINDINGS = [
         description="Unphosphorylated FoxO3a — the transcriptionally active pool.",
         reference="Dalle Pezze et al. 2014, PLoS Comput Biol 10:e1003728",
     ),
-    ActivityBinding(
-        observable="nfkb/NFkBn",
-        tf="RELA",
-        summary=zerophase_mean(tau=0.75),
-        description="Nuclear NF-κB — the transcriptionally competent pool.",
-        reference="Ihekwaba et al. 2004, Syst Biol 1:93–103",
-    ),
 ]
 
 QUERY_DAYS = (7.0, 14.0)

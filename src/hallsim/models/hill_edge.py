@@ -121,6 +121,16 @@ class HillEdge(Process):
             drive = drive * hill_gate(state[name], k, nn)
         return self.basal + (self.hi - self.basal) * drive
 
+    def frozen_at(self, levels: dict) -> "HillEdge":
+        """A copy that emits the constant this edge would emit at ``levels``.
+
+        The null for "what does this coupling buy": the target keeps receiving
+        the value the edge was placed to deliver, and stops receiving the
+        source's variation. See :func:`hallsim.ablation.freeze_coupling`.
+        """
+        held = float(self._value(levels))
+        return self.with_param("basal", held).with_param("hi", held)
+
     def derivative(self, t, state):
         if self.mode != "flux":
             return {}

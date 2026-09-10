@@ -83,7 +83,7 @@ replicates for one condition.
 Five mechanistic observables ↔ five canonical reporter genes
 ([`hallsim.gene_reporters.MULTI_HALLMARK_REPORTERS`](../src/hallsim/gene_reporters.py)):
 
-<!-- reporters:start — checked against MULTI_HALLMARK_REPORTERS by
+<!-- reporters:start — checked against MULTI_HALLMARK_REPORTERS + PROTEOSTASIS_REPORTERS by
      tests/unit/test_gene_reporters.py; edit the code, then this list. -->
 
 | Gene | Store path |
@@ -93,6 +93,8 @@ Five mechanistic observables ↔ five canonical reporter genes
 | `BNIP3` | `dp14/FoxO3a` |
 | `DDB2` | `gz06/x` |
 | `MDM2` | `gz06/y0` |
+| `HSPA1A` | `ups/MisP` |
+| `UBB` | `ups/Ub` |
 
 <!-- reporters:end -->
 

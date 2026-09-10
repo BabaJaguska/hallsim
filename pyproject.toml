@@ -38,6 +38,12 @@ cuda = [
   "jax-cuda12-pjrt>=0.10,<0.11",
 ]
 
+# Layered (Sugiyama) layout for the generated composite graph
+# (hallsim.plotting.draw_composite_graph). A composite is a shallow DAG plus a
+# few feedback edges, which a force layout renders as a ball; without this the
+# drawer falls back to spring layout and says so.
+graph = ["netgraph>=4.13"]
+
 # COPASI's own bindings, used only to convert a .cps deposit to SBML on the
 # way in (hallsim.cps_import). A paper's supplement is often a .cps rather
 # than an SBML file, and COPASI exports SBML natively — reimplementing that

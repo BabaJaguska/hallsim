@@ -580,18 +580,19 @@ PROTEOSTASIS_REPORTERS: list[GeneReporter] = [
         reference="Morimoto 1998, Genes Dev 12:3788–3796",
     ),
     GeneReporter(
-        observable="psmb5_mrna/integral",
-        gene_symbol="PSMB5",
-        sign=+1,
+        observable="ups/Ub",
+        gene_symbol="UBB",
+        sign=-1,
         summary=zerophase_mean(tau=2.0),
         description=(
-            "PSMB5 — the chymotrypsin-like β5 subunit. mTORC1 drives "
-            "proteasome subunit transcription through NRF1, so the reporter "
-            "reads a first-order transcript relaxing toward DP14's "
-            "phospho-mTORC1, not the free proteasome pool (a physical "
-            "entity a transcript cannot track)."
+            "UBB — polyubiquitin B, induced when the free ubiquitin pool is "
+            "drawn down by conjugation and by sequestration into aggregates. "
+            "Reads Proctor 2007's free Ub, so the sign is negative: the "
+            "transcript answers the depletion. Ubiquitin is the conserved "
+            "quantity the UPS model is built around, which is why this pool "
+            "and not a subunit count is the readable state."
         ),
-        reference="Zhang et al. 2014, Nature 513:440–443",
+        reference="Ryu et al. 2007, J Biol Chem 282:36592–36602",
     ),
 ]
 

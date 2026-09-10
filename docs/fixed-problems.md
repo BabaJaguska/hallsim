@@ -1185,3 +1185,37 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   not JAX's backend probing; `-q` quietens both. `force=True` so the level a
   user asked for wins over a demo module's own `basicConfig`, and that call
   is now guarded to the script path. `test_cli.py::TestVerbosity`.
+
+- [x] **P0.53 — `composite_schematic` is drawn by hand and has been depicting a
+  composite that does not exist.** Filed 2026-09-05. `fig_schematic` places
+  every block, label and edge caption at absolute coordinates with nothing
+  linking it to the composite. It still draws **ih04 / BIOMD230 / NF-κB**,
+  removed on 2026-08-31, captions two edges that went with it (`mTOR -> IKK`,
+  `IKKb -> IKK`), and has no block for Kallenberger. The figure is the one a
+  reader would take as the composite's definition, and it is two models wrong.
+
+  Only the readouts are derived (`readouts_for(namespace)` reads
+  `MULTI_HALLMARK_REPORTERS`), which is why the reporter labels stayed correct
+  while everything around them rotted.
+
+  *Guarded 2026-09-05* — it now raises when the composite's SBML members differ
+  from what is drawn, so it cannot silently produce a lie. That is not the fix.
+  *Fix:* derive the blocks from `composite.processes` (name, BioModels id from
+  `metadata()`, readouts as now) and the edge captions from each edge process's
+  own `description`, rendering into the existing hand-tuned slots and raising
+  when there are more members than slots. Everything needed is already on the
+  processes; only the drawing is disconnected from them.
+
+  Related, fixed in the same pass: `plot_runs_comparison` titled each panel by
+  its store path's last segment, so the pre/post figures read `FoxO3a`, `x` and
+  `y0` instead of BNIP3, DDB2 and MDM2 — correct data, unreadable labels. It
+  now takes `labels` and `calibration_report` passes the gene symbols.
+
+  **Fixed 2026-09-08.** Membership, readouts and edge captions now derive from
+  the composite: the blocks are drawn from whichever SBML processes are live,
+  the readout lines from the run's own reporter set, and each arrow's caption
+  from that edge process's `description`. What stays in a table is geometry —
+  where a block or a label goes — plus the deposit accession, which cannot be
+  derived because an imported process does not retain it (filed separately as
+  P3.17). The guard now names the processes that have no slot rather than
+  reporting a set difference, so the failure says what to add.

@@ -33,6 +33,11 @@ from hallsim.composite import Composite  # noqa: E402
 from hallsim.hallmarks import apply_hallmarks, with_hallmarks  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.calibration import load_checkpoint  # noqa: E402
+from demos.models.multi_hallmark import (  # noqa: E402
+    DP14_SBML_PATH,
+    GZ06_SBML_PATH,
+    PROCTOR07_SBML_PATH,
+)
 
 plt.rcParams.update(
     {
@@ -74,12 +79,90 @@ def _problem(args):
 
 
 # ── schematic ────────────────────────────────────────────────────────────
+# Geometry only. Membership comes from the composite, readouts from the
+# reporter set and edge captions from each edge's own description; what a
+# drawing cannot derive is where to put things. fig_schematic refuses to draw
+# a composite whose processes have no slot rather than showing a stale
+# picture. The deposit label is here because an imported process does not
+# retain its accession.
+MODEL_BLOCKS = {
+    "dp14": dict(
+        xy=(3.7, 1.95, 2.6, 2.0),
+        edge="#3a3f4a",
+        fill="#eef0f2",
+        deposit="BIOMD582",
+        body=[
+            "mTOR · AMPK · FoxO3a",
+            "mitophagy · ROS · DNA damage",
+            "CDKN1A",
+        ],
+    ),
+    "gz06": dict(
+        xy=(8.9, 3.72, 3.1, 1.2),
+        edge="#de8f05",
+        fill="#fbf1e0",
+        deposit="BIOMD157",
+        body=["p53–Mdm2 oscillator"],
+    ),
+    "ups": dict(
+        xy=(8.9, 0.72, 3.1, 1.42),
+        edge="#0173b2",
+        fill="#e7eff7",
+        deposit="BIOMD105",
+        body=["ubiquitin–proteasome", "misfolding · aggregation"],
+    ),
+}
+
+DIAL_DRIVES = {"irradiation_pulse", "rapamycin_drive"}
+
+MODEL_EDGES = {
+    "damage_bridge": dict(
+        p0=(6.4, 3.82),
+        p1=(8.8, 4.05),
+        rad=-0.30,
+        color="#de8f05",
+        at=(7.6, 4.38),
+        rot=0,
+    ),
+    "p53_cdkn1a": dict(
+        p0=(8.8, 3.75),
+        p1=(6.4, 3.50),
+        rad=-0.30,
+        color="#de8f05",
+        at=(7.6, 3.15),
+        rot=0,
+    ),
+    "ros_misfolding": dict(
+        p0=(6.3, 2.62),
+        p1=(8.9, 1.72),
+        rad=-0.11,
+        color="#0173b2",
+        at=(7.60, 2.36),
+        rot=-17,
+    ),
+    "mtor_synthesis": dict(
+        p0=(6.3, 2.16),
+        p1=(8.9, 1.24),
+        rad=-0.13,
+        color="#0173b2",
+        at=(7.55, 1.52),
+        rot=-17,
+    ),
+}
+
+
+def _edge_caption(proc) -> str:
+    """The edge's own ``description``, trimmed to what fits on an arrow: the
+    clause before the parenthetical that names the two deposits."""
+    text = (proc.description or "").split("(")[0].strip().rstrip(".")
+    return text or type(proc).__name__
+
+
 def fig_schematic(args):
     from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 
-    C_DP, C_GZ, C_NF, C_DIAL = "#3a3f4a", "#de8f05", "#2a9d8f", "#6b7280"
-    INK, DIM, BODY = "#1f2530", "#5b6b7d", "#333a44"
-    F_DP, F_GZ, F_NF, F_DIAL = "#eef0f2", "#fbf1e0", "#e6f3f1", "#f4f5f7"
+    C_DIAL, INK, DIM, BODY = "#6b7280", "#1f2530", "#5b6b7d", "#333a44"
+    F_DIAL = "#f4f5f7"
 
     def block(ax, x, y, w, h, edge, fill, r=0.11, lw=2.0):
         ax.add_patch(
@@ -129,48 +212,33 @@ def fig_schematic(args):
             bbox=dict(boxstyle="round,pad=0.14", fc="#ffffff", ec="none"),
         )
 
-    def reporters(ax, x, y, text, color, fs=9.8):
-        ax.text(
-            x,
-            y,
-            text,
-            fontsize=fs,
-            color=color,
-            ha="center",
-            va="center",
-            style="italic",
-            zorder=5,
+    problem = _problem(args)
+    comp = problem.composite
+    live_models = {
+        n for n, pr in comp.processes.items() if hasattr(pr, "_species_names")
+    }
+    # Everything that is neither a constituent nor one of the two severity
+    # drives (drawn as the dial arrows) is a cross-publication edge.
+    live_edges = set(comp.processes) - live_models - DIAL_DRIVES
+    missing = sorted(
+        (live_models - set(MODEL_BLOCKS)) | (live_edges - set(MODEL_EDGES))
+    )
+    if missing:
+        raise RuntimeError(
+            f"composite_schematic has no layout entry for {missing}. Add one "
+            "to MODEL_BLOCKS / MODEL_EDGES before regenerating — a schematic "
+            "that silently omits a constituent is worse than no schematic."
         )
 
-    from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
+    reporters = problem.reporters
 
     def readouts_for(namespace):
         genes = [
             r.gene_symbol
-            for r in MULTI_HALLMARK_REPORTERS
+            for r in reporters
             if r.observable.split("/")[0] == namespace
         ]
         return "readouts:  " + " · ".join(genes)
-
-    # The blocks and edge labels below are hand-laid-out, so nothing links
-    # them to the composite. Fail rather than draw a composite that no longer
-    # exists — it drew a removed model (ih04) for a week.
-    from demos.models.multi_hallmark import build_multi_hallmark_composite
-
-    DRAWN = {"dp14", "gz06", "nfkb"}
-    live = {
-        n
-        for n, pr in build_multi_hallmark_composite(
-            validate=False
-        ).processes.items()
-        if hasattr(pr, "_species_names")
-    }
-    if live != DRAWN:
-        raise RuntimeError(
-            f"composite_schematic is drawn by hand for {sorted(DRAWN)} but the "
-            f"composite has {sorted(live)}. Update the drawing (and DRAWN) "
-            "before regenerating."
-        )
 
     fig, ax = plt.subplots(figsize=(12.8, 5.9))
     ax.set_xlim(0, 12.8)
@@ -219,76 +287,60 @@ def fig_schematic(args):
         color=DIM,
         ha="center",
     )
-    block(ax, 3.7, 1.95, 2.6, 2.0, C_DP, F_DP)
-    ax.text(
-        5.0,
-        3.62,
-        "dp14",
-        fontsize=16,
-        color=C_DP,
-        fontweight="bold",
-        ha="center",
-    )
-    ax.text(5.0, 3.30, "BIOMD582", fontsize=10.1, color=DIM, ha="center")
-    for k, line in enumerate(
-        ["mTOR · AMPK · FoxO3a", "mitophagy · ROS · DNA damage", "CDKN1A"]
-    ):
+    for name in sorted(live_models):
+        spec = MODEL_BLOCKS[name]
+        x, y, w, h = spec["xy"]
+        block(ax, x, y, w, h, spec["edge"], spec["fill"])
+        cx, top = x + w / 2, y + h
         ax.text(
-            5.0, 2.98 - 0.30 * k, line, fontsize=10.3, color=BODY, ha="center"
+            cx,
+            top - 0.33,
+            name,
+            fontsize=16,
+            color=spec["edge"],
+            fontweight="bold",
+            ha="center",
         )
-    reporters(
-        ax,
-        5.0,
-        1.64,
-        readouts_for("dp14"),
-        C_DP,
-        fs=9.2,
-    )
-    block(ax, 8.9, 3.72, 3.1, 1.2, C_GZ, F_GZ)
-    ax.text(
-        10.45,
-        4.60,
-        "gz06",
-        fontsize=16,
-        color=C_GZ,
-        fontweight="bold",
-        ha="center",
-    )
-    ax.text(10.45, 4.28, "BIOMD157", fontsize=10.1, color=DIM, ha="center")
-    ax.text(
-        10.45,
-        4.02,
-        "p53–Mdm2 oscillator",
-        fontsize=10.3,
-        color=BODY,
-        ha="center",
-    )
-    reporters(ax, 10.45, 3.50, readouts_for("gz06"), C_GZ)
-    block(ax, 8.9, 0.9, 3.1, 1.2, C_NF, F_NF)
-    ax.text(
-        10.45,
-        1.78,
-        "ih04",
-        fontsize=16,
-        color=C_NF,
-        fontweight="bold",
-        ha="center",
-    )
-    ax.text(10.45, 1.46, "BIOMD230", fontsize=10.1, color=DIM, ha="center")
-    ax.text(
-        10.45, 1.20, "NF-κB / IκBα", fontsize=10.3, color=BODY, ha="center"
-    )
-    reporters(ax, 10.45, 0.68, readouts_for("nfkb"), C_NF)
+        ax.text(
+            cx,
+            top - 0.65,
+            spec["deposit"],
+            fontsize=10.1,
+            color=DIM,
+            ha="center",
+        )
+        for k, line in enumerate(spec["body"]):
+            ax.text(
+                cx,
+                top - 0.91 - 0.30 * k,
+                line,
+                fontsize=10.3,
+                color=BODY,
+                ha="center",
+            )
+        ax.text(
+            cx,
+            y - 0.24,
+            readouts_for(name),
+            fontsize=9.2 if name == "dp14" else 9.8,
+            color=spec["edge"],
+            ha="center",
+            va="center",
+            style="italic",
+            zorder=5,
+        )
     arrow(ax, (2.9, 3.82), (3.7, 3.28), C_DIAL, rad=-0.14)
     arrow(ax, (2.9, 1.88), (3.7, 2.55), C_DIAL, rad=0.14)
-    arrow(ax, (6.4, 3.82), (8.8, 4.05), C_GZ, rad=-0.30)
-    elabel(ax, 7.6, 4.35, "DNA damage → p53", C_GZ, 0)
-    arrow(ax, (8.8, 3.75), (6.4, 3.50), C_GZ, rad=-0.30)
-    elabel(ax, 7.6, 3.15, "p53 → CDKN1A", C_GZ, 0)
-    arrow(ax, (6.3, 2.8), (8.9, 1.82), C_DP, rad=-0.11)
-    elabel(ax, 7.6, 2.44, "mTOR → IKK", C_DP, -17)
-    arrow(ax, (6.3, 2.3), (8.9, 1.32), C_NF, rad=-0.14)
-    elabel(ax, 7.55, 1.6, "IKKβ → IKK", C_NF, -17)
+    for name in sorted(live_edges):
+        spec = MODEL_EDGES[name]
+        arrow(ax, spec["p0"], spec["p1"], spec["color"], rad=spec["rad"])
+        elabel(
+            ax,
+            *spec["at"],
+            _edge_caption(comp.processes[name]),
+            spec["color"],
+            spec["rot"],
+        )
     fig.tight_layout(pad=0.2)
     OUT_CAL.mkdir(parents=True, exist_ok=True)
     for ext in ("png", "pdf"):
@@ -310,17 +362,16 @@ def fig_trajectories(args):
         (1.0, 0.0, "DDIS", "tab:red"),
         (1.0, -1.0, "DDIS+rapa", "tab:blue"),
     ]
-    from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
-
-    # Read the reporter set; plot the raw underlying state for integral-based
-    # readouts (the cumulative ∫ path isn't a useful trajectory).
+    # The run's own reporter set; plot the raw underlying state for
+    # integral-based readouts (the cumulative ∫ path isn't a trajectory).
     panels = [
         (r.observable.replace("_integral", ""), r.gene_symbol)
-        for r in MULTI_HALLMARK_REPORTERS
+        for r in _problem(args).reporters
     ]
+    proteostasis = getattr(args, "proteostasis", False)
 
     def run(gi, dns):
-        base = build_multi_hallmark_composite()
+        base = build_multi_hallmark_composite(proteostasis=proteostasis)
         hallmarks = {"Genomic Instability": gi}
         if dns != 0.0:
             hallmarks["Deregulated Nutrient Sensing"] = dns
@@ -843,6 +894,47 @@ def fig_temporal_compare(args):
 
 
 # ── before-after (standalone vs composite) ───────────────────────────────
+# One row per constituent: its deposit (for the SBML-defaults column) and the
+# species worth plotting. Column 0 is the raw model at its published defaults,
+# a permanent reference so a reparametrization break shows as a divergence.
+BEFORE_AFTER_ROWS = [
+    dict(
+        namespace="dp14",
+        sbml=DP14_SBML_PATH,
+        ylabel="DP14\nspecies value",
+        logy=True,
+        dialled=True,
+        vars=[
+            ("dp14/mTORC1_pS2448", "mTORC1", "#6d28d9"),
+            ("dp14/DNA_damage", "DNA damage", "#b91c1c"),
+            ("dp14/ROS", "ROS", "#ca8a04"),
+            ("dp14/CDKN1A", "p21 (CDKN1A)", "#0e7490"),
+        ],
+    ),
+    dict(
+        namespace="gz06",
+        sbml=GZ06_SBML_PATH,
+        ylabel="GZ06\np53 / Mdm2",
+        vars=[
+            ("gz06/x", "p53 (x)", "#6d28d9"),
+            ("gz06/y", "Mdm2 (y)", "#b45309"),
+        ],
+    ),
+    dict(
+        namespace="ups",
+        sbml=PROCTOR07_SBML_PATH,
+        ylabel="UPS\nnative / misfolded / Ub",
+        logy=True,
+        vars=[
+            ("ups/NatP", "native protein", "#0e7490"),
+            ("ups/MisP", "misfolded", "#b91c1c"),
+            ("ups/Ub", "free ubiquitin", "#6d28d9"),
+            ("ups/AggP", "aggregates", "#ca8a04"),
+        ],
+    ),
+]
+
+
 def fig_before_after(args):
     """Standalone-vs-composite check on the composite the PIPELINE runs.
 
@@ -853,16 +945,11 @@ def fig_before_after(args):
     coupling only adds the intended edges.
     """
     from hallsim.sbml_import import process_from_sbml
-    from demos.models.multi_hallmark import (
-        CANONICAL_TIME_SECONDS,
-        DP14_SBML_PATH,
-        GZ06_SBML_PATH,
-        NFKB_SBML_PATH,
-    )
+    from demos.models.multi_hallmark import CANONICAL_TIME_SECONDS
 
     out = ROOT / "outputs" / "multi_hallmark_before_after"
     # save_dt is decoupled from macro_dt: sample fine enough for the fastest
-    # row (NF-kB, ~100 min period) without changing the solve.
+    # row (gz06's ~0.29 d p53 period) without changing the solve.
     t_end, macro_dt, save_dt = float(getattr(args, "t_end", 14.0)), 0.1, 0.001
     problem = _problem(args)
     if getattr(args, "params", "init") == "fit":
@@ -872,21 +959,25 @@ def fig_before_after(args):
         tag = "calibration init (out-of-the-box)"
     pj = {k: jnp.asarray(v) for k, v in pvals.items()}
     cond, base = problem.arm_pairs["DDIS_vs_ctrl"]  # DDIS, control
-    dp14_vars = [
-        ("dp14/mTORC1_pS2448", "mTORC1", "#6d28d9"),
-        ("dp14/DNA_damage", "DNA damage", "#b91c1c"),
-        ("dp14/ROS", "ROS", "#ca8a04"),
-        ("dp14/CDKN1A", "p21 (CDKN1A)", "#0e7490"),
+    rows = [
+        r
+        for r in BEFORE_AFTER_ROWS
+        if r["namespace"] in problem.composite.processes
     ]
-    gz06_vars = [
-        ("gz06/x", "p53 (x)", "#6d28d9"),
-        ("gz06/y", "Mdm2 (y)", "#b45309"),
-    ]
-    nfkb_vars = [
-        ("nfkb/IKK", "IKK", "#b91c1c"),
-        ("nfkb/IkBat", "IkBa transcript", "#0e7490"),
-        ("nfkb/NFkBn", "NF-kB nuclear", "#6d28d9"),
-    ]
+    unknown = sorted(
+        {
+            n
+            for n, pr in problem.composite.processes.items()
+            if hasattr(pr, "_species_names")
+        }
+        - {r["namespace"] for r in BEFORE_AFTER_ROWS}
+    )
+    if unknown:
+        raise RuntimeError(
+            f"before_after has no row for {unknown}. Add one to "
+            "BEFORE_AFTER_ROWS — a per-constituent check that silently skips "
+            "a constituent checks nothing."
+        )
 
     # Constituents and composite come from the pipeline's own substituted
     # processes; nothing is a hand-passed parameter value.
@@ -908,15 +999,6 @@ def fig_before_after(args):
 
     def solo_of(name, cname, te, sdt):
         return solo(procs_of(cname)[name], te, sdt)
-
-    # Raw model at its published SBML defaults — no calibration, no
-    # hallmark. A permanent reference so any reparametrization break shows
-    # up as a divergence from this column.
-    def solo_default(sbml_path, nm, te, sdt):
-        p = process_from_sbml(str(sbml_path), name=nm).reconciled_to(
-            CANONICAL_TIME_SECONDS
-        )
-        return solo(p, te, sdt)
 
     def run_comp(cname):
         comp = Composite(
@@ -951,70 +1033,45 @@ def fig_before_after(args):
     out.mkdir(parents=True, exist_ok=True)
     ct, ctrl = run_comp(base)
     dt, ddis = run_comp(cond)
-    # gz06/nfkb have no coupled input standalone, so they're condition-
-    # independent: one basal line. Both over the full run — gz06's DDIS
-    # limit cycle has a delayed onset (psi ramps through its Hopf over
-    # days), invisible in a short window.
-    gz = solo_of("gz06", base, t_end, save_dt)
-    nf = solo_of("nfkb", base, t_end, save_dt)
-    # Col 0: raw models at SBML defaults (reparametrization reference).
-    dp0 = solo_default(DP14_SBML_PATH, "dp14", t_end, save_dt)
-    gz0 = solo_default(GZ06_SBML_PATH, "gz06", t_end, save_dt)
-    nf0 = solo_default(NFKB_SBML_PATH, "nfkb", t_end, save_dt)
+    composite_series = [
+        ("control", (ct, ctrl), "-"),
+        ("DDIS", (dt, ddis), "--"),
+    ]
 
-    fig, ax = plt.subplots(3, 3, figsize=(19, 11))
-    ax[0, 0].set_title(
-        "ORIGINAL — SBML defaults", fontsize=12, fontweight="bold"
+    fig, ax = plt.subplots(
+        len(rows), 3, figsize=(19, 3.7 * len(rows)), squeeze=False
     )
-    ax[0, 1].set_title(
-        "BEFORE — standalone (calibrated)", fontsize=12, fontweight="bold"
-    )
-    ax[0, 2].set_title("AFTER — in composite", fontsize=12, fontweight="bold")
-    panel(ax[0, 0], [("default", dp0, "-")], dp14_vars, (0, t_end), logy=True)
-    panel(
-        ax[0, 1],
-        [
-            ("control", solo_of("dp14", base, t_end, save_dt), "-"),
-            ("DDIS", solo_of("dp14", cond, t_end, save_dt), "--"),
-        ],
-        dp14_vars,
-        (0, t_end),
-        logy=True,
-    )
-    panel(
-        ax[0, 2],
-        [("control", (ct, ctrl), "-"), ("DDIS", (dt, ddis), "--")],
-        dp14_vars,
-        (0, t_end),
-        logy=True,
-    )
-    ax[0, 0].set_ylabel("DP14\nspecies value", fontsize=11)
-    panel(
-        ax[1, 0], [("default", (gz0[0], gz0[1]), "-")], gz06_vars, (0, t_end)
-    )
-    panel(
-        ax[1, 1], [("standalone", (gz[0], gz[1]), "-")], gz06_vars, (0, t_end)
-    )
-    panel(
-        ax[1, 2],
-        [("control", (ct, ctrl), "-"), ("DDIS", (dt, ddis), "--")],
-        gz06_vars,
-        (0, t_end),
-    )
-    ax[1, 0].set_ylabel("GZ06\np53 / Mdm2", fontsize=11)
-    panel(
-        ax[2, 0], [("default", (nf0[0], nf0[1]), "-")], nfkb_vars, (0, t_end)
-    )
-    panel(
-        ax[2, 1], [("standalone", (nf[0], nf[1]), "-")], nfkb_vars, (0, t_end)
-    )
-    panel(
-        ax[2, 2],
-        [("control", (ct, ctrl), "-"), ("DDIS", (dt, ddis), "--")],
-        nfkb_vars,
-        (0, t_end),
-    )
-    ax[2, 0].set_ylabel("NFKB\nIKK / IkBa / NF-kB", fontsize=11)
+    for title, col in (
+        ("ORIGINAL — SBML defaults", 0),
+        ("BEFORE — standalone (calibrated)", 1),
+        ("AFTER — in composite", 2),
+    ):
+        ax[0, col].set_title(title, fontsize=12, fontweight="bold")
+
+    for i, row in enumerate(rows):
+        ns, vars_, logy = row["namespace"], row["vars"], row.get("logy", False)
+        default = solo(
+            process_from_sbml(str(row["sbml"]), name=ns).reconciled_to(
+                CANONICAL_TIME_SECONDS
+            ),
+            t_end,
+            save_dt,
+        )
+        panel(ax[i, 0], [("default", default, "-")], vars_, (0, t_end), logy)
+        # Only dp14 receives a severity dial standalone; the others have no
+        # coupled input on their own, so one basal line is the whole story.
+        standalone = (
+            [
+                ("control", solo_of(ns, base, t_end, save_dt), "-"),
+                ("DDIS", solo_of(ns, cond, t_end, save_dt), "--"),
+            ]
+            if row.get("dialled")
+            else [("standalone", solo_of(ns, base, t_end, save_dt), "-")]
+        )
+        panel(ax[i, 1], standalone, vars_, (0, t_end), logy)
+        panel(ax[i, 2], composite_series, vars_, (0, t_end), logy)
+        ax[i, 0].set_ylabel(row["ylabel"], fontsize=11)
+
     for row in ax:
         for a in row:
             a.set_xlabel("time (days)")
@@ -1035,6 +1092,155 @@ def fig_before_after(args):
             facecolor="white",
         )
     print(f"wrote before_after.png/.pdf -> {out}", flush=True)
+
+
+# ── composite graph (generated; cannot go stale) ─────────────────────────
+def fig_composite_graph(args):
+    """The composite's own interaction graph, from `hallsim.plotting`.
+
+    Nothing here is drawn by hand: nodes, kinds, sizes and edge labels all
+    come from the composite, so this figure describes whatever is actually
+    composed. `composite_schematic` is the hand-laid presentation version.
+    """
+    from hallsim.plotting import draw_composite_graph
+
+    problem = _problem(args)
+    models = sum(
+        hasattr(p, "_species_names")
+        for p in problem.composite.processes.values()
+    )
+    fig = draw_composite_graph(
+        problem.composite,
+        title=f"{models} imported models on one clock, and every path "
+        "between them",
+    )
+    OUT_CAL.mkdir(parents=True, exist_ok=True)
+    for ext in ("png", "pdf"):
+        fig.savefig(
+            OUT_CAL / f"composite_graph.{ext}",
+            dpi=200,
+            bbox_inches="tight",
+            facecolor="white",
+        )
+    print(f"wrote composite_graph.png/.pdf -> {OUT_CAL}", flush=True)
+
+
+# ── coupling ablation (the null a composition claim has to beat) ─────────
+def fig_coupling_ablation(args):
+    """Wired composite vs the same models with every edge frozen.
+
+    Holds constituents, clock, parameters and readout fixed and removes only
+    the variation the cross-publication edges transmit
+    (:mod:`hallsim.ablation`), then re-scores the *same* fitted vector.
+    """
+    from scipy.stats import spearmanr
+
+    from hallsim.ablation import freeze_coupling, trajectory_levels
+    from demos.multi_hallmark_calibrate import build_problem
+
+    C_WIRED, C_NULL, DIM, INK = "#0173b2", "#b0b7c3", "#5b6b7d", "#1f2530"
+
+    problem = _problem(args)
+    fitted = load_fit()
+    genes = [r.gene_symbol for r in problem.reporters]
+    days = sorted({d for arm in problem.data.values() for d in arm})
+    qt = jnp.asarray(days)
+
+    # Freeze at what each edge actually saw in the control arm — a source's
+    # declared value is a published starting point, not a rest level.
+    ctrl = Scheduler(auto_stiffness=True).run(
+        with_hallmarks(
+            problem.composite, problem.conditions["ctrl"].hallmarks
+        ),
+        t_span=(0.0, args.t_end),
+        macro_dt=0.5,
+        save_dt=args.t_end / 149,
+    )
+    levels = trajectory_levels(problem.composite, ctrl)
+    null = build_problem(
+        proteostasis=getattr(args, "proteostasis", False),
+        composite=freeze_coupling(problem.composite, levels),
+    )
+
+    rows, labels = [], []
+    for arm in problem.arm_pairs:
+        for j, day in enumerate(days):
+            measured = np.array([problem.data[arm][day][g] for g in genes])
+            scores = []
+            for pr in (problem, null):
+                sim = np.asarray(pr.model_lfc(fitted, arm, qt), float)[:, j]
+                scores.append(
+                    (
+                        float(spearmanr(sim, measured).statistic),
+                        int(np.sum(np.sign(sim) == np.sign(measured))),
+                    )
+                )
+            rows.append(scores)
+            labels.append(
+                f"{arm.split('_')[0]}\nD{int(day):02d}"
+                + ("\n(held out)" if arm in problem.held_out_arms else "")
+            )
+
+    x = np.arange(len(rows))
+    fig, ax = plt.subplots(figsize=(6.6, 4.6))
+    lo = min(r[k][0] for r in rows for k in (0, 1))
+    for k, (color, name) in enumerate(
+        ((C_WIRED, "wired composite"), (C_NULL, "every edge frozen"))
+    ):
+        bars = ax.bar(
+            x + (k - 0.5) * 0.38,
+            [r[k][0] for r in rows],
+            0.36,
+            color=color,
+            label=name,
+            zorder=3,
+        )
+        for b, r in zip(bars, rows):
+            ax.text(
+                b.get_x() + b.get_width() / 2,
+                max(b.get_height(), 0.0) + 0.035,
+                f"{r[k][1]}/{len(genes)}",
+                ha="center",
+                fontsize=8.4,
+                color=DIM,
+            )
+    ax.set_xticks(x, labels, fontsize=9.2)
+    ax.set_ylabel("Spearman ρ, model vs measured log2FC")
+    ax.set_ylim(min(lo - 0.15, -0.05), 1.18)
+    ax.axhline(0, color=INK, lw=0.8, zorder=2)
+    ax.grid(axis="y", alpha=0.25, zorder=0)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    ax.legend(frameon=False, fontsize=9.2, loc="lower left", ncols=2)
+    ax.set_title(
+        "Freezing the cross-publication edges\ncosts rank agreement at "
+        "every arm-day",
+        fontsize=12.5,
+        fontweight="bold",
+        color=INK,
+        loc="left",
+        pad=26,
+    )
+    ax.text(
+        0,
+        1.015,
+        "same constituents, clock, fitted parameters and readout;\nonly the "
+        "signal the edges carry is removed.  labels: sign agreement",
+        transform=ax.transAxes,
+        fontsize=8.8,
+        color=DIM,
+        va="bottom",
+    )
+    fig.tight_layout()
+    OUT_CAL.mkdir(parents=True, exist_ok=True)
+    for ext in ("png", "pdf"):
+        fig.savefig(
+            OUT_CAL / f"coupling_ablation.{ext}",
+            dpi=200,
+            bbox_inches="tight",
+            facecolor="white",
+        )
+    print(f"wrote coupling_ablation.png/.pdf -> {OUT_CAL}", flush=True)
 
 
 def fig_training(args):
@@ -1113,6 +1319,8 @@ FIGURES = {
     "temporal": fig_temporal,
     "temporal-compare": fig_temporal_compare,
     "before-after": fig_before_after,
+    "coupling-ablation": fig_coupling_ablation,
+    "composite-graph": fig_composite_graph,
 }
 
 

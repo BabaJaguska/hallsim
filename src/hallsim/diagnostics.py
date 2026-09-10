@@ -266,6 +266,63 @@ def _solo_run(
     )
 
 
+def operating_range(
+    model,
+    paths=None,
+    *,
+    t_end: float = 100.0,
+    n_save: int = 200,
+    rtol: float = 1e-6,
+    atol: float = DEFAULT_ATOL,
+    max_steps: int = DEFAULT_MAX_STEPS,
+):
+    """``{path: OperatingRange}`` — the band each path spans over a solo run.
+
+    The envelope a deposit occupies under its own dynamics, so a coupling edge
+    can be placed from the models rather than from experimental data
+    (:func:`hallsim.models.gain_edge.place_gain_from_ranges`). Pass a
+    ``Process`` or a ``Composite``; ``paths`` defaults to every stored path.
+
+    A single run gives the band the model reaches unperturbed. For the band it
+    spans *across conditions* — usually the one an edge should be placed from
+    — run it once per condition and take the union, or use
+    :meth:`hallsim.calibration.CalibrationProblem.operating_ranges`, which
+    routes through the same simulation the loss uses.
+    """
+    from hallsim.calibration import OperatingRange
+
+    comp = (
+        model
+        if isinstance(model, Composite)
+        else single_process_composite(model)
+    )
+    res = Scheduler(rtol=rtol, atol=atol, max_steps=max_steps).run(
+        comp,
+        t_span=(0.0, t_end),
+        macro_dt=t_end,
+        y0=comp.initial_state_vec(),
+        save_dt=t_end / n_save,
+    )
+    keys = list(res.keys)
+    wanted = list(paths) if paths is not None else keys
+    missing = [p for p in wanted if p not in keys]
+    if missing:
+        raise KeyError(
+            f"{missing} are not stored paths of this model; it stores "
+            f"{keys[:12]}{' ...' if len(keys) > 12 else ''}."
+        )
+    ys = np.asarray(res.ys)
+    out = {}
+    for path in wanted:
+        col = ys[..., keys.index(path)]
+        out[path] = OperatingRange(
+            lo=float(np.min(col)),
+            mean=float(np.mean(col)),
+            hi=float(np.max(col)),
+        )
+    return out
+
+
 def _has_unfed_inputs(process) -> bool:
     return single_process_composite(process).unfed_input_indices().size > 0
 

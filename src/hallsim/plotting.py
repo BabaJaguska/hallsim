@@ -7,11 +7,14 @@ including trajectory plots, phase portraits, and composite overviews.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 def plot_trajectories(
@@ -265,18 +268,58 @@ def plot_runs_comparison(
     return fig
 
 
+def _node_kinds(composite) -> dict:
+    """``{process: kind}`` — what each node *is*, from the process itself.
+
+    ``model`` carries integrated species, ``edge`` is a coupling edge (it can
+    be frozen), ``source`` drives an input and reads nothing.
+    """
+    kinds = {}
+    for name, proc in composite.processes.items():
+        if hasattr(proc, "_species_names"):
+            kinds[name] = "model"
+        elif hasattr(proc, "frozen_at"):
+            kinds[name] = "edge"
+        else:
+            kinds[name] = "source"
+    return kinds
+
+
+def _layered_positions(G):
+    """Sugiyama layering when netgraph is installed, spring otherwise.
+
+    A composite is a shallow DAG plus a few feedback edges, so a layered
+    layout reads as "what drives what" where a force layout reads as a ball.
+    """
+    import networkx as nx
+
+    try:
+        from netgraph import get_sugiyama_layout
+
+        return get_sugiyama_layout(
+            list(G.edges()), node_size=6, scale=(12.0, 6.0)
+        )
+    except ImportError:
+        log.info("netgraph not installed; composite graph uses spring layout")
+        return nx.spring_layout(
+            G, seed=42, k=1.0 / max(1, len(G.nodes) ** 0.5)
+        )
+
+
 def draw_composite_graph(
     composite,
     save: str | None = None,
     title: str = "",
-    figsize: tuple[float, float] = (10, 7),
-    layout: str = "spring",
+    figsize: tuple[float, float] = (13, 7),
+    layout: str = "layered",
 ):
-    """Render the composite's process-port-store topology graph.
+    """Render the composite's process interaction graph — generated, never
+    drawn, so it cannot describe a composite that no longer exists.
 
-    Uses :class:`hallsim.validation.GraphAnalyzer` to build a directed
-    interaction graph (process nodes + store-path nodes; edges encode
-    reads/writes). Renders via networkx + matplotlib.
+    Nodes are processes, coloured by what they are (imported model, coupling
+    edge, drive) and sized by how many states they carry; edges are labelled
+    with the store path the write travels on.
+    :class:`hallsim.validation.GraphAnalyzer` supplies the graph.
 
     Parameters
     ----------
@@ -285,72 +328,127 @@ def draw_composite_graph(
     save:
         If set, write PNG to this path.
     layout:
-        ``"spring"`` (default), ``"kamada_kawai"``, ``"shell"``, or
-        ``"circular"``. Picked per how connected the composite is.
+        ``"layered"`` (default; Sugiyama via netgraph, spring if it is not
+        installed), ``"spring"``, ``"kamada_kawai"``, ``"shell"`` or
+        ``"circular"``.
     """
     import networkx as nx
 
     from hallsim.validation import GraphAnalyzer
 
-    analyzer = GraphAnalyzer()
-    G = analyzer.build_graph(composite.processes, composite.topology)
+    FACE = {"model": "#0173b2", "edge": "#de8f05", "source": "#94a3b8"}
+    LEGEND = {
+        "model": "imported model",
+        "edge": "coupling edge",
+        "source": "severity drive",
+    }
 
-    if layout == "spring":
-        pos = nx.spring_layout(G, seed=42, k=1.0 / max(1, len(G.nodes) ** 0.5))
+    G = GraphAnalyzer().build_graph(composite.processes, composite.topology)
+    kinds = _node_kinds(composite)
+
+    if layout == "layered":
+        pos = _layered_positions(G)
     elif layout == "kamada_kawai":
         pos = nx.kamada_kawai_layout(G)
     elif layout == "shell":
         pos = nx.shell_layout(G)
-    else:
+    elif layout == "circular":
         pos = nx.circular_layout(G)
+    else:
+        pos = nx.spring_layout(G, seed=42, k=1.0 / max(1, len(G.nodes) ** 0.5))
+
+    widths = {
+        name: len(getattr(proc, "_species_names", ()) or ())
+        for name, proc in composite.processes.items()
+    }
+    sizes = {n: 900 + 90 * widths.get(n, 0) for n in G.nodes}
 
     fig, ax = plt.subplots(figsize=figsize)
     nx.draw_networkx_edges(
         G,
         pos,
         ax=ax,
-        edge_color="#888888",
+        edge_color="#6b7280",
         arrows=True,
-        arrowsize=14,
+        arrowsize=13,
         width=1.2,
-        alpha=0.75,
-        connectionstyle="arc3,rad=0.07",
+        alpha=0.8,
+        node_size=[sizes[n] for n in G.nodes],
+        connectionstyle="arc3,rad=0.08",
     )
-    nx.draw_networkx_nodes(
-        G,
-        pos,
-        node_color="#4a90e2",
-        node_shape="s",
-        node_size=1400,
-        ax=ax,
-        edgecolors="#1f3a68",
-        linewidths=1.0,
-    )
-    nx.draw_networkx_labels(G, pos, font_size=9, font_color="white", ax=ax)
+    for kind, color in FACE.items():
+        members = [n for n in G.nodes if kinds.get(n) == kind]
+        if not members:
+            continue
+        nx.draw_networkx_nodes(
+            G,
+            pos,
+            nodelist=members,
+            node_color=color,
+            node_shape="s",
+            node_size=[sizes[n] for n in members],
+            ax=ax,
+            edgecolors="white",
+            linewidths=1.4,
+            label=LEGEND[kind],
+        )
+    # Names sit under their node: a process name is longer than any box that
+    # would still leave the graph readable.
+    for name, (x, y) in pos.items():
+        ax.annotate(
+            name,
+            (x, y),
+            xytext=(0, -(sizes[name] ** 0.5) / 2 - 9),
+            textcoords="offset points",
+            ha="center",
+            va="top",
+            fontsize=9,
+            fontweight="bold",
+            color=FACE[kinds.get(name, "source")],
+            zorder=5,
+        )
     edge_labels = {
-        (u, v): d.get("store_path", "")
+        (u, v): d["store_path"].split("/")[-1]
         for u, v, d in G.edges(data=True)
         if d.get("store_path")
     }
-    if edge_labels:
-        nx.draw_networkx_edge_labels(
-            G,
-            pos,
-            edge_labels=edge_labels,
-            font_size=6,
-            ax=ax,
-            alpha=0.85,
-            label_pos=0.5,
-            bbox=dict(
-                boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.7
-            ),
-        )
+    # Staggered along their edges: two labels meeting at a shared node land on
+    # top of each other at a common label_pos.
+    for offset, subset in (
+        (0.42, dict(list(edge_labels.items())[0::2])),
+        (0.62, dict(list(edge_labels.items())[1::2])),
+    ):
+        if subset:
+            nx.draw_networkx_edge_labels(
+                G,
+                pos,
+                edge_labels=subset,
+                font_size=6.5,
+                font_color="#5b6b7d",
+                ax=ax,
+                label_pos=offset,
+                rotate=False,
+                bbox=dict(
+                    boxstyle="round,pad=0.12",
+                    fc="white",
+                    ec="none",
+                    alpha=0.85,
+                ),
+            )
+    ax.margins(0.16, 0.20)
     ax.set_axis_off()
+    ax.legend(
+        frameon=False,
+        fontsize=9,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.0),
+        ncols=3,
+    )
     if title:
-        ax.set_title(title, fontsize=12)
+        ax.set_title(title, fontsize=12, fontweight="bold", loc="left")
     fig.tight_layout()
     if save:
-        fig.savefig(save, dpi=150, bbox_inches="tight")
+        fig.savefig(save, dpi=200, bbox_inches="tight", facecolor="white")
     return fig
 
 

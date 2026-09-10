@@ -413,31 +413,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `cmd_run` end to end including every figure, so the report path is exercised
   on every CI run rather than the next time someone waits out a fit.
 
-- [ ] **P0.53 — `composite_schematic` is drawn by hand and has been depicting a
-  composite that does not exist.** Filed 2026-09-05. `fig_schematic` places
-  every block, label and edge caption at absolute coordinates with nothing
-  linking it to the composite. It still draws **ih04 / BIOMD230 / NF-κB**,
-  removed on 2026-08-31, captions two edges that went with it (`mTOR -> IKK`,
-  `IKKb -> IKK`), and has no block for Kallenberger. The figure is the one a
-  reader would take as the composite's definition, and it is two models wrong.
-
-  Only the readouts are derived (`readouts_for(namespace)` reads
-  `MULTI_HALLMARK_REPORTERS`), which is why the reporter labels stayed correct
-  while everything around them rotted.
-
-  *Guarded 2026-09-05* — it now raises when the composite's SBML members differ
-  from what is drawn, so it cannot silently produce a lie. That is not the fix.
-  *Fix:* derive the blocks from `composite.processes` (name, BioModels id from
-  `metadata()`, readouts as now) and the edge captions from each edge process's
-  own `description`, rendering into the existing hand-tuned slots and raising
-  when there are more members than slots. Everything needed is already on the
-  processes; only the drawing is disconnected from them.
-
-  Related, fixed in the same pass: `plot_runs_comparison` titled each panel by
-  its store path's last segment, so the pre/post figures read `FoxO3a`, `x` and
-  `y0` instead of BNIP3, DDB2 and MDM2 — correct data, unreadable labels. It
-  now takes `labels` and `calibration_report` passes the gene symbols.
-
 - [ ] **P0.65 — A coupling edge with `timescale=None` gets its own scheduler
   group, so `macro_dt = span` freezes the model it couples.** Filed
   2026-09-06 (Proctor 2013 maths review, FW3).
@@ -1870,3 +1845,31 @@ maintainer's.
 
 The full report, including what the reviewer judged well designed and should not
 be broken, is the gitignored `docs/review-architecture-systems.md`.
+
+- [ ] **P3.17 — An imported process does not retain where it came from.**
+  Filed 2026-09-08. `process_from_sbml` reads a file, builds an `SBMLProcess`
+  and keeps neither the source path nor the deposit accession; `metadata()`
+  returns `{'name': 'SBMLProcess'}` for DallePezze, Geva-Zatorsky and Proctor
+  alike, and the only survivor is `native_time_source`. So nothing downstream
+  can say which publication a namespace *is*: the composite schematic has to
+  carry `BIOMD582` in a hand-written table, a provenance line in a figure or a
+  report has to be retyped, and a composite assembled by an agent from a
+  search result loses the accession it searched by. This is against the
+  framework's own premise that composites are generated rather than typed.
+  *Fix:* keep the resolved source path and, where the file declares one, the
+  model id, on the process, and surface both through `metadata()`.
+
+- [ ] **P3.18 — DallePezze's ROS and Proctor's ROS are the same species held as
+  two unwired pools.** Filed 2026-09-08; the semantic validator finds it and
+  says so: *"Entity chebi:CHEBI:26523 is modeled in 2 namespaces ('dp14/ROS',
+  'ups/ROS') as unwired, distinct pools."* `ros_misfolding` drives Proctor's
+  misfolding *rate constant* from DallePezze's ROS level, which is the right
+  units bridge for a rate, but `ups/ROS` itself stays pinned at Proctor's own
+  constant 10 and appears a second time in the misfolding rate law. The
+  composite therefore multiplies a rescaled ROS by an unrescaled one. It is
+  not a numerical error — the gain is placed to absorb it — but the model
+  carries two ROS pools where the biology has one, and any later edge that
+  reads `ups/ROS` will read the wrong one.
+  *Fix:* decide between rewiring `ups/ROS` onto `dp14/ROS` (with the scale the
+  gain currently carries) and annotating the two as compartment-distinct.
+  The validator already asks exactly this question.

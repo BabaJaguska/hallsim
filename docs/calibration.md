@@ -14,7 +14,7 @@ one canonical reporter gene per mechanistic store path, with a
 literature-anchored sign and a per-reporter trajectory summary. The
 multi-hallmark composite's reporters:
 
-<!-- reporters:start — checked against MULTI_HALLMARK_REPORTERS by
+<!-- reporters:start — checked against MULTI_HALLMARK_REPORTERS + PROTEOSTASIS_REPORTERS by
      tests/unit/test_gene_reporters.py; edit the code, then this table. -->
 
 | Gene | Store path | Summary | Note |
@@ -24,6 +24,8 @@ multi-hallmark composite's reporters:
 | `BNIP3` | `dp14/FoxO3a` | zero-phase mean, τ=2.0 | FoxO3 target; reads the FoxO-driven mitophagy arm downstream of nutrient sensing |
 | `DDB2` | `gz06/x` | zero-phase **RMS** `√⟨x²⟩`, τ=0.75 | p53 target; GZ06's mean p53 is analytically damage-blind, so DDB2 reads pulse amplitude — see [gz06-basal-p53.md](gz06-basal-p53.md) |
 | `MDM2` | `gz06/y0` | zero-phase mean, τ=0.75 | p53 target; `y0` is the paper's Mdm2 precursor, "representing, for example, Mdm2 mRNA" — the transcript, not the protein `y` |
+| `HSPA1A` | `ups/MisP` | zero-phase mean, τ=2.0 | *(--proteostasis)* HSP70, the canonical HSF1 target induced by misfolded load; reads Proctor's free misfolded pool — the load the heat-shock response would answer, not the response |
+| `UBB` | `ups/Ub` | zero-phase mean, τ=2.0, **sign −1** | *(--proteostasis)* polyubiquitin B, induced when the free ubiquitin pool is drawn down by conjugation and sequestration; ubiquitin is the conserved quantity the UPS model is built around |
 
 <!-- reporters:end -->
 

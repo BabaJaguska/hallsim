@@ -44,7 +44,9 @@ to 1 (DallePezze's published irradiation dose) on its damage rate.
 Gene reporters (see :mod:`hallsim.gene_reporters`): CDKN1A → ``dp14/CDKN1A``,
 GLB1 → ``dp14/SA_beta_gal``, BNIP3 → ``dp14/FoxO3a``, DDB2 → ``gz06/x``
 (RMS amplitude), and MDM2 → ``gz06/y0`` — the Mdm2 *precursor*, which GZ06's
-Table I defines as the transcript, not the protein ``y``.
+Table I defines as the transcript, not the protein ``y``. With
+``proteostasis``, HSPA1A → ``ups/MisP`` and UBB → ``ups/Ub``; both read
+Proctor states, so freezing the two ``ups/`` edges moves both.
 
 ``test_gene_reporters.py`` checks this list against
 ``MULTI_HALLMARK_REPORTERS``, so it fails rather than drifts.
@@ -54,8 +56,11 @@ from __future__ import annotations
 
 from hallsim.composite import Composite
 from hallsim.models.forcing import drive_pulse, drive_step
-from hallsim.models.gain_edge import GainEdge, place_gain
-from hallsim.models.running_integral import RunningIntegral
+from hallsim.models.gain_edge import (
+    GainEdge,
+    place_gain,
+    place_gain_from_ranges,
+)
 from hallsim.models.hill_edge import (
     HillEdge,
     place_hill_gate_for_crossing,
@@ -79,6 +84,12 @@ PROCTOR07_SBML_PATH = sbml_source(
 # 2007 Table 2 gives 1.0E-3 s^-1.
 PROCTOR07_K69_PAPER = 1.0e-3
 PROCTOR07_K69_NAME = "k69"
+# The deposit declares no timeUnits, so the importer would guess. It is
+# seconds, and the deposit settles it twice over: its own notes give native
+# protein a half-life of "about 10 hours", and k2*ROS = 2e-5 puts that at
+# 34657 time units = 9.63 h only if those units are seconds; independently
+# k1*Source/(k2*ROS) = 500.0, exactly the declared initial NatP.
+PROCTOR07_NATIVE_TIME_SECONDS = 1.0
 # Proctor's misfolding rate is k2·NatP·ROS with ROS a constant 10, and its
 # synthesis is k1·Source. DP14's ROS and phospho-mTORC1 drive those two rate
 # constants through linear gains placed so each deposit's published rest
@@ -91,11 +102,14 @@ DP14_MTORC1_ACTIVE_NAME = "mTORC1_pS2448"
 # inhibition (Torin1) halves synthesis in MEFs, Thoreen et al. 2012, Nature
 # 485:109–113. The rest is the offset the synthesis gain keeps at zero mTORC1.
 PROCTOR07_SYNTHESIS_MTOR_FRACTION = 0.5
-# PSMB5 transcript: mTORC1 → NRF1 → proteasome subunit genes (Zhang et al.
-# 2014, Nature 513:440–443), read as a first-order transcript relaxing toward
-# phospho-mTORC1 with the median mammalian mRNA half-life of 9 h
-# (Schwanhäusser et al. 2011, Nature 473:337–342): tau = 9 h / ln 2.
-PSMB5_MRNA_TAU_DAYS = 9.0 / 24.0 / 0.6931
+# The gains below are placed on DP14's *settled* control level, not on the
+# port default: DallePezze's published initial condition is an experimental
+# starting point, not a rest point, and anchoring there ran Proctor at 1.81x
+# its published misfolding rate for the whole run. Measured from a 600-day
+# control settle of the composite (scratch/2026-09-08-reporters/p3_rest.py);
+# test_multi_hallmark.py re-derives them.
+DP14_ROS_CONTROL_REST = 18.1075
+DP14_MTORC1_CONTROL_REST = 8.2527
 # SBML defaults, named at module level so hallsim.hallmarks can target the
 # same constants. DallePezze 2014 supplementary Table S2.
 DP14_MTOR_PHOS_RATE_DEFAULT = 162.471039450073
@@ -300,17 +314,22 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
             str(PROCTOR07_SBML_PATH),
             name="ups",
             parameters={PROCTOR07_K69_NAME: PROCTOR07_K69_PAPER},
+            native_time_seconds=PROCTOR07_NATIVE_TIME_SECONDS,
         )
         .reconciled_to(CANONICAL_TIME_SECONDS)
         .with_param_input(PROCTOR07_MISFOLDING_RATE_NAME, "k2_in")
         .with_param_input(PROCTOR07_SYNTHESIS_RATE_NAME, "k1_in")
     )
-    dp14_ports = dp14.ports_schema()
-    ros_rest = float(dp14_ports[DP14_ROS_NAME].default)
-    mtor_rest = float(dp14_ports[DP14_MTORC1_ACTIVE_NAME].default)
+    ros_rest = DP14_ROS_CONTROL_REST
+    mtor_rest = DP14_MTORC1_CONTROL_REST
     k2_pub = float(ups.parameters[PROCTOR07_MISFOLDING_RATE_NAME])
     k1_pub = float(ups.parameters[PROCTOR07_SYNTHESIS_RATE_NAME])
     processes["ups"] = ups
+    # One point, so this one does assume the line passes through the origin:
+    # no ROS, no oxidative misfolding. Proctor reports k2 at a single ROS
+    # level and a rate constant has no operating envelope, so there is no
+    # second point to place from — unlike mtor_synthesis below, where
+    # Thoreen 2012 supplies the intercept.
     processes["ros_misfolding"] = GainEdge(
         mode="level",
         timescale=ups.timescale,
@@ -325,12 +344,18 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
         reference="Proctor et al. 2007, BMC Syst Biol 1:17, Table 2",
         description="ROS → protein misfolding (DP14 ROS drives Proctor k2).",
     )
+    # Two points, so no origin assumption: Proctor's published k1 at DP14's
+    # control mTORC1, and (1-f)k1 at zero mTORC1, f being the fraction of
+    # synthesis that follows mTORC1.
     f = PROCTOR07_SYNTHESIS_MTOR_FRACTION
+    mtor_line = place_gain_from_ranges(
+        source=(0.0, mtor_rest), target=((1.0 - f) * k1_pub, k1_pub)
+    )
     processes["mtor_synthesis"] = GainEdge(
         mode="level",
         timescale=ups.timescale,
-        offset=(1.0 - f) * k1_pub,
-        gain=place_gain(mtor_rest, f * k1_pub),
+        offset=mtor_line.offset,
+        gain=mtor_line.gain,
         source_description="DP14 phospho-mTORC1 (S2448)",
         target_description=(
             "Proctor 2007 synthesis rate k1, rescaled to DP14 phospho-mTORC1."
@@ -342,12 +367,6 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
             "Proctor k1)."
         ),
     )
-    processes["psmb5_mrna"] = RunningIntegral(
-        timescale=dp14.timescale,
-        power=1.0,
-        tau=PSMB5_MRNA_TAU_DAYS,
-        initial=PSMB5_MRNA_TAU_DAYS * mtor_rest,
-    )
     topology["ups"] = {"k2_in": "ups/k2_signal", "k1_in": "ups/k1_signal"}
     topology["ros_misfolding"] = {
         "source": f"dp14/{DP14_ROS_NAME}",
@@ -356,8 +375,4 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
     topology["mtor_synthesis"] = {
         "source": f"dp14/{DP14_MTORC1_ACTIVE_NAME}",
         "signal": "ups/k1_signal",
-    }
-    topology["psmb5_mrna"] = {
-        "source": f"dp14/{DP14_MTORC1_ACTIVE_NAME}",
-        "integral": "psmb5_mrna/integral",
     }

@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 from hallsim.gene_reporters import (
     CANONICAL_REPORTERS,
     MULTI_HALLMARK_REPORTERS,
+    PROTEOSTASIS_REPORTERS,
     GeneExpressionDataset,
     GeneReporter,
     compute_concordance,
@@ -442,7 +443,8 @@ class TestPublishedReporterTable:
 
     def _live(self):
         return {
-            (r.gene_symbol, r.observable) for r in MULTI_HALLMARK_REPORTERS
+            (r.gene_symbol, r.observable)
+            for r in MULTI_HALLMARK_REPORTERS + PROTEOSTASIS_REPORTERS
         }
 
     def _marked_block(self, relative_path: str) -> str:
