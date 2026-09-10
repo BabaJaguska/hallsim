@@ -283,6 +283,43 @@ def validate_topology(
                         f"DISCRETE/EVENT processes should use LATCHED ports for output."
                     )
 
+    # A stochastic reaction process owns integer-valued count paths. A
+    # continuous contribution to one of those paths would turn a jump
+    # trajectory into a non-integer state between events.
+    stochastic_paths: dict[str, str] = {}
+    for proc_name, proc in processes.items():
+        if not getattr(proc, "_stochastic_enabled", False):
+            continue
+        topo = topology.get(proc_name, {})
+        for port_name, port in proc.ports_schema().items():
+            if port.role not in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
+                continue
+            for store_path in as_paths(topo.get(port_name, ())):
+                stochastic_paths.setdefault(store_path, proc_name)
+
+    if stochastic_paths:
+        for proc_name, proc in processes.items():
+            if getattr(proc, "_stochastic_enabled", False):
+                continue
+            if proc.kind != ProcessKind.CONTINUOUS:
+                continue
+            topo = topology.get(proc_name, {})
+            for port_name, port in proc.ports_schema().items():
+                if port.role not in (
+                    PortRole.EVOLVED,
+                    PortRole.EXCLUSIVE,
+                    PortRole.ASSIGNED,
+                ):
+                    continue
+                for store_path in as_paths(topo.get(port_name, ())):
+                    owner = stochastic_paths.get(store_path)
+                    if owner is not None:
+                        errors.append(
+                            f"Stochastic count path {store_path!r} is written "
+                            f"by both {owner!r} and continuous process "
+                            f"{proc_name!r}"
+                        )
+
     # Check that DISCRETE processes declare dt_step
     for proc_name, proc in processes.items():
         if proc.kind == ProcessKind.DISCRETE and proc.dt_step is None:

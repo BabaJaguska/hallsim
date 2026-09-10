@@ -134,8 +134,7 @@ class RunPlan:
     re-planning at the end and comparing.
 
     ``core`` is ``None`` for composites that take the eager path (DISCRETE or
-    EVENT processes, ``adaptive_dt``, ``debug``); there is no compiled core to
-    carry.
+    EVENT processes, or ``debug``); there is no compiled core to carry.
     """
 
     composite: Composite
@@ -404,7 +403,7 @@ class Scheduler:
 
     Continuous groups are solved sequentially by Lie operator splitting, each
     seeing the previous group's updated state. Single-group composites with no
-    events / discrete / adaptive_dt / Strang / interpolated coupling take a
+    events / discrete / Strang / interpolated coupling take a
     fast path: one ``dfx.diffeqsolve`` over the whole ``t_span``.
 
     Parameters
@@ -476,12 +475,6 @@ class Scheduler:
     splitting:
         ``"lie"`` (default, O(macro_dt)) or ``"strang"`` (symmetric
         half-steps, O(macro_dt²)).
-    adaptive_dt:
-        PLL-inspired adaptive ``macro_dt`` sizing off the coupling residual:
-        shrink above ``adaptive_dt_rho_max``, grow after
-        ``adaptive_dt_grow_wait`` steps below ``adaptive_dt_rho_min``, by
-        ``adaptive_dt_factor``, bounded by ``adaptive_dt_min`` / ``_max``
-        (default ``macro_dt/64`` and ``macro_dt*4``).
     throw:
         If ``True`` (default), a group that does not return
         ``RESULTS.successful`` raises a labelled error via ``eqx.error_if``
@@ -512,13 +505,6 @@ class Scheduler:
         coupling_interp_points: int = 16,
         splitting: str = "lie",
         waveform_sweeps: int = 1,
-        adaptive_dt: bool = False,
-        adaptive_dt_rho_max: float = 0.5,
-        adaptive_dt_rho_min: float = 0.01,
-        adaptive_dt_grow_wait: int = 3,
-        adaptive_dt_factor: float = 2.0,
-        adaptive_dt_min: float | None = None,
-        adaptive_dt_max: float | None = None,
         adjoint: dfx.AbstractAdjoint | None = None,
         throw: bool = True,
         debug: bool = False,
@@ -635,13 +621,6 @@ class Scheduler:
             )
         self.splitting = splitting
         self.waveform_sweeps = waveform_sweeps
-        self.adaptive_dt = adaptive_dt
-        self.adaptive_dt_rho_max = adaptive_dt_rho_max
-        self.adaptive_dt_rho_min = adaptive_dt_rho_min
-        self.adaptive_dt_grow_wait = adaptive_dt_grow_wait
-        self.adaptive_dt_factor = adaptive_dt_factor
-        self.adaptive_dt_min = adaptive_dt_min
-        self.adaptive_dt_max = adaptive_dt_max
         self.debug = debug
         self.progress = progress
 
@@ -676,9 +655,9 @@ class Scheduler:
         t_span:
             ``(t0, t1)``. Required unless a plan is given.
         macro_dt:
-            Communication interval (initial value under ``adaptive_dt``). Each
-            macro step solves the continuous groups, fires any due discrete
-            processes, then checks event conditions.
+            Fixed communication interval. Each macro step solves the
+            continuous groups, fires any due discrete processes, then checks
+            event conditions.
         y0:
             Initial state ``(n_vars,)``, or ``(batch, n_vars)`` for a
             population run. ``None`` uses ``composite.initial_state_vec()``.
@@ -816,10 +795,10 @@ class Scheduler:
         if state.ndim <= 1:
             return
         blockers = []
-        if self.adaptive_dt:
+        if composite.stochastic_processes():
             blockers.append(
-                "adaptive_dt=True (coupling residual is a single dt "
-                "for the whole batch and reduces via Python float)"
+                "stochastic reaction processes currently require an "
+                "unbatched state"
             )
         only_assigned = _batch_varies_only_on_assigned(composite, state, keys)
         if only_assigned:
@@ -942,22 +921,18 @@ class Scheduler:
             len(groups) == 1
             and not discrete_procs
             and not event_procs
-            and not self.adaptive_dt
             and self.splitting == "lie"
             and coupling == "frozen"
             and not stochastic_procs
         )
         # Scan path: a statically-known macro-step count, so the whole
         # multi-group run is one lax.scan — bounded compile, reverse-mode
-        # memory flat in macro-step count. adaptive_dt (data-dependent step
-        # count) and debug logging fall through to the eager loop.
+        # memory flat in macro-step count.
         scan_eligible = (
             not discrete_procs
             and not event_procs
-            and not self.adaptive_dt
             and coupling in ("frozen", "interpolated")
             and not self.debug
-            and not stochastic_procs
         )
         core = (
             self._continuous_core(
@@ -974,6 +949,7 @@ class Scheduler:
                 fast=fast_path_eligible,
                 state=state,
                 jump_ts=jump_ts,
+                stochastic_procs=stochastic_procs,
             )
             if (fast_path_eligible or scan_eligible)
             else None
@@ -1039,14 +1015,22 @@ class Scheduler:
         event_procs = composite.event_processes()
 
         if plan.core is not None:
-            ts, ys, dyn = plan.core(composite, state)
+            ts, ys, dyn = plan.core(
+                composite, state, jax.random.PRNGKey(stochastic_seed)
+            )
             stats = {
                 g: {
-                    **dyn[g],
-                    "solver": type(integrators[g].solver).__name__,
-                    "stiff": integrators[g].stiff,
+                    **values,
+                    **(
+                        {
+                            "solver": type(integrators[g].solver).__name__,
+                            "stiff": integrators[g].stiff,
+                        }
+                        if g in integrators
+                        else {}
+                    ),
                 }
-                for g in groups
+                for g, values in dyn.items()
             }
             return SchedulerResult(
                 ts=ts,
@@ -1133,18 +1117,6 @@ class Scheduler:
             st["num_rejected_steps"] = st["num_rejected_steps"] + n_rej
             st["result"] = result
 
-        current_macro_dt = macro_dt
-        if self.adaptive_dt:
-            dt_min = self.adaptive_dt_min or macro_dt / 64.0
-            dt_max = self.adaptive_dt_max or macro_dt * 4.0
-            consecutive_low = 0
-            stats["adaptive_dt"] = {
-                "shrinks": 0,
-                "grows": 0,
-                "min_dt": macro_dt,
-                "max_dt": macro_dt,
-            }
-
         n_macro = int((t1 - t0) / macro_dt) + 1
         pbar = None
         if self.progress:
@@ -1163,8 +1135,7 @@ class Scheduler:
 
         t = t0
         while t < t1 - _TIME_EPS:
-            t_next = min(t + current_macro_dt, t1)
-            state_before = state if self.adaptive_dt else None
+            t_next = min(t + macro_dt, t1)
 
             if self.splitting == "strang" and len(group_rhs) > 1:
                 t_mid = t + (t_next - t) / 2.0
@@ -1312,35 +1283,6 @@ class Scheduler:
                     )
                     stats[proc_name]["result"] = "successful"
 
-            if self.adaptive_dt:
-                num = float(jnp.sum((state - state_before) ** 2))
-                den = float(jnp.sum(state_before**2)) + 1e-30
-                rho = (num / den) ** 0.5
-
-                if rho > self.adaptive_dt_rho_max:
-                    current_macro_dt = max(
-                        dt_min, current_macro_dt / self.adaptive_dt_factor
-                    )
-                    consecutive_low = 0
-                    stats["adaptive_dt"]["shrinks"] += 1
-                elif rho < self.adaptive_dt_rho_min:
-                    consecutive_low += 1
-                    if consecutive_low >= self.adaptive_dt_grow_wait:
-                        current_macro_dt = min(
-                            dt_max, current_macro_dt * self.adaptive_dt_factor
-                        )
-                        consecutive_low = 0
-                        stats["adaptive_dt"]["grows"] += 1
-                else:
-                    consecutive_low = 0
-
-                stats["adaptive_dt"]["min_dt"] = min(
-                    stats["adaptive_dt"]["min_dt"], current_macro_dt
-                )
-                stats["adaptive_dt"]["max_dt"] = max(
-                    stats["adaptive_dt"]["max_dt"], current_macro_dt
-                )
-
             for proc_name, proc in discrete_procs.items():
                 if self._is_due(t, t_next, proc.dt_step):
                     read_pairs, write_pairs = discrete_idxs[proc_name]
@@ -1416,6 +1358,7 @@ class Scheduler:
         fast,
         state,
         jump_ts,
+        stochastic_procs=None,
     ):
         """Compiled ``(composite, y0) -> (ts, ys, per_group_stats)`` for the
         continuous paths, cached by structure.
@@ -1446,6 +1389,7 @@ class Scheduler:
             tuple(state.shape),
             str(state.dtype),
             (None if jump_ts is None else tuple(float(t) for t in jump_ts)),
+            tuple(sorted(stochastic_procs or {})),
         )
         cached = self._core_cache.get(sig)
         if cached is not None:
@@ -1460,7 +1404,7 @@ class Scheduler:
 
             own = composite.evolved_indices(proc_names, keys)
 
-            def core(comp, y0):
+            def core(comp, y0, rng_key=None):
                 integ = integrators[gname]
                 rhs_fn, _ = comp.build_rhs(proc_names)
                 sol, ys = self._reduced_solve(
@@ -1496,7 +1440,7 @@ class Scheduler:
 
         else:
 
-            def core(comp, y0):
+            def core(comp, y0, rng_key=None):
                 return self._run_scan_continuous(
                     comp,
                     groups,
@@ -1510,6 +1454,8 @@ class Scheduler:
                     adjoint,
                     coupling,
                     jump_ts,
+                    stochastic_procs or {},
+                    rng_key,
                 )
 
         if state.ndim > 1:
@@ -1538,12 +1484,12 @@ class Scheduler:
         """
         mapped = eqx.filter_vmap(
             core,
-            in_axes=(None, eqx.if_array(0)),
+            in_axes=(None, eqx.if_array(0), None),
             out_axes=(eqx.if_array(0), eqx.if_array(1), eqx.if_array(0)),
         )
 
-        def batched(comp, y0):
-            ts, ys, stats = mapped(comp, y0)
+        def batched(comp, y0, rng_key):
+            ts, ys, stats = mapped(comp, y0, rng_key)
             return ts[0], ys, stats
 
         return batched
@@ -1625,6 +1571,8 @@ class Scheduler:
         adjoint: dfx.AbstractAdjoint,
         coupling: str = "frozen",
         jump_ts=None,
+        stochastic_procs=None,
+        rng_key=None,
     ):
         """Continuous-only multi-group run as a single ``lax.scan``, returning
         ``(ts, ys, per_group_stats)``.
@@ -1635,6 +1583,11 @@ class Scheduler:
         trajectory compiles to one executable, so compile time and
         reverse-mode memory don't scale with the macro-step count.
         """
+        stochastic_procs = stochastic_procs or {}
+        if len(stochastic_procs) > 1:
+            raise NotImplementedError(
+                "compiled stochastic scheduling supports one reaction process"
+            )
         group_rhs = [
             (g, composite.build_rhs(procs)[0]) for g, procs in groups.items()
         ]
@@ -1644,6 +1597,21 @@ class Scheduler:
         write_idxs = [
             composite.evolved_indices(p, keys) for p in groups.values()
         ]
+        stochastic_info = None
+        stochastic_event_count = jnp.asarray(0, dtype=jnp.int32)
+        if stochastic_procs:
+            proc_name, proc = next(iter(stochastic_procs.items()))
+            key_to_idx = {key: i for i, key in enumerate(keys)}
+            species_idxs = jnp.asarray(
+                [
+                    key_to_idx[
+                        as_paths(composite.topology[proc_name][species])[0]
+                    ]
+                    for species in proc._species_names
+                ],
+                dtype=jnp.int32,
+            )
+            stochastic_info = (proc_name, proc, species_idxs)
 
         # Enough windows to reach t1, not the nearest whole number of them:
         # the body clamps the last one to t1, so a span that is not a multiple
@@ -1704,7 +1672,7 @@ class Scheduler:
             )
 
         def body(carry, t_start):
-            st, dt0h, steps, rej, res = carry
+            st, dt0h, steps, rej, res, rng, stochastic_event_count = carry
             t_next = jnp.minimum(t_start + macro_dt, t1)
             dt0_next = [None] * n_groups
 
@@ -1787,13 +1755,56 @@ class Scheduler:
                         solved.append((w, gy))
                     last = solved
 
-            carry = (st, jnp.stack(dt0_next), steps, rej, res)
+            if stochastic_info is not None:
+                from hallsim.stochastic import ssa_step_jax
+
+                proc_name, proc, species_idxs = stochastic_info
+                rng, step_key = jax.random.split(rng)
+                local = st[species_idxs]
+                _, new_local, _, n_events, _ = ssa_step_jax(
+                    proc,
+                    t_span=(t_start, t_next),
+                    state=local,
+                    key=step_key,
+                    max_events=100_000,
+                )
+                st = st.at[species_idxs].set(new_local)
+                stochastic_event_count = stochastic_event_count + n_events
+                if n_out:
+                    traj = traj.at[-1, species_idxs].set(new_local)
+            carry = (
+                st,
+                (
+                    jnp.stack(dt0_next)
+                    if n_groups
+                    else jnp.zeros((0,), dtype=st.dtype)
+                ),
+                steps,
+                rej,
+                res,
+                rng,
+                stochastic_event_count,
+            )
             return carry, traj
 
-        init = (state, dt0_init, steps_init, rej_init, res_init)
-        (final_state, _, steps_tot, rej_tot, res_final), ys_stack = (
-            jax.lax.scan(body, init, t_starts)
+        init = (
+            state,
+            dt0_init,
+            steps_init,
+            rej_init,
+            res_init,
+            jax.random.PRNGKey(0) if rng_key is None else rng_key,
+            stochastic_event_count,
         )
+        (
+            final_state,
+            _,
+            steps_tot,
+            rej_tot,
+            res_final,
+            _,
+            event_count,
+        ), ys_stack = jax.lax.scan(body, init, t_starts)
 
         # y0, then each window's n_out fresh samples; flatten window into time.
         step_len = jnp.minimum(t_starts + macro_dt, t1) - t_starts
@@ -1823,6 +1834,13 @@ class Scheduler:
             }
             for gi, (g, _) in enumerate(group_rhs)
         }
+        if stochastic_info is not None:
+            stats[stochastic_info[0]] = {
+                "num_events": event_count,
+                "result": "successful",
+                "solver": "GillespieDirect",
+                "stochastic": True,
+            }
         return ts, composite.materialize_assigned(ts, ys), stats
 
     def _remember_verdict(self, sig, base, digest, integ):

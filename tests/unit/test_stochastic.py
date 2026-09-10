@@ -6,6 +6,7 @@ import numpy as np
 
 from hallsim.sbml_import import process_from_sbml
 from hallsim.composite import Composite
+from hallsim.process import Port, PortRole, Process
 from hallsim.scheduler import Scheduler
 from hallsim.stochastic import SSACompatibilityError, simulate_ssa
 
@@ -132,3 +133,30 @@ def test_scheduler_can_advance_an_explicit_stochastic_process(tmp_path):
     )
     assert result.stats["decay"]["num_events"] > 0
     assert np.all(result.ys[:, 0] + result.ys[:, 1] == 10)
+
+
+def test_composite_rejects_continuous_writer_on_stochastic_count(tmp_path):
+    path = tmp_path / "decay.xml"
+    path.write_text(textwrap.dedent(MODEL))
+    stochastic = process_from_sbml(str(path), name="decay").as_stochastic()
+
+    class ContinuousWriter(Process):
+        def ports_schema(self):
+            return {"A": Port(role=PortRole.EVOLVED, default=0.0)}
+
+        def derivative(self, t, state):
+            return {"A": 0.25}
+
+    import pytest
+
+    with pytest.raises(ValueError, match="Stochastic count path"):
+        Composite(
+            processes={"decay": stochastic, "writer": ContinuousWriter()},
+            topology={
+                "decay": {
+                    name: f"cell/{name}" for name in stochastic._species_names
+                },
+                "writer": {"A": "cell/A"},
+            },
+            semantic_validation=False,
+        )

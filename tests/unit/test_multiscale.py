@@ -1476,42 +1476,6 @@ class TestSchedulerBatchedGuards:
         )
         assert jnp.array_equal(batched.get("state/flag")[-1], jnp.ones(4))
 
-    def test_batched_y0_with_adaptive_dt_raises(self):
-        """Batched y0 + adaptive_dt=True → ValueError mentioning adaptive_dt."""
-        composite = Composite(
-            processes={"prod": ConstantProduction(rate=1.0)},
-            topology={"prod": {"x": "pool/x"}},
-        )
-        keys = composite.store_keys()
-        y0 = jnp.broadcast_to(
-            composite.initial_state_vec(keys), (4, len(keys))
-        )
-        with pytest.raises(ValueError, match="adaptive_dt"):
-            Scheduler(adaptive_dt=True).run(
-                composite, t_span=(0.0, 10.0), macro_dt=1.0, y0=y0
-            )
-
-    def test_adaptive_dt_unbatched_runs(self):
-        """adaptive_dt=True still works for the unbatched case — guard
-        is targeted at batched y0 only."""
-        composite = Composite(
-            processes={
-                "prod": ConstantProduction(rate=1.0),
-                "decay": SimpleDecay(rate=0.1),
-            },
-            topology={
-                "prod": {"x": "pool/x"},
-                "decay": {"x": "pool/x"},
-            },
-        )
-        result = Scheduler(adaptive_dt=True).run(
-            composite, t_span=(0.0, 5.0), macro_dt=0.5, save_dt=0.5
-        )
-        assert "adaptive_dt" in result.stats
-        assert result.ts.shape[0] >= 2
-        # State must remain finite throughout — no NaN from a bad dt path.
-        assert not jnp.any(jnp.isnan(result.get("pool/x")))
-
 
 class TestSchedulerIsDue:
     def test_is_due_fires(self):
