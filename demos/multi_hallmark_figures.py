@@ -17,6 +17,7 @@ NeuralODE-hybrid swap in multi_hallmark_hybrid.py.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import jax
@@ -70,12 +71,40 @@ def load_fit() -> dict:
     return {k: float(v) for k, v in params.items()}
 
 
+def _saved_run() -> dict:
+    """What the latest calibration recorded about itself — its composite
+    variant and fitted set — so a figure scores the fit as it was run rather
+    than as a flag re-describes it. Empty when no fit has been written."""
+    path = OUT_CAL / "summary.json"
+    if not path.exists():
+        return {}
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def _proteostasis(args) -> bool:
+    """Proctor 2007 attached — read off the saved run's process list, and
+    off the flag only when no fit has been written yet."""
+    saved = _saved_run()
+    if "processes" in saved:
+        return "ups" in saved["processes"]
+    return bool(getattr(args, "proteostasis", False))
+
+
 def _problem(args):
     """The same problem the calibration built, so every figure sees the
-    composite, reporters and fitted parameters the checkpoint belongs to."""
+    composite, reporters and fitted set the checkpoint belongs to — a fit
+    that held a parameter is scored with that parameter left out."""
     from demos.multi_hallmark_calibrate import build_problem
 
-    return build_problem(proteostasis=getattr(args, "proteostasis", False))
+    saved = _saved_run()
+    fitted = list(saved["params"]) if "params" in saved else None
+    if fitted is None and _CKPT.exists():
+        fitted = list(load_fit())
+    return build_problem(
+        proteostasis=_proteostasis(args),
+        fitted=tuple(fitted) if fitted is not None else None,
+    )
 
 
 # ── schematic ────────────────────────────────────────────────────────────
@@ -132,7 +161,7 @@ MODEL_EDGES = {
         at=(7.6, 3.15),
         rot=0,
     ),
-    "ros_misfolding": dict(
+    "ros_identity": dict(
         p0=(6.3, 2.62),
         p1=(8.9, 1.72),
         rad=-0.11,
@@ -368,7 +397,7 @@ def fig_trajectories(args):
         (r.observable.replace("_integral", ""), r.gene_symbol)
         for r in _problem(args).reporters
     ]
-    proteostasis = getattr(args, "proteostasis", False)
+    proteostasis = _proteostasis(args)
 
     def run(gi, dns):
         base = build_multi_hallmark_composite(proteostasis=proteostasis)
@@ -1158,8 +1187,9 @@ def fig_coupling_ablation(args):
     )
     levels = trajectory_levels(problem.composite, ctrl)
     null = build_problem(
-        proteostasis=getattr(args, "proteostasis", False),
+        proteostasis=_proteostasis(args),
         composite=freeze_coupling(problem.composite, levels),
+        fitted=tuple(problem.param_refs),
     )
 
     rows, labels = [], []

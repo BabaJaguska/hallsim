@@ -1219,3 +1219,19 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   derived because an imported process does not retain it (filed separately as
   P3.17). The guard now names the processes that have no slot rather than
   reporting a set difference, so the failure says what to add.
+
+- [x] **P3.18 — DallePezze's ROS and Proctor's ROS are the same species held as
+  two unwired pools.** Filed 2026-09-08 from the semantic validator's own
+  warning. `ros_misfolding` drove Proctor's rate constant `k2` from
+  DallePezze's ROS while `ups/ROS` stayed pinned at 10 inside the same rate
+  law, `k2·NatP·ROS`, so the composite multiplied a rescaled ROS by an
+  unrescaled one and hid the factor in the gain — Kounis's steady-state
+  ratio, in a rate constant.
+  *Fixed 2026-09-09.* `SBMLProcess.with_species_input` hands a species over:
+  the port keeps its name and ontology and becomes INPUT, the model's own
+  reactions stop moving it, and every rate law reads the external value.
+  `ups/ROS` is now written by `ros_identity`, a level edge from `dp14/ROS`
+  whose gain is the ratio of the two deposits' declared reference levels
+  (10/10 = 1.0); `k2` stays at its published value and the validator no
+  longer reports the pair. The primitive is SBML comp's replaced element
+  with a conversion factor, in-process.

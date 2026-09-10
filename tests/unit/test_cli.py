@@ -110,3 +110,27 @@ class TestVerbosity:
         assert handlers, "no handler installed; records fall to lastResort"
         fmt = handlers[0].formatter._fmt
         assert "%(levelname)s" in fmt and "%(name)s" in fmt
+
+
+class TestTheFittedSetIsOneList:
+    """``fitted`` names exactly the set a fit uses; a saved fit is scored
+    with the set it had. There is no second list describing the set by
+    subtraction — that produced a checkpoint indexed by names it lacked."""
+
+    def _build(self, **kw):
+        sys.path.insert(0, str(DEMOS))
+        try:
+            from multi_hallmark_calibrate import build_problem
+        finally:
+            sys.path.remove(str(DEMOS))
+        return build_problem(**kw)
+
+    def test_fitted_names_exactly_the_set(self):
+        full = set(self._build().param_refs)
+        chosen = ("CDKN1A_transcr", "alpha_x_control")
+        assert set(chosen) < full
+        assert set(self._build(fitted=chosen).param_refs) == set(chosen)
+
+    def test_a_name_outside_the_default_set_is_refused(self):
+        with pytest.raises(KeyError, match="not in the fitted set"):
+            self._build(fitted=("not_a_parameter",))

@@ -104,6 +104,74 @@ class TestWithParamInput:
         )
 
 
+class TestWithSpeciesInput:
+    """A species handed over to another model's pool: read, not integrated."""
+
+    def _shared(self, psi=0.9):
+        return _gz06(psi).with_species_input("y")
+
+    def _state(self, proc):
+        return {
+            n: jnp.asarray(float(p.default))
+            for n, p in proc.ports_schema().items()
+        }
+
+    def test_rejects_unknown_species(self):
+        with pytest.raises(KeyError, match="not species"):
+            _gz06(0.9).with_species_input("not_a_species")
+
+    def test_the_port_keeps_its_name_and_becomes_an_input(self):
+        from hallsim.process import PortRole
+
+        owned = _gz06(0.9).ports_schema()["y"]
+        handed = self._shared().ports_schema()["y"]
+        assert owned.role is PortRole.EVOLVED
+        assert handed.role is PortRole.INPUT
+        assert handed.default == owned.default
+        assert handed.ontology == owned.ontology
+
+    def test_the_model_no_longer_moves_the_species(self):
+        shared = self._shared()
+        d = shared.derivative(0.5, self._state(shared))
+        assert "y" not in d
+        assert set(d) == set(shared._species_names) - {"y"}
+
+    def test_at_the_published_value_the_rest_is_unchanged(self):
+        plain, shared = _gz06(0.9), self._shared()
+        state = self._state(plain)
+        d0, d1 = plain.derivative(0.5, state), shared.derivative(0.5, state)
+        for s in d1:
+            assert jnp.allclose(d0[s], d1[s], atol=1e-12)
+
+    def test_the_external_value_reaches_the_rate_laws(self):
+        # Mdm2 (y) degrades p53 (x): more external Mdm2, lower dx/dt. The
+        # deposit starts p53 at zero, where nothing degrades, so give it some.
+        shared = self._shared()
+        state = {**self._state(shared), "x": jnp.asarray(1.0)}
+        lo = shared.derivative(0.5, {**state, "y": jnp.asarray(0.1)})["x"]
+        hi = shared.derivative(0.5, {**state, "y": jnp.asarray(2.0)})["x"]
+        assert float(hi) < float(lo)
+
+    def test_unwired_it_holds_the_published_value_for_the_whole_run(self):
+        shared = self._shared()
+        comp = Composite(
+            processes={"gz06": shared},
+            topology={"gz06": {n: f"gz06/{n}" for n in shared._species_names}},
+            validate=False,
+            semantic_validation=False,
+        )
+        res = Scheduler().run(
+            comp,
+            t_span=(0.0, 5.0),
+            macro_dt=5.0,
+            y0=comp.initial_state_vec(),
+            save_dt=0.5,
+        )
+        y = jnp.asarray(res.get("gz06/y"))
+        assert jnp.allclose(y, y[0])
+        assert float(y[0]) == shared.ports_schema()["y"].default
+
+
 SBML_QUAL = """<?xml version="1.0" encoding="UTF-8"?>
 <sbml xmlns="http://www.sbml.org/sbml/level3/version1/core"
       xmlns:qual="http://www.sbml.org/sbml/level3/version1/qual/version1"

@@ -20,13 +20,17 @@ Cross-publication edges:
 
 - **DNA damage ⊣ p53 degradation**: ``damage_bridge`` Hill-interpolates GZ06's
   ``alpha_x`` *downward* from a quiescent control value to the deposit's own
-  ``alpha_x = 0`` on DP14's accumulated DNA_damage. ATM phosphorylates p53
-  Ser15 and blocks its degradation (Banin 1998), and crossing the p53 Hopf at
-  ``alpha_x = 0.1662`` is what starts the pulses — so a damaged arm oscillates
-  and a control arm does not. GZ06 fitted *irradiated* cells, so its published
-  parameter set is the damaged end of this edge and the range carries no free
-  strength. ``psi`` is the paper's ξ, a production-noise gain, and is not a
-  damage variable; it stays at its published 1.0.
+  ``alpha_x = 0`` on DP14's accumulated DNA_damage. The mechanism claim is
+  ATM's: damage-induced Ser15 phosphorylation blocks p53 degradation (Banin
+  1998), which in this deposit is the Mdm2-*dependent* channel ``alpha_k``;
+  ``alpha_k``'s damage direction does not cross the p53 Hopf and ``alpha_x``'s
+  does, so the edge drives ``alpha_x``, and crossing the Hopf at
+  ``alpha_x = 0.1662`` is what starts the pulses — a damaged arm oscillates
+  and a control arm does not, at the placed parameters. GZ06 fitted
+  *irradiated* cells, so its published parameter set is the damaged end of
+  this edge, and the control end is a manufactured unirradiated state, not a
+  published rate. ``psi`` is the paper's ξ, a production-noise gain, and is
+  not a damage variable; it stays at its published 1.0.
 
 Conditions and drugs both enter through the hallmark layer::
 
@@ -90,11 +94,13 @@ PROCTOR07_K69_NAME = "k69"
 # 34657 time units = 9.63 h only if those units are seconds; independently
 # k1*Source/(k2*ROS) = 500.0, exactly the declared initial NatP.
 PROCTOR07_NATIVE_TIME_SECONDS = 1.0
-# Proctor's misfolding rate is k2·NatP·ROS with ROS a constant 10, and its
-# synthesis is k1·Source. DP14's ROS and phospho-mTORC1 drive those two rate
-# constants through linear gains placed so each deposit's published rest
-# point maps onto the other's.
-PROCTOR07_MISFOLDING_RATE_NAME = "k2"
+# Proctor's misfolding rate is k2·NatP·ROS, with ROS a species the deposit
+# holds at a constant 10, and both deposits annotate their ROS as
+# CHEBI:26523. One entity, two pools: Proctor's copy becomes an input read
+# from DallePezze's pool through a level edge whose gain is the conversion
+# factor, and k2 stays at its published value. Synthesis is k1·Source, and
+# DallePezze's phospho-mTORC1 drives k1 through a linear gain.
+PROCTOR07_ROS_NAME = "ROS"
 PROCTOR07_SYNTHESIS_RATE_NAME = "k1"
 DP14_ROS_NAME = "ROS"
 DP14_MTORC1_ACTIVE_NAME = "mTORC1_pS2448"
@@ -102,14 +108,15 @@ DP14_MTORC1_ACTIVE_NAME = "mTORC1_pS2448"
 # inhibition (Torin1) halves synthesis in MEFs, Thoreen et al. 2012, Nature
 # 485:109–113. The rest is the offset the synthesis gain keeps at zero mTORC1.
 PROCTOR07_SYNTHESIS_MTOR_FRACTION = 0.5
-# The gains below are placed on DP14's *settled* control level, not on the
-# port default: DallePezze's published initial condition is an experimental
-# starting point, not a rest point, and anchoring there ran Proctor at 1.81x
-# its published misfolding rate for the whole run. Measured from a 600-day
-# control settle of the composite (scratch/2026-09-08-reporters/p3_rest.py);
-# test_multi_hallmark.py re-derives them.
-DP14_ROS_CONTROL_REST = 18.1075
-DP14_MTORC1_CONTROL_REST = 8.2527
+# Every placement reads the deposits' *declared* reference states — the
+# initial values their authors calibrated at — never a level measured under
+# this composite's protocol, and never a settled level the run does not
+# visit. DallePezze's control ROS leaves its declared 10 at once (20 by day
+# 2, 34 by day 4, 19.5 by day 14) and settles at 18.1 only after ~600 days,
+# so there is no rest level inside the window to anchor on; anchoring at the
+# 600-day value tied the interface to a state the experiment never occupies.
+# The excursion is DallePezze's own claim about control cells and passes
+# through the interface as such.
 # SBML defaults, named at module level so hallsim.hallmarks can target the
 # same constants. DallePezze 2014 supplementary Table S2.
 DP14_MTOR_PHOS_RATE_DEFAULT = 162.471039450073
@@ -143,16 +150,22 @@ RAPA_INTERVENTION_DAY = DDIS_ETOPOSIDE_DOSE_WINDOW[1]
 # here. Rapamycin acts on the mTORC1 kinase rate, DP14_MTOR_PHOS_RATE_NAME.
 
 # GZ06's `psi` is the paper's ξ, a noise gain on protein production, and stays
-# at its published 1.0. Damage enters on `alpha_x`, the Mdm2-independent p53
-# degradation ATM blocks (Banin 1998) — the channel `simulate gz06-damage-scan`
-# picks: its Hopf is at 0.1662 and damage crosses it, where alpha_k's and
-# alpha_y's damage directions move away. GZ06 fitted irradiated cells, so the
-# published alpha_x = 0 IS the damaged state and the edge runs down to it.
+# at its published 1.0. Damage enters on `alpha_x`, Mdm2-independent p53
+# degradation — the channel `simulate gz06-damage-scan` picks: its Hopf is at
+# 0.1662 and damage crosses it, where alpha_k's and alpha_y's damage
+# directions move away. The ATM mechanism the edge cites (Banin 1998) acts on
+# Mdm2-*dependent* degradation, alpha_k here, so the citation supports the
+# direction of the effect and not the parameter. GZ06 fitted irradiated cells,
+# so the published alpha_x = 0 IS the damaged state and the edge runs down to
+# it; the control end below is a manufactured unirradiated state with no
+# published source, and the fit moves it from there. The Hopf value is a slice
+# at the published alpha_y = 0.8 and moves with alpha_y; a fit that moves
+# alpha_y moves the crossing, and nothing re-checks it (see known problems).
 GZ06_PSI_NAME = "psi"
 GZ06_PSI_PUBLISHED = 1.0
 GZ06_ALPHA_X_NAME = "alpha_x"
 GZ06_ALPHA_X_HOPF = 0.1662
-GZ06_ALPHA_X_CONTROL = 4 * GZ06_ALPHA_X_HOPF  # decay tau 5.5 h; fitted
+GZ06_ALPHA_X_CONTROL = 4 * GZ06_ALPHA_X_HOPF  # manufactured; fitted from here
 GZ06_ALPHA_X_DAMAGED = 0.0  # the deposit's own value
 GZ06_DAMAGE_DRIVE_N = 2.0
 # Measured DNA_damage: control ceiling and DDIS mean (operating_ranges).
@@ -305,10 +318,10 @@ def build_multi_hallmark_composite(
 
 
 def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
-    """Proctor 2007 as ``ups/``, with two linear gains from DP14: ROS onto
-    the misfolding rate and phospho-mTORC1 onto the synthesis rate, each
-    placed so DP14's published initial level reproduces Proctor's published
-    rate constant."""
+    """Proctor 2007 as ``ups/``: its ROS pool handed over to DP14's through
+    an identity edge, and its synthesis rate driven by DP14's phospho-mTORC1
+    through a linear gain placed from DP14's declared reference state and
+    Thoreen 2012."""
     ups = (
         process_from_sbml(
             str(PROCTOR07_SBML_PATH),
@@ -317,39 +330,45 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
             native_time_seconds=PROCTOR07_NATIVE_TIME_SECONDS,
         )
         .reconciled_to(CANONICAL_TIME_SECONDS)
-        .with_param_input(PROCTOR07_MISFOLDING_RATE_NAME, "k2_in")
+        .with_species_input(PROCTOR07_ROS_NAME)
         .with_param_input(PROCTOR07_SYNTHESIS_RATE_NAME, "k1_in")
     )
-    ros_rest = DP14_ROS_CONTROL_REST
-    mtor_rest = DP14_MTORC1_CONTROL_REST
-    k2_pub = float(ups.parameters[PROCTOR07_MISFOLDING_RATE_NAME])
+    dp14_ports = dp14.ports_schema()
+    ros_ref = float(dp14_ports[DP14_ROS_NAME].default)
+    mtor_ref = float(dp14_ports[DP14_MTORC1_ACTIVE_NAME].default)
+    ups_ros_ref = float(ups.ports_schema()[PROCTOR07_ROS_NAME].default)
     k1_pub = float(ups.parameters[PROCTOR07_SYNTHESIS_RATE_NAME])
     processes["ups"] = ups
-    # One point, so this one does assume the line passes through the origin:
-    # no ROS, no oxidative misfolding. Proctor reports k2 at a single ROS
-    # level and a rate constant has no operating envelope, so there is no
-    # second point to place from — unlike mtor_synthesis below, where
-    # Thoreen 2012 supplies the intercept.
-    processes["ros_misfolding"] = GainEdge(
+    # Identity edge: one entity carried on two arbitrary scales. The gain is
+    # the conversion factor SBML comp leaves to the modeller, placed once as
+    # the ratio of the two deposits' declared reference levels; zero maps to
+    # zero because both scales are concentrations with a physical zero.
+    # Proctor's misfolding law k2·NatP·ROS then does its own multiplication
+    # at the published k2, which is where "no ROS, no misfolding" lives.
+    processes["ros_identity"] = GainEdge(
         mode="level",
         timescale=ups.timescale,
         offset=0.0,
-        gain=place_gain(ros_rest, k2_pub),
+        gain=place_gain(ros_ref, ups_ros_ref),
         source_ontology={"chebi": "CHEBI:26523"},
         source_description="DP14 ROS",
-        target_description=(
-            "Proctor 2007 misfolding rate k2, rescaled to DP14 ROS."
-        ),
+        target_ontology={"chebi": "CHEBI:26523"},
+        target_description="Proctor 2007 ROS, read from DP14's pool.",
         hallmark="Loss of Proteostasis",
-        reference="Proctor et al. 2007, BMC Syst Biol 1:17, Table 2",
-        description="ROS → protein misfolding (DP14 ROS drives Proctor k2).",
+        reference=(
+            "Proctor et al. 2007, BMC Syst Biol 1:17; "
+            "Dalle Pezze et al. 2014, PLoS Comput Biol 10:e1003728"
+        ),
+        description="Shared ROS pool (DP14 ROS read by Proctor 2007).",
     )
     # Two points, so no origin assumption: Proctor's published k1 at DP14's
-    # control mTORC1, and (1-f)k1 at zero mTORC1, f being the fraction of
-    # synthesis that follows mTORC1.
+    # declared reference mTORC1, and (1-f)k1 at zero mTORC1, f being the
+    # fraction of synthesis that follows mTORC1. The second point is a
+    # measured response of the relation itself (Thoreen 2012), the only kind
+    # of second point that is not a guess.
     f = PROCTOR07_SYNTHESIS_MTOR_FRACTION
     mtor_line = place_gain_from_ranges(
-        source=(0.0, mtor_rest), target=((1.0 - f) * k1_pub, k1_pub)
+        source=(0.0, mtor_ref), target=((1.0 - f) * k1_pub, k1_pub)
     )
     processes["mtor_synthesis"] = GainEdge(
         mode="level",
@@ -367,10 +386,11 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
             "Proctor k1)."
         ),
     )
-    topology["ups"] = {"k2_in": "ups/k2_signal", "k1_in": "ups/k1_signal"}
-    topology["ros_misfolding"] = {
+    # ups/ROS keeps its path; the identity edge now owns it and ups reads it.
+    topology["ups"] = {"k1_in": "ups/k1_signal"}
+    topology["ros_identity"] = {
         "source": f"dp14/{DP14_ROS_NAME}",
-        "signal": "ups/k2_signal",
+        "signal": f"ups/{PROCTOR07_ROS_NAME}",
     }
     topology["mtor_synthesis"] = {
         "source": f"dp14/{DP14_MTORC1_ACTIVE_NAME}",

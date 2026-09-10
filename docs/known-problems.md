@@ -1362,6 +1362,23 @@ The check that would catch a mistake does not exist, does not run, or fails open
   (`reconciled_to`) — and every one is a place that can produce a
   plausible-but-wrong trajectory. **The entire correctness argument for all of it
   is currently internal consistency.**
+  *Evidence, 2026-09-10, and it is good news.* The whole multi-hallmark
+  composite was rebuilt independently in Tellurium 2.2.13 / roadrunner 2.10 and
+  in COPASI 4.46 via basico, by merging the three deposits into one 82-species /
+  142-reaction / 20-rule SBML with the coupling edges compiled in as assignment
+  rules and rate-law rescalings, and simulated over 50 days. Both engines
+  reproduce the HallSim trajectory to integration tolerance: max relative
+  deviation over 1001 points is 1e-6 to 9e-4 on DNA_damage, CDKN1A, ROS,
+  phospho-mTORC1 and AggP in both arms and both engines. So the SBML semantics
+  HallSim re-implements are, on this composite, right. Two caveats keep this
+  entry open. The harness and its artifacts live outside this repo, so nothing
+  here re-runs it. And the one outlier — COPASI's etoposide-arm p53 at 3.5e-2 —
+  is not a discrepancy but a phase offset in a limit cycle scored with a
+  pointwise metric, which is its own defect (see the oscillation-aware
+  comparison entry below). Whether the merge was built against the current
+  wiring or the pre-2026-09-09 one, in which DallePezze's ROS drove Proctor's
+  `k2` rather than sharing its pool, is not recorded and needs establishing
+  before the numbers are quoted.
   *Fix:* promote it to `tests/conformance/`, marked `slow` and gated on
   `pytest.importorskip("roadrunner")`, asserting a per-species relative-deviation
   bound on the bundled offline SBML. 2-3 days to make deterministic and bounded;
@@ -1390,6 +1407,100 @@ The check that would catch a mistake does not exist, does not run, or fails open
   *Fix:* measure precision first — what fraction of emitted warnings correspond
   to a defect a reviewer agrees with, across the composites on hand — and rank
   that above further cost work on this checker.
+
+- [ ] **P1.21 — A placement's purpose is never re-checked after calibration,
+  and the fitted multi-hallmark composite has no p53 oscillator.** Filed
+  2026-09-09. `damage_bridge` is placed so the etoposide arm crosses
+  Geva-Zatorsky's Hopf at `alpha_x = 0.1662` and the control arm does not,
+  and with the placed vector it does: 44 p53 peaks between day 2 and day 14
+  in the etoposide arm, none in control. The fit of 2026-09-08 moves
+  `alpha_x_control` 0.665 → 0.823 and Mdm2 degradation `alpha_y` 0.80 → 1.11,
+  and at `alpha_y = 1.11` the deposit oscillates at *no* `alpha_x` (solo scan
+  0.05–0.25; at 0.80 it oscillates up to 0.20). The 0.1662 constant is a
+  slice of the Hopf curve at the published `alpha_y`. So the fitted composite
+  pulses in neither arm (etoposide: 3 peaks in days 2–4, none after), the
+  DDB2 and MDM2 reporters read levels, and the preprint section's §2
+  described a property its §3 model does not have. `check_hill_gates` runs
+  on the initial vector and checks only that `K` lies inside the driver's
+  range; nothing evaluates a placement's stated purpose on the fitted
+  vector, and here the purpose depends on a host parameter the placement
+  never names.
+  *Measured 2026-09-10: the constraint is nearly free.* Re-scoring the
+  2026-09-09 fit with `alpha_y` put back to 0.80 raises the loss from 0.1377
+  to 0.1403; with both Geva-Zatorsky parameters put back, 0.1412 — the whole
+  p53 side is 0.0035 of a 0.141 descent, and the MAP prior charged exactly the
+  0.0026 the move gained. A fit with `alpha_y` held at its published value
+  (`simulate multi-hallmark calibrate --proteostasis --hold mdm2_degradation`)
+  reaches 0.1399 with the etoposide arm pulsing as placed (7 / 7 / 11 / 26
+  peaks per window, identical to the placed vector). So the oscillator was
+  walked over for 1.6% of loss by a gradient nothing opposed, twice, on two
+  different wirings.
+  *Fix:* a placement records the constraint it was solved for, including the
+  host parameters it depends on, and the calibration report re-evaluates
+  every such constraint on the fitted vector and prints the result — a
+  broken constraint is a finding, not a silent success. Design in
+  [design-edge-placement.md](design-edge-placement.md), D4 and D5. Holding
+  the host constant is the cheapest form of it and is what the canonical fit
+  now does.
+
+- [ ] **P1.22 — The damage gate's two driver levels come from the calibration
+  experiment, not from the models.** Filed 2026-09-09. `GZ06_DAMAGE_OFF_LEVEL
+  = 9.59` and `GZ06_DAMAGE_ON_LEVEL = 12.13` are DP14's DNA_damage ceiling in
+  the control arm and its mean in the etoposide arm, both measured on this
+  composite under GSE248823's two-day dose window, and `K` is solved between
+  them. The interface is therefore placed from the experiment it is later
+  scored against, which is the one input a placement may not read: data and
+  protocol are calibration's; placement reads the deposits and the
+  literature. The margin is 12.5% to the nearer arm, so the placement is also
+  fragile.
+  *Fix:* solve the crossing between the source deposit's own declared
+  reference state and its own published perturbation (DallePezze's native
+  `Irradiation` rule, whose exposure `drive_pulse` already compares against),
+  and record both as the constraint's inputs.
+
+- [ ] **P1.23 — Trajectory agreement is scored pointwise, which misreads every
+  oscillator the repo cares about.** Filed 2026-09-10. The cross-engine rebuild
+  (P1.17) put COPASI's etoposide-arm p53 at 3.5e-2 max relative deviation
+  against HallSim while every other panel sat at 1e-6 to 9e-4. It is not a
+  disagreement: it is a sub-pulse phase shift in the p53–Mdm2 limit cycle, where
+  two visually identical trajectories differ by the full amplitude wherever the
+  spikes do not align. The repo already knows this — the intake protocol says so
+  for the tolerance screen, and the reporters already summarize `gz06/x` as an
+  RMS amplitude rather than a level for the same reason — but every comparison
+  path that produces a *number* still uses `max|a - b|`: the tolerance screen,
+  the cross-engine harness, and any solver or engine comparison built on them.
+  The cost is both directions: a phase-shifted match reads as a failure, and a
+  genuine amplitude error inside a matching phase can hide under the same
+  metric.
+  *Fix:* a comparison in `hallsim.diagnostics` that classifies a signal as
+  oscillatory (the machinery is in `hallsim.bifurcation`) and scores it on
+  cycle-average, amplitude and period rather than pointwise, returning which
+  test it applied. Then use it in the tolerance screen and in the conformance
+  test P1.17 asks for.
+
+- [ ] **P2.9 — A composite cannot be exported, so every cross-engine check
+  needs a hand-written SBML merge.** Filed 2026-09-10. HallSim imports SBML and
+  never emits it. To run the multi-hallmark composite in Tellurium and COPASI
+  (P1.17) the three deposits had to be merged offline with libSBML into one
+  file, and that merge is 300+ lines of reference surgery: `renameSIdRefs` does
+  not descend into kinetic laws or update `speciesReference` species attributes,
+  metaids are document-global and collide across documents, cross-document adds
+  fail with a bare `-8` unless levels are normalized first (DallePezze is L2V4,
+  the other two L2V1), assignment-rule targets need `setConstant(False)`, and
+  display-name collisions are not checked by SBML validation at all — DallePezze's
+  ROS and Proctor's ROS collided silently and were separated only by prefixing
+  every element name by hand. All of that is a re-derivation of wiring the
+  composite already holds as data, and it has to be redone by hand every time
+  the wiring changes, which makes the conformance check expensive to keep
+  current rather than expensive once.
+  *Fix:* `Composite.to_sbml()` emitting the flattened model with the coupling
+  edges as assignment rules and the clock reconciliation as rate-law scaling —
+  the same translation the merge does by hand, from the topology that already
+  describes it. It is also the interchange artifact for using COPASI as a
+  stochastic and inverse-task engine on sub-models (P3.6), and the thing that
+  makes the conformance test cheap to run on any composite rather than on one
+  hand-merged file.
+
 
 ## P2 — cannot see what was built
 
@@ -1433,6 +1544,36 @@ The check that would catch a mistake does not exist, does not run, or fails open
   it per store path is what turns "a declared EVOLVED port silently frozen" into
   something visible, and it is the same report.
 
+- [ ] **P2.10 — Fitting a parameter to a trajectory has no visible path, so an
+  agent concluded the framework cannot fit.** Filed 2026-09-10. The cross-engine
+  rebuild report (P1.17) states that "Hallsim has none of these; calibration
+  currently means hand-rolled JAX loops" and demonstrates a k1 recovery on
+  Proctor 2007 in COPASI instead — about ten lines of basico. The capability
+  exists here and is not findable: `Calibrator` takes any traceable loss and
+  recovers the same k1 (0.005 → 0.01199 against a true 0.012, 60 steps, 20 s,
+  `scratch/2026-09-10-fit-path/k1_recovery.py`, 52 lines of which ~25 are the
+  user's), but nothing points a user at it. `docs/calibration.md` opens its
+  API section with `CalibrationProblem`, which demands reporters, conditions,
+  arm pairs and a gene-expression dataset, and names the 1000-line
+  `multi_hallmark_calibrate.py` as "the runnable end-to-end example"; the
+  README's only fit command is `simulate multi-hallmark calibrate`, welded to
+  one demo; direct `Calibrator` use appears in one demo and the unit tests,
+  and a trajectory target — the commonest fitting task there is — has no
+  example anywhere. By the standing criterion this is the framework's fault:
+  a user who cannot find the path hand-rolls around it or reaches for another
+  tool, and the report did the second. The stop-rule comparison is not
+  unfavourable on substance (25 lines and 20 s against 10 lines) and entirely
+  unfavourable on discoverability.
+  *Fix:* a trajectory-target problem — `CalibrationProblem` accepting a time
+  series per store path in place of gene-expression fold changes, or a
+  sibling class — plus a `simulate fit <composite> --param NAME --target
+  file.csv` command that is what the README quotes, and a ten-line example in
+  `docs/calibration.md` ahead of the gene-expression layer. The
+  `--fit PARAM` option added to `simulate multi-hallmark calibrate` today
+  is the same instinct one level down: the identifiability probe was a
+  scratch script until it was a flag.
+
+
 ## P3 — capability gaps
 
 - [ ] **P3.1 — Severity cannot be a state.** A hallmark dial is a constant set
@@ -1465,7 +1606,13 @@ The check that would catch a mistake does not exist, does not run, or fails open
   not a fourth `ProcessKind`. Measured on Hui 2016 (a Gillespie deposit, P0.57):
   6.25e5 events/s at 256 cells on CPU, against 4.67e6 jumps/cell for a 14-day
   window — the composite's own horizon costs ~32 min. Tau-leaping buys 3.4×
-  and no more, because 24 of 62 species never exceed 10 molecules.
+  and no more, because 24 of 62 species never exceed 10 molecules. Confirmed
+  again 2026-09-10 on Proctor 2007 itself, the composite's own proteostasis
+  constituent: COPASI's direct method over three replicates ends at 4, 5 and 3
+  AggP molecules against a deterministic 3.94 — a model whose aggregate counts
+  are single digits, run as an ODE here. Proctor's lineage was written for
+  Gillespie simulation, which is the same class of silent mechanism deletion
+  as P0.57.
 - [~] **P3.7 — No batched parameter sweeps.** Severity varies the pytree, not
   the state, so a sweep is a Python loop.
   **Re-scoped 2026-08-30 — this is a convenience, not a blocker, and the
@@ -1858,18 +2005,3 @@ be broken, is the gitignored `docs/review-architecture-systems.md`.
   framework's own premise that composites are generated rather than typed.
   *Fix:* keep the resolved source path and, where the file declares one, the
   model id, on the process, and surface both through `metadata()`.
-
-- [ ] **P3.18 — DallePezze's ROS and Proctor's ROS are the same species held as
-  two unwired pools.** Filed 2026-09-08; the semantic validator finds it and
-  says so: *"Entity chebi:CHEBI:26523 is modeled in 2 namespaces ('dp14/ROS',
-  'ups/ROS') as unwired, distinct pools."* `ros_misfolding` drives Proctor's
-  misfolding *rate constant* from DallePezze's ROS level, which is the right
-  units bridge for a rate, but `ups/ROS` itself stays pinned at Proctor's own
-  constant 10 and appears a second time in the misfolding rate law. The
-  composite therefore multiplies a rescaled ROS by an unrescaled one. It is
-  not a numerical error — the gain is placed to absorb it — but the model
-  carries two ROS pools where the biology has one, and any later edge that
-  reads `ups/ROS` will read the wrong one.
-  *Fix:* decide between rewiring `ups/ROS` onto `dp14/ROS` (with the scale the
-  gain currently carries) and annotating the two as compartment-distinct.
-  The validator already asks exactly this question.

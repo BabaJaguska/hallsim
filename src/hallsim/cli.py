@@ -702,8 +702,15 @@ def gz06_damage_scan():
 @click.option(
     "--proteostasis",
     is_flag=True,
-    help="add Proctor 2007's ubiquitin–proteasome system, driven by DP14's "
-    "ROS and phospho-mTORC1, with its own reporters",
+    help="add Proctor 2007's ubiquitin–proteasome system, sharing DP14's "
+    "ROS pool and driven by its phospho-mTORC1, with its own reporters",
+)
+@click.option(
+    "--fit",
+    multiple=True,
+    metavar="PARAM",
+    help="fit exactly these parameters (repeatable); the rest stay at "
+    "their placed values. Default: the demo's declared set",
 )
 def multi_hallmark(
     command,
@@ -714,6 +721,7 @@ def multi_hallmark(
     no_plateau,
     equilibrate,
     proteostasis,
+    fit,
 ):
     """The multi-hallmark composite (DallePezze 2014 + Geva-Zatorsky 2006,
     plus Proctor 2007 with --proteostasis) scored against GSE248823.
@@ -739,6 +747,7 @@ def multi_hallmark(
         no_plateau=no_plateau,
         equilibrate=equilibrate,
         proteostasis=proteostasis,
+        fit=fit,
     )
     (cmd_sweep if command == "sweep" else cmd_run)(args)
 

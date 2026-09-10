@@ -194,10 +194,15 @@ def build_problem(
     equilibrate: bool = False,
     parameters=None,
     proteostasis: bool = False,
+    fitted: tuple | None = None,
 ) -> CalibrationProblem:
     """The calibration problem. ``parameters`` overrides the fitted set,
-    which is what an identifiability screen varies. ``proteostasis`` builds
-    the composite with Proctor 2007 attached and scores its reporters too."""
+    which is what an identifiability screen varies. ``fitted`` names exactly
+    which members of the default set to fit — the one list there is: a
+    smaller fit declares it, and scoring a saved fit passes the set that fit
+    had. Everything not named stays at its placed value. ``proteostasis``
+    builds the composite with Proctor 2007 attached and scores its reporters
+    too."""
     ds = (
         GeneExpressionDataset.from_series_matrix(
             SERIES_MATRIX,
@@ -218,6 +223,28 @@ def build_problem(
     def published(process: str, field: str) -> float:
         """The deposit's own value, as the MAP prior centre."""
         return float(composite.processes[process].parameters[field])
+
+    # Each fit param is read by ≥1 reporter and has a log-normal MAP prior.
+    # See docs/coupling-edge-priors.md, docs/gz06-basal-p53.md.
+    # Screened 2026-09-05 over all 84 calibratable candidates
+    # (`identifiability.sensitivity_jacobian`); 33 are numerically flat.
+    # Selecting the top 5 by Gauss-Newton loss reduction was measured to
+    # OVERFIT — better on the fit arm at D07, held-out worse than not
+    # fitting at all — and the identifiability verdict predicted it: that
+    # set had 0 identifiable parameters against this one's 2. Rank by
+    # loss reduction, but keep only what the data constrains.
+    params = (
+        parameters
+        if parameters is not None
+        else _default_fit_params(composite, published, proteostasis)
+    )
+    if fitted is not None:
+        unknown = sorted(set(fitted) - set(params))
+        if unknown:
+            raise KeyError(
+                f"{unknown} are not in the fitted set {sorted(params)}"
+            )
+        params = {k: v for k, v in params.items() if k in fitted}
 
     return CalibrationProblem(
         composite=composite,
@@ -275,20 +302,7 @@ def build_problem(
         equilibrate=equilibrate,
         equilibration_condition="ctrl",
         arm_pairs=ARM_PAIRS,
-        # Each fit param is read by ≥1 reporter and has a log-normal MAP prior.
-        # See docs/coupling-edge-priors.md, docs/gz06-basal-p53.md.
-        # Screened 2026-09-05 over all 84 calibratable candidates
-        # (`identifiability.sensitivity_jacobian`); 33 are numerically flat.
-        # Selecting the top 5 by Gauss-Newton loss reduction was measured to
-        # OVERFIT — better on the fit arm at D07, held-out worse than not
-        # fitting at all — and the identifiability verdict predicted it: that
-        # set had 0 identifiable parameters against this one's 2. Rank by
-        # loss reduction, but keep only what the data constrains.
-        params=(
-            parameters
-            if parameters is not None
-            else _default_fit_params(composite, published, proteostasis)
-        ),
+        params=params,
         fit_arms=["DDIS_vs_ctrl"],
         held_out_arms=["RAPA_vs_ctrl"],
         prior_weight=0.03,
@@ -866,12 +880,16 @@ def cmd_run(args) -> None:
         logging.getLogger("hallsim").setLevel(logging.INFO)
     equilibrate = getattr(args, "equilibrate", False)
     proteostasis = getattr(args, "proteostasis", False)
+    fitted = tuple(getattr(args, "fit", ()) or ()) or None
     if not SERIES_MATRIX.exists():
         print(_missing_data_notice(), flush=True)
         return run_unscored(equilibrate, make_run_dir(RUN_NAME))
-    problem = build_problem(equilibrate=equilibrate, proteostasis=proteostasis)
+    problem = build_problem(
+        equilibrate=equilibrate, proteostasis=proteostasis, fitted=fitted
+    )
     print(
-        f"[run] equilibrate={equilibrate} proteostasis={proteostasis}",
+        f"[run] equilibrate={equilibrate} proteostasis={proteostasis}"
+        f" fit={sorted(problem.param_refs)}",
         flush=True,
     )
     init = problem.initial_params()

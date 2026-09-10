@@ -150,6 +150,9 @@ def save_outputs(
             for name, c in problem.conditions.items()
         },
         "arm_pairs": dict(problem.arm_pairs),
+        # Which composite this fit was run on, so a consumer scores it on
+        # the same one rather than on whatever a flag re-describes.
+        "processes": sorted(problem.composite.processes),
         "fit_arms": list(problem.fit_arms),
         "held_out_arms": list(problem.held_out_arms),
         "t_end": problem.t_end,

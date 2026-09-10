@@ -310,6 +310,10 @@ class SBMLProcess(ImportedODEProcess):
     # ``value_before`` until ``t_step``, for a timed intervention rather than a
     # severity applied across the whole trajectory.
     _param_steps: tuple = eqx.field(static=True, default=())
+    # Species read from the store instead of integrated: the port keeps the
+    # species' name and ontology and becomes INPUT, so another model's pool
+    # can be wired to it (:meth:`with_species_input`).
+    _species_inputs: tuple[str, ...] = eqx.field(static=True, default=())
 
     def coupling_structure(self) -> dict:
         """SBML equation structure for the coupling-wiring check (extracted at
@@ -406,6 +410,62 @@ class SBMLProcess(ImportedODEProcess):
         )
         return new
 
+    def with_species_input(self, *species: str) -> "SBMLProcess":
+        """Copy that reads ``species`` from the store instead of integrating
+        them. Each port keeps the species' name and ontology and becomes
+        INPUT, so the topology can point it at another model's pool::
+
+            ups = process_from_sbml(105).with_species_input("ROS")
+            topology["ros_link"] = {"source": "dp14/ROS", "signal": "ups/ROS"}
+
+        This is the composition move for one entity that two deposits both
+        carry — SBML comp's replaced element: one model owns the pool, this
+        one reads it, and a level edge between them holds the conversion
+        factor. Every rate law here that reads the species sees the external
+        value, and the species' own reactions stop moving anything, which is
+        what handing the pool over means. Unwired, the port defaults to the
+        species' published initial value, so a solo run of a species the
+        deposit held constant reproduces the source model exactly.
+        """
+        unknown = [s for s in species if s not in self._species_names]
+        if unknown:
+            raise KeyError(
+                f"{unknown} are not species on {self._name!r}; "
+                f"available: {sorted(self._species_names)}"
+            )
+        ruled = [s for s in species if s in self._assigned_names]
+        if ruled:
+            raise ValueError(
+                f"{ruled} are set by an assignment rule on {self._name!r}, "
+                "so the model computes them itself and cannot read them "
+                "from an external pool."
+            )
+        set_by_event = sorted(
+            {
+                s
+                for s in species
+                for ev in self._events
+                for tgt, _ in getattr(ev, "_assign_ir", ())
+                if tgt == s
+            }
+        )
+        if set_by_event:
+            raise ValueError(
+                f"{set_by_event} are assigned by an SBML event on "
+                f"{self._name!r}; an event cannot write a pool this model "
+                "no longer owns. Drop the events (without_events) or keep "
+                "the species."
+            )
+        import copy
+
+        new = copy.copy(self)
+        object.__setattr__(
+            new,
+            "_species_inputs",
+            tuple(dict.fromkeys(self._species_inputs + tuple(species))),
+        )
+        return new
+
     def native_input_exposure(self, input_name, t_start, t_end, *, n=8000):
         """``∫ native-drive dt`` for driveable quantity ``input_name`` over
         composite time ``[t_start, t_end]`` — the exposure the model's driven
@@ -453,6 +513,17 @@ class SBMLProcess(ImportedODEProcess):
                 self._species_ontology or ({},) * len(self._species_names),
             )
         }
+        # A species handed over to another model's pool keeps its name and
+        # identity and is read, not integrated (with_species_input).
+        for name in self._species_inputs:
+            owned = schema[name]
+            schema[name] = Port(
+                role=PortRole.INPUT,
+                default=owned.default,
+                units=owned.units,
+                description=f"SBML species {name}, read from an external pool",
+                ontology=owned.ontology,
+            )
         # An assignment rule determines its target outright, so ASSIGNED
         # replaces the EVOLVED port when the species is in `y` as well.
         schema.update(
@@ -616,14 +687,18 @@ class SBMLProcess(ImportedODEProcess):
         if self._frozen_indices:
             dydt = dydt.at[..., jnp.asarray(self._frozen_indices)].set(0.0)
 
+        # A species read from an external pool is not this model's to move.
         return {
-            name: dydt[..., i] for i, name in enumerate(self._species_names)
+            name: dydt[..., i]
+            for i, name in enumerate(self._species_names)
+            if name not in self._species_inputs
         }
 
     def metadata(self):
         base = super().metadata()
         base["sbml_name"] = self._name
         base["n_species"] = len(self._species_names)
+        base["species_inputs"] = list(self._species_inputs)
         return base
 
 

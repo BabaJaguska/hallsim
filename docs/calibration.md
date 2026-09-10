@@ -108,6 +108,40 @@ history = problem.fit(steps=150, mode="reverse")
 results = problem.evaluate(history.final_params)
 ```
 
+### Fitting a parameter to a trajectory
+
+The gene-expression layer above is one loss. `Calibrator` takes any
+JAX-traceable scalar of the parameter pytree, with the solve inside it, so
+the commonest fitting task — recover a rate constant from a time series —
+needs no reporters, conditions or arms. Proctor 2007's synthesis rate from a
+synthetic native-protein trajectory, start 0.005, true 0.012:
+
+```python
+from hallsim.calibration import Calibrator
+from hallsim.scheduler import Scheduler
+
+def natp(k1):
+    comp = base.with_params({"ups.parameters.k1": k1})
+    return Scheduler().run(comp, t_span=(0.0, T_END), macro_dt=T_END,
+                           y0=comp.initial_state_vec(),
+                           save_dt=T_END / 50).get("ups/NatP")
+
+target = natp(0.012)
+
+def loss(params):
+    return jnp.mean(((natp(params["k1"]) - target) / target.mean()) ** 2)
+
+hist = Calibrator(loss_fn=loss, init_params={"k1": jnp.asarray(0.005)},
+                  log_params=True, clamps={"k1": (1e-4, 1e-1)},
+                  mode="reverse", learning_rate=0.05).fit(steps=60)
+hist.best_params["k1"]   # 0.01199 after 60 steps, ~20 s
+```
+
+`log_params=True` fits in log10 so a rate constant spanning decades takes
+even steps; `clamps` is the box; `mode="reverse"` is the adjoint through the
+solve. The runnable version is `scratch/2026-09-10-fit-path/k1_recovery.py`.
+There is no CLI for this yet; the gap is filed.
+
 ### Principles the API enforces
 
 - **Hallmark knobs aren't fittable by default** — a guard rail raises if you
