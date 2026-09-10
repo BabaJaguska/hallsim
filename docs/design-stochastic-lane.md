@@ -40,7 +40,10 @@ Scheduler now also recognizes an explicitly selected
 `SBMLProcess.as_stochastic()` in an eager single-stochastic-process lane.
 The direct runner remains useful for one-way hybrid inputs; batched stochastic
 groups, multiple stochastic processes, and fully coupled hybrid splitting
-remain unfinished.
+remain unfinished. The fixed Lie/frozen hybrid lane is now compiled; hybrid
+Strang, interpolated coupling, and waveform-relaxation semantics remain
+deliberately eager until jump timing, event replay, and static-buffer
+contracts are specified.
 
 ## The gap
 

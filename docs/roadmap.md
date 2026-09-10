@@ -7,10 +7,14 @@ analysis behind the Scheduler items.
 ## Scheduler & Multi-Scale
 
 * [ ] Combine Strang splitting + interpolated coupling (currently mutually exclusive)
-* [ ] Event-bearing and adaptive_dt composites under batched `y0` (currently
-  rejected at `Scheduler.run` entry — both rely on Python-side branching that
-  doesn't compose with `vmap`)
-* [ ] Waveform relaxation (Gauss-Seidel iteration at sync points, from FSI/PLL analogy)
+* [ ] Compiled hybrid Strang splitting for DISCRETE/EVENT processes — define
+  jump timing within the half-steps before implementing the static JAX path
+* [ ] Compiled hybrid interpolated coupling — define dense-waveform replay
+  and event ordering for continuous/discontinuous coupling
+* [ ] Compiled hybrid waveform relaxation — replay threshold crossings and
+  handlers deterministically across fixed Gauss-Seidel sweeps
+* [ ] Event-bearing composites under batched `y0` with a public event-buffer
+  contract
 * [ ] Anderson acceleration for waveform relaxation convergence
 * [ ] Mori-Zwanzig memory kernel for fast→slow coupling (captures history effects)
 * [ ] Coupling residual spectral monitoring (early-warning diagnostic)

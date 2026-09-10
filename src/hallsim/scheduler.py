@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any
@@ -929,10 +930,17 @@ class Scheduler:
         # multi-group run is one lax.scan — bounded compile, reverse-mode
         # memory flat in macro-step count.
         scan_eligible = (
-            not discrete_procs
-            and not event_procs
-            and coupling in ("frozen", "interpolated")
+            coupling in ("frozen", "interpolated")
             and not self.debug
+            and not self.progress
+            and (
+                not (discrete_procs or event_procs)
+                or (
+                    self.splitting == "lie"
+                    and coupling == "frozen"
+                    and self.waveform_sweeps == 1
+                )
+            )
         )
         core = (
             self._continuous_core(
@@ -950,6 +958,8 @@ class Scheduler:
                 state=state,
                 jump_ts=jump_ts,
                 stochastic_procs=stochastic_procs,
+                discrete_procs=discrete_procs,
+                event_procs=event_procs,
             )
             if (fast_path_eligible or scan_eligible)
             else None
@@ -1018,6 +1028,47 @@ class Scheduler:
             ts, ys, dyn = plan.core(
                 composite, state, jax.random.PRNGKey(stochastic_seed)
             )
+            compiled_events = dyn.pop("_events", None)
+            events = []
+            if compiled_events is not None:
+                event_times, event_fired, event_deltas, event_names = (
+                    compiled_events
+                )
+                if event_fired.ndim == 2:
+                    for i, name in enumerate(event_names):
+                        for j in range(event_fired.shape[0]):
+                            if bool(event_fired[j, i]):
+                                delta = {
+                                    keys[k]: event_deltas[j, i, k]
+                                    for k in range(len(keys))
+                                    if bool(event_deltas[j, i, k] != 0)
+                                }
+                                events.append(
+                                    EventRecord(
+                                        time=float(event_times[j, i]),
+                                        process=name,
+                                        delta=delta,
+                                    )
+                                )
+                else:
+                    for i, name in enumerate(event_names):
+                        for j in range(event_fired.shape[1]):
+                            members = np.asarray(event_fired[:, j, i])
+                            if members.any():
+                                first = int(np.flatnonzero(members)[0])
+                                delta = {
+                                    keys[k]: event_deltas[first, j, i, k]
+                                    for k in range(len(keys))
+                                    if bool(event_deltas[first, j, i, k] != 0)
+                                }
+                                events.append(
+                                    EventRecord(
+                                        time=float(event_times[first, j, i]),
+                                        process=name,
+                                        delta=delta,
+                                        members=members,
+                                    )
+                                )
             stats = {
                 g: {
                     **values,
@@ -1036,7 +1087,7 @@ class Scheduler:
                 ts=ts,
                 ys=ys,
                 keys=keys,
-                events=[],
+                events=events,
                 stats=_attach_diagnosis(stats, ys),
             )
 
@@ -1359,6 +1410,8 @@ class Scheduler:
         state,
         jump_ts,
         stochastic_procs=None,
+        discrete_procs=None,
+        event_procs=None,
     ):
         """Compiled ``(composite, y0) -> (ts, ys, per_group_stats)`` for the
         continuous paths, cached by structure.
@@ -1394,6 +1447,35 @@ class Scheduler:
         cached = self._core_cache.get(sig)
         if cached is not None:
             return cached
+
+        if discrete_procs or event_procs:
+
+            def core(comp, y0, rng_key=None):
+                return self._run_scan_hybrid(
+                    comp,
+                    groups,
+                    integrators,
+                    y0,
+                    keys,
+                    t0,
+                    t1,
+                    macro_dt,
+                    save_dt,
+                    adjoint,
+                    jump_ts,
+                    discrete_procs or {},
+                    event_procs or {},
+                )
+
+            if state.ndim > 1:
+                core = self._per_member(core)
+            fn = eqx.filter_jit(core)
+            if not any(
+                isinstance(leaf, jax.core.Tracer)
+                for leaf in jax.tree_util.tree_leaves((composite, state))
+            ):
+                self._core_cache[sig] = fn
+            return fn
 
         if fast:
             (gname,) = groups
@@ -1556,6 +1638,208 @@ class Scheduler:
                 if writes[a] & reads[b]:
                     return "interpolated"
         return "frozen"
+
+    def _run_scan_hybrid(
+        self,
+        composite,
+        groups,
+        integrators,
+        state,
+        keys,
+        t0,
+        t1,
+        macro_dt,
+        save_dt,
+        adjoint,
+        jump_ts,
+        discrete_procs,
+        event_procs,
+    ):
+        """Compiled fixed-grid lane for continuous + discrete/event processes."""
+        key_to_idx = {key: i for i, key in enumerate(keys)}
+        group_rhs = [
+            (name, composite.build_rhs(names)[0])
+            for name, names in groups.items()
+        ]
+        write_idxs = [
+            composite.evolved_indices(names, keys)
+            for _, names in groups.items()
+        ]
+        discrete_info = [
+            (
+                name,
+                proc,
+                *_build_proc_index_maps(
+                    proc, composite.topology[name], key_to_idx
+                ),
+            )
+            for name, proc in discrete_procs.items()
+        ]
+        event_info = [
+            (
+                name,
+                proc,
+                *_build_proc_index_maps(
+                    proc, composite.topology[name], key_to_idx
+                ),
+            )
+            for name, proc in event_procs.items()
+        ]
+        n_macro = max(1, int(math.ceil((t1 - t0) / macro_dt - 1e-12)))
+        t_starts = t0 + macro_dt * jnp.arange(n_macro)
+        due = jnp.asarray(
+            [
+                [
+                    self._is_due(
+                        t0 + i * macro_dt,
+                        min(t0 + (i + 1) * macro_dt, t1),
+                        proc.dt_step,
+                    )
+                    for _, proc, _, _ in discrete_info
+                ]
+                for i in range(n_macro)
+            ],
+            dtype=bool,
+        )
+        dt0_init = jnp.full((len(group_rhs),), float(self.dt0))
+        steps_init = jnp.zeros((len(group_rhs),), dtype=jnp.int64)
+        rej_init = jnp.zeros((len(group_rhs),), dtype=jnp.int64)
+        res_init = tuple(dfx.RESULTS.successful for _ in range(len(group_rhs)))
+        was_init = jnp.zeros((len(event_info),), dtype=bool)
+        event_times_init = jnp.zeros(
+            (n_macro, len(event_info)), dtype=state.dtype
+        )
+        event_fired_init = jnp.zeros((n_macro, len(event_info)), dtype=bool)
+        event_deltas_init = jnp.zeros(
+            (n_macro, len(event_info), state.shape[-1]), dtype=state.dtype
+        )
+
+        def body(carry, inputs):
+            (
+                st,
+                dt0h,
+                steps,
+                rej,
+                res,
+                was_active,
+                event_times,
+                event_fired,
+                event_deltas,
+            ) = carry
+            t_start, step_index = inputs
+            t_next = jnp.minimum(t_start + macro_dt, t1)
+            next_dt = []
+            for gi, (gname, rhs) in enumerate(group_rhs):
+                st, last_dt, result, n_steps, n_rej = self._group_step(
+                    rhs,
+                    st,
+                    write_idxs[gi],
+                    t_start,
+                    t_next,
+                    integrators[gname],
+                    adjoint,
+                    gname,
+                    dt0h[gi],
+                    jump_ts,
+                )
+                next_dt.append(last_dt)
+                steps = steps.at[gi].add(n_steps)
+                rej = rej.at[gi].add(n_rej)
+                res = res[:gi] + (result,) + res[gi + 1 :]
+
+            for di, (_, proc, read_pairs, write_pairs) in enumerate(
+                discrete_info
+            ):
+                view = {port: st[..., idx] for port, idx in read_pairs}
+                delta = _apply_delta(
+                    st, proc.update(t_next, view), write_pairs
+                )
+                st = jnp.where(due[step_index, di], delta, st)
+
+            for ei, (name, proc, read_pairs, write_pairs) in enumerate(
+                event_info
+            ):
+                view = {port: st[..., idx] for port, idx in read_pairs}
+                condition = jnp.asarray(
+                    proc.condition(t_next, view), dtype=bool
+                )
+                fire = condition & ~was_active[ei]
+                delta = _apply_delta(
+                    jnp.zeros_like(st), proc.handler(t_next, view), write_pairs
+                )
+                st = st + jnp.where(fire, delta, 0.0)
+                was_active = was_active.at[ei].set(condition)
+                event_times = event_times.at[step_index, ei].set(t_next)
+                event_fired = event_fired.at[step_index, ei].set(fire)
+                event_deltas = event_deltas.at[step_index, ei].set(
+                    jnp.where(fire, delta, 0.0)
+                )
+
+            return (
+                (
+                    st,
+                    (
+                        jnp.stack(next_dt)
+                        if next_dt
+                        else jnp.zeros((0,), dtype=state.dtype)
+                    ),
+                    steps,
+                    rej,
+                    res,
+                    was_active,
+                    event_times,
+                    event_fired,
+                    event_deltas,
+                ),
+                st,
+            )
+
+        init = (
+            state,
+            dt0_init,
+            steps_init,
+            rej_init,
+            res_init,
+            was_init,
+            event_times_init,
+            event_fired_init,
+            event_deltas_init,
+        )
+        final, snapshots = jax.lax.scan(
+            body, init, (t_starts, jnp.arange(n_macro))
+        )
+        all_ts = jnp.concatenate(
+            (jnp.asarray([t0]), jnp.minimum(t_starts + macro_dt, t1))
+        )
+        ys = jnp.concatenate((state[None], snapshots), axis=0)
+        (
+            _,
+            _,
+            steps,
+            rej,
+            results,
+            _,
+            event_times,
+            event_fired,
+            event_deltas,
+        ) = final
+        stats = {
+            gname: {
+                "num_macro_steps": n_macro,
+                "num_solver_steps": steps[i],
+                "num_rejected_steps": rej[i],
+                "result": results[i],
+            }
+            for i, (gname, _) in enumerate(group_rhs)
+        }
+        if event_info:
+            stats["_events"] = (
+                event_times,
+                event_fired,
+                event_deltas,
+                tuple(name for name, *_ in event_info),
+            )
+        return all_ts, composite.materialize_assigned(all_ts, ys), stats
 
     def _run_scan_continuous(
         self,
