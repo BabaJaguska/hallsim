@@ -19,6 +19,7 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import sympy
 
 from hallsim.imported import ImportedODEProcess
 from hallsim.process import Port, PortRole, ReactionChannel
@@ -64,9 +65,8 @@ class SBMLProcess(ImportedODEProcess):
     # so a driver aimed at a rate constant the model modulates via a rule can
     # be flagged (see hallsim.coupling_wiring).
     _coupling_meta: dict = eqx.field(static=True, default=None)
-    # Species × reaction stoichiometry from the source SBML — the exact,
-    # parameter-independent basis for conserved-moiety analysis.
-    _stoichiometry: dict = eqx.field(static=True, default=None)
+    # The source reactions with their kinetic laws as sympy, in the model's
+    # own symbols; reaction_channels() presents them over the ports.
     _reaction_channels: tuple[SBMLReactionChannel, ...] = eqx.field(
         static=True, default=()
     )
@@ -122,30 +122,105 @@ class SBMLProcess(ImportedODEProcess):
         import; see :func:`_extract_coupling_metadata`)."""
         return self._coupling_meta
 
-    def stoichiometry(self) -> dict | None:
-        """Species × reaction ``N`` from the source SBML (see
-        :func:`_extract_stoichiometry`). ``None`` when the model declares no
-        reactions or a symbolic stoichiometry, where ``N`` would not be
-        parameter-independent."""
-        if not self._stoichiometry or not self._stoichiometry["species"]:
-            return None
-        return self._stoichiometry
-
     def reaction_channels(self) -> tuple[SBMLReactionChannel, ...]:
-        """Return reaction stoichiometry and source rate laws.
+        """The source reactions: id, net stoichiometry, and the kinetic law
+        in the model's own symbols and time — species and rule-assigned
+        quantities as port symbols, constants and boundary inputs as
+        parameter symbols (:meth:`symbol_values`), a driven quantity as the
+        port that drives it. A stepped constant appears as its own symbol;
+        the step is an intervention the exporter writes as an event.
 
-        This is deliberately separate from :meth:`derivative`: an SBML
-        reaction network can support a stochastic SSA interpretation, while
-        the deterministic ODE remains the default execution mode.
+        Deliberately separate from :meth:`derivative`: the same channels are
+        what the stochastic lane executes as propensities, while the
+        deterministic ODE stays the default execution. The stoichiometry is
+        the source's, sink included; :meth:`stoichiometry` is what this
+        process integrates, with a frozen sink's row zero.
         """
-        return self._reaction_channels
+        subs = self._driver_symbols()
+        if not subs:
+            return self._reaction_channels
+        return tuple(
+            ReactionChannel(
+                ch.reaction_id, ch.stoichiometry, ch.rate_law.xreplace(subs)
+            )
+            for ch in self._reaction_channels
+        )
+
+    def stoichiometry(self) -> dict | None:
+        """``N`` over the species this process integrates: the source
+        reactions' stoichiometry, with a frozen sink's row zero because its
+        derivative is held at zero, and a rate-ruled quantity left out."""
+        declared = super().stoichiometry()
+        frozen = {self._species_names[i] for i in self._frozen_indices}
+        if declared is None or not frozen:
+            return declared
+        matrix = tuple(
+            (0.0,) * len(row) if sp in frozen else row
+            for sp, row in zip(declared["species"], declared["matrix"])
+        )
+        return {**declared, "matrix": matrix}
+
+    def rate_rules(self) -> tuple:
+        """The source rate rules on integrated ports, in the same symbols."""
+        subs = self._driver_symbols()
+        skip = {self._species_names[i] for i in self._frozen_indices} | set(
+            self._species_inputs
+        )
+        return tuple(
+            (target, expr.xreplace(subs) if subs else expr)
+            for target, expr in self._model.rate_rules
+            if target in self._species_names and target not in skip
+        )
+
+    def assignment_rules(self) -> tuple:
+        """The source assignment rules behind the ASSIGNED ports, in the
+        same symbols; a driven input's rule is replaced by its port."""
+        subs = self._driver_symbols()
+        driven = dict(self._input_drivers)
+        rules = dict(self._model.assignment_rules)
+        return tuple(
+            (name, rules[name].xreplace(subs) if subs else rules[name])
+            for name in self._assigned_names
+            if name in rules and name not in driven
+        )
+
+    def symbol_values(self) -> dict:
+        """Every SBML constant and boundary input at its current value —
+        the ``parameters`` surface, which is what the laws read."""
+        return dict(self.parameters)
+
+    def _driver_symbols(self) -> dict:
+        """Substitutions taking a driven quantity's symbol to the port that
+        drives it, so the symbolic forms read what the RHS reads."""
+        subs = {
+            sympy.Symbol(w): sympy.Symbol(port)
+            for w, port in self._input_drivers
+        }
+        for d in self._param_drivers:
+            sym = sympy.Symbol(d.param_name)
+            subs[sym] = d.symbolic(sym, sympy.Symbol(d.input_port))
+        return subs
 
     def as_stochastic(self) -> "SBMLProcess":
-        """Return a copy selecting reaction-level execution in Scheduler."""
+        """Copy selecting reaction-level execution in the Scheduler.
+
+        Counts have no scaling problem, so a sink the ODE import froze is
+        integrated here: the reactions move it exactly as the source says,
+        and :meth:`reaction_channels`, :meth:`stoichiometry` and the SSA
+        lane then describe the same network.
+        """
         import copy
 
         new = copy.copy(self)
         object.__setattr__(new, "_stochastic_enabled", True)
+        if self._frozen_indices:
+            log.info(
+                "%s: reaction-level execution lifts the freeze on %s; a "
+                "count is bounded by its pool and needs no scaling guard.",
+                self._name,
+                [self._species_names[i] for i in self._frozen_indices],
+            )
+            object.__setattr__(new, "_frozen_indices", ())
         return new
 
     def reaction_propensities(self, t, state):
@@ -678,70 +753,6 @@ def _extract_species_ontology(xml_path: str) -> dict[str, dict[str, str]]:
     return result
 
 
-def _extract_stoichiometry(xml_path: str) -> dict:
-    """Species × reaction stoichiometry ``N`` straight from the SBML.
-
-    Returns ``{"species": (id, ...), "reactions": (id, ...), "matrix":
-    ((coeff, ...), ...)}`` with one matrix row per species. This is the
-    model's wiring, not its kinetics: it fixes the conserved moieties exactly
-    and independently of every rate constant, which is what distinguishes a
-    moiety from a merely slow direction.
-
-    Species the network cannot change are excluded — ``boundaryCondition``
-    (held by the experiment) and ``constant`` — since a reaction touching one
-    is not a constraint on the state. A species carrying a non-integer or
-    symbolic stoichiometry (``stoichiometryMath``) makes the matrix
-    parameter-dependent, so the extraction reports nothing rather than
-    something conditionally true. Likewise a ``rateRule`` on one of these
-    species — its dynamics are then not ``N·v`` at all, so ``N`` no longer
-    settles what is conserved.
-
-    Empty structure if libsbml cannot parse the file or the model has no
-    reactions (a rules-only model, where ``N`` says nothing).
-    """
-    import libsbml
-
-    empty = {"species": (), "reactions": (), "matrix": ()}
-    model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
-    if model is None or model.getNumReactions() == 0:
-        return empty
-
-    dynamic = [
-        s.getId()
-        for s in model.getListOfSpecies()
-        if not s.getBoundaryCondition() and not s.getConstant()
-    ]
-    if not dynamic:
-        return empty
-    rate_ruled = {
-        r.getVariable() for r in model.getListOfRules() if r.isRate()
-    }
-    if rate_ruled & set(dynamic):
-        return empty
-    row_of = {sid: i for i, sid in enumerate(dynamic)}
-
-    reactions = [r.getId() for r in model.getListOfReactions()]
-    matrix = [[0.0] * len(reactions) for _ in dynamic]
-    for col, reaction in enumerate(model.getListOfReactions()):
-        for refs, sign in (
-            (reaction.getListOfReactants(), -1.0),
-            (reaction.getListOfProducts(), +1.0),
-        ):
-            for ref in refs:
-                if ref.isSetStoichiometryMath():
-                    return empty
-                row = row_of.get(ref.getSpecies())
-                if row is None:
-                    continue
-                matrix[row][col] += sign * ref.getStoichiometry()
-
-    return {
-        "species": tuple(dynamic),
-        "reactions": tuple(reactions),
-        "matrix": tuple(tuple(r) for r in matrix),
-    }
-
-
 def _extract_reaction_channels(
     xml_path: str, core: SBMLCore
 ) -> tuple[SBMLReactionChannel, ...]:
@@ -751,9 +762,20 @@ def _extract_reaction_channels(
     model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
     if model is None:
         return ()
+    # A local parameter is read by its local id and stored under
+    # ``<reaction>_<id>``; the law names the stored one.
+    local_of = {
+        rid: {
+            sympy.Symbol(local): sympy.Symbol(stored)
+            for local, stored in pairs
+        }
+        for rid, pairs in core.local_parameters
+    }
     channels = []
     for i, law in enumerate(core.rate_laws):
         rxn = model.getReaction(i)
+        subs = local_of.get(rxn.getId(), {})
+        law = law.xreplace(subs) if subs else law
         net: dict[str, float] = {}
         for refs, sign in (
             (rxn.getListOfReactants(), -1.0),
@@ -1240,7 +1262,6 @@ def process_from_sbml(
     ontology_map = _extract_species_ontology(xml_path)
     coupling_meta = _extract_coupling_metadata(xml_path)
     compartment_names = _extract_compartment_names(xml_path)
-    stoichiometry = _extract_stoichiometry(xml_path)
     reaction_channels = _extract_reaction_channels(xml_path, model)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
     _species_label_map = _extract_species_labels(xml_path)
@@ -1283,7 +1304,6 @@ def process_from_sbml(
         ),
         _species_ontology=species_ontology,
         _coupling_meta=coupling_meta,
-        _stoichiometry=stoichiometry,
         _reaction_channels=reaction_channels,
         native_time_seconds=native_time_seconds,
         native_time_source=native_time_source,

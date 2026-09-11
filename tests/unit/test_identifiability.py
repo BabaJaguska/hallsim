@@ -150,3 +150,190 @@ class TestEndToEnd:
         )
         assert history.identifiability is not None
         assert "rate" in history.identifiability.names
+
+
+# ── structural redundancy, from the symbolic forms alone ─────────────────
+
+REDUNDANT_MODEL = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<sbml xmlns="http://www.sbml.org/sbml/level3/version2/core" level="3" version="2">
+  <model id="redundant">
+    <listOfCompartments>
+      <compartment id="c" size="1" constant="true"/>
+    </listOfCompartments>
+    <listOfSpecies>
+      <species id="A" compartment="c" initialAmount="2" hasOnlySubstanceUnits="true" boundaryCondition="false" constant="false"/>
+      <species id="B" compartment="c" initialAmount="1" hasOnlySubstanceUnits="true" boundaryCondition="false" constant="false"/>
+      <species id="C" compartment="c" initialAmount="0" hasOnlySubstanceUnits="true" boundaryCondition="false" constant="false"/>
+    </listOfSpecies>
+    <listOfParameters>
+      <parameter id="k1" value="0.3" constant="true"/>
+      <parameter id="k2" value="0.2" constant="true"/>
+      <parameter id="k3" value="0.5" constant="true"/>
+      <parameter id="k4" value="1.0" constant="true"/>
+      <parameter id="k5" value="0.7" constant="true"/>
+      <parameter id="k6" value="0.4" constant="true"/>
+    </listOfParameters>
+    <listOfReactions>
+      <reaction id="r1" reversible="false">
+        <listOfReactants><speciesReference species="A" stoichiometry="1" constant="true"/></listOfReactants>
+        <listOfProducts><speciesReference species="B" stoichiometry="1" constant="true"/></listOfProducts>
+        <kineticLaw><math xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/><ci>k1</ci><ci>A</ci></apply></math></kineticLaw>
+      </reaction>
+      <reaction id="r2" reversible="false">
+        <listOfReactants><speciesReference species="A" stoichiometry="1" constant="true"/></listOfReactants>
+        <listOfProducts><speciesReference species="B" stoichiometry="1" constant="true"/></listOfProducts>
+        <kineticLaw><math xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/><ci>k2</ci><ci>A</ci></apply></math></kineticLaw>
+      </reaction>
+      <reaction id="r3" reversible="false">
+        <listOfReactants><speciesReference species="B" stoichiometry="1" constant="true"/></listOfReactants>
+        <listOfProducts><speciesReference species="C" stoichiometry="1" constant="true"/></listOfProducts>
+        <kineticLaw><math xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/><ci>k3</ci><ci>B</ci></apply></math></kineticLaw>
+      </reaction>
+      <reaction id="r4" reversible="false">
+        <listOfReactants><speciesReference species="C" stoichiometry="1" constant="true"/></listOfReactants>
+        <listOfProducts><speciesReference species="A" stoichiometry="1" constant="true"/></listOfProducts>
+        <kineticLaw><math xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/><ci>k5</ci><ci>k6</ci><ci>C</ci></apply></math></kineticLaw>
+      </reaction>
+    </listOfReactions>
+  </model>
+</sbml>
+"""
+
+
+class TestStructuralRedundancy:
+    def _composite(self, tmp_path):
+        from hallsim.composite import single_process_composite
+        from hallsim.sbml_import import process_from_sbml
+
+        path = tmp_path / "redundant.xml"
+        path.write_text(REDUNDANT_MODEL)
+        return single_process_composite(process_from_sbml(str(path), name="m"))
+
+    def test_same_law_form_on_the_same_reaction_is_one_parameter(
+        self, tmp_path
+    ):
+        """k1·A and k2·A with the same stoichiometry: only k1 + k2 enters
+        the dynamics. k5·k6 on one law: only the product does. k4 is read
+        by nothing. k3 stands alone."""
+        from hallsim.identifiability import structural_redundancy
+
+        comp = self._composite(tmp_path)
+        report = structural_redundancy(comp)
+        groups = {g.parameters: g.ratios for g in report.groups}
+        assert groups == {
+            ("m.parameters.k1", "m.parameters.k2"): ("1", "1"),
+            ("m.parameters.k5", "m.parameters.k6"): (
+                "1",
+                "m.parameters.k5/m.parameters.k6",
+            ),
+        }
+        assert report.unassessed == ()
+        assert "m.parameters.k3" in report.assessed
+        # read by no form, so not assessed unless asked for; then inert
+        assert "m.parameters.k4" not in report.assessed
+        asked = structural_redundancy(comp, params=["m.parameters.k4"])
+        assert asked.inert == ("m.parameters.k4",)
+        assert "redundant: m.parameters.k1, m.parameters.k2" in str(report)
+
+    def test_restricting_to_fitted_parameters(self, tmp_path):
+        from hallsim.calibration import ParameterRef
+        from hallsim.identifiability import structural_redundancy
+
+        report = structural_redundancy(
+            self._composite(tmp_path),
+            params=[
+                ParameterRef("m", "parameters.k1"),
+                ParameterRef("m", "parameters.k3"),
+                "m.parameters.k6",
+            ],
+        )
+        assert report.groups == ()
+        assert report.assessed == (
+            "m.parameters.k1",
+            "m.parameters.k3",
+            "m.parameters.k6",
+        )
+
+    def test_two_clamps_on_one_target_are_redundant_and_the_fit_warns(
+        self, caplog
+    ):
+        """Two hand-written edges with the same form on the same path: their
+        rates enter only as a sum, seen from the edges' declared forms and
+        said at problem construction, before any data."""
+        import pandas as pd
+
+        from hallsim.calibration import (
+            CalibrationProblem,
+            Condition,
+            ParameterRef,
+        )
+        from hallsim.composite import Composite
+        from hallsim.gene_reporters import GeneReporter
+        from hallsim.identifiability import structural_redundancy
+        from hallsim.models.clamp_edge import ClampEdge
+
+        comp = Composite(
+            processes={
+                "h1": ClampEdge(k_clamp=1.0, target_default=0.2),
+                "h2": ClampEdge(k_clamp=0.5),
+            },
+            topology={
+                "h1": {"target": "p/x", "setpoint": "hold/sp"},
+                "h2": {"target": "p/x", "setpoint": "hold/sp"},
+            },
+            initial={"p/x": 0.2, "hold/sp": 1.0},
+            validate=False,
+            semantic_validation=False,
+        )
+        report = structural_redundancy(comp)
+        assert [g.parameters for g in report.groups] == [
+            ("h1.k_clamp", "h2.k_clamp")
+        ]
+        with caplog.at_level(logging.WARNING, logger="hallsim.calibration"):
+            CalibrationProblem(
+                composite=comp,
+                reporters=[
+                    GeneReporter(
+                        observable="p/x", gene_symbol="GENE_X", sign=1
+                    )
+                ],
+                conditions={
+                    "ctrl": Condition("ctrl", {}),
+                    "high": Condition("high", {}),
+                },
+                data={"high_vs_ctrl": pd.Series({"GENE_X": -0.5})},
+                arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
+                params={
+                    "k1": ParameterRef(process_name="h1", field="k_clamp"),
+                    "k2": ParameterRef(process_name="h2", field="k_clamp"),
+                },
+                fit_arms=["high_vs_ctrl"],
+                t_end=5.0,
+                macro_dt=1.0,
+                n_save=3,
+            )
+        assert "structural redundancy" in caplog.text
+        assert "'k1', 'k2'" in caplog.text
+
+    def test_dallepezze_k33_and_k34_are_one_coordinate(self):
+        """The case from the referee pass: two biogenesis reactions with the
+        identical law k·Mito_mass_turnover·mTORC1_pS2448 and the same
+        stoichiometry, one of them named for AMPK it never reads."""
+        from hallsim.composite import single_process_composite
+        from hallsim.identifiability import structural_redundancy
+        from hallsim.sbml_import import process_from_sbml
+
+        proc = process_from_sbml(
+            "demos/models/sbml/dallepezze2014/"
+            "dallepezze2014_BIOMD0000000582.xml",
+            name="dp14",
+        )
+        report = structural_redundancy(single_process_composite(proc))
+        pair = (
+            "dp14.parameters.mito_biogenesis_by_AMPK_pT172",
+            "dp14.parameters.mito_biogenesis_by_mTORC1_pS2448",
+        )
+        assert pair in [g.parameters for g in report.groups]
+        group = next(g for g in report.groups if g.parameters == pair)
+        assert group.ratios == ("1", "1")

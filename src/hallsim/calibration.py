@@ -1016,6 +1016,7 @@ class CalibrationProblem:
         # substitutes into processes, `_coeffs` overrides registry floors.
         self.params = proc_params
         self._check_param_targets(proc_params)
+        self._warn_structural_redundancy(proc_params)
         # What the fitted fields held when the problem was wired. Every
         # evaluation overwrites them, so a later edit to one is inert; it is
         # checked against this and raised on rather than silently discarded.
@@ -1590,6 +1591,32 @@ class CalibrationProblem:
             f"the non-oscillatory part and hold the oscillator at its "
             f"published initial condition, or run with equilibrate=False."
         )
+
+    def _warn_structural_redundancy(self, refs) -> None:
+        """Warn when fitted parameters enter the dynamics only as one
+        combination — visible from the declared symbolic forms before any
+        data, so it is said here rather than after the fit."""
+        if len(refs) < 2:
+            return
+        from hallsim.identifiability import structural_redundancy
+
+        by_address = {
+            f"{r.process_name}.{r.field}": n for n, r in refs.items()
+        }
+        report = structural_redundancy(self.composite, params=by_address)
+        for group in report.groups:
+            fitted = [
+                by_address[p] for p in group.parameters if p in by_address
+            ]
+            if len(fitted) > 1:
+                log.warning(
+                    "structural redundancy: fitted parameters %s enter the "
+                    "dynamics only as one combination (%s), so no data can "
+                    "separate them and the fit will split it arbitrarily. Fit "
+                    "one and fix the rest, or fit the combination.",
+                    fitted,
+                    group.describe(),
+                )
 
     def _check_param_targets(self, refs) -> None:
         """Reject a ParameterRef whose field cannot carry a fitted scalar."""

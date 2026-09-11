@@ -58,10 +58,11 @@ class SaturatingRemoval(Process):
 
     def reaction_channels(self):
         D_pos = sympy.Max(sympy.Symbol("damage"), 0)
-        production = float(self.alpha) + float(self.eta) * TIME * float(
-            self.tau_scale
+        alpha, eta, beta, K, tau_scale = sympy.symbols(
+            "alpha eta beta K tau_scale"
         )
-        repair = float(self.beta) * D_pos / (float(self.K) + D_pos)
+        production = alpha + eta * TIME * tau_scale
+        repair = beta * D_pos / (K + D_pos)
         return (
             ReactionChannel("production", (("damage", 1.0),), production),
             ReactionChannel("repair", (("damage", -1.0),), repair),

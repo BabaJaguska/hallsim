@@ -1,5 +1,6 @@
 """A composite written out as SBML: what the document holds."""
 
+import jax.numpy as jnp
 import libsbml
 import pytest
 
@@ -164,3 +165,68 @@ def test_events_drivers_and_steps_export(tmp_path):
     # the stepped constant starts at its value before the step
     assert model.getParameter("a__k1").getValue() == 0.35
     assert not model.getParameter("a__k1").getConstant()
+
+
+def _reimported_rhs(comp, tmp_path):
+    """The exported document read back as one process, and its RHS over
+    the original store paths at the original initial state."""
+    import numpy as np
+
+    from hallsim.composite import single_process_composite
+    from hallsim.sbml_export import _sid
+
+    path = tmp_path / "roundtrip.xml"
+    comp.to_sbml(str(path))
+    doc = single_process_composite(process_from_sbml(str(path), name="doc"))
+    keys, doc_keys = comp.store_keys(), doc.store_keys()
+    state = comp.initial_state()
+    y_doc = np.zeros(len(doc_keys))
+    for k, v in state.items():
+        y_doc[doc_keys.index(f"doc/{_sid(k)}")] = float(v)
+    rhs, _ = comp.build_rhs()
+    rhs_doc, _ = doc.build_rhs()
+    ours = np.asarray(rhs(0.0, comp.initial_state_vec(keys)))
+    theirs = np.asarray(rhs_doc(0.0, jnp.asarray(y_doc)))
+    return {
+        k: (ours[i], theirs[doc_keys.index(f"doc/{_sid(k)}")])
+        for i, k in enumerate(keys)
+        if k not in comp.assigned_paths()
+    }
+
+
+def test_the_document_reads_back_as_the_same_vector_field(tmp_path):
+    """Re-imported as one process, the export has the composite's RHS at
+    the initial state — including a writer in µM on a path held in nM,
+    whose reads and writes the RHS converts and the document must too."""
+    import numpy as np
+
+    comp = Composite(
+        processes={
+            "hold_nm": ClampEdge(
+                k_clamp=1.5, units="nM", target_default=200.0
+            ),
+            "hold_um": ClampEdge(k_clamp=0.4, units="uM"),
+        },
+        topology={
+            "hold_nm": {"target": "p/x", "setpoint": "sp/nm"},
+            "hold_um": {"target": "p/x", "setpoint": "sp/um"},
+        },
+        initial={"p/x": 200.0, "sp/nm": 300.0, "sp/um": 0.25},
+        validate=False,
+        semantic_validation=False,
+    )
+    pairs = _reimported_rhs(comp, tmp_path)
+    # 1.5·(300 − 200) nM/s plus 1000 · 0.4·(0.25 − 0.2) µM/s, in nM/s
+    assert pairs["p/x"][0] == pytest.approx(150.0 + 20.0)
+    for k, (ours, theirs) in pairs.items():
+        assert theirs == pytest.approx(ours, rel=1e-9, abs=1e-12), k
+    assert not np.isnan([v for pair in pairs.values() for v in pair]).any()
+
+
+def test_the_two_model_composite_reads_back_as_the_same_vector_field(
+    tmp_path,
+):
+    for k, (ours, theirs) in _reimported_rhs(
+        build(tmp_path), tmp_path
+    ).items():
+        assert theirs == pytest.approx(ours, rel=1e-9, abs=1e-12), k

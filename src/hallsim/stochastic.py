@@ -318,6 +318,9 @@ def simulate_ssa(
     """Run Gillespie's direct method with JAX-native event execution.
 
     ``key`` is a ``jax.random`` key; ``seed`` builds one when it is None.
+    The network is the source's, sink species included: a count is bounded
+    by its pool, so the freeze the ODE import puts on an inert sink does not
+    apply here.
     """
     if (
         len(t_span) != 2

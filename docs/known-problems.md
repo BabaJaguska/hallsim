@@ -40,7 +40,7 @@ does not survive their next pull and the next user repeats it. Instances so far:
 | `screen_sensitivity` would not take a `registry=`, so a model could not ship its own hallmark mappings | fixed |
 | `_same_default` broke the trace, so a calibration loss could not run | fixed, and guarded by `tests/unit/test_trace_safety.py` |
 | no public parameter setter (P0.9) | open |
-| `steady_state` was intractable at 910 nodes × 300 conditions, so the inner solve was replaced by a hand-written linear solve (P3.10) | open |
+| `steady_state` was intractable at 910 nodes × 300 conditions, so the inner solve was replaced by a hand-written linear solve (P3.10) | Newton Jacobian sparse and conservation exact for declared composites 2026-09-11; the dense factorisation is still open |
 | semantic validation had to be switched off wholesale to compose 910 generated ports (P3.11) | cost fixed 2026-08-29 (SCC); annotation granularity open |
 
 The guard for the second one is the pattern to repeat: reachability under trace
@@ -1321,11 +1321,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
 - [ ] **P1.8 — Operating-range violations warn and continue.** DP14 runs 416×
   outside its own range with the framework's 593× exposure warning printed and
   ignored.
-- [ ] **P1.9 — Conservation laws are still inferred numerically for any
-  composite containing a hand-written process.** The exact stoichiometric path
-  needs every process to declare `stoichiometry()`; one undeclared edge disables
-  it.
-
 - [ ] **P1.10 — `equilibrate=True` is ill-posed for a composite containing an
   autonomous oscillator, and fails.** `steady_state`'s Newton finds the
   *unstable* fixed point at the centre of the Geva-Zatorsky limit cycle;
@@ -1351,19 +1346,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   exist, must not be static, and its current value must be a scalar. Say which
   of those failed and, for a non-`calibratable` field, that fitting it is
   unsupported. The check is cheap and the failure it replaces is unreadable.
-
-- [ ] **P1.13 — Structurally redundant parameters are invisible before a fit.**
-  DallePezze's `k33` and `k34` carry the *identical* rate law
-  `k·Mito_mass_turnover·mTORC1_pS2448` — the field is invariant under
-  `(k33+δ, k34−δ)` to 4.4×10⁻¹⁶ and `∂endpoint/∂k33 = ∂endpoint/∂k34` to ten
-  digits — so only their sum is identifiable. `k34` is *named*
-  `mito_biogenesis_by_AMPK_pT172` and never reads AMPK. The paper's Figure 6A
-  conclusion is an arbitrary split of one coordinate. This is visible from the
-  rate laws alone, with no data and no fit, but nothing looks. Distinct from
-  P1.3 (Fisher conditioning, needs a fit) and P1.5 (zero-gradient fittables,
-  needs arms): this is structural and available at import.
-  *Fix:* a collinearity pass over declared rate laws / stoichiometry at
-  `Process` construction, naming the redundant group.
 
 - [ ] **P1.16 — The multi-group scheduler has no in-repo workload, so every
   defect in it was found by hand-forcing a configuration.** Found 2026-08-31
@@ -1672,8 +1654,21 @@ The check that would catch a mistake does not exist, does not run, or fails open
   covariance with the noise scale set to 1 and the prior precision omitted, so
   `std_decades` overstates the spread and `std_tol` files parameters as
   `practical` too readily.
-- [ ] **P3.10 — Dense Jacobians are materialised where the topology already
+- [~] **P3.10 — Dense Jacobians are materialised where the topology already
   declares sparsity — in `steady_state` *and* in stiffness analysis.**
+  **Newton half fixed 2026-09-11:** `steady_state` forms every Jacobian
+  through `hallsim.structure.compressed_jacobian`, in as many forward
+  passes as the residual's sparsity pattern has colours — the pattern read
+  off each process's declared symbolic form, dense only on an undeclared
+  process's own block, and checked once against the composite's own
+  derivative before it is trusted. A ring of 960 declared leaky integrals
+  has two colours: the compiled Jacobian takes 0.25 ms against `jacfwd`'s
+  4.0 ms, and the compiled Newton solve 7.1 ms against 11.4 ms with a dense
+  pattern. What remains of that is the dense LU in `jnp.linalg.solve`, the
+  half still open; `bifurcation.py`'s Newton and the sub-512 path in
+  `stiffness.py` still call `jacfwd`. The `conservation_laws` cost below is
+  gone for a declared composite — exact from `N`, no sampled Jacobians, no
+  SVD (P1.9). Original entry:
   **Second code path confirmed 2026-08-29.** `stiffness.py`'s `jacfwd` builds a
   dense N x N Jacobian, so a 10,001-state composite dies in `analyze_groups`
   with `RESOURCE_EXHAUSTED` (763 MiB allocation, 7.8 GB peak) on a 15 GB card —

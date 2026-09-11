@@ -86,7 +86,7 @@ class ClampEdge(Process):
         }
 
     def reaction_channels(self):
-        law = float(self.k_clamp) * (
+        law = sympy.Symbol("k_clamp") * (
             sympy.Symbol("setpoint") - sympy.Symbol("target")
         )
         return (ReactionChannel("clamp", (("target", 1.0),), law),)

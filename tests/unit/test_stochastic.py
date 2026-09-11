@@ -221,6 +221,7 @@ def test_eager_lane_is_seeded_and_refuses_a_batch(tmp_path):
     with pytest.raises(ValueError, match="unbatched"):
         eager.run(composite, y0=y0, **_SPAN)
 
+
 @pytest.mark.parametrize("provider", [None, lambda t, state: None])
 def test_ssa_samples_only_reactions_that_have_already_fired(
     tmp_path, provider
@@ -257,3 +258,30 @@ def test_ssa_event_limit_is_not_silent(tmp_path, provider):
         simulate_ssa(
             process, t_span=(0.0, 3.0), max_events=1, input_provider=provider
         )
+
+
+def test_a_stochastic_copy_integrates_the_sink_the_ode_import_froze(tmp_path):
+    """The ODE import holds an inert sink for scaling's sake; a count has no
+    such problem, so the reaction-level copy moves it, and its declared
+    stoichiometry says so too."""
+    path = tmp_path / "decay.xml"
+    path.write_text(textwrap.dedent(MODEL))
+    process = process_from_sbml(str(path), name="decay")
+    assert process._frozen_indices
+    sink = process._species_names[process._frozen_indices[0]]
+    frozen_row = dict(
+        zip(
+            process.stoichiometry()["species"],
+            process.stoichiometry()["matrix"],
+        )
+    )[sink]
+    assert not any(frozen_row)
+    stochastic = process.as_stochastic()
+    assert stochastic._frozen_indices == ()
+    moving_row = dict(
+        zip(
+            stochastic.stoichiometry()["species"],
+            stochastic.stoichiometry()["matrix"],
+        )
+    )[sink]
+    assert any(moving_row)

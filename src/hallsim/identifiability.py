@@ -268,3 +268,201 @@ def log_summary(report: IdentifiabilityReport, logger) -> None:
         len(report.names),
         len(report.confounded),
     )
+
+
+# ── structural redundancy, from the symbolic forms alone ─────────────────
+
+
+@dataclasses.dataclass(frozen=True)
+class RedundancyGroup:
+    """Parameters the dynamics cannot separate.
+
+    Each member's field sensitivity ``∂f/∂θ`` is the first member's times
+    the matching entry of ``ratios``, a factor free of state and time — so
+    only one combination of them enters the dynamics, no data of any kind
+    can resolve the split, and a fit places it arbitrarily. A ratio of ``1``
+    means the sum is what is identifiable.
+    """
+
+    parameters: tuple
+    ratios: tuple
+
+    def describe(self) -> str:
+        first = self.parameters[0]
+        parts = [
+            f"∂f/∂{p} = {r} · ∂f/∂{first}"
+            for p, r in zip(self.parameters[1:], self.ratios[1:])
+        ]
+        return "; ".join(parts)
+
+
+@dataclasses.dataclass(frozen=True)
+class StructuralReport:
+    """What :func:`structural_redundancy` found: ``groups`` of redundant
+    parameters, ``inert`` ones the field never reads, and ``unassessed``
+    ones whose effect passes through a process with no symbolic form."""
+
+    groups: tuple
+    inert: tuple
+    unassessed: tuple
+    assessed: tuple
+
+    def __str__(self) -> str:
+        lines = ["Structural redundancy (from declared symbolic forms)"]
+        for g in self.groups:
+            lines.append(
+                "  redundant: "
+                + ", ".join(g.parameters)
+                + "  ("
+                + g.describe()
+                + ")"
+            )
+        if self.inert:
+            lines.append(
+                "  inert (never read by the dynamics): "
+                + ", ".join(self.inert)
+            )
+        if self.unassessed:
+            lines.append(
+                "  unassessed (reach a process with no symbolic form): "
+                + ", ".join(self.unassessed)
+            )
+        if not self.groups and not self.inert:
+            lines.append(
+                "  no structural redundancy among the assessed parameters"
+            )
+        return "\n".join(lines)
+
+
+def _address(param) -> str:
+    if isinstance(param, str):
+        return param
+    return f"{param.process_name}.{param.field}"
+
+
+def _proportional(sa: dict, sb: dict, forbidden: set):
+    """``ρ`` with ``sb = ρ·sa`` on their shared support and ``ρ`` free of
+    ``forbidden`` symbols, else ``None``."""
+    import sympy
+
+    support = sorted(sa)
+    first = support[0]
+    ratio = sympy.nsimplify(sympy.cancel(sb[first] / sa[first]), rational=True)
+    if ratio.free_symbols & forbidden:
+        return None
+    for path in support:
+        diff = sympy.cancel(sb[path] - ratio * sa[path])
+        if diff != 0 and sympy.simplify(diff) != 0:
+            return None
+    return ratio
+
+
+def structural_redundancy(composite, params=None) -> StructuralReport:
+    """Parameters that are redundant *structurally* — from the declared
+    rate laws and stoichiometry, before any data or fit.
+
+    For each parameter ``θ`` the field sensitivity ``∂f/∂θ`` is formed
+    symbolically over the composite's store paths
+    (:func:`hallsim.structure.symbolic_field`). Two parameters with
+    sensitivities proportional by a factor free of state and time enter the
+    dynamics only as one combination; such parameters are grouped. A
+    parameter with zero sensitivity is inert. One whose symbol reaches a
+    process with no symbolic form is unassessed, since that process may do
+    anything with it — as is one no form reads while such a process exists.
+
+    ``params`` restricts the analysis to those parameters, each a
+    ``"<process>.<field>"`` address or a
+    :class:`~hallsim.calibration.ParameterRef`; by default every parameter
+    some symbolic form reads is assessed. Distinct from
+    :func:`identifiability_report`, which needs a fit and finds *practical*
+    confounding in the data.
+    """
+    import sympy
+    from sympy.core.function import AppliedUndef
+
+    from hallsim.structure import symbolic_field
+
+    field = symbolic_field(composite)
+    if params is None:
+        names = sorted(field.parameters)
+    else:
+        names = [_address(p) for p in params]
+    symbols = {n: sympy.Symbol(n) for n in names}
+    from hallsim.sbml_math import TIME
+
+    forbidden = (
+        {sympy.Symbol(p) for p in field.derivatives}
+        | {sympy.Symbol(p) for p in field.assigned}
+        | {TIME}
+    )
+
+    opaque_args: set = set()
+    for expr in list(field.derivatives.values()) + list(
+        field.assigned.values()
+    ):
+        for applied in sympy.sympify(expr).atoms(AppliedUndef):
+            for arg in applied.args:
+                opaque_args |= arg.free_symbols
+    unassessed = [
+        n
+        for n in names
+        if symbols[n] in opaque_args
+        or (n not in field.parameters and field.opaque)
+    ]
+
+    sens: dict[str, dict] = {}
+    for n in names:
+        if n in unassessed:
+            continue
+        s = {}
+        for path, expr in field.derivatives.items():
+            expr = sympy.sympify(expr)
+            if symbols[n] in expr.free_symbols:
+                d = sympy.diff(expr, symbols[n])
+                if d != 0:
+                    s[path] = d
+        sens[n] = s
+    inert = [n for n, s in sens.items() if not s]
+
+    buckets: dict = {}
+    for n, s in sens.items():
+        if s:
+            buckets.setdefault(frozenset(s), []).append(n)
+    parent = {n: n for n in sens}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for members in buckets.values():
+        for i, a in enumerate(members):
+            for b in members[i + 1 :]:
+                if find(a) == find(b):
+                    continue
+                if _proportional(sens[a], sens[b], forbidden) is not None:
+                    parent[find(b)] = find(a)
+    grouped: dict = {}
+    for n in sens:
+        if sens[n]:
+            grouped.setdefault(find(n), []).append(n)
+    groups = []
+    for members in grouped.values():
+        if len(members) < 2:
+            continue
+        members = sorted(members)
+        first = members[0]
+        ratios = [sympy.Integer(1)] + [
+            _proportional(sens[first], sens[m], forbidden) for m in members[1:]
+        ]
+        groups.append(
+            RedundancyGroup(tuple(members), tuple(str(r) for r in ratios))
+        )
+    groups.sort(key=lambda g: g.parameters)
+    return StructuralReport(
+        groups=tuple(groups),
+        inert=tuple(inert),
+        unassessed=tuple(unassessed),
+        assessed=tuple(n for n in names if n not in unassessed),
+    )

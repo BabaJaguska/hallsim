@@ -104,23 +104,18 @@ class BistableLatch(Process):
 
     def reaction_channels(self):
         latch, trigger = sympy.Symbol("latch"), sympy.Symbol("trigger")
-        kick = hill_gate_sympy(trigger, float(self.K_trig), float(self.n_trig))
-        auto = hill_gate_sympy(latch, float(self.K_fb), float(self.n_fb))
+        k_trigger, K_trig, n_trig = sympy.symbols("k_trigger K_trig n_trig")
+        k_feedback, K_fb, n_fb = sympy.symbols("k_feedback K_fb n_fb")
+        k_decay, k_output = sympy.symbols("k_decay k_output")
+        kick = hill_gate_sympy(trigger, K_trig, n_trig)
+        auto = hill_gate_sympy(latch, K_fb, n_fb)
         return (
+            ReactionChannel("induction", (("latch", 1.0),), k_trigger * kick),
             ReactionChannel(
-                "induction", (("latch", 1.0),), float(self.k_trigger) * kick
+                "feedback", (("latch", 1.0),), k_feedback * auto * (1 - latch)
             ),
-            ReactionChannel(
-                "feedback",
-                (("latch", 1.0),),
-                float(self.k_feedback) * auto * (1 - latch),
-            ),
-            ReactionChannel(
-                "decay", (("latch", -1.0),), float(self.k_decay) * latch
-            ),
-            ReactionChannel(
-                "output", (("target", 1.0),), float(self.k_output) * latch
-            ),
+            ReactionChannel("decay", (("latch", -1.0),), k_decay * latch),
+            ReactionChannel("output", (("target", 1.0),), k_output * latch),
         )
 
     def derivative(self, t, state):

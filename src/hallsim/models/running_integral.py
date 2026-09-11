@@ -66,7 +66,7 @@ class RunningIntegral(Process):
             ReactionChannel(
                 "accumulate",
                 (("integral", 1.0),),
-                sympy.Symbol("source") ** float(self.power),
+                sympy.Symbol("source") ** sympy.Symbol("power"),
             )
         ]
         if self.tau is not None:
@@ -74,7 +74,7 @@ class RunningIntegral(Process):
                 ReactionChannel(
                     "decay",
                     (("integral", -1.0),),
-                    sympy.Symbol("integral") / float(self.tau),
+                    sympy.Symbol("integral") / sympy.Symbol("tau"),
                 )
             )
         return tuple(channels)

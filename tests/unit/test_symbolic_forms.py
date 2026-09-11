@@ -1,5 +1,7 @@
-"""Each edge's declared symbolic form reproduces its derivative and assign."""
+"""Each edge's declared symbolic form reproduces its derivative and assign,
+and its declared dependencies cover what the derivative actually reads."""
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -60,6 +62,8 @@ def test_symbolic_form_matches_numeric(name):
     }
     subs = {sympy.Symbol(p): sympy.Float(v) for p, v in state.items()}
     subs[TIME] = sympy.Float(t)
+    for name, value in proc.symbol_values().items():
+        subs[sympy.Symbol(name)] = sympy.Float(float(value))
     jstate = {p: jnp.asarray(v) for p, v in state.items()}
 
     try:
@@ -92,3 +96,28 @@ def test_symbolic_form_matches_numeric(name):
         p for p, spec in ports.items() if spec.role is PortRole.ASSIGNED
     }
     assert declared == set(rules)
+
+
+@pytest.mark.parametrize("name", sorted(EDGES), ids=sorted(EDGES))
+def test_declared_dependencies_cover_the_numeric_jacobian(name):
+    """A port the derivative reads must appear in port_dependencies(), or
+    the coloured Jacobian built from the pattern is silently wrong."""
+    proc = EDGES[name]
+    ports = list(proc.ports_schema())
+    rng = np.random.default_rng(2)
+    values = jnp.asarray(rng.uniform(0.05, 1.5, len(ports)))
+    deps = proc.port_dependencies()
+
+    def outputs(vec):
+        state = {p: vec[i] for i, p in enumerate(ports)}
+        try:
+            out = dict(proc.derivative(0.7, state))
+        except NotImplementedError:
+            out = {}
+        out.update(proc.assign(0.7, state))
+        return out
+
+    jac = jax.jacfwd(outputs)(values)
+    for port, row in jac.items():
+        reads = {ports[i] for i in np.flatnonzero(np.abs(np.asarray(row)) > 0)}
+        assert reads <= deps[port], (port, reads, deps[port])

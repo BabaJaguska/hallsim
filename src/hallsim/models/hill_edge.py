@@ -139,11 +139,13 @@ class HillEdge(Process):
     def _symbolic_value(self):
         K, n = self._gates()
         drive = sympy.Integer(1)
-        for name, k, nn in zip(self.sources, K, n):
+        for i, (name, _, _) in enumerate(zip(self.sources, K, n)):
             drive = drive * hill_gate_sympy(
-                sympy.Symbol(name), float(k), float(nn)
+                sympy.Symbol(name),
+                sympy.Symbol(f"K_{i}"),
+                sympy.Symbol(f"n_{i}"),
             )
-        basal, hi = float(self.basal), float(self.hi)
+        basal, hi = sympy.Symbol("basal"), sympy.Symbol("hi")
         return basal + (hi - basal) * drive
 
     def reaction_channels(self):

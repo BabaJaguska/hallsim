@@ -33,6 +33,7 @@ from hallsim.process import ProcessKind
 from hallsim.sbml_events import SBMLEvent
 from hallsim.sbml_math import TIME, to_ast
 from hallsim.store import as_paths
+from hallsim.units import canonical_units, conversion_factor
 
 COMPARTMENT = "store"
 
@@ -44,6 +45,29 @@ class UnsupportedExportError(ValueError):
 def _sid(text: str) -> str:
     sid = re.sub(r"\W", "_", text)
     return sid if re.match(r"[A-Za-z_]", sid) else "_" + sid
+
+
+class _Units:
+    """The port-to-path unit factors the RHS applies on every read and
+    write, so the document holds each species in its path's canonical unit
+    exactly as the store does."""
+
+    def __init__(self, composite):
+        self.canon = canonical_units(composite.processes, composite.topology)
+
+    def read(self, schema, port, path):
+        return conversion_factor(self.canon.get(path, ""), schema[port].units)
+
+    def write(self, schema, port, path):
+        return conversion_factor(schema[port].units, self.canon.get(path, ""))
+
+
+def _scaled(expr, factor):
+    return (
+        expr
+        if factor == 1.0
+        else expr * sympy.nsimplify(factor, rational=True)
+    )
 
 
 class _Ids:
@@ -126,6 +150,7 @@ def composite_to_sbml(composite, *, model_id: str = "composite") -> str:
     comp.setConstant(True)
     ids = _Ids()
     ids.taken.add(COMPARTMENT)
+    units = _Units(composite)
 
     initial = {k: float(v) for k, v in composite.initial_state().items()}
     written: set[str] = set()
@@ -146,7 +171,7 @@ def composite_to_sbml(composite, *, model_id: str = "composite") -> str:
             exporter = _ImportedExporter
         else:
             exporter = _DeclaredExporter
-        exporter(name, proc, topo, ids, model).run(
+        exporter(name, proc, topo, ids, model, units).run(
             written, boundary, rules, reactions
         )
 
@@ -164,7 +189,7 @@ def composite_to_sbml(composite, *, model_id: str = "composite") -> str:
 class _DeclaredExporter:
     """A hand-written process, through its declared symbolic forms."""
 
-    def __init__(self, name, proc, topo, ids, model):
+    def __init__(self, name, proc, topo, ids, model, units):
         self.name, self.proc, self.topo, self.ids, self.model = (
             name,
             proc,
@@ -172,24 +197,48 @@ class _DeclaredExporter:
             ids,
             model,
         )
+        self.units = units
         self.prefix = _sid(name)
+        self.schema = proc.ports_schema()
+        self.values = proc.symbol_values()
+        self.parameter_sid: dict[str, str] = {}
 
     def _paths(self, port):
         entry = self.topo.get(port, port)
         return as_paths(entry)
+
+    def _parameter(self, name):
+        """An SBML parameter for one of the process's own, prefixed."""
+        if name not in self.parameter_sid:
+            sid = self.ids.fresh(f"{self.prefix}__{_sid(name)}")
+            _add_parameter(self.model, sid, float(self.values[name]))
+            self.parameter_sid[name] = sid
+        return self.parameter_sid[name]
 
     def _bind(self, expr):
         subs = {}
         for sym in expr.atoms(sympy.Symbol):
             if sym is TIME:
                 continue
+            if sym.name not in self.schema:
+                if sym.name in self.values:
+                    subs[sym] = sympy.Symbol(self._parameter(sym.name))
+                    continue
+                raise UnsupportedExportError(
+                    f"{self.name!r}: {sym.name!r} in its symbolic form is "
+                    "neither a port nor a parameter it lists in "
+                    "symbol_values()"
+                )
             paths = self._paths(sym.name)
             if len(paths) != 1:
                 raise UnsupportedExportError(
                     f"{self.name!r} reads port {sym.name!r}, which binds "
                     f"{len(paths)} store paths; a read must bind one"
                 )
-            subs[sym] = sympy.Symbol(self.ids.path(paths[0]))
+            subs[sym] = _scaled(
+                sympy.Symbol(self.ids.path(paths[0])),
+                self.units.read(self.schema, sym.name, paths[0]),
+            )
         return expr.xreplace(subs)
 
     def run(self, written, boundary, rules, reactions):
@@ -204,9 +253,13 @@ class _DeclaredExporter:
         for channel in channels or ():
             net: dict[str, float] = {}
             for port, coeff in channel.stoichiometry:
+                if port not in self.schema:
+                    continue  # a quantity this process does not integrate
                 for path in self._paths(port):
                     sid = self.ids.path(path)
-                    net[sid] = net.get(sid, 0.0) + float(coeff)
+                    net[sid] = net.get(sid, 0.0) + float(
+                        coeff
+                    ) * self.units.write(self.schema, port, path)
             reactions.append(
                 (
                     self.ids.fresh(
@@ -221,7 +274,10 @@ class _DeclaredExporter:
                 rules.append(
                     (
                         self.ids.path(path),
-                        self._bind(sympy.sympify(expr)),
+                        _scaled(
+                            self._bind(sympy.sympify(expr)),
+                            self.units.write(self.schema, port, path),
+                        ),
                         False,
                     )
                 )
@@ -230,7 +286,7 @@ class _DeclaredExporter:
 class _ImportedExporter:
     """An SBML-imported process, from its compiled core."""
 
-    def __init__(self, name, proc, topo, ids, model):
+    def __init__(self, name, proc, topo, ids, model, units):
         self.name, self.proc, self.topo, self.ids, self.model = (
             name,
             proc,
@@ -238,6 +294,8 @@ class _ImportedExporter:
             ids,
             model,
         )
+        self.units = units
+        self.schema = proc.ports_schema()
         self.core = proc._model
         self.prefix = _sid(name)
         self.scale = float(proc.time_scale)
@@ -274,6 +332,21 @@ class _ImportedExporter:
     def run(self, written, boundary, rules, reactions):
         core, proc, model, ids = self.core, self.proc, self.model, self.ids
         params = {k: float(v) for k, v in proc.parameters.items()}
+
+        def read(port, path):
+            """The path's symbol in the port's units."""
+            return _scaled(
+                sympy.Symbol(ids.path(path)),
+                self.units.read(self.schema, port, path),
+            )
+
+        def wfac(port, path):
+            """Port-to-path factor; 1 for a quantity that is not a port
+            (a boundary input kept local to the document)."""
+            if path is None or port not in self.schema:
+                return 1.0
+            return self.units.write(self.schema, port, path)
+
         info = {s[0]: s for s in core.species_info}
         sizes = dict(core.compartment_sizes)
         # constants: every c entry, and the compartment sizes among them
@@ -287,8 +360,8 @@ class _ImportedExporter:
             if cname in info:
                 continue  # a boundary species: exported as a species below
             if cname in self.driven:
-                path = self._port_path(self.driven[cname])
-                symbol_of[cname] = sympy.Symbol(ids.path(path))
+                port = self.driven[cname]
+                symbol_of[cname] = read(port, self._port_path(port))
                 continue
             value = params.get(
                 cname, dict(zip(core.c_indexes, core.c0))[cname]
@@ -332,8 +405,9 @@ class _ImportedExporter:
         ) in core.species_info:
             path = self._species_path(sid_model)
             if sid_model in self.input_driven:
-                driving = self._port_path(self.input_driven[sid_model])
-                symbol_of[sid_model] = sympy.Symbol(ids.path(driving))
+                port = self.input_driven[sid_model]
+                driving = self._port_path(port)
+                symbol_of[sid_model] = read(port, driving)
                 sid_of[sid_model] = ids.path(driving)
                 continue
             if path is not None:
@@ -351,9 +425,9 @@ class _ImportedExporter:
                         sid_model, 0.0
                     )
                 _add_species(model, sid, amount, boundary=True)
-            read = sympy.Symbol(sid)
+            value = read(sid_model, path) if path else sympy.Symbol(sid)
             vol = volume(sid_model)
-            symbol_of[sid_model] = read / vol if vol is not None else read
+            symbol_of[sid_model] = value / vol if vol is not None else value
             sid_of[sid_model] = sid
         # non-species y entries (rate-ruled parameters) and w parameters
         for name in list(core.y_indexes) + list(core.w_indexes):
@@ -365,7 +439,7 @@ class _ImportedExporter:
                     f"{self.name!r}: {name!r} is integrated or assigned but "
                     "bound to no store path"
                 )
-            symbol_of[name] = sympy.Symbol(ids.path(path))
+            symbol_of[name] = read(name, path)
             sid_of[name] = ids.path(path)
 
         def bind(expr, reaction_id=None):
@@ -392,18 +466,36 @@ class _ImportedExporter:
         for target, expr in core.assignment_rules:
             if target in self.input_driven:
                 continue  # the store path drives it now
-            rules.append((sid_of[target], stored(target, bind(expr)), False))
-        for target, expr in core.rate_rules:
+            path = self._species_path(target)
             rules.append(
-                (sid_of[target], self.scale * stored(target, bind(expr)), True)
+                (
+                    sid_of[target],
+                    _scaled(stored(target, bind(expr)), wfac(target, path)),
+                    False,
+                )
             )
-        for channel in proc.reaction_channels():
+        for target, expr in core.rate_rules:
+            path = self._species_path(target)
+            rules.append(
+                (
+                    sid_of[target],
+                    _scaled(
+                        self.scale * stored(target, bind(expr)),
+                        wfac(target, path),
+                    ),
+                    True,
+                )
+            )
+        # the raw source laws: driven and stepped quantities are bound here
+        for channel in proc._reaction_channels:
             net: dict[str, float] = {}
             for species, coeff in channel.stoichiometry:
                 sid = sid_of.get(species)
                 if sid is None or sid in boundary:
                     continue
-                net[sid] = net.get(sid, 0.0) + float(coeff)
+                path = self._species_path(species)
+                factor = wfac(species, path) if path else 1.0
+                net[sid] = net.get(sid, 0.0) + float(coeff) * factor
             reactions.append(
                 (
                     ids.fresh(self._local(channel.reaction_id)),
@@ -416,7 +508,7 @@ class _ImportedExporter:
 class _EventExporter:
     """A translated SBML event, back to ``<event>``."""
 
-    def __init__(self, name, proc, topo, ids, model):
+    def __init__(self, name, proc, topo, ids, model, units):
         self.name, self.proc, self.topo, self.ids, self.model = (
             name,
             proc,
@@ -424,6 +516,8 @@ class _EventExporter:
             ids,
             model,
         )
+        self.units = units
+        self.schema = proc.ports_schema()
         self.scale = float(proc.time_scale)
 
     def _paths(self, port):
@@ -441,7 +535,10 @@ class _EventExporter:
                     f"{self.name!r} reads {sym.name!r}, which binds "
                     f"{len(paths)} store paths; a read must bind one"
                 )
-            subs[sym] = sympy.Symbol(self.ids.path(paths[0]))
+            subs[sym] = _scaled(
+                sympy.Symbol(self.ids.path(paths[0])),
+                self.units.read(self.schema, sym.name, paths[0]),
+            )
         return expr.xreplace(subs)
 
     def run(self, written, boundary, rules, reactions):
@@ -456,4 +553,10 @@ class _EventExporter:
             for path in self._paths(f"__set_{target}"):
                 ea = ev.createEventAssignment()
                 ea.setVariable(self.ids.path(path))
-                _set_math(ea, self._bind(sympy.sympify(expr)))
+                _set_math(
+                    ea,
+                    _scaled(
+                        self._bind(sympy.sympify(expr)),
+                        self.units.write(self.schema, f"__set_{target}", path),
+                    ),
+                )

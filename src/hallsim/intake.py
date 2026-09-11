@@ -161,7 +161,7 @@ def emitted_species(process, pattern: str) -> tuple[str, ...]:
     if not wanted:
         return ()
 
-    reaction_based = bool(getattr(process, "_stoichiometry", None))
+    reaction_based = bool(getattr(process, "_reaction_channels", ()))
     out = []
     for sid in wanted:
         try:

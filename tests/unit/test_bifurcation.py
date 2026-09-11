@@ -153,13 +153,15 @@ def test_leaf_spectrum_drops_the_conserved_zero():
 
 @pytest.mark.slow
 def test_dallepezze_equilibrium_needs_its_conservation_laws():
-    """Six laws over 23 states: without
-    them the search reports no equilibrium for a model that has one, and the
-    raw spectrum's leading mode is a conserved zero rather than the rate the
-    fixed point actually relaxes at."""
+    """Five moieties over 23 integrated states, the frozen sink, and one pin
+    per algebraic slot: without them the search reports no equilibrium for
+    a model that has one, and the raw spectrum's leading mode is a
+    conserved zero rather than the rate the fixed point actually relaxes
+    at."""
     from hallsim.composite import Composite
     from hallsim.sbml_import import process_from_sbml
     from hallsim.steady_state import conservation_laws
+    from hallsim.structure import composite_moieties
     from demos.models.multi_hallmark import (
         DP14_IRRADIATION_RATE_NAME,
         DP14_SBML_PATH,
@@ -182,8 +184,11 @@ def test_dallepezze_equilibrium_needs_its_conservation_laws():
 
     assert equilibrium(f, y0) is None
 
+    moieties = composite_moieties(comp, keys)
+    assert len(moieties) == 6  # five totals and the held sink
+    assert {"dp14/AMPK": 1, "dp14/AMPK_pT172": 1} in moieties
     laws = conservation_laws(comp, y0)
-    assert laws.shape[0] == 6
+    assert laws.shape[0] == 6 + len(comp.assigned_paths())
     eq = equilibrium(f, y0, laws=laws)
     assert eq is not None
 

@@ -43,6 +43,34 @@ def _as_traced(value):
     return None
 
 
+def _is_scalar(value) -> bool:
+    """A number or a 0-d array (a traced one included) — a parameter value."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    return getattr(value, "shape", None) == ()
+
+
+def stoichiometry_from_channels(species, channels) -> dict:
+    """``N`` over ``species`` from a tuple of :class:`ReactionChannel`, one
+    row per species and one column per channel. A stoichiometry entry naming
+    anything outside ``species`` — a boundary quantity, a port the process
+    does not integrate — is dropped."""
+    index = {s: i for i, s in enumerate(species)}
+    matrix = [[0.0] * len(channels) for _ in species]
+    for j, channel in enumerate(channels):
+        for name, coeff in channel.stoichiometry:
+            i = index.get(name)
+            if i is not None:
+                matrix[i][j] += float(coeff)
+    return {
+        "species": tuple(species),
+        "reactions": tuple(c.reaction_id for c in channels),
+        "matrix": tuple(tuple(row) for row in matrix),
+    }
+
+
 def calibratable(
     default,
     *,
@@ -321,18 +349,95 @@ class Process(eqx.Module):
         :class:`ReactionChannel`, or ``None`` when it declares none.
 
         Each channel is a signed stoichiometry over ports and a rate law as
-        a sympy expression over port symbols (and :data:`hallsim.sbml_math.TIME`),
-        with parameter values folded in. It is the process's symbolic form:
-        what an SBML export writes, what the Jacobian's sparsity reads, and
-        for an imported reaction network the propensity view the stochastic
-        lane executes. ``None`` means undeclared, not "no flux".
+        a sympy expression over port symbols, parameter symbols (named as in
+        :meth:`symbol_values`) and :data:`hallsim.sbml_math.TIME`, in the
+        process's own time. It is the process's symbolic form: what an SBML
+        export writes, what conservation and the Jacobian's sparsity read,
+        what a collinearity check differentiates, and for an imported
+        reaction network the propensity view the stochastic lane executes.
+        ``None`` means undeclared, not "no flux".
         """
         return None
 
     def assignment_rules(self) -> tuple:
         """``((port, expr), ...)`` for each ASSIGNED port, as sympy over port
-        symbols — the symbolic form of :meth:`assign`. Empty by default."""
+        and parameter symbols — the symbolic form of :meth:`assign`. Empty by
+        default."""
         return ()
+
+    def rate_rules(self) -> tuple:
+        """``((port, expr), ...)`` for each written port whose derivative is
+        given directly rather than through reactions — an SBML rate rule.
+        It adds to whatever the channels contribute on that port. Empty by
+        default."""
+        return ()
+
+    def symbol_values(self) -> dict:
+        """``{name: value}`` for every parameter symbol the symbolic forms
+        may use: by default each non-static numeric field under its own
+        name, and each entry of a numeric tuple field as ``<field>_<i>``; an
+        imported model returns its ``parameters``. Values may be tracers
+        under a trace — the forms never need them, only a consumer that
+        evaluates them does."""
+        out = {}
+        for f in dataclasses.fields(self):
+            if f.metadata.get("static"):
+                continue
+            value = getattr(self, f.name, None)
+            if isinstance(value, (tuple, list)):
+                for i, v in enumerate(value):
+                    if _is_scalar(v):
+                        out[f"{f.name}_{i}"] = v
+            elif _is_scalar(value):
+                out[f.name] = value
+        return out
+
+    def port_dependencies(self) -> dict:
+        """``{port: frozenset(ports)}`` — for each port this process writes
+        or assigns, the ports its value can depend on: the sparsity of its
+        Jacobian. Read off the free symbols of :meth:`reaction_channels`,
+        :meth:`rate_rules` and :meth:`assignment_rules`. A written port with
+        no symbolic form depends on every port the process reads, which is
+        exact for an opaque process and dense only on its own block."""
+        import sympy
+
+        schema = self.ports_schema()
+        ports = frozenset(schema)
+        readable = frozenset(
+            p
+            for p, s in schema.items()
+            if not (s.role is PortRole.EVOLVED and not s.reads_value)
+        )
+        written = [
+            p
+            for p, s in schema.items()
+            if s.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
+        ]
+
+        def reads(expr):
+            return frozenset(
+                s.name
+                for s in sympy.sympify(expr).free_symbols
+                if s.name in ports
+            )
+
+        channels = self.reaction_channels()
+        out = {
+            p: (readable if channels is None else frozenset()) for p in written
+        }
+        for channel in channels or ():
+            deps = reads(channel.rate_law)
+            for port, _ in channel.stoichiometry:
+                if port in out:
+                    out[port] = out[port] | deps
+        for port, expr in self.rate_rules():
+            if port in out:
+                out[port] = out[port] | reads(expr)
+        rules = dict(self.assignment_rules())
+        for p, s in schema.items():
+            if s.role is PortRole.ASSIGNED:
+                out[p] = reads(rules[p]) if p in rules else readable
+        return out
 
     # --- Interface: ASSIGNED (algebraic) -------------------------------------
 
@@ -440,18 +545,29 @@ class Process(eqx.Module):
     def stoichiometry(self) -> dict | None:
         """Species × reaction stoichiometry ``N``, as ``{"species": (port
         name, ...), "reactions": (id, ...), "matrix": ((coeff, ...), ...)}``
-        with one row per species.
+        with one row per species — derived from :meth:`reaction_channels`
+        over the ports this process writes, or ``None`` when it declares no
+        channels.
 
         ``N`` is the process's wiring, independent of every rate constant, so
         it settles the conserved moieties exactly — where the null space of a
         Jacobian only ever says "nothing much is moving *here*, at *these*
-        parameters". Declare it whenever the dynamics really are
-        ``dy/dt = N·v(y)``.
-
-        ``None`` means undeclared, not "no conservation": callers fall back to
-        inferring the moieties numerically (see
-        :func:`hallsim.steady_state.conservation_laws`)."""
-        return None
+        parameters". Its rows are the ports whose whole derivative is
+        ``N·v``: a port a :meth:`rate_rules` entry also moves is left out,
+        and the composite then treats it as it treats a port an undeclared
+        process writes (see :func:`hallsim.steady_state.conservation_laws`).
+        ``None`` means undeclared, not "no conservation"."""
+        channels = self.reaction_channels()
+        if channels is None:
+            return None
+        ruled = {port for port, _ in self.rate_rules()}
+        species = tuple(
+            p
+            for p, s in self.ports_schema().items()
+            if s.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
+            and p not in ruled
+        )
+        return stoichiometry_from_channels(species, channels)
 
     # --- Helpers -------------------------------------------------------------
 

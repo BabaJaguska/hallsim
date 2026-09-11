@@ -31,6 +31,10 @@ class ParamInput(eqx.Module):
     def value(self, basal, signal):
         return jnp.asarray(signal)
 
+    def symbolic(self, basal, signal):
+        """:meth:`value` as sympy, for the owner's symbolic forms."""
+        return signal
+
 
 class ImportedODEProcess(Process):
     """Base for an ODE model auto-generated from an external format.

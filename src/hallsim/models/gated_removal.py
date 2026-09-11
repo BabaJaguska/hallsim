@@ -66,9 +66,9 @@ class GatedRemoval(Process):
 
     def reaction_channels(self):
         gate = hill_gate_sympy(
-            sympy.Symbol("trigger"), float(self.K), float(self.n)
+            sympy.Symbol("trigger"), sympy.Symbol("K"), sympy.Symbol("n")
         )
-        law = float(self.k_remove) * gate * sympy.Symbol("target")
+        law = sympy.Symbol("k_remove") * gate * sympy.Symbol("target")
         return (ReactionChannel("removal", (("target", -1.0),), law),)
 
     def derivative(self, t, state):

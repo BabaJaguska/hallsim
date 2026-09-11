@@ -101,7 +101,7 @@ class GainEdge(Process):
         return self.offset + self.gain * jnp.asarray(state[self.source])
 
     def _symbolic_value(self):
-        return float(self.offset) + float(self.gain) * sympy.Symbol(
+        return sympy.Symbol("offset") + sympy.Symbol("gain") * sympy.Symbol(
             self.source
         )
 

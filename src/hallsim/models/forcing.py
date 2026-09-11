@@ -66,7 +66,7 @@ class PulseSource(Process):
         on = TIME >= float(self.t_start)
         if self.t_end is not None:
             on = sympy.And(on, TIME < float(self.t_end))
-        signal = sympy.Piecewise((float(self.amplitude), on), (0, True))
+        signal = sympy.Piecewise((sympy.Symbol("amplitude"), on), (0, True))
         return (("signal", signal),)
 
     def discontinuity_times(self):
@@ -221,8 +221,8 @@ class StepSource(Process):
 
     def assignment_rules(self):
         signal = sympy.Piecewise(
-            (float(self.after), TIME >= float(self.t_step)),
-            (float(self.before), True),
+            (sympy.Symbol("after"), TIME >= float(self.t_step)),
+            (sympy.Symbol("before"), True),
         )
         return (("signal", signal),)
 

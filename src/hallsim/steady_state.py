@@ -31,8 +31,6 @@ from __future__ import annotations
 import logging
 import math
 from fractions import Fraction
-from functools import reduce
-from math import gcd, lcm
 
 import equinox as eqx
 import jax
@@ -41,20 +39,26 @@ import jax.tree_util as jtu
 import numpy as np
 
 from hallsim.store import as_paths
+from hallsim.structure import (
+    JacobianPattern,
+    check_pattern,
+    composite_stoichiometry,
+    compressed_jacobian,
+    integerize,
+    jacobian_pattern,
+    rational_null_space,
+)
 from hallsim.tracing import is_traced
 
 log = logging.getLogger(__name__)
 
 
-def accumulator_mask(composite, keys: list[str]) -> jnp.ndarray:
-    """Boolean mask over ``keys`` marking *flat* RunningIntegral outputs.
-
-    Only flat (``tau=None``) integrals are unbounded and lack a fixed point, so
-    they are masked out of the Newton solve. A *leaky* integral settles to
-    ``A=τ·⟨sourceᵖ⟩`` — it has a fixed point and is solved like any state."""
+def accumulator_positions(composite, keys: list[str]) -> list[int]:
+    """Indices into ``keys`` of *flat* RunningIntegral outputs — structure,
+    readable under a trace."""
     from hallsim.models.running_integral import RunningIntegral
 
-    positions = [
+    return [
         keys.index(path)
         for name, proc in composite.processes.items()
         if isinstance(proc, RunningIntegral) and proc.tau is None
@@ -63,6 +67,15 @@ def accumulator_mask(composite, keys: list[str]) -> jnp.ndarray:
         )
         if path in keys
     ]
+
+
+def accumulator_mask(composite, keys: list[str]) -> jnp.ndarray:
+    """Boolean mask over ``keys`` marking *flat* RunningIntegral outputs.
+
+    Only flat (``tau=None``) integrals are unbounded and lack a fixed point, so
+    they are masked out of the Newton solve. A *leaky* integral settles to
+    ``A=τ·⟨sourceᵖ⟩`` — it has a fixed point and is solved like any state."""
+    positions = accumulator_positions(composite, keys)
     mask = jnp.zeros(len(keys), dtype=bool)
     return mask.at[jnp.asarray(positions)].set(True) if positions else mask
 
@@ -70,55 +83,6 @@ def accumulator_mask(composite, keys: list[str]) -> jnp.ndarray:
 def _residual_fn(composite, mask):
     rhs, _ = composite.build_rhs()
     return lambda y: jnp.where(mask, y, rhs(0.0, y))
-
-
-def _rational_null_space(
-    rows: list[list[Fraction]], n_cols: int
-) -> list[list[Fraction]]:
-    """Exact basis of ``{x : A·x = 0}`` for ``A`` given as ``rows``.
-
-    Gauss-Jordan over the rationals, so the answer is the null space itself
-    rather than whatever survived a floating-point threshold.
-    """
-    a = [list(r) for r in rows]
-    pivots: list[int] = []
-    r = 0
-    for c in range(n_cols):
-        piv = next((i for i in range(r, len(a)) if a[i][c] != 0), None)
-        if piv is None:
-            continue
-        a[r], a[piv] = a[piv], a[r]
-        inv = Fraction(1, 1) / a[r][c]
-        a[r] = [v * inv for v in a[r]]
-        for i in range(len(a)):
-            if i != r and a[i][c] != 0:
-                f = a[i][c]
-                a[i] = [v - f * w for v, w in zip(a[i], a[r])]
-        pivots.append(c)
-        r += 1
-        if r == len(a):
-            break
-
-    basis = []
-    for free_col in (c for c in range(n_cols) if c not in pivots):
-        vec = [Fraction(0, 1)] * n_cols
-        vec[free_col] = Fraction(1, 1)
-        for i, pivot_col in enumerate(pivots):
-            vec[pivot_col] = -a[i][free_col]
-        basis.append(vec)
-    return basis
-
-
-def _integerize(vec: list[Fraction]) -> list[int]:
-    """Scale a rational vector to the smallest integer vector, sign-normalised
-    so the first nonzero entry is positive — ``ATP + ADP``, not
-    ``(-0.707, -0.707)``."""
-    denom = reduce(lcm, (v.denominator for v in vec), 1)
-    ints = [int(v * denom) for v in vec]
-    common = reduce(gcd, (abs(i) for i in ints if i), 0) or 1
-    ints = [i // common for i in ints]
-    first = next((i for i in ints if i), 1)
-    return [-i for i in ints] if first < 0 else ints
 
 
 def conserved_moieties(stoichiometry: dict) -> list[dict[str, int]]:
@@ -131,18 +95,18 @@ def conserved_moieties(stoichiometry: dict) -> list[dict[str, int]]:
     """
     species = stoichiometry["species"]
     matrix = stoichiometry["matrix"]
-    n_reactions = len(stoichiometry["reactions"])
     # L·N = 0 is Nᵀ·Lᵀ = 0: one row per reaction, one column per species.
     rows = [
-        [
-            Fraction(matrix[s][r]).limit_denominator(10**6)
+        {
+            s: Fraction(matrix[s][r]).limit_denominator(10**6)
             for s in range(len(species))
-        ]
-        for r in range(n_reactions)
+            if matrix[s][r]
+        }
+        for r in range(len(stoichiometry["reactions"]))
     ]
     return [
-        {species[i]: c for i, c in enumerate(_integerize(vec)) if c}
-        for vec in _rational_null_space(rows, len(species))
+        {species[i]: c for i, c in sorted(integerize(vec).items())}
+        for vec in rational_null_space(rows, len(species))
     ]
 
 
@@ -172,38 +136,27 @@ def warn_if_time_dependent(composite, y, dt: float = 1.0) -> bool:
     return autonomous
 
 
-def composite_stoichiometry(composite, keys: list[str] | None = None):
-    """Composite-level ``N`` over store paths, or ``None``.
+def residual_pattern(composite, keys, laws=None):
+    """Sparsity of the pinned residual ``g = f + LᵀL·(y − y_ref)`` over
+    ``keys``: the composite's own pattern
+    (:func:`hallsim.structure.jacobian_pattern`), a diagonal on the masked
+    accumulator rows, and a block on every law's support. ``None`` when
+    ``laws`` is traced — its support is then unknown and the Jacobian is
+    formed densely."""
+    if laws is not None and is_traced(laws):
+        return None
+    masked = np.asarray(accumulator_positions(composite, keys), dtype=int)
+    pattern = jacobian_pattern(composite, keys).with_entries(masked, masked)
+    if laws is not None:
+        pattern = pattern.with_laws(np.asarray(laws))
+    return pattern
 
-    Assembled from each process's :meth:`Process.stoichiometry`, with its
-    species mapped through the topology so two models sharing a path share a
-    row. Returns ``None`` unless *every* continuous process declares one — a
-    single undeclared process (a hand-written coupling edge, a NeuralODE) can
-    move any state, so a matrix missing its columns would claim conservation
-    that the composite does not have.
-    """
-    keys = composite.store_keys() if keys is None else keys
-    row_of = {k: i for i, k in enumerate(keys)}
-    columns: list[list[float]] = []
-    covered: set[int] = set()
-    for name, proc in composite.continuous_processes().items():
-        declared = proc.stoichiometry()
-        if declared is None:
-            return None
-        topo = composite.topology.get(name, {})
-        rows = [
-            row_of.get(path)
-            for species in declared["species"]
-            for path in as_paths(topo.get(species, species))
-        ]
-        covered.update(r for r in rows if r is not None)
-        for c in range(len(declared["reactions"])):
-            column = [0.0] * len(keys)
-            for r, row in enumerate(rows):
-                if row is not None:
-                    column[row] += declared["matrix"][r][c]
-            columns.append(column)
-    return columns, sorted(covered)
+
+def _jacobian(fn, y, pattern: JacobianPattern | None):
+    """``∂fn/∂y``, in as many forward passes as ``pattern`` has colours."""
+    if pattern is None:
+        return jax.jacfwd(fn)(y)
+    return compressed_jacobian(fn, y, pattern)
 
 
 def _perturbed(composite, key, spread: float):
@@ -232,14 +185,17 @@ def infer_conservation_laws(
     n_samples: int = 8,
     spread: float = 0.5,
     seed: int = 0,
+    candidates=None,
+    pattern: JacobianPattern | None = None,
 ):
-    """Conservation laws of a composite that declares no stoichiometry.
+    """Conservation laws that the declared stoichiometry cannot settle.
 
     ``L`` is conserved exactly when ``L·f(y; θ) = 0`` for *every* state and
     *every* parameter value, so ``L`` must lie in the left null space of the
     residual Jacobian at all of them. Stacking Jacobians sampled over both and
     taking the left null space of the stack imposes all those constraints at
-    once.
+    once — within the span of ``candidates`` (rows over the state; the whole
+    space by default), which is what the declared ``N`` already allows.
 
     Sampling states alone is not enough, and this is the whole point: a
     species decaying at ``k = 1e-12`` has a Jacobian entry of ``-1e-12``
@@ -259,9 +215,11 @@ def infer_conservation_laws(
         )
         y_s = jnp.where(y == 0, factor - 1.0, y * factor)
         jac = np.asarray(
-            jax.jacfwd(
-                _residual_fn(_perturbed(composite, k_param, spread), mask)
-            )(y_s)
+            _jacobian(
+                _residual_fn(_perturbed(composite, k_param, spread), mask),
+                y_s,
+                pattern,
+            )
         )
         if np.all(np.isfinite(jac)):
             blocks.append(jac)
@@ -271,11 +229,22 @@ def infer_conservation_laws(
             "infer_conservation_laws: every sampled Jacobian was non-finite; "
             "falling back to the unperturbed state alone."
         )
-        blocks = [np.asarray(jax.jacfwd(_residual_fn(composite, mask))(y))]
+        blocks = [
+            np.asarray(_jacobian(_residual_fn(composite, mask), y, pattern))
+        ]
 
-    u, s, _ = np.linalg.svd(np.hstack(blocks))
-    null = np.argsort(s)[: int(np.sum(s < rcond * s[0]))]
-    return _surviving(u[:, null].T, blocks)
+    stacked = np.hstack(blocks)
+    scale = max(float(np.abs(b).max()) for b in blocks) or 1.0
+    if candidates is None:
+        u, s, _ = np.linalg.svd(stacked)
+        null = s <= rcond * max(float(s[0]), scale)
+        laws = u[:, null].T
+    else:
+        basis = np.asarray(candidates, dtype=float).reshape(-1, y.shape[0])
+        u, s, _ = np.linalg.svd(basis @ stacked)
+        null = s <= rcond * max(float(s[0]), scale)
+        laws = u[:, null].T @ basis
+    return _surviving(laws, blocks)
 
 
 def _surviving(candidates, blocks, eps_factor: float = 1e3):
@@ -302,23 +271,35 @@ def _surviving(candidates, blocks, eps_factor: float = 1e3):
     )
 
 
+def _dense(law: dict, n: int) -> np.ndarray:
+    out = np.zeros(n)
+    for i, c in law.items():
+        out[i] = c
+    return out
+
+
 def conservation_laws(composite, y, mask=None, rcond: float = 1e-9):
     """Conservation-law matrix ``L`` (rows = conserved combinations) over the
     composite's store paths. Returns an ``(n_laws, n_state)`` array whose rows
     are **orthonormal**, so ``L.T @ L`` is the orthogonal projector onto the
     conserved directions and ``I - L.T @ L`` projects onto the leaf's tangent
-    space. Use :func:`conserved_moieties` for the integer coefficients that
-    state the conservation as chemistry; these rows span the same space.
+    space. Use :func:`hallsim.structure.composite_moieties` for the integer
+    coefficients that state the conservation as chemistry; these rows span
+    the same space.
 
-    Where every process declares a stoichiometry this is exact: the integer
-    left null space of ``N``, identical for every parameter value and every
-    state. Otherwise the laws are inferred by
-    :func:`infer_conservation_laws`, which samples states *and* parameters —
-    a single Jacobian cannot tell a conserved combination from a merely slow
-    one, since both are singular at a point.
+    The declared stoichiometry settles every law over the paths nothing
+    moves outside it: the integer left null space of ``N``, identical for
+    every parameter value and every state. A candidate that touches a path
+    something else also moves — a process with no symbolic form, a rate rule
+    — is only what ``N`` *allows*, and is kept by
+    :func:`infer_conservation_laws`, which samples states *and* parameters,
+    since a single Jacobian cannot tell a conserved combination from a
+    merely slow one. With every process declared nothing is sampled; with
+    none declared everything is, which is the old behaviour.
 
-    Either way each candidate is checked against the composite's own Jacobian
-    and dropped if it does not hold.
+    Either way each law is checked against the composite's own Jacobian and
+    dropped if it does not hold, and the Jacobian's own sparsity pattern is
+    checked against the composite first (:func:`hallsim.structure.check_pattern`).
 
     Rows also pin any state the composite leaves identically constant. That
     is not physics: those directions are exactly singular, and the Newton
@@ -334,63 +315,77 @@ def conservation_laws(composite, y, mask=None, rcond: float = 1e-9):
             "`steady_state(composite, laws=laws)` inside it. "
             "CalibrationProblem does this for you."
         )
+    y = jnp.asarray(y)  # the RHS scatters assignments; numpy has no .at
     keys = composite.store_keys()
+    n = len(keys)
     mask = accumulator_mask(composite, keys) if mask is None else mask
     warn_if_time_dependent(composite, y)
 
-    declared = composite_stoichiometry(composite, keys)
-    if declared is None:
-        # Sampling's output is verified against this same Jacobian, so when it
-        # admits nothing the eight samples cannot either.
-        jac = np.asarray(jax.jacfwd(_residual_fn(composite, mask))(y))
-        if _no_law_can_hold(jac, len(keys)):
-            log.debug(
-                "conservation_laws: Jacobian admits no conserved "
-                "combination; skipped sampling."
-            )
-            return _orthonormal_rows([], len(keys))
+    fn = _residual_fn(composite, mask)
+    pattern = residual_pattern(composite, keys)
+    jac = np.asarray(check_pattern(fn, y, pattern, keys))
 
-        laws = infer_conservation_laws(composite, y, mask, rcond)
-        kept = _verified(list(laws), jac, keys)
-        log.debug(
-            "conservation_laws: no declared stoichiometry; inferred %d law(s) "
-            "by sampling states and parameters. Declaring "
-            "Process.stoichiometry() makes this exact.",
-            len(kept),
+    structure = composite_stoichiometry(composite, keys)
+    exact = [_dense(law, n) for law in structure.exact_laws()]
+    allowed = structure.null_space() if structure.undescribed else None
+    pending = len(allowed) - len(exact) if allowed is not None else 0
+
+    if pending and not _no_law_can_hold(jac, n):
+        # Sampling's output is verified against the same Jacobian, so when
+        # it admits nothing the samples cannot either — hence the guard.
+        candidates = (
+            None
+            if structure.matrix.shape[1] == 0
+            else np.asarray([_dense(law, n) for law in allowed])
         )
-        return _orthonormal_rows(kept, len(keys))
+        laws = list(
+            infer_conservation_laws(
+                composite,
+                y,
+                mask,
+                rcond,
+                candidates=candidates,
+                pattern=pattern,
+            )
+        )
+        log.debug(
+            "conservation_laws: %d law(s) exact from declared stoichiometry; "
+            "%d candidate(s) touching %s (moved outside it by %s) checked by "
+            "sampling states and parameters, %d law(s) kept in all. "
+            "Declaring reaction_channels() on every process makes this exact.",
+            len(exact),
+            pending,
+            [keys[i] for i in sorted(structure.undescribed)],
+            list(structure.opaque) or "rate rules",
+            len(laws),
+        )
+    else:
+        laws = exact
+        if pending:
+            log.debug(
+                "conservation_laws: Jacobian admits no conserved combination "
+                "beyond the %d exact law(s); skipped sampling.",
+                len(exact),
+            )
 
-    # Solve only over the states N actually describes. A state outside it is
-    # driven by something else (an SBML rateRule, a frozen sink), and its
-    # empty column would otherwise come back as a free variable — i.e. N
-    # would "prove" a state conserved by saying nothing about it.
-    columns, covered = declared
-    rows = [
-        [Fraction(col[i]).limit_denominator(10**6) for i in covered]
-        for col in columns
-    ]
-    laws = []
-    for vec in _rational_null_space(rows, len(covered)):
-        full = [0] * len(keys)
-        for slot, coeff in zip(covered, _integerize(vec)):
-            full[slot] = coeff
-        laws.append(full)
-
+    kept = _verified(laws, jac, keys)
     # A state the composite never moves is exactly singular for Newton, so it
     # has to be pinned even though it is not a conserved quantity in any
     # physical sense. Tested on an identically-zero Jacobian row rather than a
     # small one: "never moves" is exact, "moves slowly" is the thing this
-    # function exists to stop treating as conservation.
-    jac = np.asarray(jax.jacfwd(_residual_fn(composite, mask))(y))
-    spanned = {i for law in laws for i, c in enumerate(law) if c}
-    for i in range(len(keys)):
+    # function exists to stop treating as conservation. After verification,
+    # so a dropped law leaves nothing unpinned.
+    spanned = {
+        int(i)
+        for law in kept
+        for i in np.flatnonzero(np.abs(np.asarray(law, dtype=float)) > 1e-12)
+    }
+    for i in range(n):
         if i not in spanned and not np.any(jac[i]):
-            unit = [0] * len(keys)
-            unit[i] = 1
-            laws.append(unit)
-
-    kept = _verified(laws, jac, keys)
-    return _orthonormal_rows(kept, len(keys))
+            unit = np.zeros(n)
+            unit[i] = 1.0
+            kept.append(unit)
+    return _orthonormal_rows(kept, n)
 
 
 def _orthonormal_rows(rows, n_state: int) -> jnp.ndarray:
@@ -400,15 +395,19 @@ def _orthonormal_rows(rows, n_state: int) -> jnp.ndarray:
     ``L`` has orthonormal rows, and a null-space basis has neither unit norm nor
     mutual orthogonality. Orthonormalising preserves the row space — the same
     leaf is pinned, the same totals are fixed — and leaves ``LᵀL`` usable as a
-    projector by every caller. Integer moiety coefficients are the physical
-    statement and stay in :func:`conserved_moieties`.
+    projector by every caller; dependent rows collapse, so a law listed twice
+    counts once. Integer moiety coefficients are the physical statement and
+    stay in :func:`hallsim.structure.composite_moieties`.
 
     Signs are fixed so the first non-zero entry of each row is positive, since
-    QR's sign convention is otherwise arbitrary.
+    the SVD's sign convention is otherwise arbitrary.
     """
     if not len(rows):
         return jnp.zeros((0, n_state))
-    q = np.linalg.qr(np.asarray(rows, dtype=float).T)[0].T
+    a = np.asarray(rows, dtype=float).reshape(len(rows), n_state)
+    _, s, vt = np.linalg.svd(a, full_matrices=False)
+    rank = int(np.sum(s > 1e-10 * max(float(s[0]), 1e-300)))
+    q = vt[:rank]
     lead = [np.flatnonzero(np.abs(r) > 1e-12) for r in q]
     sign = np.array(
         [1.0 if not i.size else np.sign(r[i[0]]) for r, i in zip(q, lead)]
@@ -466,22 +465,22 @@ def _verified(laws, jac, keys, rtol: float = _VERIFY_RTOL):
     """Drop candidate laws the composite's own Jacobian contradicts.
 
     ``L`` is conserved only if ``L·J = 0``. A declared ``N`` can disagree with
-    what the composite actually integrates — a frozen sink, a species a rule
-    overrides — and a law enforced on a direction that does move biases the
-    fixed point silently. Cheaper to check than to debug.
+    what the composite actually integrates — a species a rule overrides, a
+    declaration that is simply wrong — and a law enforced on a direction that
+    does move biases the fixed point silently. Cheaper to check than to debug.
     """
     scale = float(np.abs(jac).max()) or 1.0
     kept = []
     for law in laws:
         residual = float(np.abs(np.asarray(law, dtype=float) @ jac).max())
         if residual <= rtol * scale:
-            kept.append(law)
+            kept.append(np.asarray(law, dtype=float))
         else:
             log.warning(
                 "conservation_laws: dropping %s — L·J = %.3g, not 0, so the "
                 "composite does not conserve it. The declared stoichiometry "
                 "disagrees with what is being integrated.",
-                {keys[i]: c for i, c in enumerate(law) if c},
+                {keys[i]: float(c) for i, c in enumerate(law) if c},
                 residual,
             )
     return kept
@@ -504,6 +503,11 @@ def steady_state(
     :func:`conservation_laws`; computed from ``y_guess`` if omitted) and
     ``y_ref`` (default the initial state) fixes the conserved totals. Returns
     the full state vector (accumulators zero).
+
+    The Newton Jacobian is formed in as many forward passes as the residual's
+    sparsity pattern has colours (:func:`residual_pattern`), so a composite of
+    declared processes pays for its coupling, not for its size; a composite
+    of undeclared ones pays ``jacfwd``'s ``n`` passes, as before.
     """
     keys = composite.store_keys()
     mask = accumulator_mask(composite, keys)
@@ -514,12 +518,13 @@ def steady_state(
     laws = conservation_laws(composite, y0, mask) if laws is None else laws
 
     g = pin_conserved(residual, laws, y_ref)
+    pattern = residual_pattern(composite, keys, laws)
 
     def solve(fn, guess):
         def body(state):
             y, i, _ = state
             f = fn(y)
-            dy = jnp.linalg.solve(jax.jacfwd(fn)(y), f)
+            dy = jnp.linalg.solve(_jacobian(fn, y, pattern), f)
             f0 = jnp.max(jnp.abs(f))
 
             def damp(c):
@@ -541,7 +546,7 @@ def steady_state(
         return y
 
     def tangent_solve(gg, b):
-        return jnp.linalg.solve(jax.jacfwd(gg)(jnp.zeros_like(b)), b)
+        return jnp.linalg.solve(_jacobian(gg, jnp.zeros_like(b), pattern), b)
 
     y_star = jax.lax.custom_root(g, y0, solve, tangent_solve)
     if not isinstance(y_star, jax.core.Tracer):

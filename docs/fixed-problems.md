@@ -1397,3 +1397,44 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   unseen. **Fixed 2026-09-11:** an event carries its owner's `time_scale`,
   set by `expand_events`, and evaluates trigger and assignments at
   `t · time_scale` (`test_a_reconciled_model_fires_its_event_on_the_composite_clock`).
+
+- [x] **P1.9 — Conservation laws are still inferred numerically for any
+  composite containing a hand-written process.** The exact stoichiometric path
+  needs every process to declare `stoichiometry()`; one undeclared edge disables
+  it. **Fixed 2026-09-11:** `stoichiometry()` now derives from
+  `reaction_channels()`, which the seven edge primitives and both forcing
+  sources declare, and `conservation_laws` no longer needs everyone. The
+  exact integer left null space of `N` over the paths nothing moves outside
+  it is taken as it is; only a candidate touching a path an undeclared
+  process or a rate rule also moves goes to the sampled Jacobians, and then
+  within the span `N` allows rather than the whole space. A composite of
+  declared processes samples nothing, one with none declared samples as
+  before (`test_exact_laws_survive_an_undeclared_neighbour`,
+  `test_an_undeclared_writer_on_a_declared_moiety_breaks_it`).
+  `hallsim.structure.composite_moieties` states the exact laws as integer
+  coefficients over store paths.
+
+- [x] **P1.13 — Structurally redundant parameters are invisible before a fit.**
+  DallePezze's `k33` and `k34` carry the *identical* rate law
+  `k·Mito_mass_turnover·mTORC1_pS2448` — the field is invariant under
+  `(k33+δ, k34−δ)` to 4.4×10⁻¹⁶ and `∂endpoint/∂k33 = ∂endpoint/∂k34` to ten
+  digits — so only their sum is identifiable. `k34` is *named*
+  `mito_biogenesis_by_AMPK_pT172` and never reads AMPK. The paper's Figure 6A
+  conclusion is an arbitrary split of one coordinate. This is visible from the
+  rate laws alone, with no data and no fit, but nothing looks. Distinct from
+  P1.3 (Fisher conditioning, needs a fit) and P1.5 (zero-gradient fittables,
+  needs arms): this is structural and available at import.
+  *Fix:* a collinearity pass over declared rate laws / stoichiometry at
+  `Process` construction, naming the redundant group.
+  **Fixed 2026-09-11:** `hallsim.identifiability.structural_redundancy`
+  differentiates the composite's field, assembled as sympy from the declared
+  forms (`hallsim.structure.symbolic_field`), with respect to each parameter
+  and groups those whose sensitivities are proportional by a factor free of
+  state and time — the same rate law on the same stoichiometry, or two
+  constants that only ever multiply. On the DallePezze deposit it names
+  `mito_biogenesis_by_mTORC1_pS2448` and `mito_biogenesis_by_AMPK_pT172`
+  with ratio 1, and two clamps on one target the same way, since the edges'
+  parameters are symbols in their laws too. `CalibrationProblem` runs it on
+  the fitted set at construction and warns naming the group
+  (`TestStructuralRedundancy`). A parameter reaching a process with no
+  symbolic form is reported unassessed rather than cleared.

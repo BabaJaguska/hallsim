@@ -253,25 +253,101 @@ def test_slow_decay_is_not_conserved(caplog):
     assert row["p/A"] == pytest.approx(1 / np.sqrt(2))
 
 
-def test_undeclared_process_falls_back():
-    """One process without a stoichiometry means N cannot describe the
-    composite, so the exact path must not be used."""
+class Opaque(Process):
+    """No symbolic form: dC/dt = −0.1·C, invisible to N."""
 
-    class Opaque(Process):
-        def ports_schema(self):
-            return {"C": Port(role=PortRole.EVOLVED, default=1.0)}
+    def ports_schema(self):
+        return {"C": Port(role=PortRole.EVOLVED, default=1.0)}
 
-        def derivative(self, t, state):
-            return {"C": -0.1 * state["C"]}
+    def derivative(self, t, state):
+        return {"C": -0.1 * state["C"]}
 
-    from hallsim.steady_state import composite_stoichiometry
+
+def test_undeclared_process_leaves_its_paths_undescribed():
+    """A process without a stoichiometry can move its paths any way it
+    likes, so N does not describe them — but N still describes the rest."""
+    from hallsim.structure import composite_stoichiometry
 
     comp = Composite(
         processes={"op": Opaque()},
         topology={"op": {"C": "p/C"}},
         semantic_validation=False,
     )
-    assert composite_stoichiometry(comp) is None
+    structure = composite_stoichiometry(comp)
+    assert structure.opaque == ("op",)
+    assert structure.undescribed == {0} and not structure.described
+    assert structure.matrix.shape == (1, 0)
+
+
+def test_exact_laws_survive_an_undeclared_neighbour(monkeypatch):
+    """A ⇌ B declared, C undeclared beside it: A+B is settled by N without
+    sampling anything, and only C's candidate goes to the Jacobians."""
+    from hallsim.structure import composite_moieties
+
+    calls = _sampling_calls(monkeypatch)
+    comp = Composite(
+        processes={"b": Binding(), "op": Opaque()},
+        topology={
+            "b": {"E": "p/E", "S": "p/S", "ES": "p/ES"},
+            "op": {"C": "p/C"},
+        },
+        semantic_validation=False,
+    )
+    # the free-column basis of N's exact left null space over E, ES, S
+    assert composite_moieties(comp) == [
+        {"p/E": 1, "p/ES": 1},
+        {"p/E": 1, "p/S": -1},
+    ]
+    laws = conservation_laws(comp, comp.initial_state_vec())
+    assert laws.shape[0] == 2
+    keys = comp.store_keys()
+    assert all(abs(float(v)) < 1e-12 for v in laws[:, keys.index("p/C")])
+    # sampled: C's own unit candidate had to be checked
+    assert calls
+
+
+def test_an_undeclared_writer_on_a_declared_moiety_breaks_it():
+    """Declared A ⇌ B plus an opaque process draining B: N allows A+B, the
+    sampled Jacobians reject it, and nothing is pinned that moves."""
+
+    class Drain(Process):
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=0.0)}
+
+        def derivative(self, t, state):
+            return {"x": -0.1 * state["x"]}
+
+    class Exchange(Process):
+        def ports_schema(self):
+            return {
+                "A": Port(role=PortRole.EVOLVED, default=1.0),
+                "B": Port(role=PortRole.EVOLVED, default=1.0),
+            }
+
+        def derivative(self, t, state):
+            flux = state["A"] - state["B"]
+            return {"A": -flux, "B": flux}
+
+        def reaction_channels(self):
+            from hallsim.process import ReactionChannel
+            import sympy
+
+            return (
+                ReactionChannel(
+                    "exchange",
+                    (("A", -1.0), ("B", 1.0)),
+                    sympy.Symbol("A") - sympy.Symbol("B"),
+                ),
+            )
+
+    comp = Composite(
+        processes={"ex": Exchange(), "dr": Drain()},
+        topology={"ex": {"A": "p/A", "B": "p/B"}, "dr": {"x": "p/B"}},
+        initial={"p/B": 1.0},
+        semantic_validation=False,
+    )
+    laws = conservation_laws(comp, comp.initial_state_vec())
+    assert laws.shape[0] == 0
 
 
 class Degrading(Process):
