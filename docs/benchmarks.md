@@ -110,6 +110,14 @@ a solve around the Scheduler reintroduces the bug the framework already fixed.
 
 ## 4. Solver choice: `optx.Newton` vs diffrax's default
 
+GPU batching has a different tradeoff: the optional
+`hallsim.root_finders.StepChord` reuses a Jacobian across implicit stages
+while retaining Cauchy convergence. It improves the tested 256-cell GPU
+workload but is slower for small batches, so Newton remains the default.
+See [the Jacobian reuse profile](jacobian-reuse.md) for timings, accuracy,
+and CUDA dispatch costs. The historical measurements below are not a
+general statement that Jacobian reuse can never help.
+
 `Kvaerno5`'s default `VeryChord` root finder reuses a stale Jacobian. On real
 biochemical RHSs that rejects a third of all steps:
 

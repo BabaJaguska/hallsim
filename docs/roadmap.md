@@ -115,7 +115,18 @@ the JAX-native execution model. Designed as a natural follow-up.
 
 * [ ] LLM agent-assisted model composition
 * [ ] FBA / genome-scale metabolism via `jaxopt`-based LP — couples
-  ERiQ signaling state to BiGG-scale flux distributions with gradients
+  ERiQ signaling state to BiGG-scale flux distributions with gradients.
+  **Tested against a real use case 2026-09-06 and not justified by it.** The
+  VCC extent problem was the candidate application: does FBA single-gene
+  deletion predict how hard a CRISPRi knockdown perturbs the transcriptome?
+  Human-GEM + cobrapy over 1,574 measured K562 targets gave Spearman **-0.10**
+  against an existing lookup at **0.49**, with **94% of deletions returning
+  growth ratio exactly 1.0** — a genome-scale network routes around single
+  deletions, which is why MOMA/ROOM exist. The signal that survived was binary
+  (load-bearing or not), which essentiality annotation already supplies. See
+  `VCC/docs/diary.md` 2026-09-06 (evening). This does not show the LP path is
+  worthless; it shows the first application to ask for it did not need it, so
+  the item stays queued without a sponsor rather than being promoted.
 * [ ] 3D spatial diffusion & ECM modelling
 
 ## Model-adjacent formats

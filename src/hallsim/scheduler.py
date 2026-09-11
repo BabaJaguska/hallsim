@@ -428,6 +428,9 @@ class Scheduler:
         ``VeryChord`` needs ~18x more steps on real biochemical RHSs
         (see docs/benchmarks.md). ``explicit_solver`` is also the fallback
         whenever routing is unavailable.
+        For large GPU batches, ``Kvaerno5(root_finder=StepChord(...))``
+        from :mod:`hallsim.root_finders` can amortize factorization work;
+        benchmark it first, as small batches can be slower.
     max_explicit_substeps:
         Stiffness threshold: a group is stiff when its fastest decay rate ×
         ``macro_dt`` exceeds this. Default 100.
@@ -550,7 +553,8 @@ class Scheduler:
         # Default stiff solver is Kvaerno5 with a **Newton** root finder.
         # diffrax's default `VeryChord` (stale-Jacobian chord, 10 iters)
         # rejects ~50% of steps on real biochemical RHSs; a true Newton
-        # solve (fresh Jacobian — what CVODE does) cuts that to a few %.
+        # solve (fresh Jacobian each iteration) cuts that to a few %.
+        # CVODE instead amortizes Jacobian/factorization work with reuse.
         self.implicit_solver = implicit_solver or dfx.Kvaerno5(
             root_finder=optx.Newton(
                 rtol=rtol if newton_rtol is None else newton_rtol,
@@ -1025,7 +1029,30 @@ class Scheduler:
         event_procs = composite.event_processes()
 
         if plan.core is not None:
-            ts, ys, dyn = plan.core(
+            core = plan.core
+            if tuple(state.shape) != plan.state_shape:
+                # A plan fixes numerical routing, but y0 may switch between
+                # one member and a population. The compiled core's vmap
+                # wrapper was selected from the planning state's rank.
+                core = self._continuous_core(
+                    composite,
+                    groups,
+                    integrators,
+                    keys,
+                    t0,
+                    t1,
+                    macro_dt,
+                    save_dt,
+                    adjoint,
+                    coupling,
+                    fast=plan.fast,
+                    state=state,
+                    jump_ts=plan.jump_ts,
+                    stochastic_procs=stochastic_procs,
+                    discrete_procs=discrete_procs,
+                    event_procs=event_procs,
+                )
+            ts, ys, dyn = core(
                 composite, state, jax.random.PRNGKey(stochastic_seed)
             )
             compiled_events = dyn.pop("_events", None)

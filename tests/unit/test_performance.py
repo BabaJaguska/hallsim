@@ -211,6 +211,37 @@ def test_batched_implicit_solve_is_linear_in_batch_size():
     assert _flops_per_member(sched, comp, 16) / solo < 1.5
 
 
+def test_reused_plan_preserves_independent_population_solves():
+    """Changing y0 rank must not turn N members into one dense N-state solve."""
+    comp = _composite()
+    sched = Scheduler(solver=dfx.Kvaerno5(), rtol=1e-8, atol=1e-11)
+    plan = sched.plan(comp, (0.0, 10.0), save_dt=1.0)
+    y0 = comp.initial_state_vec()
+    pop = jnp.linspace(0.1, 2.0, 16)[:, None] * y0
+    result = sched.run(plan, y0=pop)
+    assert result.ys.shape == (11, 16, 1)
+    assert result.stats["group_0"]["num_solver_steps"].shape == (16,)
+    exact = pop[None] * jnp.exp(-0.1 * result.ts[:, None, None])
+    assert jnp.allclose(result.ys, exact, rtol=1e-5, atol=1e-8)
+
+    def flops(n):
+        return (
+            jax.jit(lambda y: sched.run(plan, y0=y).ys)
+            .lower(pop[:n])
+            .compile()
+            .cost_analysis()["flops"]
+            / n
+        )
+
+    assert flops(16) / flops(1) < 1.5
+    batch_plan = sched.plan(comp, (0.0, 10.0), y0=pop, save_dt=1.0)
+    solo = sched.run(batch_plan, y0=y0)
+    assert solo.ys.shape == (11, 1)
+    assert jnp.allclose(
+        solo.ys[:, 0], y0[0] * jnp.exp(-0.1 * solo.ts), rtol=1e-5, atol=1e-8
+    )
+
+
 def test_parameter_change_does_not_recompile():
     """Sweeping a parameter reuses the executable: the value is data."""
     comp, sched = _composite(), Scheduler()

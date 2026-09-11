@@ -1204,6 +1204,29 @@ class TestSchedulerDiscrete:
 
 
 class TestSchedulerEvent:
+    def test_plan_shape_change_preserves_event_and_discrete_handlers(self):
+        composite = Composite(
+            processes={
+                "prod": ConstantProduction(rate=1.0),
+                "latch": ThresholdLatch(threshold=2.0),
+                "counter": PeriodicCounter(dt_step=2.0),
+            },
+            topology={
+                "prod": {"x": "pool/x"},
+                "latch": {"x": "pool/x", "flag": "state/flag"},
+                "counter": {"count": "state/count"},
+            },
+        )
+        scheduler = Scheduler()
+        y0 = composite.initial_state_vec()
+        population = jnp.stack([y0, y0])
+        plan = scheduler.plan(composite, (0.0, 6.0), macro_dt=1.0)
+        result = scheduler.run(plan, y0=population)
+        assert jnp.allclose(result.get("pool/x")[-1], 6.0)
+        assert jnp.allclose(result.get("state/flag")[-1], 1.0)
+        assert jnp.allclose(result.get("state/count")[-1], 3.0)
+        assert result.events
+
     def test_event_fires_on_threshold(self):
         """Event process fires when condition becomes True."""
         composite = Composite(
