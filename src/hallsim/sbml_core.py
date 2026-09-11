@@ -193,9 +193,20 @@ class SBMLCore(eqx.Module):
     compartment_sizes: tuple = eqx.field(static=True)
     local_parameters: tuple = eqx.field(static=True)
     _species_compartment: tuple = eqx.field(static=True)
-    _velocities: object = eqx.field(static=True)
-    _rate_rules: object = eqx.field(static=True)
-    _assignments: tuple = eqx.field(static=True)
+    #: One compiled program for every rule and law, common subexpressions
+    #: factored once across all of them: its outputs are the assignment
+    #: targets in ``w`` order, then the reaction velocities, then one rate
+    #: per ``y`` entry from the rate rules. Every non-boundary assignment is
+    #: substituted into what reads it; a boundary species' rule stays a read
+    #: of ``w``, which is where a driver overrides it.
+    _program: object = eqx.field(static=True)
+    _has_rate_rules: bool = eqx.field(static=True)
+    #: The boundary-species rules the field reads, as one small program with
+    #: every other rule substituted, and the ``w`` slots they fill. The
+    #: derivative evaluates these, lets a driver override, and runs the main
+    #: program once — instead of running it twice.
+    _boundary_program: object = eqx.field(static=True)
+    _boundary_slots: tuple = eqx.field(static=True)
 
     @property
     def y_indexes(self) -> dict:
@@ -213,29 +224,47 @@ class SBMLCore(eqx.Module):
     def species_compartment(self) -> dict:
         return dict(self._species_compartment)
 
+    def _run(self, y, w, c, t):
+        """``(assignments, velocities, rates)`` from the one program."""
+        n_w, n_r = len(self._w_names), len(self.reaction_ids)
+        vals = self._program(y, w, c, t)
+        return vals[:n_w], vals[n_w : n_w + n_r], vals[n_w + n_r :]
+
     def reaction_velocities(self, y, w, c, t):
         """``v(y, w, c, t)``, one amount rate per reaction."""
         if not self.reaction_ids:
             return jnp.zeros((0,), dtype=jnp.asarray(y).dtype)
-        return jnp.stack(self._velocities(y, w, c, t))
+        return jnp.stack(self._run(y, w, c, t)[1])
 
     def ratefunc(self, y, t, w, c):
         """``dy/dt = N·v + rate rules``."""
+        dtype = jnp.asarray(y).dtype
+        if self._program is None:
+            return jnp.zeros((len(self._y_names),), dtype=dtype)
+        _, velocities, rates = self._run(y, w, c, t)
         if self.reaction_ids:
-            dy = jnp.asarray(self.stoichiometry) @ self.reaction_velocities(
-                y, w, c, t
-            )
+            dy = jnp.asarray(self.stoichiometry) @ jnp.stack(velocities)
         else:
-            dy = jnp.zeros((len(self._y_names),), dtype=jnp.asarray(y).dtype)
-        if self._rate_rules is not None:
-            dy = dy + jnp.stack(self._rate_rules(y, w, c, t))
+            dy = jnp.zeros((len(self._y_names),), dtype=dtype)
+        if self._has_rate_rules:
+            dy = dy + jnp.stack(rates)
         return dy
 
     def assignmentfunc(self, y, w, c, t):
         """``w`` with every assignment rule recomputed, in dependency order."""
-        for j, f in self._assignments:
-            w = w.at[j].set(f(y, w, c, t))
-        return w
+        if not self._w_names:
+            return w
+        assignments, _, _ = self._run(y, w, c, t)
+        return w.at[: len(self._w_names)].set(jnp.stack(assignments))
+
+    def boundaryfunc(self, y, w, c, t):
+        """``w`` with only the boundary-species rules the field reads
+        recomputed — what :meth:`ratefunc` needs from ``w``, and nothing
+        the main program does not already compute for itself."""
+        if not self._boundary_slots:
+            return w
+        vals = self._boundary_program(y, w, c, t)
+        return w.at[jnp.asarray(self._boundary_slots)].set(jnp.stack(vals))
 
 
 _CORES: dict = {}
@@ -473,8 +502,6 @@ def _compile(path: str) -> SBMLCore:
         tuple(matrix[j][i] for j in range(len(reactions)))
         for i in range(len(y_names))
     )
-    velocities = to_jax(sympy.Tuple(*bound_laws), _ARGS) if reactions else None
-
     rate_rule_exprs = [sympy.Integer(0)] * len(y_names)
     for name, expr in rate_ruled.items():
         if name not in y_indexes:
@@ -482,12 +509,58 @@ def _compile(path: str) -> SBMLCore:
                 f"rate rule on {name!r}, which is not an integrated quantity"
             )
         rate_rule_exprs[y_indexes[name]] = stored(name, bind(expr))
-    rate_rules = (
-        to_jax(sympy.Tuple(*rate_rule_exprs), _ARGS) if rate_ruled else None
+
+    # Assignments in dependency order, each with every earlier non-boundary
+    # one substituted, so one expression list carries every law and rule
+    # and the shared subexpressions are named once. A boundary species'
+    # rule keeps its read of ``w``: that slot is where a driver overrides
+    # the rule with a port value.
+    boundary_ids = {s.getId() for s in species if s.getBoundaryCondition()}
+    resolved: dict[str, sympy.Basic] = {}
+    closed: dict[str, sympy.Basic] = {}
+    inline: dict = {}
+    inline_all: dict = {}
+    for name in w_names:
+        expr = stored(name, bind(assigned[name]))
+        resolved[name] = expr.xreplace(inline) if inline else expr
+        closed[name] = expr.xreplace(inline_all) if inline_all else expr
+        inline_all[_W[w_indexes[name]]] = closed[name]
+        if name not in boundary_ids:
+            inline[_W[w_indexes[name]]] = resolved[name]
+    if inline:
+        bound_laws = [law.xreplace(inline) for law in bound_laws]
+        rate_rule_exprs = [e.xreplace(inline) for e in rate_rule_exprs]
+    program_exprs = (
+        [resolved[name] for name in w_names]
+        + bound_laws
+        + (rate_rule_exprs if rate_ruled else [])
     )
-    assignments = tuple(
-        (w_indexes[name], to_jax(stored(name, bind(assigned[name])), _ARGS))
-        for name in w_names
+    program = (
+        to_jax(sympy.Tuple(*program_exprs), _ARGS, cse=True)
+        if program_exprs
+        else None
+    )
+    # The boundary rules the field still reads through ``w``, closed over
+    # every rule they depend on, so the derivative can refresh exactly
+    # those before a driver overrides them.
+    boundary_slots = tuple(
+        sorted(
+            {
+                int(s.indices[0])
+                for e in bound_laws + rate_rule_exprs
+                for s in e.atoms(sympy.Indexed)
+                if s.base == _W
+            }
+        )
+    )
+    boundary_program = (
+        to_jax(
+            sympy.Tuple(*[closed[w_names[j]] for j in boundary_slots]),
+            _ARGS,
+            cse=True,
+        )
+        if boundary_slots
+        else None
     )
 
     reads = tuple(
@@ -521,9 +594,10 @@ def _compile(path: str) -> SBMLCore:
             (rid, tuple(names.items())) for rid, names in local_names.items()
         ),
         _species_compartment=tuple(species_compartment.items()),
-        _velocities=velocities,
-        _rate_rules=rate_rules,
-        _assignments=assignments,
+        _program=program,
+        _has_rate_rules=bool(rate_ruled),
+        _boundary_program=boundary_program,
+        _boundary_slots=boundary_slots,
     )
 
 

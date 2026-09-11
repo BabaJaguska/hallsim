@@ -137,11 +137,11 @@ ARM_PAIRS = {
 ARM_CONDITIONS = {arm: cond for arm, (cond, _) in ARM_PAIRS.items()}
 
 
-def _default_fit_params(composite, published, proteostasis: bool) -> dict:
+def _default_fit_params(composite, published) -> dict:
     """The fitted set: one parameter per reporter axis the data constrains,
-    each with a log-normal MAP prior at its published or placed value. With
-    Proctor 2007 attached, fit the mTORC1→synthesis gain. Proteasome
-    activity k69 is excluded by the reporter identifiability check."""
+    each with a log-normal MAP prior at its published or placed value, plus
+    the mTORC1→synthesis gain into Proctor 2007. Proteasome activity k69 is
+    excluded by the reporter identifiability check."""
     params = {
         "sa_beta_gal_decay": ParameterRef(
             "dp14",
@@ -175,15 +175,14 @@ def _default_fit_params(composite, published, proteostasis: bool) -> dict:
         # arm-days (2026-09-07). DP14's active FoxO3a cannot rise under
         # damage; that is the model, not a parameter.
     }
-    if proteostasis:
-        # k69 (proteasome activity) is left out: at the fit it moves no
-        # reporter (structural, per the fit's identifiability check).
-        params["mtor_synthesis_gain"] = ParameterRef(
-            "mtor_synthesis",
-            "gain",
-            prior=float(composite.processes["mtor_synthesis"].gain),
-            prior_sigma=0.5,
-        )
+    # k69 (proteasome activity) is left out: at the fit it moves no
+    # reporter (structural, per the fit's identifiability check).
+    params["mtor_synthesis_gain"] = ParameterRef(
+        "mtor_synthesis",
+        "gain",
+        prior=float(composite.processes["mtor_synthesis"].gain),
+        prior_sigma=0.5,
+    )
     return params
 
 
@@ -192,16 +191,13 @@ def build_problem(
     reporters=None,
     equilibrate: bool = False,
     parameters=None,
-    proteostasis: bool = False,
     fitted: tuple | None = None,
 ) -> CalibrationProblem:
     """The calibration problem. ``parameters`` overrides the fitted set,
     which is what an identifiability screen varies. ``fitted`` names exactly
     which members of the default set to fit — the one list there is: a
     smaller fit declares it, and scoring a saved fit passes the set that fit
-    had. Everything not named stays at its placed value. ``proteostasis``
-    builds the composite with Proctor 2007 attached and scores its reporters
-    too."""
+    had. Everything not named stays at its placed value."""
     ds = (
         GeneExpressionDataset.from_series_matrix(
             SERIES_MATRIX,
@@ -213,11 +209,9 @@ def build_problem(
         else None
     )
     if composite is None:
-        composite = build_multi_hallmark_composite(proteostasis=proteostasis)
+        composite = build_multi_hallmark_composite()
     if reporters is None:
-        reporters = list(MULTI_HALLMARK_REPORTERS)
-        if proteostasis:
-            reporters += PROTEOSTASIS_REPORTERS
+        reporters = list(MULTI_HALLMARK_REPORTERS) + PROTEOSTASIS_REPORTERS
 
     def published(process: str, field: str) -> float:
         """The deposit's own value, as the MAP prior centre."""
@@ -235,7 +229,7 @@ def build_problem(
     params = (
         parameters
         if parameters is not None
-        else _default_fit_params(composite, published, proteostasis)
+        else _default_fit_params(composite, published)
     )
     if fitted is not None:
         unknown = sorted(set(fitted) - set(params))
@@ -843,7 +837,7 @@ def _missing_data_notice() -> str:
     )
 
 
-def run_unscored(equilibrate: bool, out_dir: Path, *, proteostasis=False):
+def run_unscored(equilibrate: bool, out_dir: Path):
     """The scored run minus the scoring.
 
     Same problem, same reporters, same overview figure — the measured points
@@ -851,7 +845,7 @@ def run_unscored(equilibrate: bool, out_dir: Path, *, proteostasis=False):
     concordance is reported: with no arms to compare against there is nothing
     to be concordant with.
     """
-    problem = build_problem(equilibrate=equilibrate, proteostasis=proteostasis)
+    problem = build_problem(equilibrate=equilibrate)
     params = problem.initial_params()
     print(f"[unscored] reporters : {len(problem.reporters)}")
     print(f"[unscored] arms      : {list(_ARM_STYLE)}")
@@ -878,19 +872,13 @@ def cmd_run(args) -> None:
         )
         logging.getLogger("hallsim").setLevel(logging.INFO)
     equilibrate = getattr(args, "equilibrate", False)
-    proteostasis = getattr(args, "proteostasis", False)
     fitted = tuple(getattr(args, "fit", ()) or ()) or None
     if not SERIES_MATRIX.exists():
         print(_missing_data_notice(), flush=True)
-        return run_unscored(
-            equilibrate, make_run_dir(RUN_NAME), proteostasis=proteostasis
-        )
-    problem = build_problem(
-        equilibrate=equilibrate, proteostasis=proteostasis, fitted=fitted
-    )
+        return run_unscored(equilibrate, make_run_dir(RUN_NAME))
+    problem = build_problem(equilibrate=equilibrate, fitted=fitted)
     print(
-        f"[run] equilibrate={equilibrate} proteostasis={proteostasis}"
-        f" fit={sorted(problem.param_refs)}",
+        f"[run] equilibrate={equilibrate} fit={sorted(problem.param_refs)}",
         flush=True,
     )
     init = problem.initial_params()
@@ -1067,12 +1055,6 @@ def main() -> None:
         help="Newton-solve the whole composite to a fixed point and share it "
         "as t=0. Off by default: this composite is mixed, and DP14 senescence "
         "is progressive with no healthy fixed point to solve for",
-    )
-    ap.add_argument(
-        "--proteostasis",
-        action="store_true",
-        help="add Proctor 2007's ubiquitin-proteasome system, driven by "
-        "DP14's ROS and phospho-mTORC1, with its own reporters",
     )
     args = ap.parse_args()
     _COMMANDS[args.command](args)

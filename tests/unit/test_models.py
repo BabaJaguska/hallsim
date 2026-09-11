@@ -347,9 +347,7 @@ def test_proteostasis_handle_scales_composite_activity_without_mutation():
     from demos.models.multi_hallmark import build_multi_hallmark_composite
     from hallsim.hallmarks import apply_hallmarks
 
-    composite = build_multi_hallmark_composite(
-        validate=False, proteostasis=True
-    )
+    composite = build_multi_hallmark_composite(validate=False)
     original = composite.processes
     assert float(original["p07"].parameters["k69"]) == pytest.approx(1e-3)
     for severity, expected in [(0.0, 1e-3), (0.5, 5e-4), (1.0, 0.0)]:

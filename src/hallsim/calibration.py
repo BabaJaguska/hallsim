@@ -1017,6 +1017,7 @@ class CalibrationProblem:
         self.params = proc_params
         self._check_param_targets(proc_params)
         self._warn_structural_redundancy(proc_params)
+        self._note_stochastic_members(proc_params)
         # What the fitted fields held when the problem was wired. Every
         # evaluation overwrites them, so a later edit to one is inert; it is
         # checked against this and raised on rather than silently discarded.
@@ -1590,6 +1591,26 @@ class CalibrationProblem:
             f"oscillator has no stable whole-system rest state — equilibrate "
             f"the non-oscillatory part and hold the oscillator at its "
             f"published initial condition, or run with equilibrate=False."
+        )
+
+    def _note_stochastic_members(self, refs) -> None:
+        """A stochastic member is a sampled forcing in the gradient: its
+        jump process has no tangent, so a parameter whose effect reaches the
+        reporters only through it gets a zero gradient and shows as
+        *structural* in the post-fit identifiability report."""
+        members = list(self.composite.stochastic_processes())
+        if not members:
+            return
+        on_member = sorted(
+            name for name, r in refs.items() if r.process_name in members
+        )
+        log.warning(
+            "calibration: %s run at reaction level; gradients do not pass "
+            "through them, so a fitted parameter reaching the reporters only "
+            "through one of them cannot move%s. Fit such parameters on the "
+            "mean field.",
+            members,
+            f" ({on_member} live on one)" if on_member else "",
         )
 
     def _warn_structural_redundancy(self, refs) -> None:

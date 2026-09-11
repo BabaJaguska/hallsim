@@ -1438,3 +1438,104 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   the fitted set at construction and warns naming the group
   (`TestStructuralRedundancy`). A parameter reaching a process with no
   symbolic form is reported unassessed rather than cleared.
+
+- [x] **P0.74 — The stochastic lanes read the store raw: a member's
+  non-species ports were missing and its ASSIGNED inputs held stale
+  values.** Found 2026-09-11 by taking the calibration gradient of the
+  multi-hallmark composite with Proctor 2007 at reaction level. The
+  compiled lane handed `reaction_propensities` the species vector only, so
+  a driven constant (`p07/k1_in`) raised `KeyError`; and both lanes read a
+  species input from the flat state, where an ASSIGNED path holds its
+  initial value between windows because the assignment pass runs inside
+  the ODE right-hand side. Proctor saw ROS = 0 for fourteen days: no
+  misfolding, 6 350 events, native protein climbing to 6 550 while the mean
+  field settles at 252 — plausible-looking and wrong. **Fixed 2026-09-11:**
+  both lanes apply the composite's assignment pass to the window state
+  before the member reads it, and every non-species port is read there and
+  held over the window, as any Lie-coupled input is; the direct runner
+  accepts such ports in `y0`
+  (`test_a_driven_constant_reaches_the_stochastic_member`). At the
+  published vector the SSA now tracks the mean field: 605 549 events over
+  fourteen days, MisP 4 against 5.5, NatP 243 against 252, free proteasome
+  86 against 85.
+
+- [x] **P0.75 — The compiled stochastic lane would stop a window at 100 000
+  reaction events and say nothing.** Found 2026-09-11 in the same
+  experiment, by reading rather than by being bitten: `ssa_step_jax` bounds
+  its `while_loop` by `max_events`, which the scan lane fixed at 100 000 per
+  macro window, and a window that reached it continued from the truncated
+  state with no record of it. Measured on Proctor 2007 in the multi-hallmark
+  composite, no half-day window reaches it (605 549 events in 28 windows,
+  the same trajectory under either bound), so nothing here was cut; the
+  defect is the silence. The bound is a loop bound with no buffer behind it,
+  so there was nothing to save by keeping it small. **Fixed 2026-09-11:**
+  the bound is 10 million per window (`SSA_MAX_EVENTS_PER_WINDOW`), the run
+  records whether any window reached it (`stats[member]["event_cap_hit"]`)
+  and warns eagerly when one did.
+
+- [x] **P0.76 — The sympy code generation shared nothing: every rate law
+  recomputed what the others had, and each assignment rule was its own
+  function.** Found 2026-09-11 by another session profiling the native
+  importer against the `sbmltoodejax` path it replaced: XLA's cost analysis
+  of the compiled DallePezze fast path showed 1.8× the arithmetic for fewer
+  instructions, with the per-call RHS benchmark pointing the other way
+  because an isolated batched call is launch-bound. `sbml_math.to_jax`
+  printed each tree straight through `lambdify` with no common-subexpression
+  elimination, `compile_sbml` lambdified the 41 laws as one tuple but the 14
+  assignment rules as 14 functions, and `materialize_assigned` paid for
+  every one of them per saved point. **Fixed 2026-09-11:** every
+  non-boundary assignment is substituted into what reads it, in dependency
+  order, so laws, rate rules and assignments form one expression list,
+  lambdified once with sympy's `cse`; a boundary species' rule keeps its
+  read of `w`, which is where a driver overrides it. Measured on
+  DallePezze, batch 256, CPU: RHS bytes accessed 3.39e6 → 1.90e6,
+  `materialize_assigned` over 141×256×37 2.7 → 1.1 ms, the compiled 14-day
+  solve 3.23 → 2.88 s. Every cross-engine conformance case passes on the new
+  code. The other session filed this defect as P0.72 in its own tree; that
+  id is taken here, so it is P0.76 on merge.
+
+- [x] **P1.25 — A pinned implicit solver whose root finder follows the
+  controller's tolerance stalls seventeen-fold under diffrax 0.7, and
+  nothing says so.** Found 2026-09-11 benchmarking against jaxkineticmodel.
+  On the DallePezze field, ``Kvaerno5()`` as shipped (a chord iteration
+  whose ``rtol``/``atol`` are taken from the step controller) at
+  ``rtol=1e-10, atol=1e-12`` takes 18 260 steps and rejects 9 137 on this
+  environment's diffrax 0.7.2, optimistix 0.1.0 and lineax 0.1.0; the
+  identical generated field under diffrax 0.6.1 takes 1 142 steps and
+  rejects 2, and a full Newton at ``atol=1e-12`` on the new stack hits the
+  300 000-step cap. The Scheduler's own default,
+  ``Kvaerno5(root_finder=optx.Newton(rtol=rtol, atol=1e-6))``, takes the
+  1 142 steps here too, so the default is right and the trap is
+  ``Scheduler(solver=...)`` or ``implicit_solver=...`` with a plain diffrax
+  implicit solver at a tight controller tolerance. A user who matches
+  another tool's tolerances gets a solve seventeen times slower than the
+  default with no warning. *Fix:* when a pinned implicit solver's root
+  finder inherits the controller tolerances and ``atol < 1e-8``, warn at
+  construction naming the default's root finder, or substitute it.
+  **Fixed 2026-09-12:** the Scheduler installs its own root finder into any
+  implicit solver it is handed whose root finder would copy the
+  controller's tolerances — `solver=`, `implicit_solver=`, or the default —
+  and keeps one the caller set explicitly
+  (`TestPinnedImplicitSolverRootFinder`). `Scheduler(solver=dfx.Kvaerno5())`
+  now means what it says, at any tolerance.
+
+- [x] **P0.77 — The compiled stochastic lane held a member's window-start
+  value across every intermediate save point, so a saved trajectory of a
+  fast stochastic species was a staircase of stale values.** Found
+  2026-09-12 drawing Proctor 2007's reporters as a population on the
+  calibrated trajectory: UBB's pooled fold-change came out at +1.3 log2 in
+  the etoposide arm where the mean field and the data both sit near +0.05,
+  with every cell agreeing — not sampling noise. Free ubiquitin starts at
+  its published 500 and binds down to about 40 within minutes, and the lane
+  wrote the member's state only at the end of each macro window, so the
+  first window's four intermediate save points still read 500 and the
+  reporter's two-day zero-phase mean at day 0 averaged them in. The
+  species pools themselves were right (pooled free ubiquitin 40, 36, 47,
+  38 against the mean field's 33, 33, 39, 35 over days 0, 3, 7, 14); only
+  the recorded trajectory between window ends was wrong, and everything
+  that reads a trajectory — reporters, figures, `materialize_assigned` —
+  read it. **Fixed 2026-09-12:** `ssa_window_jax` records the sampled path
+  at every save point of the window and the lane writes all of them
+  (`test_saved_trajectory_carries_the_sampled_path_inside_a_window`). With
+  the fix the 64-cell population mean sits within 0.1 log2 of the mean
+  field on both Proctor reporters, both arms, both days.

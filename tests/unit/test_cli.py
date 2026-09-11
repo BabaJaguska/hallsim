@@ -136,19 +136,17 @@ class TestTheFittedSetIsOneList:
             self._build(fitted=("not_a_parameter",))
 
 
-def test_unscored_run_preserves_proteostasis_option(monkeypatch, tmp_path):
+def test_unscored_run_receives_the_equilibrate_option(monkeypatch, tmp_path):
     from demos import multi_hallmark_calibrate as demo
 
     monkeypatch.setattr(demo, "SERIES_MATRIX", tmp_path / "missing.txt")
     monkeypatch.setattr(demo, "make_run_dir", lambda name: tmp_path)
     received = {}
 
-    def unscored(equilibrate, out_dir, *, proteostasis=False):
-        received.update(proteostasis=proteostasis, equilibrate=equilibrate)
+    def unscored(equilibrate, out_dir):
+        received.update(equilibrate=equilibrate)
 
     monkeypatch.setattr(demo, "run_unscored", unscored)
-    result = CliRunner().invoke(
-        simulate, ["multi-hallmark", "run", "--proteostasis"]
-    )
+    result = CliRunner().invoke(simulate, ["multi-hallmark", "run"])
     assert result.exit_code == 0, result.output
-    assert received == {"proteostasis": True, "equilibrate": False}
+    assert received == {"equilibrate": False}

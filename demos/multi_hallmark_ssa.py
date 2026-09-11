@@ -30,9 +30,7 @@ def run(
     max_events: int = 10_000_000,
 ) -> tuple[SSAResult, object]:
     """Run deterministic DP14/GZ06 and stochastic Proctor on one-way inputs."""
-    deterministic = build_multi_hallmark_composite(
-        validate=False, proteostasis=False
-    )
+    deterministic = build_multi_hallmark_composite(validate=False)
     keys = deterministic.store_keys()
     trajectory = Scheduler().run(
         deterministic,

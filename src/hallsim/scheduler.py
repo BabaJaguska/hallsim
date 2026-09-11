@@ -63,6 +63,41 @@ from hallsim.stiffness import (
 _TIME_EPS: float = 1e-12
 
 
+def _inherits_controller_tolerances(root_finder) -> bool:
+    """Whether a root finder is diffrax's default for an implicit solver:
+    one carrying a sentinel in place of ``rtol``/``atol`` that copies the
+    step controller's tolerances at solve time."""
+    tol = getattr(root_finder, "rtol", None)
+    return (
+        tol is not None
+        and not isinstance(tol, (int, float))
+        and not hasattr(tol, "shape")
+    )
+
+
+def _with_own_root_finder(solver, root_finder):
+    """``solver`` with ``root_finder`` in place of one that would copy the
+    controller's tolerances; any other solver, and one whose root finder the
+    caller chose, unchanged."""
+    if isinstance(
+        solver, dfx.AbstractImplicitSolver
+    ) and _inherits_controller_tolerances(solver.root_finder):
+        log.info(
+            "%s: its root finder would copy the step controller's "
+            "tolerances; using the Scheduler's %s instead.",
+            type(solver).__name__,
+            type(root_finder).__name__,
+        )
+        return eqx.tree_at(lambda s: s.root_finder, solver, root_finder)
+    return solver
+
+
+#: Reaction events one stochastic member may fire per macro window in the
+#: compiled lane. A loop bound, not a buffer, so it is generous; a window
+#: that reaches it stops short and the run reports it.
+SSA_MAX_EVENTS_PER_WINDOW: int = 10_000_000
+
+
 def _worst_state(ys: jnp.ndarray):
     """``(index, magnitude, any_nonfinite)`` for the largest ``|state|``,
     non-finite ranking above everything. Reduces every leading axis, so it
@@ -549,19 +584,32 @@ class Scheduler:
             )
             auto_stiffness = False
         self.auto_solver = auto_stiffness
-        self.explicit_solver = explicit_solver or dfx.Tsit5()
-        # Default stiff solver is Kvaerno5 with a **Newton** root finder.
-        # diffrax's default `VeryChord` (stale-Jacobian chord, 10 iters)
-        # rejects ~50% of steps on real biochemical RHSs; a true Newton
-        # solve (fresh Jacobian each iteration) cuts that to a few %.
-        # CVODE instead amortizes Jacobian/factorization work with reuse.
-        self.implicit_solver = implicit_solver or dfx.Kvaerno5(
-            root_finder=optx.Newton(
-                rtol=rtol if newton_rtol is None else newton_rtol,
-                atol=newton_atol,
-            )
+        # Every implicit solver here, passed or default, runs the
+        # Scheduler's root finder: optimistix's chord at `newton_atol`, one
+        # Jacobian per nonlinear solve, not diffrax's chord that copies the
+        # step controller's tolerances. That one rejects half its steps on
+        # real biochemical RHSs once the controller tolerance is tight
+        # (18 260 steps against 1 142 on DallePezze at rtol 1e-10, atol
+        # 1e-12), and a user matching another tool's tolerances should not
+        # have to know to replace it. Against a full Newton the chord takes
+        # the same steps on DallePezze and runs 14–34% faster, since the
+        # Newton refreshes its Jacobian every iteration. A root finder the
+        # caller set explicitly is theirs and stays.
+        newton = optx.Chord(
+            rtol=rtol if newton_rtol is None else newton_rtol,
+            atol=newton_atol,
         )
-        self.solver = solver or self.explicit_solver
+        self.explicit_solver = _with_own_root_finder(
+            explicit_solver or dfx.Tsit5(), newton
+        )
+        self.implicit_solver = _with_own_root_finder(
+            implicit_solver or dfx.Kvaerno5(), newton
+        )
+        self.solver = (
+            _with_own_root_finder(solver, newton)
+            if solver is not None
+            else self.explicit_solver
+        )
         self.max_explicit_substeps = max_explicit_substeps
         self.rtol = rtol
         self.atol = atol
@@ -1336,9 +1384,22 @@ class Scheduler:
             if stochastic_procs:
                 from hallsim.stochastic import simulate_ssa
 
+                full_rhs, _ = composite.build_rhs()
+                materialised = Composite._apply_assignments(
+                    zip(
+                        full_rhs.assign_procs,
+                        full_rhs.assign_read_maps,
+                        full_rhs.assign_write_maps,
+                    ),
+                    t,
+                    state,
+                )
                 for proc_name, proc in stochastic_procs.items():
                     read_pairs, write_pairs = stochastic_idxs[proc_name]
-                    view = {port: state[..., idx] for port, idx in read_pairs}
+                    view = {
+                        port: materialised[..., idx]
+                        for port, idx in read_pairs
+                    }
                     process_y0 = {
                         species: float(view[species])
                         for species in proc._species_names
@@ -1928,16 +1989,49 @@ class Scheduler:
         if stochastic_procs:
             proc_name, proc = next(iter(stochastic_procs.items()))
             key_to_idx = {key: i for i, key in enumerate(keys)}
+            topo = composite.topology[proc_name]
+
+            def idx_of(port):
+                return key_to_idx[as_paths(topo[port])[0]]
+
             species_idxs = jnp.asarray(
-                [
-                    key_to_idx[
-                        as_paths(composite.topology[proc_name][species])[0]
-                    ]
-                    for species in proc._species_names
-                ],
-                dtype=jnp.int32,
+                [idx_of(s) for s in proc._species_names], dtype=jnp.int32
             )
-            stochastic_info = (proc_name, proc, species_idxs)
+            # A species read from another pool is not this member's to move.
+            owned = jnp.asarray(
+                [
+                    s not in getattr(proc, "_species_inputs", ())
+                    for s in proc._species_names
+                ]
+            )
+            # Every other port — a driven constant, a driven boundary input —
+            # is read at the window start and held, as any Lie-coupled
+            # input is.
+            held_ports = tuple(
+                p for p in proc.ports_schema() if p not in proc._species_names
+            )
+            held_idxs = tuple(idx_of(p) for p in held_ports)
+            # The member reads the store as the RHS reads it: with every
+            # ASSIGNED path holding its algebraic value, which the flat state
+            # itself does not carry between windows.
+            full_rhs, _ = composite.build_rhs()
+            assign_pre = tuple(
+                zip(
+                    full_rhs.assign_procs,
+                    full_rhs.assign_read_maps,
+                    full_rhs.assign_write_maps,
+                )
+            )
+            stochastic_info = (
+                proc_name,
+                proc,
+                species_idxs,
+                owned,
+                held_ports,
+                held_idxs,
+                assign_pre,
+            )
+        stochastic_capped = jnp.asarray(False)
 
         # Enough windows to reach t1, not the nearest whole number of them:
         # the body clamps the last one to t1, so a span that is not a multiple
@@ -1998,7 +2092,16 @@ class Scheduler:
             )
 
         def body(carry, t_start):
-            st, dt0h, steps, rej, res, rng, stochastic_event_count = carry
+            (
+                st,
+                dt0h,
+                steps,
+                rej,
+                res,
+                rng,
+                stochastic_event_count,
+                stochastic_capped,
+            ) = carry
             t_next = jnp.minimum(t_start + macro_dt, t1)
             dt0_next = [None] * n_groups
 
@@ -2082,22 +2185,56 @@ class Scheduler:
                     last = solved
 
             if stochastic_info is not None:
-                from hallsim.stochastic import ssa_step_jax
+                from hallsim.stochastic import ssa_window_jax
 
-                proc_name, proc, species_idxs = stochastic_info
+                (
+                    proc_name,
+                    proc,
+                    species_idxs,
+                    owned,
+                    held_ports,
+                    held_idxs,
+                    assign_pre,
+                ) = stochastic_info
                 rng, step_key = jax.random.split(rng)
-                local = st[species_idxs]
-                _, new_local, _, n_events, _ = ssa_step_jax(
+                # A jump process has no tangent: the sample path is piecewise
+                # constant in every parameter, so the member enters the
+                # gradient as a sampled forcing and nothing routes through
+                # it. Stopping the tangents at its inputs keeps the loop out
+                # of the reverse pass altogether.
+                view = jax.lax.stop_gradient(
+                    Composite._apply_assignments(assign_pre, t_next, st)
+                )
+                local = view[species_idxs]
+                # Recorded at every save point of the window, so a saved
+                # trajectory carries the sampled path rather than the
+                # window-start value held across it.
+                window_saves = (
+                    t_start
+                    + (t_next - t_start)
+                    * jnp.linspace(0.0, 1.0, n_out + 1)[1:]
+                )
+                new_local, n_events, saved_local = ssa_window_jax(
                     proc,
                     t_span=(t_start, t_next),
                     state=local,
                     key=step_key,
-                    max_events=100_000,
+                    save_times=window_saves,
+                    max_events=SSA_MAX_EVENTS_PER_WINDOW,
+                    inputs={p: view[i] for p, i in zip(held_ports, held_idxs)},
                 )
+                new_local = jnp.where(owned, new_local, st[species_idxs])
                 st = st.at[species_idxs].set(new_local)
                 stochastic_event_count = stochastic_event_count + n_events
+                stochastic_capped = stochastic_capped | (
+                    n_events >= SSA_MAX_EVENTS_PER_WINDOW
+                )
                 if n_out:
-                    traj = traj.at[-1, species_idxs].set(new_local)
+                    traj = traj.at[:, species_idxs].set(
+                        jnp.where(
+                            owned[None, :], saved_local, traj[:, species_idxs]
+                        )
+                    )
             carry = (
                 st,
                 (
@@ -2110,6 +2247,7 @@ class Scheduler:
                 res,
                 rng,
                 stochastic_event_count,
+                stochastic_capped,
             )
             return carry, traj
 
@@ -2121,6 +2259,7 @@ class Scheduler:
             res_init,
             jax.random.PRNGKey(0) if rng_key is None else rng_key,
             stochastic_event_count,
+            stochastic_capped,
         )
         (
             final_state,
@@ -2130,6 +2269,7 @@ class Scheduler:
             res_final,
             _,
             event_count,
+            event_cap_hit,
         ), ys_stack = jax.lax.scan(body, init, t_starts)
 
         # y0, then each window's n_out fresh samples; flatten window into time.
@@ -2163,10 +2303,19 @@ class Scheduler:
         if stochastic_info is not None:
             stats[stochastic_info[0]] = {
                 "num_events": event_count,
+                "event_cap_hit": event_cap_hit,
                 "result": "successful",
                 "solver": "GillespieDirect",
                 "stochastic": True,
             }
+            if not is_traced(event_cap_hit) and bool(event_cap_hit):
+                log.warning(
+                    "%s: a macro window reached the %d-event bound of the "
+                    "compiled stochastic lane and stopped short; the "
+                    "trajectory is truncated there. Shorten macro_dt.",
+                    stochastic_info[0],
+                    SSA_MAX_EVENTS_PER_WINDOW,
+                )
         return ts, composite.materialize_assigned(ts, ys), stats
 
     def _remember_verdict(self, sig, base, digest, integ):

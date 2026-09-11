@@ -700,12 +700,6 @@ def gz06_damage_scan():
     "t=0 (off by default: DP14 senescence is progressive and has none)",
 )
 @click.option(
-    "--proteostasis",
-    is_flag=True,
-    help="add Proctor 2007's ubiquitin–proteasome system, sharing DP14's "
-    "ROS pool and driven by its phospho-mTORC1, with its own reporters",
-)
-@click.option(
     "--fit",
     multiple=True,
     metavar="PARAM",
@@ -720,11 +714,10 @@ def multi_hallmark(
     grad_clip,
     no_plateau,
     equilibrate,
-    proteostasis,
     fit,
 ):
-    """The multi-hallmark composite (DallePezze 2014 + Geva-Zatorsky 2006,
-    plus Proctor 2007 with --proteostasis) scored against GSE248823.
+    """The multi-hallmark composite (DallePezze 2014 + Geva-Zatorsky 2006 +
+    Proctor 2007) scored against GSE248823.
 
     \b
       run        score the composite out of the box, no fitting (default)
@@ -746,7 +739,6 @@ def multi_hallmark(
         grad_clip=grad_clip,
         no_plateau=no_plateau,
         equilibrate=equilibrate,
-        proteostasis=proteostasis,
         fit=fit,
     )
     (cmd_sweep if command == "sweep" else cmd_run)(args)

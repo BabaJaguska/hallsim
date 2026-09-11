@@ -72,16 +72,22 @@ def ssa_step_jax(
     state: jnp.ndarray,
     key,
     max_events: int = 100_000,
+    inputs: dict | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advance one reaction network over a macro window in JAX.
 
-    Returns ``(state, key, num_events)``. The event capacity is static so the
-    complete step can be embedded in a compiled scheduler scan.
+    Returns ``(time, state, key, num_events, active)``. ``inputs`` holds the
+    process's non-species ports — a driven constant, a driven boundary
+    input — at their values for the window, which the propensities read as
+    any Lie-coupled input is read: held across the window. ``max_events``
+    is a loop bound, not a buffer, so it costs nothing to set high; a
+    window that reaches it stops short, which the caller must report.
     """
     species = tuple(process._species_names)
     channels = tuple(process.reaction_channels())
     stoich = _stoichiometry(process, species)
     start, end = t_span
+    held = {} if inputs is None else dict(inputs)
 
     def condition(carry):
         time, _, _, n_events, active = carry
@@ -93,7 +99,7 @@ def ssa_step_jax(
         rates = jnp.asarray(
             process.reaction_propensities(
                 time,
-                {name: state[i] for i, name in enumerate(species)},
+                {**held, **{name: state[i] for i, name in enumerate(species)}},
             )
         )
         total = jnp.sum(rates)
@@ -121,6 +127,88 @@ def ssa_step_jax(
     )
 
 
+def ssa_window_jax(
+    process,
+    *,
+    t_span: tuple[float, float],
+    state: jnp.ndarray,
+    key,
+    save_times: jnp.ndarray,
+    max_events: int = 100_000,
+    inputs: dict | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Advance one reaction network over a macro window and record the
+    state at each of ``save_times`` (all inside the window, the last one
+    its end). Returns ``(state, num_events, saved)`` with ``saved`` of shape
+    ``(len(save_times), n_species)``: the sampled path itself at every
+    save point, not the window-start value held across it. ``inputs`` and
+    ``max_events`` as in :func:`ssa_step_jax`.
+    """
+    species = tuple(process._species_names)
+    channels = tuple(process.reaction_channels())
+    stoich = _stoichiometry(process, species)
+    start, end = t_span
+    held = {} if inputs is None else dict(inputs)
+    n_save = save_times.shape[0]
+    grid = jnp.arange(n_save)
+    saved0 = jnp.zeros((n_save, state.shape[0]), dtype=state.dtype)
+
+    def condition(carry):
+        time, _, _, n_events, _, _, active = carry
+        return active & (time < end) & (n_events < max_events)
+
+    def body(carry):
+        time, state, key, n_events, saved, save_index, active = carry
+        key, wait_key, reaction_key = jax.random.split(key, 3)
+        rates = jnp.asarray(
+            process.reaction_propensities(
+                time,
+                {**held, **{name: state[i] for i, name in enumerate(species)}},
+            )
+        )
+        total = jnp.sum(rates)
+        valid = jnp.all(jnp.isfinite(rates)) & jnp.all(rates >= 0)
+        wait = jax.random.exponential(wait_key) / jnp.maximum(total, 1e-30)
+        next_time = time + wait
+        can_fire = valid & (total > 0) & (next_time < end)
+        reaction = jax.random.choice(
+            reaction_key, len(channels), p=rates / jnp.maximum(total, 1e-30)
+        )
+        # The state holds until the event fires, so every save point the
+        # wait crosses reads the pre-event state.
+        crossed = jnp.minimum(
+            jnp.searchsorted(save_times, next_time, side="left") - 1,
+            n_save - 1,
+        )
+        fill = (grid > save_index) & (grid <= crossed) & can_fire
+        saved = jnp.where(fill[:, None], state[None, :], saved)
+        return (
+            jnp.where(can_fire, next_time, time),
+            jnp.where(can_fire, state + stoich[:, reaction], state),
+            key,
+            n_events + can_fire.astype(jnp.int32),
+            saved,
+            jnp.where(can_fire, crossed, save_index),
+            can_fire,
+        )
+
+    _, state, _, n_events, saved, save_index, _ = jax.lax.while_loop(
+        condition,
+        body,
+        (
+            jnp.asarray(start),
+            state,
+            key,
+            jnp.asarray(0, jnp.int32),
+            saved0,
+            jnp.asarray(-1, jnp.int32),
+            True,
+        ),
+    )
+    saved = jnp.where((grid > save_index)[:, None], state[None, :], saved)
+    return state, n_events, saved
+
+
 def _simulate_ssa_jax(
     process,
     *,
@@ -130,6 +218,7 @@ def _simulate_ssa_jax(
     save_times: jnp.ndarray,
     key,
     max_events: int,
+    inputs: dict,
 ) -> SSAResult:
     species = tuple(process._species_names)
     channels = tuple(process.reaction_channels())
@@ -160,7 +249,11 @@ def _simulate_ssa_jax(
         key, wait_key, reaction_key = jax.random.split(key, 3)
         rates = jnp.asarray(
             process.reaction_propensities(
-                time, {name: state[i] for i, name in enumerate(species)}
+                time,
+                {
+                    **inputs,
+                    **{name: state[i] for i, name in enumerate(species)},
+                },
             )
         )
         total = jnp.sum(rates)
@@ -226,7 +319,8 @@ def _simulate_ssa_jax(
         raise RuntimeError("SSA max_events exhausted before t_span ended")
     final_rates = jnp.asarray(
         process.reaction_propensities(
-            time, {name: state[i] for i, name in enumerate(species)}
+            time,
+            {**inputs, **{name: state[i] for i, name in enumerate(species)}},
         )
     )
     if not bool(jnp.all(jnp.isfinite(final_rates) & (final_rates >= 0))):
@@ -320,7 +414,9 @@ def simulate_ssa(
     ``key`` is a ``jax.random`` key; ``seed`` builds one when it is None.
     The network is the source's, sink species included: a count is bounded
     by its pool, so the freeze the ODE import puts on an inert sink does not
-    apply here.
+    apply here. Entries of ``y0`` beyond the species — a driven constant's
+    port, a driven boundary input's — are held at their value for the whole
+    run; ``input_provider`` may update them along the way.
     """
     if (
         len(t_span) != 2
@@ -336,6 +432,11 @@ def simulate_ssa(
     validate_ssa_process(process)
     species = tuple(process._species_names)
     channels = tuple(process.reaction_channels())
+    inputs = {
+        name: float(value)
+        for name, value in (y0 or {}).items()
+        if name not in species
+    }
     initial = (
         process._species_y0
         if y0 is None
@@ -353,7 +454,7 @@ def simulate_ssa(
     start, end = map(float, t_span)
     save_times = _save_grid(start, end, save_dt)
     key = jax.random.PRNGKey(seed) if key is None else key
-    initial_state = dict(zip(species, values))
+    initial_state = {**inputs, **dict(zip(species, values))}
     rates = jnp.asarray(process.reaction_propensities(start, initial_state))
     if rates.shape != (len(channels),):
         raise ValueError(
@@ -382,4 +483,5 @@ def simulate_ssa(
         save_times=save_times,
         key=key,
         max_events=max_events,
+        inputs=inputs,
     )

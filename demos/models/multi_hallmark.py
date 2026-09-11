@@ -48,9 +48,9 @@ to 1 (DallePezze's published irradiation dose) on its damage rate.
 Gene reporters (see :mod:`hallsim.gene_reporters`): CDKN1A → ``dp14/CDKN1A``,
 GLB1 → ``dp14/SA_beta_gal``, BNIP3 → ``dp14/FoxO3a``, DDB2 → ``gz06/x``
 (RMS amplitude), and MDM2 → ``gz06/y0`` — the Mdm2 *precursor*, which GZ06's
-Table I defines as the transcript, not the protein ``y``. With
-``proteostasis``, HSPA1A → ``p07/MisP`` and UBB → ``p07/Ub``; both read
-Proctor states, so freezing the two ``p07/`` edges moves both.
+Table I defines as the transcript, not the protein ``y``. HSPA1A →
+``p07/MisP`` and UBB → ``p07/Ub`` read Proctor states, so freezing the two
+``p07/`` edges moves both.
 
 ``test_gene_reporters.py`` checks this list against
 ``MULTI_HALLMARK_REPORTERS``, so it fails rather than drifts.
@@ -194,19 +194,19 @@ def build_multi_hallmark_composite(
     *,
     validate: bool = True,
     dose_window=DDIS_ETOPOSIDE_DOSE_WINDOW,
-    proteostasis: bool = False,
 ):
-    """Compose DP14 + GZ06 into one composite, namespaced ``dp14/`` and
-    ``gz06/``; apply hallmarks for the treated and control variants.
+    """Compose DP14, GZ06 and Proctor 2007 into one composite, namespaced
+    ``dp14/``, ``gz06/`` and ``p07/``; apply hallmarks for the treated and
+    control variants.
 
     ``dose_window`` is the ``(t_start, t_end)`` damage pulse; ``None`` holds
     ``Irradiation`` at its severity for the whole run instead of washing out.
     ``validate`` covers topology only — semantic validation is configured per
-    sub-composite and at the merge. ``proteostasis`` adds Proctor 2007's
-    ubiquitin–proteasome system as ``p07/``, its misfolding rate driven by
-    DP14's ROS and its synthesis rate by DP14's phospho-mTORC1.
-    Its k69 starts at 1e-3 in native units; applying the Loss of Proteostasis
-    hallmark scales it by (1 - severity), with complete inhibition at 1.
+    sub-composite and at the merge. Proctor 2007's ubiquitin–proteasome
+    system is ``p07/``, its misfolding rate driven by DP14's ROS and its
+    synthesis rate by DP14's phospho-mTORC1; its k69 starts at 1e-3 in
+    native units, and the Loss of Proteostasis hallmark scales it by
+    (1 - severity), with complete inhibition at 1.
     """
     gz06 = (
         process_from_sbml(
@@ -275,8 +275,7 @@ def build_multi_hallmark_composite(
         # p53 → CDKN1A: read GZ06 p53, add transcription flux to DP14's p21.
         "p53_cdkn1a": {"source": "gz06/x", "target": "dp14/CDKN1A"},
     }
-    if proteostasis:
-        _add_proteostasis(processes, topology, dp14)
+    _add_proteostasis(processes, topology, dp14)
     # Etoposide exposure: a PulseSource ("irradiation_pulse") drives DP14's
     # Irradiation input over the dose window — composed from the general
     # port-coupling path, not a special-cased pulse. Its amplitude is the

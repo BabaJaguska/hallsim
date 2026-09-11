@@ -82,15 +82,6 @@ def _saved_run() -> dict:
         return json.load(fh)
 
 
-def _proteostasis(args) -> bool:
-    """Proctor 2007 attached — read off the saved run's process list, and
-    off the flag only when no fit has been written yet."""
-    saved = _saved_run()
-    if "processes" in saved:
-        return "p07" in saved["processes"]
-    return bool(getattr(args, "proteostasis", False))
-
-
 def _problem(args):
     """The same problem the calibration built, so every figure sees the
     composite, reporters and fitted set the checkpoint belongs to — a fit
@@ -102,7 +93,6 @@ def _problem(args):
     if fitted is None and _CKPT.exists():
         fitted = list(load_fit())
     return build_problem(
-        proteostasis=_proteostasis(args),
         fitted=tuple(fitted) if fitted is not None else None,
     )
 
@@ -397,10 +387,9 @@ def fig_trajectories(args):
         (r.observable.replace("_integral", ""), r.gene_symbol)
         for r in _problem(args).reporters
     ]
-    proteostasis = _proteostasis(args)
 
     def run(gi, dns):
-        base = build_multi_hallmark_composite(proteostasis=proteostasis)
+        base = build_multi_hallmark_composite()
         hallmarks = {"Genomic Instability": gi}
         if dns != 0.0:
             hallmarks["Deregulated Nutrient Sensing"] = dns
@@ -1187,7 +1176,6 @@ def fig_coupling_ablation(args):
     )
     levels = trajectory_levels(problem.composite, ctrl)
     null = build_problem(
-        proteostasis=_proteostasis(args),
         composite=freeze_coupling(problem.composite, levels),
         fitted=tuple(problem.param_refs),
     )
@@ -1340,6 +1328,171 @@ def fig_training(args):
     print(f"wrote training_curves.png/.pdf -> {OUT_CAL}", flush=True)
 
 
+def fig_proteostasis_population(args):
+    """Proctor 2007 at reaction level on the fitted trajectory, as a
+    population: its two reporters per cell, the population mean, the mean
+    field the calibration used, and the data.
+
+    Calibration goes through the mean field; nothing here is fitted. Each
+    cell's fold-change is the reporter machinery applied to that cell's own
+    trajectory (its own day-0 reference, as the loss does); the population
+    mean divides pooled readouts, as a bulk assay does.
+    """
+    import numpy as np
+
+    from hallsim.scheduler import Scheduler
+
+    problem = _problem(args)
+    params = {k: jnp.asarray(v) for k, v in load_fit().items()}
+    n_cells = int(getattr(args, "n_cells", 64))
+    seed = int(getattr(args, "seed", 0))
+    arms = list(problem.arm_pairs)
+    rep_idx = [
+        i
+        for i, r in enumerate(problem.reporters)
+        if r.observable.startswith("p07/")
+    ]
+    genes = [problem.reporters[i].gene_symbol for i in rep_idx]
+
+    substituted = problem._substitute(problem.composite.processes, params)
+    registry = problem._registry(params)
+    procs = dict(substituted)
+    procs["p07"] = procs["p07"].as_stochastic()
+    span = problem.t_end - problem.t_start
+    save_dt = max(1e-6, span / max(1, problem.n_save - 1))
+    sched = Scheduler(**problem.scheduler_kwargs)
+
+    rows = {}
+    for arm in arms:
+        days = sorted(float(t) for t in problem.data[arm])
+        qt = jnp.asarray(days)
+        mean_field = np.asarray(problem.model_lfc(params, arm, qt))[rep_idx]
+        cond = problem.conditions[problem.arm_pairs[arm][0]]
+        comp = problem._condition_composite(procs, cond, registry=registry)
+        y0 = comp.initial_state_vec()
+        res = sched.run(
+            comp,
+            t_span=(problem.t_start, problem.t_end),
+            macro_dt=problem.macro_dt,
+            y0=jnp.tile(y0[None], (n_cells, 1)),
+            save_dt=save_dt,
+            seed=seed,
+        )
+        trajs = jnp.stack(
+            [res.ys[..., idx] for idx in problem._reporter_indices]
+        )  # (n_rep, n_save, n_cells)
+
+        def lfc_of(tr):  # one cell's sign-aligned fold-change, as the loss
+            arm_readout = problem._reporter_summaries(res.ts, tr, qt)
+            ref = problem._reporter_summaries(res.ts, tr, jnp.zeros_like(qt))
+            return problem._log2_fold_change(arm_readout, ref)
+
+        per_cell = np.asarray(
+            jax.vmap(lfc_of, in_axes=2, out_axes=2)(trajs)
+        )  # (n_rep, n_t, n_cells)
+        pooled_traj = trajs.mean(axis=2)
+        pooled = np.asarray(lfc_of(pooled_traj))
+        measured = np.asarray(
+            [[float(problem.data[arm][t][g]) for t in days] for g in genes]
+        )
+        rows[arm] = dict(
+            days=days,
+            cells=per_cell[rep_idx],
+            pooled=pooled[rep_idx],
+            mean_field=mean_field,
+            measured=measured,
+        )
+
+    fig, axes = plt.subplots(
+        len(genes),
+        len(arms),
+        figsize=(4.4 * len(arms), 3.2 * len(genes)),
+        squeeze=False,
+        sharex=True,
+    )
+    rng = np.random.default_rng(0)
+    for j, arm in enumerate(arms):
+        r = rows[arm]
+        for i, gene in enumerate(genes):
+            ax = axes[i, j]
+            for k, day in enumerate(r["days"]):
+                jitter = rng.uniform(-0.25, 0.25, n_cells)
+                ax.scatter(
+                    day + jitter,
+                    r["cells"][i, k],
+                    s=9,
+                    color="#9aa0a6",
+                    alpha=0.5,
+                    linewidths=0,
+                    label="one cell" if k == 0 else None,
+                )
+            ax.plot(
+                r["days"],
+                r["pooled"][i],
+                "D-",
+                color="#1f1f1f",
+                ms=6,
+                label=f"population mean, N={n_cells}",
+            )
+            ax.plot(
+                r["days"],
+                r["mean_field"][i],
+                "s--",
+                color="#d97706",
+                ms=6,
+                label="mean field (calibrated)",
+            )
+            ax.plot(
+                r["days"],
+                r["measured"][i],
+                "o",
+                color="#c62828",
+                ms=7,
+                mfc="none",
+                mew=1.6,
+                label="measured (GSE248823)",
+            )
+            ax.axhline(0, color="#ddd", lw=1)
+            ax.set_title(
+                f"{gene}  ·  {arm.replace('_vs_', ' vs ')}", fontsize=10
+            )
+            if j == 0:
+                ax.set_ylabel("log2 fold-change")
+            if i == len(genes) - 1:
+                ax.set_xlabel("day")
+                ax.set_xticks(r["days"])
+    axes[0, 0].legend(fontsize=8, loc="upper left")
+    fig.suptitle(
+        "Proctor's reporters: one cell is quantised, the population mean "
+        "tracks the mean field",
+        fontsize=12,
+        fontweight="bold",
+    )
+    fig.text(
+        0.5,
+        0.925,
+        f"Proctor 2007 at reaction level on the calibrated trajectory, "
+        f"{n_cells} cells, seed {seed}; calibration through the mean field",
+        ha="center",
+        fontsize=9,
+        color="#555",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    stem = "proteostasis_population"
+    for ext in ("png", "pdf"):
+        fig.savefig(OUT_CAL / f"{stem}.{ext}", dpi=150, bbox_inches="tight")
+    print(f"wrote {stem}.png -> {OUT_CAL}", flush=True)
+    for arm in arms:
+        r = rows[arm]
+        for i, gene in enumerate(genes):
+            print(
+                f"  {arm} {gene}: days {r['days']} measured {r['measured'][i].round(3).tolist()} "
+                f"mean-field {r['mean_field'][i].round(3).tolist()} pooled {r['pooled'][i].round(3).tolist()} "
+                f"cell sd {r['cells'][i].std(axis=1).round(2).tolist()}",
+                flush=True,
+            )
+
+
 FIGURES = {
     "schematic": fig_schematic,
     "training": fig_training,
@@ -1351,6 +1504,7 @@ FIGURES = {
     "before-after": fig_before_after,
     "coupling-ablation": fig_coupling_ablation,
     "composite-graph": fig_composite_graph,
+    "proteostasis-population": fig_proteostasis_population,
 }
 
 
@@ -1371,12 +1525,23 @@ def main():
         "(out-of-the-box) or the saved fit.",
     )
     ap.add_argument(
-        "--proteostasis",
-        action="store_true",
-        help="the composite with Proctor 2007 attached, as the calibration "
-        "that wrote the checkpoint was run.",
+        "--run",
+        default=None,
+        help="a calibration run directory to draw from instead of the "
+        "latest (its checkpoint and summary).",
     )
+    ap.add_argument(
+        "--n-cells",
+        type=int,
+        default=64,
+        help="cells in the proteostasis-population figure.",
+    )
+    ap.add_argument("--seed", type=int, default=0, help="population seed.")
     args = ap.parse_args()
+    if args.run:
+        global OUT_CAL, _CKPT
+        OUT_CAL = Path(args.run).resolve()
+        _CKPT = OUT_CAL / "checkpoint.npz"
     todo = FIGURES.values() if args.figure == "all" else [FIGURES[args.figure]]
     for fn in todo:
         fn(args)

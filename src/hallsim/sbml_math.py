@@ -257,12 +257,17 @@ def inline_functions(
 # ── sympy → JAX ──────────────────────────────────────────────────────
 
 
-def to_jax(expr: sympy.Basic, symbols: Sequence[sympy.Symbol]):
+def to_jax(
+    expr: sympy.Basic, symbols: Sequence[sympy.Symbol], *, cse: bool = False
+):
     """A JAX callable ``f(*values)`` evaluating ``expr`` at ``symbols``.
 
     Traceable under ``jit``, ``grad`` and ``vmap``. Integer literals past
     the jit limit and the Avogadro csymbol are substituted as floats;
-    everything else prints exactly.
+    everything else prints exactly. ``cse`` factors the subexpressions a
+    tuple of expressions shares into temporaries computed once, which is
+    the difference between a model's laws and a model's laws each
+    re-deriving what the others already have.
     """
     demote = {AVOGADRO: sympy.Float(AVOGADRO_VALUE)}
     for n in expr.atoms(sympy.Integer):
@@ -280,7 +285,11 @@ def to_jax(expr: sympy.Basic, symbols: Sequence[sympy.Symbol]):
         }
     )
     return sympy.lambdify(
-        list(symbols), expr.xreplace(demote), modules="jax", printer=printer
+        list(symbols),
+        expr.xreplace(demote),
+        modules="jax",
+        printer=printer,
+        cse=cse,
     )
 
 

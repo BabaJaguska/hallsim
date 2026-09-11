@@ -1585,6 +1585,28 @@ The check that would catch a mistake does not exist, does not run, or fails open
 
 ## P3 — capability gaps
 
+- [ ] **P3.21 — The composite's flat right-hand side costs twice what the
+  same field costs as one generated function.** Measured 2026-09-11 against
+  jaxkineticmodel on DallePezze with the step counts equal (1 142 at
+  ``rtol=1e-10, atol=1e-12``, Kvaerno5 with the Scheduler's Newton): 125 ms
+  per 14-day solve through the Scheduler, 68 ms for the identical field
+  exported as one CSE'd JAX function, 61 ms for jaxkineticmodel. The
+  Scheduler already integrates only the EVOLVED and EXCLUSIVE paths of a
+  group (`_ReducedRHS` over `evolved_indices`); a first reading of this
+  entry blamed the algebraic slots, and that was a hand-built diffrax call
+  on the full flat vector, not the Scheduler. What the factor of two is:
+  the flat RHS spends 960 of its 1 577 jaxpr equations on ``slice``/
+  ``squeeze`` pairs from element reads of ``y``, ``w`` and ``c``, evaluates
+  the model program twice per derivative (assignments, then rates, so that
+  a driven boundary input can override its rule between them), and re-runs
+  the 14 assignment rules inside every RHS call because the derivative
+  reads them. jaxkineticmodel's RHS is 296 equations for the same
+  arithmetic. *Fix:* unpack the state vector once in the generated program;
+  evaluate it once per derivative with the driver override applied to
+  ``w`` before the call; and let the composite pass assigned values to the
+  member instead of recomputing them per call where the member's own
+  program already has them.
+
 - [ ] **P3.1 — Severity cannot be a state.** A hallmark dial is a constant set
   before the run, so aging is imposed as an initial condition. For an attractor
   to change, severity must evolve — a depleting repair capacity, a ratchet.

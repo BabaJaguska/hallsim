@@ -282,3 +282,32 @@ class TestRoutingUnderTracing:
             _composite(StiffPair(), "stiff"), t_span=(0.0, 5.0), macro_dt=1.0
         )
         assert _solvers(res) == {"Kvaerno5"}
+
+
+class TestPinnedImplicitSolverRootFinder:
+    """An implicit solver handed to the Scheduler runs the Scheduler's root
+    finder, not diffrax's chord that copies the controller's tolerances —
+    which rejects half its steps once those tolerances are tight. A root
+    finder the caller chose is kept."""
+
+    def test_a_bare_implicit_solver_gets_the_schedulers_root_finder(self):
+        import optimistix as optx
+
+        from hallsim.config import DEFAULT_NEWTON_ATOL
+
+        for kw in ("solver", "implicit_solver"):
+            sched = Scheduler(
+                **{kw: dfx.Kvaerno5()}, auto_stiffness=False, atol=1e-12
+            )
+            rf = getattr(sched, kw).root_finder
+            assert isinstance(rf, optx.Chord)
+            assert float(rf.atol) == DEFAULT_NEWTON_ATOL
+
+    def test_a_chosen_root_finder_is_kept(self):
+        chosen = dfx.VeryChord(rtol=1e-8, atol=1e-8)
+        sched = Scheduler(implicit_solver=dfx.Kvaerno5(root_finder=chosen))
+        assert sched.implicit_solver.root_finder is chosen
+
+    def test_an_explicit_solver_is_untouched(self):
+        tsit = dfx.Tsit5()
+        assert Scheduler(solver=tsit, auto_stiffness=False).solver is tsit

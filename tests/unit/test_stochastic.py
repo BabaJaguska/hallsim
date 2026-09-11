@@ -285,3 +285,72 @@ def test_a_stochastic_copy_integrates_the_sink_the_ode_import_froze(tmp_path):
         )
     )[sink]
     assert any(moving_row)
+
+
+def test_a_driven_constant_reaches_the_stochastic_member(tmp_path):
+    """A stochastic member whose rate constant is driven from a store path:
+    the propensities read the driving port, held over each window, in the
+    compiled lane and the eager one alike."""
+    path = tmp_path / "decay.xml"
+    path.write_text(textwrap.dedent(MODEL))
+    process = (
+        process_from_sbml(str(path), name="decay")
+        .as_stochastic()
+        .with_param_input("k", "k_in")
+    )
+    topology = {name: f"decay/{name}" for name in process._species_names}
+    topology["k_in"] = "drive/k"
+
+    def run(level, **scheduler_kwargs):
+        composite = Composite(
+            processes={"decay": process},
+            topology={"decay": topology},
+            initial={"drive/k": level},
+            validate=False,
+            semantic_validation=False,
+        )
+        return Scheduler(**scheduler_kwargs).run(
+            composite, t_span=(0.0, 1.0), macro_dt=0.25, save_dt=0.25, seed=3
+        )
+
+    driven = run(8.0)
+    assert driven.stats["decay"]["num_events"] > 0
+    assert float(driven.ys[-1, driven.keys.index("decay/A")]) < 10
+    assert not bool(driven.stats["decay"]["event_cap_hit"])
+    assert run(0.0).stats["decay"]["num_events"] == 0
+    eager = run(8.0, progress=True)
+    assert eager.stats["decay"]["num_events"] > 0
+
+
+def test_saved_trajectory_carries_the_sampled_path_inside_a_window(tmp_path):
+    """Several save points per macro window: each carries the count at that
+    time, not the window-start value held across the window. Pure death
+    from 40 at rate 8 halves the pool well inside the first window."""
+    path = tmp_path / "decay.xml"
+    path.write_text(
+        textwrap.dedent(MODEL).replace(
+            'initialAmount="10"', 'initialAmount="40"'
+        )
+    )
+    process = process_from_sbml(str(path), name="decay").as_stochastic()
+    composite = Composite(
+        processes={"decay": process.with_param_input("k", "k_in")},
+        topology={
+            "decay": {
+                **{n: f"decay/{n}" for n in process._species_names},
+                "k_in": "drive/k",
+            }
+        },
+        initial={"drive/k": 8.0},
+        validate=False,
+        semantic_validation=False,
+    )
+    result = Scheduler().run(
+        composite, t_span=(0.0, 1.0), macro_dt=1.0, save_dt=0.1, seed=5
+    )
+    a = np.asarray(result.ys[:, result.keys.index("decay/A")])
+    assert a.shape[0] == 11
+    assert a[0] == 40 and a[-1] < 40
+    # strictly monotone non-increasing, and moving inside the window
+    assert np.all(np.diff(a) <= 0)
+    assert np.count_nonzero(np.diff(a)) >= 3

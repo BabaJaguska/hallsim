@@ -38,6 +38,11 @@ deterministically, but their stochastic view raises explicitly when used.
 `simulate_ssa` is currently a direct-method single-process runner; the
 Scheduler now also recognizes an explicitly selected
 `SBMLProcess.as_stochastic()` in an eager single-stochastic-process lane.
+In both lanes the member reads the store with the assignment pass applied
+and every non-species port held over the window, so a driven constant or
+a pool handed over from another model reaches its propensities
+(2026-09-11); the compiled lane's per-window event bound is 10 million and
+a window that reaches it is reported, not silently cut.
 The direct runner remains useful for one-way hybrid inputs. A batched state
 splits the run key per member on the compiled lane (2026-09-11); multiple
 stochastic processes and fully coupled hybrid splitting remain unfinished.
@@ -163,7 +168,17 @@ that earns it.
 - **Calibration gradients.** Nothing differentiates through a categorical
   sample. Fit on the mean field and validate stochastically, or go
   gradient-free for the stochastic member. Not a blocker for import or for the
-  population demo; it is a hard boundary for `Calibrator`.
+  population demo; it is a hard boundary for `Calibrator`. *Status
+  2026-09-11:* the boundary is now explicit rather than a crash. The compiled
+  lane stops tangents at the member's inputs, so the jump process enters a
+  gradient as a sampled forcing: reverse mode passes, every parameter whose
+  effect reaches the reporters without crossing the member keeps its exact
+  gradient, and one that reaches them only through the member gets zero,
+  which `CalibrationProblem` announces at construction and the post-fit
+  identifiability report shows as *structural*. Measured on the
+  multi-hallmark composite with Proctor 2007 at reaction level: finite
+  gradients for DallePezze's and Geva-Zatorsky's parameters, exactly 0 for
+  the mTORC1→synthesis gain.
 - **Population observables.** The paper's only readout is "% of cells above a
   threshold". `vmap` over keys supplies the axis; the reporter layer has no
   population statistic to put on it (P3.8, P3.9), and

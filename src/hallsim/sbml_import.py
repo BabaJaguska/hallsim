@@ -244,7 +244,7 @@ class SBMLProcess(ImportedODEProcess):
             )
             c = c.at[indexes].set(jnp.stack([driven[n] for n in names]))
         t_native = t * self.time_scale
-        w = self._model.assignmentfunc(y, self._w0, c, t_native)
+        w = self._model.boundaryfunc(y, self._w0, c, t_native)
         if self._input_drivers:
             name_to_widx = dict(zip(self._w_names, self._w_indexes))
             for input_name, port in self._input_drivers:
@@ -526,7 +526,7 @@ class SBMLProcess(ImportedODEProcess):
         # Process is shape-polymorphic and batched runs need no extra vmap.
         y = jnp.stack([state[name] for name in self._species_names], axis=-1)
         ratefunc = self._model.ratefunc
-        assignmentfunc = self._model.assignmentfunc
+        boundaryfunc = self._model.boundaryfunc
         is_batched = y.ndim > 1
 
         c = self._constants(t)
@@ -559,16 +559,18 @@ class SBMLProcess(ImportedODEProcess):
         # assignment rules stay on the model's own clock.
         t_native = t * self.time_scale
 
-        # Assignment rules evaluated from the *current* state; freezing `w` at
-        # its initial value would leave a state-dependent rule stuck at t=0.
+        # The boundary rules the field reads, at the *current* state and
+        # time; every other assignment is compiled into the rates already.
+        # Freezing `w` at its initial value would leave a time-dependent
+        # input stuck at t=0.
         w_batched = False
         if is_batched:
-            w = jax.vmap(assignmentfunc, in_axes=(0, None, None, None))(
+            w = jax.vmap(boundaryfunc, in_axes=(0, None, None, None))(
                 y, self._w0, c, t_native
             )
             w_batched = True
         else:
-            w = assignmentfunc(y, self._w0, c, t_native)
+            w = boundaryfunc(y, self._w0, c, t_native)
 
         # A driven input overrides the native SBML drive already in `w` with
         # its INPUT-port value, so a prescribed dose is a wired forcing source
