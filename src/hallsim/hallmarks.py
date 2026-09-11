@@ -4,7 +4,7 @@ A hallmark of aging (Lopez-Otin et al., 2023) is a signed severity handle in
 [-1, 1] modulating parameters across one or more Processes: -1 is the full
 opposite perturbation (mTOR suppression), 0 homeostasis, +1 severely impaired.
 A hallmark with no meaningful opposite — there is no negative DNA damage —
-uses the [0, 1] half. :data:`HALLMARK_REGISTRY` maps 4 of the 12 today; each
+uses the [0, 1] half. :data:`HALLMARK_REGISTRY` maps 5 of the 12 today; each
 new one is a single :class:`HallmarkHandle` entry.
 
 Transforms are **multiplicative of the current base**: ``base * f(severity)``,
@@ -271,6 +271,30 @@ def with_hallmarks(composite, hallmarks: dict[str, float], *, registry=None):
 # Process names match those in build_eriq_composite().
 
 HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
+    "Loss of Proteostasis": HallmarkHandle(
+        name="Loss of Proteostasis",
+        description=(
+            "Reduced proteasomal degradation capacity in Proctor 2007. "
+            "Severity 0 preserves the current activity, 1 inhibits it "
+            "completely. This [0, 1] intervention models one mechanism "
+            "of proteostasis loss, not all protein quality control."
+        ),
+        category="Primary",
+        references=["Proctor et al. 2007 (BIOMD0000000105), Figures 2–3"],
+        mappings=[
+            ParameterMapping(
+                process_name="p07",
+                param_name="parameters.k69",
+                floor=1.0,
+                slope=-1.0,
+                description=(
+                    "Proteasome activity: k69 = base * (1 - severity). "
+                    "Linear interpolation is a modeling convention between "
+                    "normal activity and the paper's complete inhibition."
+                ),
+            ),
+        ],
+    ),
     "Stem Cell Exhaustion": HallmarkHandle(
         name="Stem Cell Exhaustion",
         description=(

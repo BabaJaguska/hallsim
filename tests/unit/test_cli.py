@@ -134,3 +134,21 @@ class TestTheFittedSetIsOneList:
     def test_a_name_outside_the_default_set_is_refused(self):
         with pytest.raises(KeyError, match="not in the fitted set"):
             self._build(fitted=("not_a_parameter",))
+
+
+def test_unscored_run_preserves_proteostasis_option(monkeypatch, tmp_path):
+    from demos import multi_hallmark_calibrate as demo
+
+    monkeypatch.setattr(demo, "SERIES_MATRIX", tmp_path / "missing.txt")
+    monkeypatch.setattr(demo, "make_run_dir", lambda name: tmp_path)
+    received = {}
+
+    def unscored(equilibrate, out_dir, *, proteostasis=False):
+        received.update(proteostasis=proteostasis, equilibrate=equilibrate)
+
+    monkeypatch.setattr(demo, "run_unscored", unscored)
+    result = CliRunner().invoke(
+        simulate, ["multi-hallmark", "run", "--proteostasis"]
+    )
+    assert result.exit_code == 0, result.output
+    assert received == {"proteostasis": True, "equilibrate": False}

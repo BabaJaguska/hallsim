@@ -339,3 +339,42 @@ class TestHallmarkHandles:
         assert jnp.isfinite(g)
         # d/dh ((1 + 2h)^2) at h=0.5 = 2 * 2 * 2 = 8 → check magnitude
         assert float(g) == pytest.approx(8.0)
+
+
+@pytest.mark.demo
+def test_proteostasis_handle_scales_composite_activity_without_mutation():
+    import equinox as eqx
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
+    from hallsim.hallmarks import apply_hallmarks
+
+    composite = build_multi_hallmark_composite(
+        validate=False, proteostasis=True
+    )
+    original = composite.processes
+    assert float(original["p07"].parameters["k69"]) == pytest.approx(1e-3)
+    for severity, expected in [(0.0, 1e-3), (0.5, 5e-4), (1.0, 0.0)]:
+        modified = apply_hallmarks(
+            original, {"Loss of Proteostasis": severity}
+        )
+        assert float(modified["p07"].parameters["k69"]) == pytest.approx(
+            expected
+        )
+        assert modified["dp14"] is original["dp14"]
+    assert float(original["p07"].parameters["k69"]) == pytest.approx(1e-3)
+
+    fitted = dict(original)
+    fitted["p07"] = eqx.tree_at(
+        lambda p: p.parameters["k69"], original["p07"], jnp.asarray(2e-3)
+    )
+
+    def activity(severity):
+        return apply_hallmarks(fitted, {"Loss of Proteostasis": severity})[
+            "p07"
+        ].parameters["k69"]
+
+    assert float(activity(0.5)) == pytest.approx(1e-3)
+    assert float(jax.grad(activity)(0.5)) == pytest.approx(-2e-3)
+    with pytest.raises(KeyError, match="no target"):
+        apply_hallmarks(
+            {"dp14": original["dp14"]}, {"Loss of Proteostasis": 1}
+        )

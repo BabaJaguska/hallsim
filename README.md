@@ -21,6 +21,44 @@ HallSim is a **composition framework** — you bring the modules (hand-written, 
 - Make multi-model composition tractable for AI agents building digital twins — at a scale no one assembles by hand.
 - Serve as an educational in-silico testbed for perturbations (rapamycin, caloric restriction, …).
 
+## Standalone stochastic demo
+
+```bash
+simulate proctor2007-ssa --runs 6 --hours 24 --seed 0
+```
+
+Simulates the bundled Proctor 2007 ubiquitin–proteasome model with direct
+Gillespie SSA, holding initial counts and parameters fixed across seeds.
+Writes six species panels to `outputs/proctor2007_ssa/trajectories.png` and
+all sampled species, seeds, and event counts to `trajectories.npz`.
+Time is displayed in hours; the simulation uses the model's native seconds.
+The default uses normal proteasome activity (`k69=1e-3`, documented in the
+SBML notes); `--inhibited` selects the deposit's `k69=0` condition.
+Use `--output PATH`, `--samples N`, and `--max-events N` to control output
+and event capacity. Exceeding capacity raises an error instead of returning
+a truncated trajectory. These plots illustrate stochastic variability;
+they are not a reproduction of the paper's figures.
+
+The multi-hallmark composite includes Proctor only when built with
+`proteostasis=True`. It starts with normal activity, `p07.parameters["k69"] = 1e-3`.
+Apply reduced proteasome activity through the hallmark interface:
+
+```python
+from demos.models.multi_hallmark import build_multi_hallmark_composite
+from hallsim.hallmarks import apply_hallmarks
+from hallsim.composite import Composite
+
+base = build_multi_hallmark_composite(proteostasis=True)
+processes = apply_hallmarks(base.processes, {"Loss of Proteostasis": 0.5})
+perturbed = Composite(processes=processes, topology=base.topology)
+```
+
+Severity in `[0, 1]` scales the current `k69` by `1 - severity`: 0 leaves
+it unchanged, 0.5 halves it, and 1 completely inhibits degradation. This
+linear intervention represents reduced proteasome activity, not every
+mechanism of proteostasis loss. Apply each severity to the same base;
+repeated applications compound. The base composite is unchanged.
+
 ## Architecture
 
 ![HallSim Architecture](docs/assets/hallsim_architecture.png)

@@ -220,3 +220,40 @@ def test_eager_lane_is_seeded_and_refuses_a_batch(tmp_path):
     y0 = jnp.stack([composite.initial_state_vec()] * 2)
     with pytest.raises(ValueError, match="unbatched"):
         eager.run(composite, y0=y0, **_SPAN)
+
+@pytest.mark.parametrize("provider", [None, lambda t, state: None])
+def test_ssa_samples_only_reactions_that_have_already_fired(
+    tmp_path, provider
+):
+    path = tmp_path / "decay.xml"
+    path.write_text(textwrap.dedent(MODEL))
+    process = process_from_sbml(str(path), name="decay")
+    # Independently reconstruct the exact event times of pure death A -> B.
+    key = jax.random.PRNGKey(4)
+    time = 0.0
+    events = []
+    for remaining in range(10, 0, -1):
+        key, wait_key, _ = jax.random.split(key, 3)
+        time += float(jax.random.exponential(wait_key)) / remaining
+        events.append(time)
+    result = simulate_ssa(
+        process,
+        t_span=(0.0, 3.0),
+        save_dt=0.01,
+        seed=4,
+        max_events=20,
+        input_provider=provider,
+    )
+    expected = 10 - np.searchsorted(events, result.times, side="right")
+    np.testing.assert_array_equal(result.states[:, 0], expected)
+
+
+@pytest.mark.parametrize("provider", [None, lambda t, state: None])
+def test_ssa_event_limit_is_not_silent(tmp_path, provider):
+    path = tmp_path / "decay.xml"
+    path.write_text(textwrap.dedent(MODEL))
+    process = process_from_sbml(str(path), name="decay")
+    with pytest.raises(RuntimeError, match="max_events"):
+        simulate_ssa(
+            process, t_span=(0.0, 3.0), max_events=1, input_provider=provider
+        )

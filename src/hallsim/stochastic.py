@@ -178,11 +178,11 @@ def _simulate_ssa_jax(
         event_indices = event_indices.at[n_events].set(
             jnp.asarray(reaction, dtype=jnp.int32)
         )
-        crossed = jnp.searchsorted(save_times, next_time, side="right")
+        crossed = jnp.searchsorted(save_times, next_time, side="left") - 1
         crossed = jnp.minimum(crossed, save_times.shape[0] - 1)
         grid = jnp.arange(save_times.shape[0])
         fill = (grid > save_index) & (grid <= crossed)
-        saved = jnp.where(fill[:, None], next_state[None, :], saved)
+        saved = jnp.where(fill[:, None], state[None, :], saved)
         return (
             jnp.where(can_fire, next_time, time),
             jnp.where(can_fire, next_state, state),
@@ -222,7 +222,15 @@ def _simulate_ssa_jax(
     )
     grid = jnp.arange(save_times.shape[0])
     saved = jnp.where((grid > save_index)[:, None], state[None, :], saved)
-    del active
+    if bool(active) and int(n_events) >= max_events and float(time) < end:
+        raise RuntimeError("SSA max_events exhausted before t_span ended")
+    final_rates = jnp.asarray(
+        process.reaction_propensities(
+            time, {name: state[i] for i, name in enumerate(species)}
+        )
+    )
+    if not bool(jnp.all(jnp.isfinite(final_rates) & (final_rates >= 0))):
+        raise ValueError("SSA encountered an invalid reaction propensity")
     return SSAResult(
         times=save_times,
         states=saved,
@@ -273,16 +281,19 @@ def _simulate_ssa_with_provider(
         reaction = int(
             jax.random.choice(reaction_key, len(channels), p=rates / total)
         )
+        while (
+            save_index + 1 < len(save_times)
+            and float(save_times[save_index + 1]) < time
+        ):
+            save_index += 1
+            saved.append([state[name] for name in species])
         for i, name in enumerate(species):
             state[name] += float(stoich[i, reaction])
         event_times.append(time)
         event_indices.append(reaction)
-        while (
-            save_index + 1 < len(save_times)
-            and float(save_times[save_index + 1]) <= time
-        ):
-            save_index += 1
-            saved.append([state[name] for name in species])
+
+    if len(event_indices) >= max_events and time < end:
+        raise RuntimeError("SSA max_events exhausted before t_span ended")
 
     while len(saved) < len(save_times):
         saved.append([state[name] for name in species])
@@ -308,7 +319,11 @@ def simulate_ssa(
 
     ``key`` is a ``jax.random`` key; ``seed`` builds one when it is None.
     """
-    if len(t_span) != 2 or t_span[1] < t_span[0]:
+    if (
+        len(t_span) != 2
+        or not all(map(math.isfinite, t_span))
+        or t_span[1] < t_span[0]
+    ):
         raise ValueError("t_span must be an increasing (start, end) pair")
     if save_dt is not None and (not math.isfinite(save_dt) or save_dt <= 0):
         raise ValueError("save_dt must be positive and finite")

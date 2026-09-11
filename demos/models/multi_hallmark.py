@@ -205,6 +205,8 @@ def build_multi_hallmark_composite(
     sub-composite and at the merge. ``proteostasis`` adds Proctor 2007's
     ubiquitin–proteasome system as ``p07/``, its misfolding rate driven by
     DP14's ROS and its synthesis rate by DP14's phospho-mTORC1.
+    Its k69 starts at 1e-3 in native units; applying the Loss of Proteostasis
+    hallmark scales it by (1 - severity), with complete inhibition at 1.
     """
     gz06 = (
         process_from_sbml(

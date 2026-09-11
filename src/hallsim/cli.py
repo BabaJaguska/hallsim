@@ -752,6 +752,68 @@ def multi_hallmark(
     (cmd_sweep if command == "sweep" else cmd_run)(args)
 
 
+@simulate.command("proctor2007-ssa")
+@click.option(
+    "--runs",
+    type=click.IntRange(min=2),
+    default=6,
+    show_default=True,
+    help="Number of independent stochastic runs.",
+)
+@click.option(
+    "--hours",
+    type=click.FloatRange(min=0, min_open=True),
+    default=24.0,
+    show_default=True,
+    help="Simulation duration in hours.",
+)
+@click.option(
+    "--samples",
+    type=click.IntRange(min=2),
+    default=289,
+    show_default=True,
+    help="Number of saved time points.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=0,
+    show_default=True,
+    help="First random seed; incremented for each run.",
+)
+@click.option(
+    "--max-events",
+    type=click.IntRange(min=1),
+    default=2_000_000,
+    show_default=True,
+    help="Reaction event capacity per run.",
+)
+@click.option(
+    "--inhibited",
+    is_flag=True,
+    help="Use inhibited proteasome activity (k69=0).",
+)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Output directory (default: repository outputs/proctor2007_ssa).",
+)
+def proctor2007_ssa(runs, hours, samples, seed, max_events, inhibited, output):
+    """Plot repeated standalone Proctor 2007 Gillespie simulations."""
+    from demos.proctor2007_ssa import run
+
+    run(
+        runs=runs,
+        hours=hours,
+        samples=samples,
+        seed=seed,
+        max_events=max_events,
+        inhibited=inhibited,
+        output=output,
+    )
+
+
 @simulate.command("multi-hallmark-ssa")
 @click.option("--t-end", type=float, default=14.0, show_default=True)
 @click.option("--save-dt", type=float, default=0.1, show_default=True)

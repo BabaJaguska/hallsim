@@ -140,9 +140,8 @@ ARM_CONDITIONS = {arm: cond for arm, (cond, _) in ARM_PAIRS.items()}
 def _default_fit_params(composite, published, proteostasis: bool) -> dict:
     """The fitted set: one parameter per reporter axis the data constrains,
     each with a log-normal MAP prior at its published or placed value. With
-    Proctor 2007 attached, the two its identifiability screen kept
-    (2026-09-07): the mTORC1→synthesis gain, which the two gains are
-    confounded through, and proteasome activity k69."""
+    Proctor 2007 attached, fit the mTORC1→synthesis gain. Proteasome
+    activity k69 is excluded by the reporter identifiability check."""
     params = {
         "sa_beta_gal_decay": ParameterRef(
             "dp14",
@@ -844,7 +843,7 @@ def _missing_data_notice() -> str:
     )
 
 
-def run_unscored(equilibrate: bool, out_dir: Path):
+def run_unscored(equilibrate: bool, out_dir: Path, *, proteostasis=False):
     """The scored run minus the scoring.
 
     Same problem, same reporters, same overview figure — the measured points
@@ -852,7 +851,7 @@ def run_unscored(equilibrate: bool, out_dir: Path):
     concordance is reported: with no arms to compare against there is nothing
     to be concordant with.
     """
-    problem = build_problem(equilibrate=equilibrate)
+    problem = build_problem(equilibrate=equilibrate, proteostasis=proteostasis)
     params = problem.initial_params()
     print(f"[unscored] reporters : {len(problem.reporters)}")
     print(f"[unscored] arms      : {list(_ARM_STYLE)}")
@@ -883,7 +882,9 @@ def cmd_run(args) -> None:
     fitted = tuple(getattr(args, "fit", ()) or ()) or None
     if not SERIES_MATRIX.exists():
         print(_missing_data_notice(), flush=True)
-        return run_unscored(equilibrate, make_run_dir(RUN_NAME))
+        return run_unscored(
+            equilibrate, make_run_dir(RUN_NAME), proteostasis=proteostasis
+        )
     problem = build_problem(
         equilibrate=equilibrate, proteostasis=proteostasis, fitted=fitted
     )
