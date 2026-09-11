@@ -13,6 +13,11 @@ as a constant via ``with_param_input``. ``hi < basal`` inhibits. Several
 
 from __future__ import annotations
 
+import sympy
+
+from hallsim.kinetics import hill_gate_sympy
+from hallsim.process import ReactionChannel
+
 import math
 from dataclasses import dataclass
 
@@ -130,6 +135,30 @@ class HillEdge(Process):
         """
         held = float(self._value(levels))
         return self.with_param("basal", held).with_param("hi", held)
+
+    def _symbolic_value(self):
+        K, n = self._gates()
+        drive = sympy.Integer(1)
+        for name, k, nn in zip(self.sources, K, n):
+            drive = drive * hill_gate_sympy(
+                sympy.Symbol(name), float(k), float(nn)
+            )
+        basal, hi = float(self.basal), float(self.hi)
+        return basal + (hi - basal) * drive
+
+    def reaction_channels(self):
+        if self.mode != "flux":
+            return None
+        return (
+            ReactionChannel(
+                "hill", (("target", 1.0),), self._symbolic_value()
+            ),
+        )
+
+    def assignment_rules(self):
+        if self.mode != "level":
+            return ()
+        return (("signal", self._symbolic_value()),)
 
     def derivative(self, t, state):
         if self.mode != "flux":

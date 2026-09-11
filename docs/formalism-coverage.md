@@ -80,8 +80,8 @@ recoverable via `re_namespace` without reintroducing nesting.
 | Monod-Wyman-Changeux | ✅ | Algebraic + DE; allosteric receptors fall out of the same machinery |
 | Poisson Process (degradation) | ✅ | Linear DE limit; CONTINUOUS Process |
 | Neural Network | ✅ | `NeuralODE` Process with training infrastructure (`hallsim.models.neuralode`) |
-| SBML — deterministic ODE | 🟡 | `process_from_sbml` via `sbmltoodejax`; pre-imported models in `models/sivakumar2011/`, `models/zatorsky2006/` |
-| SBML — events | 🟡 | `sbmltoodejax` skips them; HallSim has `ProcessKind.EVENT` and Diffrax 0.5+ supports events natively. Missing piece is the SBML event-MathML translator (roadmap) |
+| SBML — deterministic ODE | 🟢 | `process_from_sbml`, native (`hallsim.sbml_core`, libsbml → sympy → JAX), `scripts/conformance.py` compares an import with libRoadRunner and COPASI on demand; pre-imported models in `models/sivakumar2011/`, `models/zatorsky2006/` |
+| SBML — events | 🟡 | translated by `hallsim.sbml_events` into `ProcessKind.EVENT` processes, fired at macro-step sync points; HallSim has `ProcessKind.EVENT` and Diffrax 0.5+ supports events natively. Missing piece is the SBML event-MathML translator (roadmap) |
 | Boolean Network | 🟡 | Trivial as DISCRETE (`jnp.where` / logical ops); abstraction supports it; no model written |
 | Gillespie / Stochastic | 🟡 | Would be stochastic DISCRETE with `jax.random` keys threaded through Scheduler. Diffrax also supports SDEs natively. No model written — see [Roadmap](../README.md#stochastic-discrete--gillespie-support) |
 | Rule-based (BNGL / Kappa) | 🟡 | Could be a CONTINUOUS Process emitting an auto-expanded ODE system; not built |

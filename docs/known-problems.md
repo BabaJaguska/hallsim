@@ -1201,7 +1201,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   a GPU, but it still needs a population entry point and a validated
   per-member step policy.
 
-
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -1396,44 +1395,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   number instead of an argument, and turns P0.23 from an argument into a failing
   test. 3-5 days. Highest-leverage test in the repo that does not exist.
 
-- [ ] **P1.17 — Nothing checks HallSim against an established simulator; the
-  instrument exists and is not a test.** Found 2026-08-31 (external systems
-  review). `misc/tellurium_compare.py` builds the same SBML models in
-  libRoadRunner/CVODE and compares per-species trajectories, describing
-  RoadRunner as "the trusted stiff integrator; this is our ground-truth check" —
-  precisely the right instrument. It is a one-off script in `misc/`, its
-  docstring points at a wrong path (`demos/tellurium_compare.py`) and leaks a
-  venv name into public-facing text against the repo's own rule, and
-  `grep -rn "tellurium\|roadrunner\|copasi\|amici" tests/` returns nothing.
-  HallSim re-implements a large amount of SBML semantics on top of
-  `sbmltoodejax` — event translation (`sbml_events.py`, 358 lines),
-  assignment-rule ordering (`_order_assignments`), `functionDefinition`
-  inlining, port-boundary unit conversion (`units.py`), time-unit reconciliation
-  (`reconciled_to`) — and every one is a place that can produce a
-  plausible-but-wrong trajectory. **The entire correctness argument for all of it
-  is currently internal consistency.**
-  *Evidence, 2026-09-10, and it is good news.* The whole multi-hallmark
-  composite was rebuilt independently in Tellurium 2.2.13 / roadrunner 2.10 and
-  in COPASI 4.46 via basico, by merging the three deposits into one 82-species /
-  142-reaction / 20-rule SBML with the coupling edges compiled in as assignment
-  rules and rate-law rescalings, and simulated over 50 days. Both engines
-  reproduce the HallSim trajectory to integration tolerance: max relative
-  deviation over 1001 points is 1e-6 to 9e-4 on DNA_damage, CDKN1A, ROS,
-  phospho-mTORC1 and AggP in both arms and both engines. So the SBML semantics
-  HallSim re-implements are, on this composite, right. Two caveats keep this
-  entry open. The harness and its artifacts live outside this repo, so nothing
-  here re-runs it. And the one outlier — COPASI's etoposide-arm p53 at 3.5e-2 —
-  is not a discrepancy but a phase offset in a limit cycle scored with a
-  pointwise metric, which is its own defect (see the oscillation-aware
-  comparison entry below). Whether the merge was built against the current
-  wiring or the pre-2026-09-09 one, in which DallePezze's ROS drove Proctor's
-  `k2` rather than sharing its pool, is not recorded and needs establishing
-  before the numbers are quoted.
-  *Fix:* promote it to `tests/conformance/`, marked `slow` and gated on
-  `pytest.importorskip("roadrunner")`, asserting a per-species relative-deviation
-  bound on the bundled offline SBML. 2-3 days to make deterministic and bounded;
-  it is ~80% written. Highest-value test asset available.
-
 - [ ] **P1.18 — The validation layer emits 3 warnings and 3 false positives on
   the framework's own two-process example.** Found 2026-08-31 (external systems
   review). `simulate compose` — the README quickstart composite, the smallest
@@ -1527,33 +1488,49 @@ The check that would catch a mistake does not exist, does not run, or fails open
   cycle-average, amplitude and period rather than pointwise, returning which
   test it applied. Then use it in the tolerance screen and in the conformance
   test P1.17 asks for.
+  *Progress 2026-09-11.* `hallsim.diagnostics.trajectory_agreement` scores an
+  oscillator on cycle mean, amplitude and period and says which test it
+  applied; the conformance suite uses it (GZ06 vs CVODE: 6e-8 over 138 peaks
+  where pointwise read as a phase shift). The tolerance screen still scores
+  pointwise.
 
-- [ ] **P2.9 — A composite cannot be exported, so every cross-engine check
-  needs a hand-written SBML merge.** Filed 2026-09-10. HallSim imports SBML and
-  never emits it. To run the multi-hallmark composite in Tellurium and COPASI
-  (P1.17) the three deposits had to be merged offline with libSBML into one
-  file, and that merge is 300+ lines of reference surgery: `renameSIdRefs` does
-  not descend into kinetic laws or update `speciesReference` species attributes,
-  metaids are document-global and collide across documents, cross-document adds
-  fail with a bare `-8` unless levels are normalized first (DallePezze is L2V4,
-  the other two L2V1), assignment-rule targets need `setConstant(False)`, and
-  display-name collisions are not checked by SBML validation at all — DallePezze's
-  ROS and Proctor's ROS collided silently and were separated only by prefixing
-  every element name by hand. All of that is a re-derivation of wiring the
-  composite already holds as data, and it has to be redone by hand every time
-  the wiring changes, which makes the conformance check expensive to keep
-  current rather than expensive once.
-  *Fix:* `Composite.to_sbml()` emitting the flattened model with the coupling
-  edges as assignment rules and the clock reconciliation as rate-law scaling —
-  the same translation the merge does by hand, from the topology that already
-  describes it. It is also the interchange artifact for using COPASI as a
-  stochastic and inverse-task engine on sub-models (P3.6), and the thing that
-  makes the conformance test cheap to run on any composite rather than on one
-  hand-merged file.
+- [ ] **P1.24 — A coupling edge with no `timescale` is auto-grouped away from
+  the models it couples, and the default macro step then carries an O(1)
+  splitting error behind a warning with no number on it.** Found 2026-09-11
+  by the composite conformance case (`scripts/conformance.py`). Two
+  imported models sharing a species, a Hill edge, a gain level and a clamp:
+  `auto_groups()` returns `{group_0: [a, b], default: [drive, bridge, hold]}`
+  because the edges' `timescale` is `None`, and Lie splitting at the default
+  `macro_dt = 1.0` leaves the clamped species 54% off the monolithic
+  solution — libRoadRunner and COPASI on the exported document, and HallSim
+  itself with all five processes in one group, agree to 1e-7. First order
+  in the step, as Lie splitting is:
 
+  | macro_dt | worst species | rel. dev |
+  |---|---|---|
+  | 6.0 | a_B | 8.8e-1 |
+  | 1.0 | a_B | 5.4e-1 |
+  | 0.1 | a_B | 9.0e-2 |
+  | 0.01 | a_B | 8.1e-3 |
+
+  The warning says a cycle is cut and to size `macro_dt`; nothing on the
+  result says how far the run sits from the unsplit one.
+  *Fix:* an edge that declares no timescale has no dynamics of its own and
+  belongs on its neighbours' clock — group it with the processes it reads
+  and writes. And when a cycle does cross groups, put a splitting-error
+  estimate (one macro step re-run at half size) on the result.
 
 ## P2 — cannot see what was built
 
+  *Progress 2026-09-11.* `Composite.to_sbml()` (`hallsim.sbml_export`)
+  writes a continuous composite as one SBML L3V2 document: store paths
+  become species (amounts, one unit compartment), shared paths one species,
+  model constants and compartments prefixed parameters, edges reactions and
+  assignment rules from their declared symbolic forms, clock reconciliation
+  compiled into the rates. Verified on a two-model, three-edge composite
+  against libRoadRunner and COPASI (1e-7). Still refused by name: SBML
+  events, parameter drivers and steps, DISCRETE and EVENT processes — the
+  multi-hallmark composite waits on the events follow-up.
 - [ ] **P2.1 — No wiring report.** Nothing lists, per store path, who writes it
   and who reads it. NF-κB being write-only was invisible until someone wrote a
   script.
@@ -1986,7 +1963,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   `slow`-marked test so the stack cannot regress silently; failing an
   upstream fix, a `Scheduler` population entry point over worker processes
   is the route on every device count.
-
 
 ## Review notes — 2026-08-31 external systems review
 

@@ -134,8 +134,8 @@ with `measure_unclamped_flux` and pick the rate with `place_clamp_rate`
 ## SBML import
 
 [`sbml_import.py`](../src/hallsim/sbml_import.py) auto-generates a Process
-from an SBML file via `sbmltoodejax` — from BioModels or a paper supplement —
-and:
+from an SBML file — from BioModels or a paper supplement — compiling its math
+through `hallsim.sbml_core` (libsbml → sympy → JAX), and:
 
 **A repository is not a format.** SBML comes from BioModels, from
 BioSimulations' COMBINE archives, and from paper supplements; XPP `.ode` comes
@@ -171,7 +171,7 @@ The importer:
 Discover-then-import is two calls — the catalog is directly usable by an agent:
 
 ```python
-from sbmltoodejax.biomodels_api import search_for_model
+from hallsim.discovery import search_for_model
 from hallsim.sbml_import import process_from_sbml
 
 hits = search_for_model("genotoxic stress NFkB")   # -> [{'id': 'MODEL...'}]

@@ -1,13 +1,13 @@
 """Translate SBML ``<event>`` elements into HallSim EVENT processes.
 
-``sbmltoodejax`` cannot import SBML events, so :func:`process_from_sbml`
-strips them for the ODE core and this module re-expresses each event as an
+The compiled ODE core (:mod:`hallsim.sbml_core`) ignores SBML events;
+:func:`process_from_sbml` has this module re-express each event as an
 :class:`SBMLEvent` (``ProcessKind.EVENT``): the trigger becomes
 ``condition``, the event assignments become a ``handler`` that mutates the
-target species' store paths. Event math (trigger + assignment RHS) is
-compiled from the libsbml AST into a small pure-Python IR — no libsbml
-objects are retained — and evaluated with ``jax.numpy`` so it stays
-shape-polymorphic under batched runs.
+target species' store paths. Event math goes through
+:mod:`hallsim.sbml_math` into sympy with the model's constants folded in,
+and is printed for JAX once per expression, so it stays shape-polymorphic
+under batched runs and an export writes it back out unchanged.
 
 Supported: triggers over time and species; assignments to species and to
 parameters. A parameter target is promoted on the owning process via
@@ -18,110 +18,38 @@ that way. Symbols a parameter's own assignment rule defines are folded to
 constants first (:func:`fold_constant_rules`), which is how COPASI writes a
 ModelValue. A nonzero delay and any priority raise; ``<delay>0</delay>``,
 which COPASI emits on every event, is not a delay.
+
+Event math is written in the model's native time. An event carries its
+owner's ``time_scale``, so a reconciled model's timed events fire on the
+composite clock where the model expects them.
 """
 
 from __future__ import annotations
 
 import functools
 import logging
-import math
 
 import equinox as eqx
 import jax.numpy as jnp
+import libsbml
+import sympy
+from sympy.core.relational import Relational
 
 from hallsim.process import Port, PortRole, Process, ProcessKind
+from hallsim.sbml_math import (
+    TIME,
+    UnsupportedMathError,
+    function_definitions,
+    inline_functions,
+    to_jax,
+    to_sympy,
+)
 
 log = logging.getLogger(__name__)
 
 
 class UnsupportedEventFeatureError(Exception):
     """An SBML event uses a construct the translator does not handle."""
-
-
-# ── libsbml AST → pure-Python IR ───────────────────────────────────
-#
-# IR nodes are plain tuples so the compiled form retains no libsbml
-# objects (whose lifetime is tied to the SBMLDocument) and is safe as an
-# Equinox static field. Numeric ops use jax.numpy in the evaluator.
-
-
-def _compile_ast(node, species: set) -> tuple:
-    """Compile a libsbml ASTNode to the tuple IR (see :func:`_eval_ir`)."""
-    import libsbml
-
-    ty = node.getType()
-    kids = [node.getChild(i) for i in range(node.getNumChildren())]
-
-    def C(k):
-        return _compile_ast(k, species)
-
-    if ty == libsbml.AST_NAME:
-        nm = node.getName()
-        if nm in species:
-            return ("var", nm)
-        if nm.lower() in ("time", "t"):
-            return ("time",)
-        return ("name", nm)  # a parameter — resolved from consts at build
-    if ty == libsbml.AST_NAME_TIME:
-        return ("time",)
-    if ty == libsbml.AST_INTEGER:
-        return ("const", float(node.getInteger()))
-    if ty in (libsbml.AST_REAL, libsbml.AST_REAL_E, libsbml.AST_RATIONAL):
-        return ("const", float(node.getValue()))
-    if ty == libsbml.AST_CONSTANT_TRUE:
-        return ("const", 1.0)
-    if ty == libsbml.AST_CONSTANT_FALSE:
-        return ("const", 0.0)
-    if ty == libsbml.AST_CONSTANT_PI:
-        return ("const", math.pi)
-    if ty == libsbml.AST_CONSTANT_E:
-        return ("const", math.e)
-
-    nary = {
-        libsbml.AST_PLUS: "add",
-        libsbml.AST_TIMES: "mul",
-        libsbml.AST_LOGICAL_AND: "and",
-        libsbml.AST_LOGICAL_OR: "or",
-    }
-    binary = {
-        libsbml.AST_DIVIDE: "div",
-        libsbml.AST_POWER: "pow",
-        libsbml.AST_FUNCTION_POWER: "pow",
-        libsbml.AST_RELATIONAL_GEQ: "geq",
-        libsbml.AST_RELATIONAL_LEQ: "leq",
-        libsbml.AST_RELATIONAL_GT: "gt",
-        libsbml.AST_RELATIONAL_LT: "lt",
-        libsbml.AST_RELATIONAL_EQ: "eq",
-        libsbml.AST_RELATIONAL_NEQ: "neq",
-    }
-    funcs = {
-        libsbml.AST_FUNCTION_EXP: "exp",
-        libsbml.AST_FUNCTION_LN: "log",
-        libsbml.AST_FUNCTION_LOG: "log10",
-        libsbml.AST_FUNCTION_ABS: "abs",
-        libsbml.AST_FUNCTION_ROOT: "sqrt",
-        libsbml.AST_FUNCTION_SIN: "sin",
-        libsbml.AST_FUNCTION_COS: "cos",
-        libsbml.AST_FUNCTION_TAN: "tan",
-    }
-
-    if ty == libsbml.AST_MINUS:
-        return (
-            ("neg", C(kids[0]))
-            if len(kids) == 1
-            else ("sub", C(kids[0]), C(kids[1]))
-        )
-    if ty in nary:
-        return (nary[ty], [C(k) for k in kids])
-    if ty in binary:
-        return (binary[ty], C(kids[0]), C(kids[1]))
-    if ty == libsbml.AST_LOGICAL_NOT:
-        return ("not", C(kids[0]))
-    if ty in funcs:
-        return ("func", funcs[ty], [C(k) for k in kids])
-    raise UnsupportedEventFeatureError(
-        f"unhandled MathML node type {ty} in event expression"
-    )
 
 
 def _delay_seconds(event) -> float:
@@ -132,8 +60,6 @@ def _delay_seconds(event) -> float:
     time-dependent delay is not constant and comes back NaN, which compares
     unequal to zero and so is rejected by the caller.
     """
-    import libsbml
-
     delay = event.getDelay()
     if delay is None or not delay.isSetMath():
         return 0.0
@@ -143,15 +69,24 @@ def _delay_seconds(event) -> float:
     return float("nan")
 
 
-def _has_time(ir: tuple) -> bool:
-    """True if the IR reads the time symbol anywhere."""
-    tag = ir[0]
-    if tag == "time":
-        return True
-    if tag in ("const", "var", "name"):
-        return False
-    kids = ir[-1] if tag in ("add", "mul", "and", "or", "func") else ir[1:]
-    return any(_has_time(k) for k in kids)
+def _bake(expr, consts: dict, species: set, where: str):
+    """``expr`` with every constant folded in. What remains must be a
+    species or time, or the event refers to something the model does not
+    carry."""
+    subs = {}
+    for sym in expr.atoms(sympy.Symbol):
+        if sym is TIME or sym.name in species:
+            continue
+        if sym.name not in consts:
+            raise UnsupportedEventFeatureError(
+                f"{where} references unknown symbol {sym.name!r}"
+            )
+        subs[sym] = sympy.Float(float(consts[sym.name]))
+    return expr.xreplace(subs)
+
+
+def _symbol_names(expr) -> set[str]:
+    return {s.name for s in expr.atoms(sympy.Symbol) if s is not TIME}
 
 
 def fold_constant_rules(model, species, consts: dict) -> dict:
@@ -165,30 +100,38 @@ def fold_constant_rules(model, species, consts: dict) -> dict:
     depend on another rule. A rule that reads a species or the time symbol is
     genuinely dynamic and is left out.
     """
-    pending = {}
+    defs = function_definitions(model)
+    pending: dict[str, sympy.Basic] = {}
     for i in range(model.getNumRules()):
         rule = model.getRule(i)
         if not (rule.isAssignment() and rule.isSetVariable()):
             continue
         if not rule.isSetMath() or rule.getVariable() in species:
             continue
-        pending[rule.getVariable()] = rule.getMath()
-
+        try:
+            pending[rule.getVariable()] = inline_functions(
+                to_sympy(rule.getMath()), defs
+            )
+        except UnsupportedMathError:
+            continue
     resolved = dict(consts)
     while pending:
         progressed = False
-        for name, rule_math in list(pending.items()):
-            try:
-                ir = _bake_consts(_compile_ast(rule_math, species), resolved)
-            except UnsupportedEventFeatureError:
-                continue  # depends on something not resolved yet, or dynamic
-            seen: set = set()
-            _collect_species(ir, seen)
-            if seen or _has_time(ir):
+        for name, expr in list(pending.items()):
+            names = _symbol_names(expr)
+            if TIME in expr.free_symbols or names & set(species):
                 del pending[name]  # dynamic: never a constant
                 progressed = True
                 continue
-            resolved[name] = float(_eval_ir(ir, 0.0, {}))
+            if names - set(resolved):
+                continue  # waits on another rule
+            value = expr.xreplace(
+                {
+                    sympy.Symbol(n): sympy.Float(float(resolved[n]))
+                    for n in names
+                }
+            )
+            resolved[name] = float(value.evalf())
             del pending[name]
             progressed = True
         if not progressed:
@@ -196,129 +139,47 @@ def fold_constant_rules(model, species, consts: dict) -> dict:
     return resolved
 
 
-def _bake_consts(ir: tuple, consts: dict) -> tuple:
-    """Replace ``('name', p)`` leaves with the parameter's constant value."""
-    tag = ir[0]
-    if tag == "name":
-        if ir[1] not in consts:
-            raise UnsupportedEventFeatureError(
-                f"event math references unknown symbol {ir[1]!r}"
-            )
-        return ("const", float(consts[ir[1]]))
-    if tag in ("const", "var", "time"):
-        return ir
-    if tag in ("add", "mul", "and", "or", "func"):
-        head = ir[:-1]
-        return (*head, [_bake_consts(k, consts) for k in ir[-1]])
-    return (tag, *[_bake_consts(k, consts) for k in ir[1:]])
-
-
-def _collect_species(ir: tuple, out: set) -> None:
-    tag = ir[0]
-    if tag == "var":
-        out.add(ir[1])
-    elif tag in ("add", "mul", "and", "or", "func"):
-        for k in ir[-1]:
-            _collect_species(k, out)
-    elif tag in ("const", "time", "name"):
-        return
-    else:
-        for k in ir[1:]:
-            _collect_species(k, out)
-
-
-_FUNCS = {
-    "exp": jnp.exp,
-    "log": jnp.log,
-    "log10": jnp.log10,
-    "abs": jnp.abs,
-    "sqrt": jnp.sqrt,
-    "sin": jnp.sin,
-    "cos": jnp.cos,
-    "tan": jnp.tan,
-}
-
-
-def _eval_ir(ir: tuple, t, view: dict):
-    """Evaluate the IR at time ``t`` against a ``{species: value}`` view."""
-    tag = ir[0]
-    if tag == "const":
-        return ir[1]
-    if tag == "var":
-        return view[ir[1]]
-    if tag == "time":
-        return t
-    if tag == "add":
-        return functools.reduce(
-            lambda a, b: a + b, (_eval_ir(k, t, view) for k in ir[1])
-        )
-    if tag == "mul":
-        return functools.reduce(
-            lambda a, b: a * b, (_eval_ir(k, t, view) for k in ir[1])
-        )
-    if tag == "sub":
-        return _eval_ir(ir[1], t, view) - _eval_ir(ir[2], t, view)
-    if tag == "div":
-        return _eval_ir(ir[1], t, view) / _eval_ir(ir[2], t, view)
-    if tag == "neg":
-        return -_eval_ir(ir[1], t, view)
-    if tag == "pow":
-        return _eval_ir(ir[1], t, view) ** _eval_ir(ir[2], t, view)
-    if tag == "geq":
-        return _eval_ir(ir[1], t, view) >= _eval_ir(ir[2], t, view)
-    if tag == "leq":
-        return _eval_ir(ir[1], t, view) <= _eval_ir(ir[2], t, view)
-    if tag == "gt":
-        return _eval_ir(ir[1], t, view) > _eval_ir(ir[2], t, view)
-    if tag == "lt":
-        return _eval_ir(ir[1], t, view) < _eval_ir(ir[2], t, view)
-    if tag == "eq":
-        return _eval_ir(ir[1], t, view) == _eval_ir(ir[2], t, view)
-    if tag == "neq":
-        return _eval_ir(ir[1], t, view) != _eval_ir(ir[2], t, view)
-    if tag == "and":
-        return functools.reduce(
-            jnp.logical_and, (_eval_ir(k, t, view) for k in ir[1])
-        )
-    if tag == "or":
-        return functools.reduce(
-            jnp.logical_or, (_eval_ir(k, t, view) for k in ir[1])
-        )
-    if tag == "not":
-        return jnp.logical_not(_eval_ir(ir[1], t, view))
-    if tag == "func":
-        return _FUNCS[ir[1]](*[_eval_ir(k, t, view) for k in ir[2]])
-    raise UnsupportedEventFeatureError(f"cannot evaluate IR node {tag!r}")
-
-
 # ── trigger pathologies detectable without running the model ────────
 
+_OP = {
+    sympy.StrictLessThan: "lt",
+    sympy.LessThan: "leq",
+    sympy.StrictGreaterThan: "gt",
+    sympy.GreaterThan: "geq",
+    sympy.Equality: "eq",
+    sympy.Unequality: "neq",
+}
+_FLIP = {
+    "lt": "gt",
+    "gt": "lt",
+    "leq": "geq",
+    "geq": "leq",
+    "eq": "eq",
+    "neq": "neq",
+}
 #: Relational operators that partition a value at a boundary. Each maps to the
 #: operator whose region is its exact complement *including* the boundary
 #: point, which is the pair that overlaps at one value.
 _OVERLAPPING = {("leq", "gt"), ("gt", "leq"), ("geq", "lt"), ("lt", "geq")}
 
 
-def _relations(ir: tuple) -> list[tuple]:
-    """Every relational comparison in a trigger, as ``(op, lhs, rhs)``."""
-    if not isinstance(ir, tuple) or not ir:
-        return []
-    tag = ir[0]
+def _relations(expr) -> list[tuple]:
+    """Every comparison in a trigger as ``(op, lhs, rhs)``, operands in a
+    canonical order so two spellings of one comparison compare equal."""
     out = []
-    if tag in ("leq", "geq", "lt", "gt", "eq", "neq"):
-        out.append((tag, ir[1], ir[2]))
-    kids = ir[-1] if tag in ("add", "mul", "and", "or", "func") else ir[1:]
-    for k in kids:
-        if isinstance(k, tuple):
-            out.extend(_relations(k))
-        elif isinstance(k, list):
-            for sub in k:
-                out.extend(_relations(sub))
+    for rel in sympy.sympify(expr).atoms(Relational):
+        op = _OP.get(type(rel))
+        if op is None:
+            continue
+        lhs, rhs = rel.lhs, rel.rhs
+        if sympy.default_sort_key(lhs) > sympy.default_sort_key(rhs):
+            lhs, rhs, op = rhs, lhs, _FLIP[op]
+        out.append((op, lhs, rhs))
     return out
 
 
-def _references_time(ir: tuple) -> bool:
-    return _has_time(ir)
+def _references_time(expr) -> bool:
+    return TIME in sympy.sympify(expr).free_symbols
 
 
 def trigger_pathologies(events) -> list[str]:
@@ -345,12 +206,12 @@ def trigger_pathologies(events) -> list[str]:
     """
     found: list[str] = []
     triggers = [
-        (getattr(e, "_name", f"event{i}"), e._trigger_ir)
+        (getattr(e, "_name", f"event{i}"), _relations(e._trigger))
         for i, e in enumerate(events)
     ]
 
-    for name, ir in triggers:
-        for op, lhs, rhs in _relations(ir):
+    for name, relations in triggers:
+        for op, lhs, rhs in relations:
             if op == "eq" and (_references_time(lhs) or _references_time(rhs)):
                 found.append(
                     f"event {name!r} triggers on an equality against time; "
@@ -358,10 +219,10 @@ def trigger_pathologies(events) -> list[str]:
                     f"exactly on that instant — use a threshold crossing"
                 )
 
-    for i, (name_a, ir_a) in enumerate(triggers):
-        for name_b, ir_b in triggers[i + 1 :]:
-            for op_a, lhs_a, rhs_a in _relations(ir_a):
-                for op_b, lhs_b, rhs_b in _relations(ir_b):
+    for i, (name_a, rel_a) in enumerate(triggers):
+        for name_b, rel_b in triggers[i + 1 :]:
+            for op_a, lhs_a, rhs_a in rel_a:
+                for op_b, lhs_b, rhs_b in rel_b:
                     if (op_a, op_b) not in _OVERLAPPING:
                         continue
                     if lhs_a != lhs_b or rhs_a != rhs_b:
@@ -379,6 +240,13 @@ def trigger_pathologies(events) -> list[str]:
 # ── the EVENT process ──────────────────────────────────────────────
 
 
+@functools.lru_cache(maxsize=None)
+def _compiled(expr, names: tuple):
+    """The JAX callable for ``expr`` over ``names`` then time; one per
+    distinct expression, since a sympy expression hashes by value."""
+    return to_jax(expr, [sympy.Symbol(n) for n in names] + [TIME])
+
+
 class SBMLEvent(Process):
     """One SBML ``<event>`` as a HallSim EVENT process.
 
@@ -386,12 +254,14 @@ class SBMLEvent(Process):
     writes each assignment target through a LATCHED ``__set_<species>``
     port. The handler applies ``target := rhs`` as an additive delta
     ``rhs − current`` (the scheduler scatter-adds), i.e. a true assignment.
+    ``_trigger`` and ``_assignments`` are sympy over species symbols and
+    :data:`hallsim.sbml_math.TIME`, in the owner's native time.
     """
 
     kind: ProcessKind = ProcessKind.EVENT
     _name: str = ""
-    _trigger_ir: tuple = eqx.field(static=True, default=())
-    _assign_ir: tuple = eqx.field(static=True, default=())  # ((tgt, rhs),..)
+    _trigger: object = eqx.field(static=True, default=sympy.false)
+    _assignments: tuple = eqx.field(static=True, default=())  # ((tgt, expr),)
     _read_species: tuple = eqx.field(static=True, default=())
     # Targets that are SBML parameters rather than species. They reach the
     # rate laws through SBMLProcess.with_param_input rather than through the
@@ -401,6 +271,14 @@ class SBMLEvent(Process):
     # parameter target must start at its published value, not at zero, or the
     # model runs off a different constant until the event first fires.
     _target_defaults: tuple = eqx.field(static=True, default=())
+    #: The owner's native time per composite time unit.
+    time_scale: float = 1.0
+
+    @property
+    def _reads(self) -> tuple:
+        return tuple(self._read_species) + tuple(
+            p for p in self._param_targets if p not in self._read_species
+        )
 
     def ports_schema(self):
         ports = {
@@ -427,7 +305,7 @@ class SBMLEvent(Process):
             }
         )
         defaults = dict(self._target_defaults)
-        for tgt, _ in self._assign_ir:
+        for tgt, _ in self._assignments:
             # Only a parameter target carries a default here, and only a
             # parameter target needs one: a species target shares its store
             # path with the ODE process's own EVOLVED port, which declares
@@ -443,18 +321,23 @@ class SBMLEvent(Process):
             )
         return ports
 
+    def _args(self, t, state):
+        return [state[n] for n in self._reads] + [t * self.time_scale]
+
     def condition(self, t, state):
-        return _eval_ir(self._trigger_ir, t, state)
+        value = _compiled(self._trigger, self._reads)(*self._args(t, state))
+        return jnp.asarray(value, dtype=bool)
 
     def handler(self, t, state):
+        args = self._args(t, state)
         return {
-            f"__set_{tgt}": _eval_ir(rhs, t, state) - state[tgt]
-            for tgt, rhs in self._assign_ir
+            f"__set_{tgt}": _compiled(expr, self._reads)(*args) - state[tgt]
+            for tgt, expr in self._assignments
         }
 
     def metadata(self):
         base = super().metadata()
-        base["event_targets"] = [t for t, _ in self._assign_ir]
+        base["event_targets"] = [t for t, _ in self._assignments]
         return base
 
 
@@ -464,20 +347,28 @@ def translate_events(
     """Read the SBML at ``xml_path`` and return one SBMLEvent per event.
 
     ``species_names`` is the model's ordered species ids; ``consts`` maps
-    parameter names to their (constant) values, baked into event math and
+    parameter names to their (constant) values, folded into event math and
     extended by :func:`fold_constant_rules` so a rule-defined ModelValue
     resolves. An assignment whose target is a parameter rather than a species
     is kept and recorded in ``_param_targets``; :func:`expand_events` promotes
     it on the owning process.
     """
-    import libsbml
-
     doc = libsbml.SBMLReader().readSBMLFromFile(str(xml_path))
     model = doc.getModel()
     if model is None:
         return []
     species = set(species_names)
     consts = fold_constant_rules(model, species, consts)
+    defs = function_definitions(model)
+
+    def expr_of(node, where):
+        try:
+            return _bake(
+                inline_functions(to_sympy(node), defs), consts, species, where
+            )
+        except UnsupportedMathError as exc:
+            raise UnsupportedEventFeatureError(f"{where}: {exc}") from exc
+
     out: list[SBMLEvent] = []
     for i in range(model.getNumEvents()):
         ev = model.getEvent(i)
@@ -493,11 +384,9 @@ def translate_events(
                 f"event {eid!r} on {model_name} has a priority — "
                 "not supported"
             )
-        trigger = _bake_consts(
-            _compile_ast(ev.getTrigger().getMath(), species), consts
-        )
-        read: set = set()
-        _collect_species(trigger, read)
+        where = f"event {eid!r} on {model_name}"
+        trigger = expr_of(ev.getTrigger().getMath(), f"{where} trigger")
+        read = _symbol_names(trigger) & species
         assigns, param_targets, defaults = [], [], []
         for j in range(ev.getNumEventAssignments()):
             ea = ev.getEventAssignment(j)
@@ -511,8 +400,8 @@ def translate_events(
                     var,
                 )
                 continue
-            rhs = _bake_consts(_compile_ast(ea.getMath(), species), consts)
-            _collect_species(rhs, read)
+            rhs = expr_of(ea.getMath(), f"{where} assignment to {var!r}")
+            read |= _symbol_names(rhs) & species
             if var in species:
                 read.add(var)  # current value, for the assignment delta
             else:
@@ -531,9 +420,9 @@ def translate_events(
         out.append(
             SBMLEvent(
                 _name=f"{model_name}__{eid}",
-                _trigger_ir=trigger,
-                _assign_ir=tuple(assigns),
-                _read_species=tuple(sorted(read & species)),
+                _trigger=trigger,
+                _assignments=tuple(assigns),
+                _read_species=tuple(sorted(read)),
                 _param_targets=tuple(param_targets),
                 _target_defaults=tuple(defaults),
             )
@@ -560,9 +449,10 @@ def expand_events(proc, name: str | None = None) -> tuple[dict, dict]:
     ``processes`` holds the owning process under its own name — promoted, if
     any event assigns to a parameter, via
     :meth:`~hallsim.sbml_import.SBMLProcess.with_param_input` — plus one
-    EVENT process per event. ``topology`` holds each event's full wiring and,
-    for the owner, *only* the promoted-parameter rows, which the caller merges
-    into its own row for that process::
+    EVENT process per event, each carrying the owner's ``time_scale``.
+    ``topology`` holds each event's full wiring and, for the owner, *only*
+    the promoted-parameter rows, which the caller merges into its own row for
+    that process::
 
         procs, topo = expand_events(proc)
         topology = {**mine, "dp14": {**mine["dp14"], **topo.get("dp14", {})}}
@@ -578,10 +468,13 @@ def expand_events(proc, name: str | None = None) -> tuple[dict, dict]:
     topo: dict = {}
     owner_wiring: dict = {}
     for ev in events:
+        ev = eqx.tree_at(
+            lambda e: e.time_scale, ev, jnp.asarray(proc.time_scale)
+        )
         procs[ev._name] = ev
         wiring = {s: f"{owner}/{s}" for s in ev._read_species}
         wiring.update({t: f"{owner}/{t}" for t in ev._param_targets})
-        for tgt, _ in ev._assign_ir:
+        for tgt, _ in ev._assignments:
             wiring[f"__set_{tgt}"] = f"{owner}/{tgt}"
         topo[ev._name] = wiring
         for tgt in ev._param_targets:
@@ -589,7 +482,9 @@ def expand_events(proc, name: str | None = None) -> tuple[dict, dict]:
             proc = proc.with_param_input(tgt, port)
             owner_wiring[port] = f"{owner}/{tgt}"
 
-    procs[owner] = proc
+    # The events now live as processes; the owner must not carry them into
+    # a second expansion when this composite is nested in another.
+    procs[owner] = proc.without_events()
     if owner_wiring:
         topo[owner] = owner_wiring
     return procs, topo

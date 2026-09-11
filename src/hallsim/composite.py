@@ -865,6 +865,19 @@ class Composite(eqx.Module):
                 paths.update(as_paths(entry))
         return paths
 
+    def to_sbml(
+        self, path: str | None = None, *, model_id: str = "composite"
+    ) -> str:
+        """The composite as one SBML Level 3 document, written to ``path``
+        when given; see :mod:`hallsim.sbml_export` for what it transcribes."""
+        from hallsim.sbml_export import composite_to_sbml
+
+        text = composite_to_sbml(self, model_id=model_id)
+        if path is not None:
+            with open(path, "w") as f:
+                f.write(text)
+        return text
+
     def metadata(self) -> dict[str, Any]:
         """Aggregate metadata from all processes."""
         return {name: proc.metadata() for name, proc in self.processes.items()}

@@ -306,13 +306,10 @@ class TestEventTargetKeepsPublishedInitial:
 
     def test_event_set_port_abstains_for_species_target(self, tmp_path):
         from hallsim.sbml_events import translate_events
-        from hallsim.sbml_import import _preprocess_sbml
 
         path = tmp_path / "ev.xml"
         path.write_text(SBML_EVENT_ON_NONZERO_SPECIES)
-        events = translate_events(
-            _preprocess_sbml(str(path)), ("S",), {"k": 0.1}, "ev"
-        )
+        events = translate_events(str(path), ("S",), {"k": 0.1}, "ev")
         assert events, "expected the <event> to translate"
         ports = events[0].ports_schema()
         assert ports["__set_S"].default is None

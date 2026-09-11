@@ -5,7 +5,7 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 ## Environment
 
 - Project venv is `.venv/`. Use `.venv/bin/python` for ad-hoc runs.
-- Python >=3.11. Core stack: JAX + Equinox + Diffrax + Optax. Validation uses `pint` (units) and `networkx` (graph analysis). SBML import uses `sbmltoodejax`.
+- Python >=3.11. Core stack: JAX + Equinox + Diffrax + Optax. Validation uses `pint` (units) and `networkx` (graph analysis). SBML import is native: `hallsim.sbml_core` compiles libsbml → sympy → JAX.
 - `pyproject.toml` is the single source of truth for dependencies. No lockfiles — `make install` / `make install-dev` editable-install directly from pyproject.
 - `cd` into the project before running scripts.
 - Importing `hallsim` enables x64 and points XLA's persistent compilation cache at `~/.cache/hallsim/jax`. **Set `HALLSIM_COMPILATION_CACHE_DIR=off` before timing anything compile-related**, or the second measurement is a cache hit and the comparison is meaningless.
@@ -157,7 +157,7 @@ The framework exists to be worth using. Every instance of this is evidence it cu
 - **Constituents-first rule (always, no exceptions): before composing — and before debugging a composite — verify every constituent both *runs* and *tunes* on its own.** "Runs" = a successful solver result, bounded and tolerance-insensitive (`screen_process` / `screen_composite`). "Tunes" = a forward-mode gradient of a summary w.r.t. one parameter is finite. A composite can only be as healthy as its parts; when one misbehaves, re-run this check first — if each part is fine, the bug is in the *composition* (coupling edge, shared tolerance, timescale grouping, reconciliation).
 - Seek to understand why composites fail to converge rather than brute-forcing solvers.
 - Don't pull models from memory/training. Get them from a source that can be cited and re-downloaded: BioModels, CellML/Physiome, JWS Online, ModelDB (XPP), or a paper's supplement. Record where it came from.
-- Before composing an SBML model, test it with sbmltoodejax and with our framework.
+- Before composing an SBML model, screen it on its own (`screen_process`). `scripts/conformance.py` compares an import with libRoadRunner and COPASI during development; the engines are not a dependency and are installed by hand.
 - Prefer models with a downloadable implementation over ones that exist only as printed equations — but transcribing equations from a paper is in scope, not a fallback.
 - Remember to equilibrate — but check whether the source model envisions it. Read the original literature.
 

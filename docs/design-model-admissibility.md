@@ -49,7 +49,7 @@ Most of what is needed is already in the record and is simply not read. Extend
 SBML-qual is SBML: BioModels returns `format: SBML` for Sizek 2023
 (MODEL2312140001, "a Boolean model of MiDAS") and Verlingue 2016
 (MODEL1611180000, "a Boolean model of geroconversion"), neither of which
-`sbmltoodejax` can turn into a right-hand side. Add a `kind` field —
+the importer can turn into a right-hand side. Add a `kind` field —
 ODE / qualitative / constraint-based / hybrid — determined from the SBML
 package declarations (`qual:`, `fbc:`) rather than the registry's format
 string, and surface it in the candidate. This is deterministic and needs no

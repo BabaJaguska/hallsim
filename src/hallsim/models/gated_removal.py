@@ -14,6 +14,11 @@ because its rate is a constant rather than a gated signal.
 
 from __future__ import annotations
 
+import sympy
+
+from hallsim.kinetics import hill_gate_sympy
+from hallsim.process import ReactionChannel
+
 import equinox as eqx
 
 from hallsim.kinetics import hill_gate
@@ -58,6 +63,13 @@ class GatedRemoval(Process):
                 ontology=self.trigger_ontology or {},
             ),
         }
+
+    def reaction_channels(self):
+        gate = hill_gate_sympy(
+            sympy.Symbol("trigger"), float(self.K), float(self.n)
+        )
+        law = float(self.k_remove) * gate * sympy.Symbol("target")
+        return (ReactionChannel("removal", (("target", -1.0),), law),)
 
     def derivative(self, t, state):
         gate = hill_gate(state["trigger"], self.K, self.n)

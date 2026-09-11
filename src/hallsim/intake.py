@@ -588,16 +588,13 @@ def triage_process(
 
     time_declared, coverage = False, 0.0
     if xml_path is not None:
+        from hallsim.sbml_core import unsupported_features
         from hallsim.sbml_import import (
             _extract_native_time_seconds,
             _extract_species_ontology,
-            _precheck_sbml_supported,
-            _preprocess_sbml,
         )
 
-        # Match what import consumes: function definitions are expanded
-        # first, so the raw file reports calls the pipeline already handles.
-        unsupported = _precheck_sbml_supported(_preprocess_sbml(xml_path))
+        unsupported = unsupported_features(xml_path)
         if unsupported:
             blockers.append(
                 f"unsupported constructs: {'; '.join(unsupported)}"

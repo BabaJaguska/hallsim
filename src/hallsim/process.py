@@ -150,6 +150,20 @@ class ProcessKind(enum.Enum):
     EVENT = "event"
 
 
+@dataclasses.dataclass(frozen=True)
+class ReactionChannel:
+    """One reaction of a process's symbolic form.
+
+    ``stoichiometry`` is ``((port_or_species, coefficient), ...)`` with the
+    sign giving the direction; ``rate_law`` is a sympy expression over port
+    symbols and :data:`hallsim.sbml_math.TIME`.
+    """
+
+    reaction_id: str
+    stoichiometry: tuple
+    rate_law: object
+
+
 class PortRole(enum.Enum):
     """How a port participates. Write semantics are validated at composition
     time.
@@ -303,13 +317,22 @@ class Process(eqx.Module):
         raise NotImplementedError
 
     def reaction_channels(self):
-        """Return source reaction channels for a stochastic execution lane.
+        """The process's flux as reactions: a tuple of
+        :class:`ReactionChannel`, or ``None`` when it declares none.
 
-        Deterministic processes return ``None``. Imported reaction-network
-        processes may return channel metadata and expose a matching propensity
-        evaluator; the Scheduler then advances them outside the ODE RHS.
+        Each channel is a signed stoichiometry over ports and a rate law as
+        a sympy expression over port symbols (and :data:`hallsim.sbml_math.TIME`),
+        with parameter values folded in. It is the process's symbolic form:
+        what an SBML export writes, what the Jacobian's sparsity reads, and
+        for an imported reaction network the propensity view the stochastic
+        lane executes. ``None`` means undeclared, not "no flux".
         """
         return None
+
+    def assignment_rules(self) -> tuple:
+        """``((port, expr), ...)`` for each ASSIGNED port, as sympy over port
+        symbols — the symbolic form of :meth:`assign`. Empty by default."""
+        return ()
 
     # --- Interface: ASSIGNED (algebraic) -------------------------------------
 

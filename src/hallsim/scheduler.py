@@ -640,6 +640,7 @@ class Scheduler:
         antialias: bool = True,
         params_from: Composite | None = None,
         seed: int = 0,
+        key: jax.Array | None = None,
     ) -> SchedulerResult:
         """Run the composite with multi-rate scheduling.
 
@@ -681,14 +682,17 @@ class Scheduler:
             Nyquist guardrail: refine the save grid finer (never coarser) if
             ``save_dt`` would undersample the fastest oscillation and alias a
             raw readout. ``False`` takes the grid verbatim.
-        seed:
-            Seed for the eager direct-SSA lane. It has no effect on purely
-            deterministic composites.
+        seed, key:
+            Randomness for stochastic reaction processes: ``key`` is a
+            ``jax.random`` key, and ``seed`` builds one when ``key`` is
+            None. A batched ``y0`` splits it per member, so replicates draw
+            independent noise. No effect on a deterministic composite.
 
         Returns
         -------
         :class:`SchedulerResult`
         """
+        rng_key = jax.random.PRNGKey(seed) if key is None else jnp.asarray(key)
         if isinstance(composite, RunPlan):
             conflicting = [
                 n
@@ -707,7 +711,7 @@ class Scheduler:
                     "discontinuity times) is what a plan *is*."
                 )
             return self._execute(
-                composite, y0, params_from=params_from, stochastic_seed=seed
+                composite, y0, params_from=params_from, rng_key=rng_key
             )
         if params_from is not None:
             raise TypeError(
@@ -720,7 +724,7 @@ class Scheduler:
         plan = self._plan_for(
             composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
         )
-        return self._execute(plan, y0, stochastic_seed=seed)
+        return self._execute(plan, y0, rng_key=rng_key)
 
     def plan(
         self,
@@ -789,7 +793,9 @@ class Scheduler:
             self._last_plan = (key, plan)
         return plan
 
-    def _reject_unsupported_batch(self, composite, state, keys) -> None:
+    def _reject_unsupported_batch(
+        self, composite, state, keys, compiled: bool
+    ) -> None:
         """Refuse a batched ``y0`` on the paths that cannot carry a batch axis.
 
         These branch on Python ``bool()``/``float()`` of the state, which would
@@ -800,10 +806,10 @@ class Scheduler:
         if state.ndim <= 1:
             return
         blockers = []
-        if composite.stochastic_processes():
+        if composite.stochastic_processes() and not compiled:
             blockers.append(
-                "stochastic reaction processes currently require an "
-                "unbatched state"
+                "stochastic reaction processes on an eager (non-scan) "
+                "configuration require an unbatched state"
             )
         only_assigned = _batch_varies_only_on_assigned(composite, state, keys)
         if only_assigned:
@@ -820,7 +826,9 @@ class Scheduler:
                 f"Batched y0 of shape {tuple(state.shape)} is not "
                 "supported with: " + "; ".join(blockers) + ". "
                 "Run unbatched, drop the blocking feature, or vmap "
-                "Scheduler.run from outside."
+                "Scheduler.run from outside — over the seed as well as y0 "
+                "when a process is stochastic, or every member draws the "
+                "same noise."
             )
 
     def verify_plan(
@@ -892,8 +900,6 @@ class Scheduler:
         discrete_procs = composite.discrete_processes()
         event_procs = composite.event_processes()
 
-        self._reject_unsupported_batch(composite, state, keys)
-
         # If no groups and no discrete/event, single-group fallback
         if not groups and not discrete_procs and not event_procs:
             continuous = composite.continuous_processes()
@@ -946,6 +952,12 @@ class Scheduler:
                 )
             )
         )
+        self._reject_unsupported_batch(
+            composite,
+            state,
+            keys,
+            compiled=fast_path_eligible or scan_eligible,
+        )
         core = (
             self._continuous_core(
                 composite,
@@ -991,9 +1003,11 @@ class Scheduler:
         plan: RunPlan,
         y0,
         params_from: Composite | None = None,
-        stochastic_seed: int = 0,
+        rng_key: jax.Array | None = None,
     ) -> SchedulerResult:
         """Run a resolved :class:`RunPlan` from ``y0``."""
+        if rng_key is None:
+            rng_key = jax.random.PRNGKey(0)
         composite = plan.composite
         if params_from is not None:
             want = plan.composite.structural_fingerprint()
@@ -1016,7 +1030,9 @@ class Scheduler:
             if y0 is None
             else jnp.asarray(y0)
         )
-        self._reject_unsupported_batch(composite, state, keys)
+        self._reject_unsupported_batch(
+            composite, state, keys, compiled=plan.core is not None
+        )
         key_to_idx = {k: i for i, k in enumerate(keys)}
         stochastic_procs = composite.stochastic_processes()
         if len(stochastic_procs) > 1:
@@ -1052,9 +1068,7 @@ class Scheduler:
                     discrete_procs=discrete_procs,
                     event_procs=event_procs,
                 )
-            ts, ys, dyn = core(
-                composite, state, jax.random.PRNGKey(stochastic_seed)
-            )
+            ts, ys, dyn = core(composite, state, rng_key)
             compiled_events = dyn.pop("_events", None)
             events = []
             if compiled_events is not None:
@@ -1144,8 +1158,6 @@ class Scheduler:
             )
             for name, proc in stochastic_procs.items()
         }
-        stochastic_rng = np.random.default_rng(stochastic_seed)
-
         discrete_idxs = {
             name: _build_proc_index_maps(
                 proc, composite.topology[name], key_to_idx
@@ -1338,11 +1350,12 @@ class Scheduler:
                             if port not in process_y0
                         }
                     )
+                    rng_key, window_key = jax.random.split(rng_key)
                     ssa = simulate_ssa(
                         proc,
                         t_span=(t, t_next),
                         y0=process_y0,
-                        seed=int(stochastic_rng.integers(0, 2**63 - 1)),
+                        key=window_key,
                         max_events=10_000_000,
                     )
                     for species, value in zip(
@@ -1589,16 +1602,18 @@ class Scheduler:
         Jacobian, cubic in population size. Per member the solve is
         ``n_vars``-sized, which is the block structure the Jacobian already
         has. ``ys`` keeps the ``(n_time, batch, n_vars)`` layout; per-group
-        stats come back per-member.
+        stats come back per-member. The key is split per member, so
+        stochastic replicates draw independent noise.
         """
         mapped = eqx.filter_vmap(
             core,
-            in_axes=(None, eqx.if_array(0), None),
+            in_axes=(None, eqx.if_array(0), 0),
             out_axes=(eqx.if_array(0), eqx.if_array(1), eqx.if_array(0)),
         )
 
         def batched(comp, y0, rng_key):
-            ts, ys, stats = mapped(comp, y0, rng_key)
+            keys = jax.random.split(rng_key, y0.shape[0])
+            ts, ys, stats = mapped(comp, y0, keys)
             return ts[0], ys, stats
 
         return batched

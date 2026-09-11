@@ -9,6 +9,10 @@ importer. :func:`drive_pulse` assembles the common dose-then-washout case.
 
 from __future__ import annotations
 
+import sympy
+
+from hallsim.sbml_math import TIME
+
 import logging
 
 import equinox as eqx
@@ -57,6 +61,13 @@ class PulseSource(Process):
         if self.t_end is not None:
             on = on & (t < self.t_end)
         return {"signal": self.amplitude * jnp.where(on, 1.0, 0.0)}
+
+    def assignment_rules(self):
+        on = TIME >= float(self.t_start)
+        if self.t_end is not None:
+            on = sympy.And(on, TIME < float(self.t_end))
+        signal = sympy.Piecewise((float(self.amplitude), on), (0, True))
+        return (("signal", signal),)
 
     def discontinuity_times(self):
         if self.t_end is None:
@@ -207,6 +218,13 @@ class StepSource(Process):
 
     def assign(self, t, state):
         return {"signal": jnp.where(t >= self.t_step, self.after, self.before)}
+
+    def assignment_rules(self):
+        signal = sympy.Piecewise(
+            (float(self.after), TIME >= float(self.t_step)),
+            (float(self.before), True),
+        )
+        return (("signal", signal),)
 
     def discontinuity_times(self):
         return (self.t_step,)

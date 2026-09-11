@@ -1,7 +1,7 @@
 """SBML auto-import — convert BioModels SBML files into Process instances.
 
-Uses ``sbmltoodejax`` to convert SBML species and reactions into a
-JAX-compatible RHS function, then wraps it as a :class:`Process` with
+The model's math is compiled by :mod:`hallsim.sbml_core` (libsbml → sympy →
+JAX); this module wraps the compiled core as a :class:`Process` with
 auto-generated ports and metadata.
 
 Example
@@ -9,16 +9,11 @@ Example
 >>> proc = process_from_sbml(10, name="mapk_cascade")
 >>> proc.ports_schema()    # auto-generated from SBML species
 >>> proc.metadata()        # SBML annotations
-
-Requires ``sbmltoodejax`` to be installed::
-
-    pip install sbmltoodejax
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Any
 
 import equinox as eqx
@@ -26,321 +21,21 @@ import jax
 import jax.numpy as jnp
 
 from hallsim.imported import ImportedODEProcess
-from hallsim.process import Port, PortRole
+from hallsim.process import Port, PortRole, ReactionChannel
+from hallsim.sbml_core import (  # noqa: F401  (re-exported)
+    SBMLCore,
+    UnsupportedSBMLFeatureError,
+    compile_sbml,
+)
 
 log = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class SBMLReactionChannel:
-    """Source-level reaction data preserved for stochastic execution."""
-
-    reaction_id: str
-    rate_law: str
-    stoichiometry: tuple[tuple[str, float], ...]
-
-
-def _compile_sbml_rate_law(
-    rate_law: str,
-    *,
-    model_data,
-    runtime_model,
-    reaction_id: str,
-):
-    """Compile one parsed SBML kinetic law using sbmltoodejax conventions.
-
-    This intentionally shares the generated model's vector layout rather than
-    deriving rates from the aggregate ODE.  It is a small execution view over
-    the source reaction and is not yet a claim that every SBML kinetic law is
-    a molecule-count propensity.
-    """
-    import re
-
-    from sbmltoodejax import jaxfuncs
-
-    math_funcs = {
-        "abs": "jnp.abs",
-        "max": "jnp.max",
-        "min": "jnp.min",
-        "pow": "jnp.power",
-        "exp": "jnp.exp",
-        "floor": "jnp.floor",
-        "ceiling": "jnp.ceil",
-        "ln": "jnp.log",
-        "log": "jnp.log10",
-        "factorial": "jaxfuncs.factorial",
-        "sqrt": "jnp.sqrt",
-        "sin": "jnp.sin",
-        "cos": "jnp.cos",
-        "tan": "jnp.tan",
-        "sinh": "jnp.sinh",
-        "cosh": "jnp.cosh",
-        "tanh": "jnp.tanh",
-        "true": "True",
-        "false": "False",
-        "pi": "jnp.pi",
-    }
-    species = model_data.species
-    compartments = model_data.compartments
-    y_indexes = runtime_model.y_indexes
-    w_indexes = runtime_model.w_indexes
-    c_indexes = runtime_model.c_indexes
-    local_names = {
-        name: f"{reaction_id}_{name}"
-        for name, _ in model_data.reactions[reaction_id].rxnParameters
-    }
-    pieces: list[str] = []
-    cursor = 0
-    for match in re.finditer(r"\b[A-Za-z_]\w*", rate_law):
-        pieces.append(rate_law[cursor : match.start()])
-        name = local_names.get(match.group(), match.group())
-        if name in c_indexes:
-            pieces.append(f"c[{c_indexes[name]}]")
-        elif name in w_indexes:
-            pieces.append(f"w[{w_indexes[name]}]")
-        elif name in y_indexes:
-            if (
-                name in species
-                and species[name].valueType == "Concentration"
-                and not species[name].hasOnlySubstanceUnits
-            ):
-                compartment = compartments[species[name].compartment].size
-                pieces.append(f"(y[{y_indexes[name]}] / {compartment})")
-            else:
-                pieces.append(f"y[{y_indexes[name]}]")
-        elif name in species:
-            raise UnsupportedSBMLFeatureError(
-                f"reaction {reaction_id!r} references species {name!r} "
-                "that is not present in the generated state vectors"
-            )
-        elif name in math_funcs:
-            pieces.append(math_funcs[name])
-        elif name == "time":
-            pieces.append("t")
-        else:
-            raise UnsupportedSBMLFeatureError(
-                f"reaction {reaction_id!r} references unsupported symbol "
-                f"{name!r} in rate law {rate_law!r}"
-            )
-        cursor = match.end()
-    pieces.append(rate_law[cursor:])
-    expression = "".join(pieces).replace("^", "**")
-    namespace = {"jnp": jnp, "jaxfuncs": jaxfuncs}
-    return eval(
-        f"lambda y, t, w, c: {expression}",
-        {"__builtins__": {}},
-        namespace,
-    )
-
-
-class UnsupportedSBMLFeatureError(Exception):
-    """Raised when an SBML file uses features sbmltoodejax cannot translate.
-
-    The pre-flight check in :func:`_precheck_sbml_supported` catches the
-    documented limitations (events; named functions outside
-    ``sbmltoodejax.modulegeneration.mathFuncs``) before ``GenerateModel``
-    runs, so users get one clear message naming the offending feature
-    rather than a cryptic traceback from inside the generated module.
-    """
-
-
-def _supported_function_names() -> set[str]:
-    """Names sbmltoodejax recognises as named function calls.
-
-    Source of truth is the ``mathFuncs`` dict literal inside
-    ``sbmltoodejax.modulegeneration.GenerateModel``. Upstream defines
-    it as a local variable, so we extract the keys via ``ast`` rather
-    than copying them — the set stays in sync as the table grows. If
-    upstream ever promotes ``mathFuncs`` to module scope, the direct
-    attribute lookup below picks it up automatically. Arithmetic
-    primitives (``+``, ``*``, ``**``, …) are not in this set because
-    libsbml's ``formulaToString`` emits them as Python operators that
-    never hit the function-name lookup.
-    """
-    import ast
-    import inspect
-
-    import sbmltoodejax.modulegeneration as mg
-
-    if hasattr(mg, "mathFuncs") and isinstance(mg.mathFuncs, dict):
-        keys: set[str] = set(mg.mathFuncs.keys())
-    else:
-        try:
-            src = inspect.getsource(mg.GenerateModel)
-        except (TypeError, OSError):
-            return set()
-        keys = set()
-        for node in ast.walk(ast.parse(src)):
-            if (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == "mathFuncs"
-                and isinstance(node.value, ast.Dict)
-            ):
-                keys = {
-                    k.value
-                    for k in node.value.keys
-                    if isinstance(k, ast.Constant) and isinstance(k.value, str)
-                }
-                break
-    # ParseRHS also special-cases bare identifiers 'time' and 'pi'.
-    return keys | {"time", "pi"}
-
-
-def _collect_known_symbols(sbml_model) -> set[str]:
-    """Identifiers libsbml's ``formulaToString`` may emit that refer to
-    model components (species, parameters, compartments, reactions,
-    local kineticLaw parameters) rather than function calls."""
-    names: set[str] = set()
-    for i in range(sbml_model.getNumSpecies()):
-        names.add(sbml_model.getSpecies(i).getId())
-    for i in range(sbml_model.getNumParameters()):
-        names.add(sbml_model.getParameter(i).getId())
-    for i in range(sbml_model.getNumCompartments()):
-        names.add(sbml_model.getCompartment(i).getId())
-    for i in range(sbml_model.getNumReactions()):
-        rxn = sbml_model.getReaction(i)
-        names.add(rxn.getId())
-        kl = rxn.getKineticLaw()
-        if kl is None:
-            continue
-        for j in range(kl.getNumParameters()):
-            names.add(kl.getParameter(j).getId())
-        if hasattr(kl, "getNumLocalParameters"):
-            for j in range(kl.getNumLocalParameters()):
-                names.add(kl.getLocalParameter(j).getId())
-    names.discard("")
-    return names
-
-
-def _collect_math_nodes(sbml_model):
-    """Yield every libsbml ASTNode root attached to the model.
-
-    Covers kinetic laws, rules, initial assignments, constraints,
-    event triggers/delays/assignments, and user function definitions —
-    everywhere SBML carries an evaluatable expression.
-    """
-    for i in range(sbml_model.getNumReactions()):
-        kl = sbml_model.getReaction(i).getKineticLaw()
-        if kl is not None and kl.isSetMath():
-            yield kl.getMath()
-    for i in range(sbml_model.getNumRules()):
-        r = sbml_model.getRule(i)
-        if r.isSetMath():
-            yield r.getMath()
-    for i in range(sbml_model.getNumInitialAssignments()):
-        ia = sbml_model.getInitialAssignment(i)
-        if ia.isSetMath():
-            yield ia.getMath()
-    for i in range(sbml_model.getNumConstraints()):
-        c = sbml_model.getConstraint(i)
-        if c.isSetMath():
-            yield c.getMath()
-    for i in range(sbml_model.getNumEvents()):
-        e = sbml_model.getEvent(i)
-        if e.isSetTrigger() and e.getTrigger().isSetMath():
-            yield e.getTrigger().getMath()
-        if e.isSetDelay() and e.getDelay().isSetMath():
-            yield e.getDelay().getMath()
-        for j in range(e.getNumEventAssignments()):
-            ea = e.getEventAssignment(j)
-            if ea.isSetMath():
-                yield ea.getMath()
-    for i in range(sbml_model.getNumFunctionDefinitions()):
-        fd = sbml_model.getFunctionDefinition(i)
-        if fd.isSetMath():
-            yield fd.getMath()
-
-
-def _precheck_sbml_supported(xml_path: str) -> list[str]:
-    """Scan an SBML file for features sbmltoodejax cannot translate.
-
-    Covers the two limitations documented at
-    https://developmentalsystems.org/sbmltoodejax/why_use.html#limitations:
-
-    1. ``<event>`` elements (discrete state changes).
-    2. Named function calls in any math expression whose name is not in
-       ``sbmltoodejax.modulegeneration.mathFuncs`` (and not the built-in
-       ``time`` or ``pi`` identifiers that ``ParseRHS`` special-cases).
-       Distinguishing operators from named function calls is delegated
-       to libsbml's ``ASTNode.isFunction`` so arithmetic primitives are
-       not flagged.
-
-    Returns
-    -------
-    list of human-readable issue strings. Empty list means OK.
-    """
-    import libsbml
-
-    reader = libsbml.SBMLReader()
-    doc = reader.readSBMLFromFile(str(xml_path))
-    model = doc.getModel()
-    if model is None:
-        return [f"libsbml could not parse {xml_path!r} as SBML"]
-
-    issues: list[str] = []
-
-    # An SBML-qual file carries qualitativeSpecies and transitions in place
-    # of species and reactions, so libsbml parses it and the model comes back
-    # with an empty state vector: without this the failure surfaces much
-    # later as "None is not a valid value for jnp.array". BioModels serves
-    # these under format "SBML" with no other signal.
-    if (
-        doc.getPlugin("qual") is not None
-        or model.getPlugin("qual") is not None
-    ):
-        issues.append(
-            "this is an SBML qual (logical/Boolean) model, not a kinetic "
-            "one: it declares update rules over discrete levels rather than "
-            "rate laws, so there is no ODE to integrate"
-        )
-
-    # <event> elements are translated separately (hallsim.sbml_events) and
-    # stripped from the copy sbmltoodejax generates from, so they are not a
-    # blocker here.
-
-    # Mirror sbmltoodejax's identifier-resolution path: serialize each
-    # math AST to infix via libsbml (the same conversion sbmltoodejax
-    # itself feeds into ParseRHS), find every function-call identifier
-    # (name immediately followed by ``(``), and flag any that isn't a
-    # model symbol and isn't in the supported function set. Doing the
-    # check post-formulaToString avoids false positives like ``power``
-    # and ``root`` that libsbml rewrites to ``pow`` and ``sqrt``.
-    import re
-
-    supported = _supported_function_names()
-    known_symbols = _collect_known_symbols(model)
-    unsupported: dict[str, int] = {}
-    for math_root in _collect_math_nodes(model):
-        infix = libsbml.formulaToString(math_root)
-        for match in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", infix):
-            name = match.group(1)
-            if name in supported or name in known_symbols:
-                continue
-            # libsbml renders <lambda> inside functionDefinitions as
-            # "lambda(...)" in the infix string. That's an SBML construct,
-            # not a call site; the actual unsupported event is the
-            # call to the user-defined function elsewhere, which the
-            # scan catches on its own.
-            if name == "lambda":
-                continue
-            unsupported[name] = unsupported.get(name, 0) + 1
-
-    if unsupported:
-        listing = ", ".join(
-            f"{name}() (x{n})" for name, n in sorted(unsupported.items())
-        )
-        issues.append(
-            f"calls function(s) outside sbmltoodejax's mathFuncs table: "
-            f"{listing}"
-        )
-
-    return issues
+SBMLReactionChannel = ReactionChannel
 
 
 class SBMLProcess(ImportedODEProcess):
-    """Process auto-generated from an SBML model via sbmltoodejax, exposing
+    """Process built on a compiled SBML model, exposing
     SBML species as EVOLVED ports. Built by :func:`process_from_sbml`, not
     directly.
 
@@ -375,9 +70,8 @@ class SBMLProcess(ImportedODEProcess):
     _reaction_channels: tuple[SBMLReactionChannel, ...] = eqx.field(
         static=True, default=()
     )
-    _reaction_propensity_functions: tuple = eqx.field(static=True, default=())
     _stochastic_enabled: bool = eqx.field(static=True, default=False)
-    _model: Any = None  # sbmltoodejax model object
+    _model: Any = None  # the compiled SBMLCore
     _w0: Any = None
     _c: Any = None
     # Parallel to _param_names, fixed at construction so derivative-time
@@ -475,27 +169,12 @@ class SBMLProcess(ImportedODEProcess):
             )
             c = c.at[indexes].set(jnp.stack([driven[n] for n in names]))
         t_native = t * self.time_scale
-        assignmentfunc = getattr(self._model, "assignmentfunc", None)
-        w = (
-            assignmentfunc(y, self._w0, c, t_native)
-            if assignmentfunc is not None
-            else self._w0
-        )
+        w = self._model.assignmentfunc(y, self._w0, c, t_native)
         if self._input_drivers:
             name_to_widx = dict(zip(self._w_names, self._w_indexes))
             for input_name, port in self._input_drivers:
                 w = w.at[name_to_widx[input_name]].set(state[port])
-        if any(fn is None for fn in self._reaction_propensity_functions):
-            raise UnsupportedSBMLFeatureError(
-                "an SBML reaction uses a kinetic-law feature that the "
-                "stochastic execution view cannot evaluate"
-            )
-        values = jnp.stack(
-            [
-                fn(y, t_native, w, c)
-                for fn in self._reaction_propensity_functions
-            ]
-        )
+        values = self._model.reaction_velocities(y, w, c, t_native)
         return values * self.time_scale
 
     def with_param_step(
@@ -614,7 +293,7 @@ class SBMLProcess(ImportedODEProcess):
                 s
                 for s in species
                 for ev in self._events
-                for tgt, _ in getattr(ev, "_assign_ir", ())
+                for tgt, _ in getattr(ev, "_assignments", ())
                 if tgt == s
             }
         )
@@ -725,10 +404,7 @@ class SBMLProcess(ImportedODEProcess):
         at the current state on the model's own clock."""
         if not self._assigned_names:
             return {}
-        host = getattr(self._model, "modelstepfunc", self._model)
-        assignmentfunc = getattr(host, "assignmentfunc", None)
-        if assignmentfunc is None:
-            return {}
+        assignmentfunc = self._model.assignmentfunc
         y = jnp.stack([state[name] for name in self._species_names], axis=-1)
         t_native = t * self.time_scale
         c = self._constants(t)
@@ -774,9 +450,8 @@ class SBMLProcess(ImportedODEProcess):
         # Trailing-axis stack, matching Composite.flatten/unflatten, so this
         # Process is shape-polymorphic and batched runs need no extra vmap.
         y = jnp.stack([state[name] for name in self._species_names], axis=-1)
-        host = getattr(self._model, "modelstepfunc", self._model)
-        ratefunc = host.ratefunc
-        assignmentfunc = getattr(host, "assignmentfunc", None)
+        ratefunc = self._model.ratefunc
+        assignmentfunc = self._model.assignmentfunc
         is_batched = y.ndim > 1
 
         c = self._constants(t)
@@ -812,16 +487,13 @@ class SBMLProcess(ImportedODEProcess):
         # Assignment rules evaluated from the *current* state; freezing `w` at
         # its initial value would leave a state-dependent rule stuck at t=0.
         w_batched = False
-        if assignmentfunc is not None:
-            if is_batched:
-                w = jax.vmap(assignmentfunc, in_axes=(0, None, None, None))(
-                    y, self._w0, c, t_native
-                )
-                w_batched = True
-            else:
-                w = assignmentfunc(y, self._w0, c, t_native)
+        if is_batched:
+            w = jax.vmap(assignmentfunc, in_axes=(0, None, None, None))(
+                y, self._w0, c, t_native
+            )
+            w_batched = True
         else:
-            w = self._w0
+            w = assignmentfunc(y, self._w0, c, t_native)
 
         # A driven input overrides the native SBML drive already in `w` with
         # its INPUT-port value, so a prescribed dose is a wired forcing source
@@ -856,11 +528,13 @@ class SBMLProcess(ImportedODEProcess):
         if self._frozen_indices:
             dydt = dydt.at[..., jnp.asarray(self._frozen_indices)].set(0.0)
 
-        # A species read from an external pool is not this model's to move.
+        # A species read from an external pool is not this model's to move,
+        # and one set by an assignment rule is ASSIGNED, not integrated.
+        skip = set(self._species_inputs) | set(self._assigned_names)
         return {
             name: dydt[..., i]
             for i, name in enumerate(self._species_names)
-            if name not in self._species_inputs
+            if name not in skip
         }
 
     def metadata(self):
@@ -869,14 +543,6 @@ class SBMLProcess(ImportedODEProcess):
         base["n_species"] = len(self._species_names)
         base["species_inputs"] = list(self._species_inputs)
         return base
-
-
-def _converted_cache_dir() -> str:
-    import os
-
-    path = os.path.expanduser("~/.cache/hallsim/converted")
-    os.makedirs(path, exist_ok=True)
-    return path
 
 
 def _atomic_write(out_path: str, write) -> None:
@@ -900,223 +566,6 @@ def _atomic_write(out_path: str, write) -> None:
             os.unlink(tmp)
 
 
-def _source_stamp(sbml_path: str):
-    import os
-
-    try:
-        st = os.stat(sbml_path)
-    except OSError:
-        return None
-    return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
-
-
-# Bump when a conversion pass changes, so cached copies made by the previous
-# passes are redone rather than served.
-_CONVERT_VERSION = 6
-
-
-def _cached_convert(sbml_path: str, out_name: str, transform) -> str:
-    """Path to a converted copy of ``sbml_path``, reusing a cached one.
-
-    ``transform(doc) -> bool`` mutates the parsed document and returns whether
-    a converted copy is needed; ``False`` means the source is usable as-is.
-    The entry is keyed on the source's size and mtime and on
-    ``_CONVERT_VERSION``, so an edited source or a changed pass reconverts,
-    and both the document and its key are written atomically.
-    """
-    import json
-    import os
-
-    import libsbml
-
-    out_path = os.path.join(_converted_cache_dir(), out_name)
-    stamp_path = out_path + ".stamp"
-    stamp = _source_stamp(sbml_path)
-
-    if stamp is not None:
-        try:
-            with open(stamp_path) as fh:
-                record = json.load(fh)
-            if (
-                record.get("src") == stamp
-                and record.get("xform") == _CONVERT_VERSION
-            ):
-                cached = record.get("result") or sbml_path
-                if cached == sbml_path or os.path.exists(cached):
-                    return cached
-        except (OSError, ValueError):
-            pass
-
-    doc = libsbml.SBMLReader().readSBMLFromFile(str(sbml_path))
-    if transform(doc):
-        _atomic_write(out_path, lambda p: libsbml.writeSBMLToFile(doc, p))
-        result = out_path
-    else:
-        result = sbml_path
-
-    if stamp is not None:
-        _atomic_write(
-            stamp_path,
-            lambda p: open(p, "w").write(
-                json.dumps(
-                    {"src": stamp, "xform": _CONVERT_VERSION, "result": result}
-                )
-            ),
-        )
-    return result
-
-
-def _preprocess_sbml(sbml_path: str) -> str:
-    """Apply libsbml converters that flatten SBML features sbmltoodejax
-    cannot translate but that have well-defined equivalent forms.
-
-    Currently runs:
-
-    * **expandFunctionDefinitions** — inlines every ``<functionDefinition>``
-      body at every call site. After this pass, the model has zero
-      user-defined functions and no ``function_X(...)`` references, so
-      sbmltoodejax (which rejects custom functions in ``ParseRHS``) can
-      translate the model directly. Idempotent on models that have no
-      function definitions to begin with.
-
-    Returns a path to the converted SBML file under
-    ``~/.cache/hallsim/converted``, reconverting only when the source
-    changes. The cache key is the basename of the input, so a converted local
-    file lives alongside any converted BioModels download.
-    """
-    import os
-
-    import libsbml
-
-    def transform(doc) -> bool:
-        if doc.getModel() is None:
-            # libsbml couldn't parse it; let the downstream pre-check produce
-            # the actual diagnostic — we just hand back the original path.
-            return False
-        props = libsbml.ConversionProperties()
-        props.addOption("expandFunctionDefinitions", True)
-        doc.convert(props)
-        _rewrite_math_functions(doc.getModel())
-        return True
-
-    return _cached_convert(sbml_path, os.path.basename(sbml_path), transform)
-
-
-def _rewrite_math_functions(sbml_model) -> int:
-    """Rewrite MathML functions sbmltoodejax mistranslates into forms it
-    handles, in place, returning the number of rewrites.
-
-    * ``<log/>`` (base 10 by default, or an explicit ``<logbase>``) becomes
-      ``ln(x) / ln(base)``: libsbml prints the former as ``log10(x)``, which
-      the translator has no entry for, and ``ln`` maps to ``jnp.log``.
-    * ``<root/>`` (square root by default, or an explicit ``<degree>``)
-      becomes ``x ^ (1/degree)``: the translator's ``sqrt`` entry is the
-      misspelt ``no.sqrt``, so every deposit taking a root in a rule fails
-      on a ``NameError`` (Erguler 2013).
-    * A literal with an integral value is re-emitted in exponent form, so a
-      constant power folds in float rather than overflowing int64 —
-      ``pow(1500, 6)`` is 1.139e19, past 9.22e18, and the whole model is
-      rejected for it. An *exponent* is left alone: ``x ** 6`` is defined at
-      negative ``x`` and ``x ** 6.0`` is not.
-    """
-    import libsbml
-
-    def ln(arg):
-        node = libsbml.ASTNode(libsbml.AST_FUNCTION_LN)
-        node.addChild(arg.deepCopy())
-        return node
-
-    def number(value):
-        # AST_REAL_E, not AST_REAL: libsbml prints a real with an integral
-        # value as "1500", which the translator then emits as a Python int
-        # and the coercion is undone at the only place it mattered.
-        node = libsbml.ASTNode(libsbml.AST_REAL_E)
-        node.setValue(float(value), 0)
-        return node
-
-    def rewrite(node, is_exponent=False):
-        if node is None:
-            return node, 0
-        kind_now = node.getType()
-        integral_literal = kind_now == libsbml.AST_INTEGER or (
-            kind_now == libsbml.AST_REAL
-            and float(node.getValue()).is_integer()
-        )
-        if integral_literal and not is_exponent:
-            return number(node.getValue()), 1
-        count = 0
-        power = node.getType() in (
-            libsbml.AST_POWER,
-            libsbml.AST_FUNCTION_POWER,
-        )
-        for i in range(node.getNumChildren()):
-            child, n = rewrite(node.getChild(i), power and i == 1)
-            count += n
-            if n and child is not node.getChild(i):
-                node.replaceChild(i, child)
-        kind = node.getType()
-        if kind == libsbml.AST_FUNCTION_LOG:
-            if node.getNumChildren() == 2:
-                base, arg = node.getChild(0), node.getChild(1)
-            else:
-                base, arg = number(10), node.getChild(0)
-            out = libsbml.ASTNode(libsbml.AST_DIVIDE)
-            out.addChild(ln(arg))
-            out.addChild(ln(base))
-            return out, count + 1
-        if kind == libsbml.AST_FUNCTION_ROOT:
-            if node.getNumChildren() == 2:
-                degree, arg = node.getChild(0), node.getChild(1)
-                # libsbml gives an implicit degree a unit attribute, which
-                # the L3 printer emits as a bare token; rebuild a number.
-                if degree.isNumber():
-                    degree = number(degree.getValue())
-                else:
-                    degree = degree.deepCopy()
-                exponent = libsbml.ASTNode(libsbml.AST_DIVIDE)
-                exponent.addChild(number(1))
-                exponent.addChild(degree)
-            else:
-                arg, exponent = node.getChild(0), number(0.5)
-            out = libsbml.ASTNode(libsbml.AST_POWER)
-            out.addChild(arg.deepCopy())
-            out.addChild(exponent)
-            return out, count + 1
-        return node, count
-
-    def containers():
-        for i in range(sbml_model.getNumReactions()):
-            kl = sbml_model.getReaction(i).getKineticLaw()
-            if kl is not None:
-                yield kl
-        for i in range(sbml_model.getNumRules()):
-            yield sbml_model.getRule(i)
-        for i in range(sbml_model.getNumInitialAssignments()):
-            yield sbml_model.getInitialAssignment(i)
-        for i in range(sbml_model.getNumConstraints()):
-            yield sbml_model.getConstraint(i)
-        for i in range(sbml_model.getNumEvents()):
-            e = sbml_model.getEvent(i)
-            if e.isSetTrigger():
-                yield e.getTrigger()
-            if e.isSetDelay():
-                yield e.getDelay()
-            for j in range(e.getNumEventAssignments()):
-                yield e.getEventAssignment(j)
-        for i in range(sbml_model.getNumFunctionDefinitions()):
-            yield sbml_model.getFunctionDefinition(i)
-
-    total = 0
-    for holder in containers():
-        if not holder.isSetMath():
-            continue
-        new, n = rewrite(holder.getMath().deepCopy())
-        if n:
-            holder.setMath(new)
-            total += n
-    return total
-
-
 def _download_biomodel_to_cache(model_id) -> str:
     """Fetch SBML XML for a BioModels ID and cache it under
     ``~/.cache/hallsim/biomodels``. Returns the cached path.
@@ -1126,8 +575,9 @@ def _download_biomodel_to_cache(model_id) -> str:
     model per machine.
     """
     import os
+    import urllib.request
 
-    from sbmltoodejax.biomodels_api import get_content_for_model
+    from hallsim.discovery import BIOMODELS_DOWNLOAD, _accession
 
     cache_dir = os.path.expanduser("~/.cache/hallsim/biomodels")
     os.makedirs(cache_dir, exist_ok=True)
@@ -1137,7 +587,13 @@ def _download_biomodel_to_cache(model_id) -> str:
         fname = f"{model_id}.xml"
     cache_path = os.path.join(cache_dir, fname)
     if not os.path.exists(cache_path):
-        xml = get_content_for_model(model_id)
+        accession = _accession(model_id)
+        url = (
+            BIOMODELS_DOWNLOAD.format(model_id=accession)
+            + f"?filename={accession}_url.xml"
+        )
+        with urllib.request.urlopen(url, timeout=60) as response:
+            xml = response.read().decode("utf-8")
         # Atomic, so an interrupted or concurrent download cannot leave a
         # truncated file that every later run then trusts.
         _atomic_write(cache_path, lambda p: open(p, "w").write(xml))
@@ -1287,29 +743,32 @@ def _extract_stoichiometry(xml_path: str) -> dict:
 
 
 def _extract_reaction_channels(
-    xml_path: str,
+    xml_path: str, core: SBMLCore
 ) -> tuple[SBMLReactionChannel, ...]:
-    """Preserve SBML reaction channels for a later SSA execution path."""
-    from sbmltoodepy.parse import ParseSBMLFile
+    """Each reaction's id, rate law and signed net stoichiometry."""
+    import libsbml
 
-    try:
-        model = ParseSBMLFile(str(xml_path))
-    except Exception as exc:
-        log.warning(
-            "Could not preserve SBML reactions from %s: %s", xml_path, exc
-        )
+    model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
+    if model is None:
         return ()
-
     channels = []
-    for reaction_id, reaction in model.reactions.items():
+    for i, law in enumerate(core.rate_laws):
+        rxn = model.getReaction(i)
+        net: dict[str, float] = {}
+        for refs, sign in (
+            (rxn.getListOfReactants(), -1.0),
+            (rxn.getListOfProducts(), 1.0),
+        ):
+            for ref in refs:
+                sid = ref.getSpecies()
+                net[sid] = net.get(sid, 0.0) + sign * float(
+                    ref.getStoichiometry()
+                )
         channels.append(
-            SBMLReactionChannel(
-                reaction_id=str(reaction_id),
-                rate_law=str(reaction.rateLaw),
-                stoichiometry=tuple(
-                    (str(species), float(coefficient))
-                    for coefficient, species in reaction.reactants
-                ),
+            ReactionChannel(
+                reaction_id=rxn.getId(),
+                rate_law=law,
+                stoichiometry=tuple(net.items()),
             )
         )
     return tuple(channels)
@@ -1438,133 +897,11 @@ def _extract_native_time_seconds(xml_path: str) -> tuple[float, bool]:
     return float(seconds), True
 
 
-def _strip_events(sbml_path: str) -> str:
-    """Write an event-free copy of the SBML for sbmltoodejax.
-
-    Events carry no ODE-core information (they only impose discrete state
-    changes, imported separately by :mod:`hallsim.sbml_events`), so
-    removing them lets the continuous model generate. Returns the original
-    path unchanged when there are no events.
-    """
-    import os
-
-    def transform(doc) -> bool:
-        model = doc.getModel()
-        if model is None or model.getNumEvents() == 0:
-            return False
-        while model.getNumEvents() > 0:
-            model.removeEvent(0)
-        return True
-
-    return _cached_convert(
-        sbml_path, f"noevents_{os.path.basename(sbml_path)}", transform
-    )
-
-
-_GENERATED_MODELS: dict = {}
-
-
 def _load_local_sbml(sbml_path: str):
-    """Load a local SBML file via sbmltoodejax's codegen, returning
-    ``(model, y0, w0, c)`` to match ``load_biomodel``.
-
-    Cached per source file (path + mtime + size): each generated module defines
-    a *new* model class, so importing the same SBML twice would otherwise give
-    one model two pytree node types and share no compiled solve.
-    """
-    import os
-
-    try:
-        st = os.stat(sbml_path)
-        key = (os.path.abspath(sbml_path), st.st_mtime_ns, st.st_size)
-    except OSError:
-        key = None
-    if key is not None and key in _GENERATED_MODELS:
-        model_cls, y0, w0, c = _GENERATED_MODELS[key]
-        return model_cls(), y0, w0, c
-
-    model_cls, y0, w0, c = _generate_model_module(sbml_path)
-    if key is not None:
-        _GENERATED_MODELS[key] = (model_cls, y0, w0, c)
-    return model_cls(), y0, w0, c
-
-
-def _generate_model_module(sbml_path: str):
-    """Run sbmltoodejax codegen and import the result, returning
-    ``(model_cls, y0, w0, c)``. Patches the generated source on the way in —
-    see the inline notes for each."""
-    import importlib.util
-    import os
-    import tempfile
-
-    from sbmltoodejax.utils import ParseSBMLFile, GenerateModel
-
-    # Flatten features that sbmltoodejax can't translate but libsbml
-    # knows how to expand (currently: user-defined function definitions).
-    sbml_path = _preprocess_sbml(sbml_path)
-    # Events are imported separately (hallsim.sbml_events); strip them so
-    # the ODE core generates cleanly.
-    sbml_path = _strip_events(sbml_path)
-
-    issues = _precheck_sbml_supported(sbml_path)
-    if issues:
-        bullets = "\n  - ".join(issues)
-        raise UnsupportedSBMLFeatureError(
-            f"Cannot import {sbml_path!r} via sbmltoodejax:\n  - {bullets}\n"
-            f"See https://developmentalsystems.org/sbmltoodejax/why_use.html"
-            f"#limitations"
-        )
-
-    model_data = ParseSBMLFile(sbml_path)
-
-    tmp_dir = os.path.expanduser("~/.cache/hallsim")
-    os.makedirs(tmp_dir, exist_ok=True)
-    fd, tmp_py = tempfile.mkstemp(
-        suffix=".py", prefix="sbml_jax_", dir=tmp_dir
-    )
-    os.close(fd)
-    try:
-        GenerateModel(model_data, tmp_py)
-        with open(tmp_py, "r") as f:
-            code = f.read()
-        patched = False
-        # Some models (Sivakumar2011) emit bare `no.sqrt(...)`: the MathML
-        # namespace prefix passes through instead of mapping to jax.numpy.
-        if "\tno " in code or " no." in code or "\tno." in code:
-            code = code.replace("import no\n", "import jax.numpy as no\n")
-            if "import no" not in code:
-                code = "import jax.numpy as no\n" + code
-            patched = True
-        if "eqx.static_field()" in code:
-            code = code.replace("eqx.static_field()", "eqx.field(static=True)")
-            patched = True
-        # sbmltoodejax hardcodes dtype=jnp.float32, which overrides
-        # jax_enable_x64. At rtol=1e-6 — below the float32 floor — the error
-        # estimate is then dominated by roundoff and the controller thrashes
-        # (~57% rejection masquerading as stiffness). No-op with x64 off.
-        if "float32" in code:
-            code = code.replace("float32", "float64")
-            patched = True
-        if patched:
-            with open(tmp_py, "w") as f:
-                f.write(code)
-        spec = importlib.util.spec_from_file_location(
-            "_sbml_generated", tmp_py
-        )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        # sbmltoodejax versions use different class names
-        model_cls = getattr(mod, "ModelSpec", None) or getattr(
-            mod, "ModelStep", None
-        )
-        if model_cls is None:
-            raise AttributeError(
-                f"Generated SBML module has neither ModelSpec nor ModelStep. "
-                f"Available: {[a for a in dir(mod) if not a.startswith('_')]}"
-            )
-        return model_cls, mod.y0, mod.w0, mod.c
-    finally:
-        os.unlink(tmp_py)
+    """``(core, y0, w0, c)`` for an SBML file, from :func:`compile_sbml`."""
+    core = compile_sbml(sbml_path)
+    as_vec = lambda values: jnp.asarray(values, dtype=float)  # noqa: E731
+    return core, as_vec(core.y0), as_vec(core.w0), as_vec(core.c0)
 
 
 def _collect_boundary_inputs(xml_path: str) -> set[str]:
@@ -1734,38 +1071,14 @@ def _resolve_source(model_id, name):
     return _download_biomodel_to_cache(model_id), name
 
 
-def _ordered_species(model) -> tuple[str, ...]:
-    """Species names in state-vector order, from the model's ``y_indexes``.
-
-    sbmltoodejax versions differ: ModelSpec exposes it on ``modelstepfunc``,
-    ModelStep directly on the model.
-    """
-    if hasattr(model, "modelstepfunc") and hasattr(
-        model.modelstepfunc, "y_indexes"
-    ):
-        y_indexes = model.modelstepfunc.y_indexes
-    elif hasattr(model, "y_indexes"):
-        y_indexes = model.y_indexes
-    else:
-        raise AttributeError(
-            f"Cannot find y_indexes on model ({type(model).__name__}). "
-            f"Available attrs: {[a for a in dir(model) if not a.startswith('_')]}"
-        )
-    return tuple(n for n, _ in sorted(y_indexes.items(), key=lambda x: x[1]))
+def _ordered_species(core) -> tuple[str, ...]:
+    """Species names in state-vector order."""
+    return tuple(core.y_indexes)
 
 
-def _index_maps(model):
-    """``(c_indexes, w_indexes)`` — the model's constant and boundary maps."""
-    host = getattr(model, "modelstepfunc", model)
-    c_indexes = getattr(host, "c_indexes", None) or getattr(
-        model, "c_indexes", None
-    )
-    w_indexes = (
-        getattr(host, "w_indexes", None)
-        or getattr(model, "w_indexes", None)
-        or {}
-    )
-    return c_indexes, w_indexes
+def _index_maps(core):
+    """``(c_indexes, w_indexes)`` — the core's constant and assigned maps."""
+    return core.c_indexes, core.w_indexes
 
 
 def _settable_surface(xml_path, c, w0, c_indexes, w_indexes):
@@ -1910,22 +1223,13 @@ def process_from_sbml(
         distinct from a clock the source actually asserts.
 
     Returns an :class:`SBMLProcess` with ports auto-generated from the species.
-    Raises ``ImportError`` without sbmltoodejax, ``KeyError`` on an unknown
-    parameter name.
+    Raises ``UnsupportedSBMLFeatureError`` for a construct the importer does
+    not translate, ``KeyError`` on an unknown parameter name.
     """
-    try:
-        import sbmltoodejax  # noqa: F401  (only checking availability)
-    except ImportError:
-        raise ImportError(
-            "sbmltoodejax is required for SBML import. "
-            "Install it with: pip install sbmltoodejax"
-        )
-
     xml_path, name = _resolve_source(model_id, name)
 
-    # Single import path: both local files and downloaded BioModels go
-    # through _load_local_sbml so the pre-check and the generated-module
-    # patches (namespace alias, eqx.static_field) apply uniformly.
+    # Single import path: local files and downloads alike go through
+    # _load_local_sbml, which caches one compiled core per file.
     model, y0, w0, c = _load_local_sbml(xml_path)
     species_names = _ordered_species(model)
     log.info(f"Loaded {len(species_names)} species: {species_names}")
@@ -1937,29 +1241,7 @@ def process_from_sbml(
     coupling_meta = _extract_coupling_metadata(xml_path)
     compartment_names = _extract_compartment_names(xml_path)
     stoichiometry = _extract_stoichiometry(xml_path)
-    reaction_channels = _extract_reaction_channels(xml_path)
-    from sbmltoodepy.parse import ParseSBMLFile
-
-    model_data = ParseSBMLFile(str(xml_path))
-    reaction_propensity_functions = []
-    for channel in reaction_channels:
-        try:
-            fn = _compile_sbml_rate_law(
-                channel.rate_law,
-                model_data=model_data,
-                runtime_model=model,
-                reaction_id=channel.reaction_id,
-            )
-        except UnsupportedSBMLFeatureError as exc:
-            log.warning(
-                "%s: stochastic reaction view unavailable for %s: %s",
-                name,
-                channel.reaction_id,
-                exc,
-            )
-            fn = None
-        reaction_propensity_functions.append(fn)
-    reaction_propensity_functions = tuple(reaction_propensity_functions)
+    reaction_channels = _extract_reaction_channels(xml_path, model)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
     _species_label_map = _extract_species_labels(xml_path)
 
@@ -1983,14 +1265,12 @@ def process_from_sbml(
         params_dict, parameters, c_indexes, boundary_inputs
     )
 
-    # Translate SBML <event> elements (stripped from the ODE core above)
+    # Translate SBML <event> elements (the compiled core ignores them)
     # into EVENT processes. Expand into a composite via
     # hallsim.sbml_events.expand_events(proc).
     from hallsim.sbml_events import translate_events
 
-    events = translate_events(
-        _preprocess_sbml(xml_path), species_names, params_dict, name
-    )
+    events = translate_events(xml_path, species_names, params_dict, name)
     # Through __init__, never object.__new__ + setattr: JAX rebuilds this pytree
     # at every jit/partition boundary, and a field-by-field instance does not
     # match what tree_unflatten produces — its structure shifts on the
@@ -2005,7 +1285,6 @@ def process_from_sbml(
         _coupling_meta=coupling_meta,
         _stoichiometry=stoichiometry,
         _reaction_channels=reaction_channels,
-        _reaction_propensity_functions=reaction_propensity_functions,
         native_time_seconds=native_time_seconds,
         native_time_source=native_time_source,
         time_scale=1.0,

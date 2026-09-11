@@ -300,10 +300,14 @@ def simulate_ssa(
     y0: dict[str, float] | None = None,
     save_dt: float | None = None,
     seed: int = 0,
+    key=None,
     max_events: int = 10_000_000,
     input_provider=None,
 ) -> SSAResult:
-    """Run Gillespie's direct method with JAX-native event execution."""
+    """Run Gillespie's direct method with JAX-native event execution.
+
+    ``key`` is a ``jax.random`` key; ``seed`` builds one when it is None.
+    """
     if len(t_span) != 2 or t_span[1] < t_span[0]:
         raise ValueError("t_span must be an increasing (start, end) pair")
     if save_dt is not None and (not math.isfinite(save_dt) or save_dt <= 0):
@@ -314,8 +318,6 @@ def simulate_ssa(
     validate_ssa_process(process)
     species = tuple(process._species_names)
     channels = tuple(process.reaction_channels())
-    if len(process._reaction_propensity_functions) != len(channels):
-        raise ValueError("reaction channels and propensity functions disagree")
     initial = (
         process._species_y0
         if y0 is None
@@ -332,7 +334,7 @@ def simulate_ssa(
         )
     start, end = map(float, t_span)
     save_times = _save_grid(start, end, save_dt)
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.PRNGKey(seed) if key is None else key
     initial_state = dict(zip(species, values))
     rates = jnp.asarray(process.reaction_propensities(start, initial_state))
     if rates.shape != (len(channels),):

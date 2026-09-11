@@ -14,6 +14,10 @@ source onto the target model's scale without a threshold or a saturation.
 
 from __future__ import annotations
 
+import sympy
+
+from hallsim.process import ReactionChannel
+
 from typing import NamedTuple
 
 import equinox as eqx
@@ -95,6 +99,25 @@ class GainEdge(Process):
 
     def _value(self, state):
         return self.offset + self.gain * jnp.asarray(state[self.source])
+
+    def _symbolic_value(self):
+        return float(self.offset) + float(self.gain) * sympy.Symbol(
+            self.source
+        )
+
+    def reaction_channels(self):
+        if self.mode != "flux":
+            return None
+        return (
+            ReactionChannel(
+                "gain", (("target", 1.0),), self._symbolic_value()
+            ),
+        )
+
+    def assignment_rules(self):
+        if self.mode != "level":
+            return ()
+        return (("signal", self._symbolic_value()),)
 
     def derivative(self, t, state):
         if self.mode != "flux":

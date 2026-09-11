@@ -1235,3 +1235,165 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   (10/10 = 1.0); `k2` stays at its published value and the validator no
   longer reports the pair. The primitive is SBML comp's replaced element
   with a conversion factor, in-process.
+
+- [x] **P0.71 — The Scheduler's own advice for a batched stochastic run yields
+  a population with one noise realisation.** Filed 2026-09-11. A batched `y0`
+  on a composite with a stochastic reaction process is refused by
+  `_reject_unsupported_batch` with "Run unbatched, drop the blocking feature,
+  or vmap Scheduler.run from outside." Doing exactly that —
+  `jax.vmap(lambda y: sched.run(comp, y0=y, seed=1).ys)` over three members
+  of a 50-molecule decay model — returns three trajectories that are equal in
+  every element: the integer seed becomes a single `jax.random.PRNGKey` inside
+  the compiled core (`scheduler.py:1056`) and the key is broadcast across
+  members. Vmapping the seed alongside `y0` gives distinct replicates, so the
+  replicate axis is expressible today; nothing says so, and the documented
+  route produces exactly the fake population the batch guard exists to
+  prevent, with no warning. Probe:
+  `scratch/2026-09-11-jkm-adoption/batched_ssa_probe.py`.
+  *Fix:* accept a batched state with stochastic processes by splitting the
+  key per member inside `_per_member` (its `in_axes` currently broadcasts the
+  key), and let `run` take a `key` alongside `seed`. Until then the refusal
+  message must say to vmap the seed too. `docs/design-stochastic-lane.md`
+  already states the design: the replicate axis is the key axis.
+  **Fixed 2026-09-11.** `Scheduler.run` takes ``key=`` alongside ``seed``;
+  the compiled lane splits the key per batch member (`_per_member`), the
+  eager lane derives one key per macro window with `jax.random.split` and
+  `simulate_ssa` takes ``key=``, and the batch guard refuses a stochastic
+  batch only on eager configurations. The probe's batched run now returns
+  ``ys`` of shape (201, 2, 2) with members that differ; the outer-vmap route
+  with a fixed seed still returns one realisation, and the refusal text now
+  says to vmap the seed. Tests: `test_stochastic.py` (independent members,
+  seed reproducibility, ``key`` ≡ ``seed``, eager lane seeded and refusing a
+  batch).
+
+- [x] **P3.20 — Initial values set by `<initialAssignment>` or by an
+  assignment rule are not evaluated at import, so such a deposit does not
+  load.** Found 2026-09-11 by the conformance suite. Nazaret 2009
+  (BIOMD0000000232) sets ADP and NADH by assignment rules and DeltaPsi and
+  six flux parameters by initial assignment, with no `initialConcentration`
+  or `value` attribute; `sbmltoodejax` emits `None` for them and the import
+  dies in `jnp.array`. The repository has carried a hand-edited copy,
+  `nazaret2009_BIOMD0000000232_initialised.xml`, with the values typed in —
+  which is the P0.63 pattern of patching the deposit instead of the
+  importer. libRoadRunner and COPASI load the original. The original is a
+  strict expected failure in `scripts/conformance.py`
+  (`CANNOT_IMPORT`) until this is fixed.
+  *Fix:* evaluate initial assignments and assignment rules at `t = 0` from
+  the sympy form of each rule (`hallsim.sbml_math`) when the importer owns
+  the translation, then delete the `_initialised` copy.
+  **Fixed 2026-09-11** by the native importer (`hallsim.sbml_core`): initial
+  assignments and assignment rules are evaluated at `t = 0` from their sympy
+  form. The deposited Nazaret 2009 file imports unchanged and matches
+  libRoadRunner to 1e-7 on both conformance windows; the `_initialised` copy
+  is deleted and `demos/models/mitochondrial_aging.py` reads the deposit.
+
+- [x] **P2.9 — A composite cannot be exported, so every cross-engine check
+  needs a hand-written SBML merge.** Filed 2026-09-10. HallSim imports SBML and
+  never emits it. To run the multi-hallmark composite in Tellurium and COPASI
+  (P1.17) the three deposits had to be merged offline with libSBML into one
+  file, and that merge is 300+ lines of reference surgery: `renameSIdRefs` does
+  not descend into kinetic laws or update `speciesReference` species attributes,
+  metaids are document-global and collide across documents, cross-document adds
+  fail with a bare `-8` unless levels are normalized first (DallePezze is L2V4,
+  the other two L2V1), assignment-rule targets need `setConstant(False)`, and
+  display-name collisions are not checked by SBML validation at all — DallePezze's
+  ROS and Proctor's ROS collided silently and were separated only by prefixing
+  every element name by hand. All of that is a re-derivation of wiring the
+  composite already holds as data, and it has to be redone by hand every time
+  the wiring changes, which makes the conformance check expensive to keep
+  current rather than expensive once.
+  *Fix:* `Composite.to_sbml()` emitting the flattened model with the coupling
+  edges as assignment rules and the clock reconciliation as rate-law scaling —
+  the same translation the merge does by hand, from the topology that already
+  describes it. It is also the interchange artifact for using COPASI as a
+  stochastic and inverse-task engine on sub-models (P3.6), and the thing that
+  makes the conformance test cheap to run on any composite rather than on one
+  hand-merged file.
+  **Fixed 2026-09-11.** `Composite.to_sbml()` (`hallsim.sbml_export`)
+  writes the composite as one SBML L3V2 document: store paths as species
+  (amounts, one unit compartment), a shared path one species, model
+  constants and compartments prefixed parameters, edges as reactions and
+  assignment rules from their declared symbolic forms, clock reconciliation
+  compiled into rates and event triggers, SBML events, parameter drivers,
+  parameter steps and input drivers included. The multi-hallmark composite
+  exports and matches libRoadRunner and COPASI to 1.2e-6 over two days on
+  42 species (`scripts/conformance.py --multi-hallmark`). Not covered:
+  DISCRETE processes, and any hand-written process that declares no
+  `reaction_channels()` / `assignment_rules()` — the mitochondrial demo's
+  own modules today.
+
+- [x] **P1.17 — Nothing checks HallSim against an established simulator; the
+  instrument exists and is not a test.** Found 2026-08-31 (external systems
+  review). `misc/tellurium_compare.py` builds the same SBML models in
+  libRoadRunner/CVODE and compares per-species trajectories, describing
+  RoadRunner as "the trusted stiff integrator; this is our ground-truth check" —
+  precisely the right instrument. It is a one-off script in `misc/`, its
+  docstring points at a wrong path (`demos/tellurium_compare.py`) and leaks a
+  venv name into public-facing text against the repo's own rule, and
+  `grep -rn "tellurium\|roadrunner\|copasi\|amici" tests/` returns nothing.
+  HallSim re-implements a large amount of SBML semantics on top of
+  `sbmltoodejax` — event translation (`sbml_events.py`, 358 lines),
+  assignment-rule ordering (`_order_assignments`), `functionDefinition`
+  inlining, port-boundary unit conversion (`units.py`), time-unit reconciliation
+  (`reconciled_to`) — and every one is a place that can produce a
+  plausible-but-wrong trajectory. **The entire correctness argument for all of it
+  is currently internal consistency.**
+  *Evidence, 2026-09-10, and it is good news.* The whole multi-hallmark
+  composite was rebuilt independently in Tellurium 2.2.13 / roadrunner 2.10 and
+  in COPASI 4.46 via basico, by merging the three deposits into one 82-species /
+  142-reaction / 20-rule SBML with the coupling edges compiled in as assignment
+  rules and rate-law rescalings, and simulated over 50 days. Both engines
+  reproduce the HallSim trajectory to integration tolerance: max relative
+  deviation over 1001 points is 1e-6 to 9e-4 on DNA_damage, CDKN1A, ROS,
+  phospho-mTORC1 and AggP in both arms and both engines. So the SBML semantics
+  HallSim re-implements are, on this composite, right. Two caveats keep this
+  entry open. The harness and its artifacts live outside this repo, so nothing
+  here re-runs it. And the one outlier — COPASI's etoposide-arm p53 at 3.5e-2 —
+  is not a discrepancy but a phase offset in a limit cycle scored with a
+  pointwise metric, which is its own defect (see the oscillation-aware
+  comparison entry below). Whether the merge was built against the current
+  wiring or the pre-2026-09-09 one, in which DallePezze's ROS drove Proctor's
+  `k2` rather than sharing its pool, is not recorded and needs establishing
+  before the numbers are quoted.
+  *Fix:* promote it to `tests/conformance/`, marked `slow` and gated on
+  `pytest.importorskip("roadrunner")`, asserting a per-species relative-deviation
+  bound on the bundled offline SBML. 2-3 days to make deterministic and bounded;
+  it is ~80% written. Highest-value test asset available.
+  *Progress 2026-09-11.* The single-model half is in-repo:
+  `scripts/conformance.py` runs every vendored deposit and three
+  synthetic models against libRoadRunner and COPASI on two windows, 31/31
+  with the native importer. The composite half still needs `Composite.to_sbml()`
+  (P2.9); until then the multi-hallmark cross-engine rebuild stays external.
+
+  *Progress 2026-09-11, later.* The composite half has its instrument too:
+  `Composite.to_sbml()` plus the composite case in the conformance suite.
+  The multi-hallmark composite itself needs event export before it can go
+  through it.
+  **Closed 2026-09-11.** The instrument is `scripts/conformance.py` — by
+  decision a development script, not a test, and the reference engines are
+  not a dependency. Every vendored deposit, three synthetic models, a
+  two-model three-edge composite, an event composite and the multi-hallmark
+  composite itself match libRoadRunner and COPASI to integration tolerance.
+  The document is generated from the composite's current wiring, so the
+  "which wiring was the merge built against" caveat no longer arises.
+
+- [x] **P0.72 — A composite nested inside another composite fired each SBML
+  event twice.** Found 2026-09-11 by the export test. `expand_events` left
+  the owner's `_events` in place after turning them into EVENT processes, so
+  when the composite was flattened into an outer one `_compose_events`
+  expanded them again under a second name; the collision check compares
+  names, and the second copy had a different one. Both copies fired.
+  **Fixed 2026-09-11:** expansion returns the owner through
+  `without_events()`, so a nested composite carries nothing to expand twice
+  (`test_a_nested_composite_expands_each_event_once`).
+
+- [x] **P0.73 — An event on a clock-reconciled model fired at the wrong
+  composite time.** Found 2026-09-11 while moving `sbml_events` onto
+  `sbml_math`. Event math is written in the model's native time, and
+  `SBMLEvent.condition` compared the composite's `t` against it directly, so
+  a model passed through `reconciled_to` had its timed events fire at
+  native-time instants read as composite time — off by the clock ratio. No
+  vendored demo composes an event-bearing model, which is why it went
+  unseen. **Fixed 2026-09-11:** an event carries its owner's `time_scale`,
+  set by `expand_events`, and evaluates trigger and assignments at
+  `t · time_scale` (`test_a_reconciled_model_fires_its_event_on_the_composite_clock`).

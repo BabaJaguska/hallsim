@@ -38,12 +38,12 @@ deterministically, but their stochastic view raises explicitly when used.
 `simulate_ssa` is currently a direct-method single-process runner; the
 Scheduler now also recognizes an explicitly selected
 `SBMLProcess.as_stochastic()` in an eager single-stochastic-process lane.
-The direct runner remains useful for one-way hybrid inputs; batched stochastic
-groups, multiple stochastic processes, and fully coupled hybrid splitting
-remain unfinished. The fixed Lie/frozen hybrid lane is now compiled; hybrid
-Strang, interpolated coupling, and waveform-relaxation semantics remain
-deliberately eager until jump timing, event replay, and static-buffer
-contracts are specified.
+The direct runner remains useful for one-way hybrid inputs. A batched state
+splits the run key per member on the compiled lane (2026-09-11); multiple
+stochastic processes and fully coupled hybrid splitting remain unfinished.
+The fixed Lie/frozen hybrid lane is now compiled; hybrid Strang, interpolated
+coupling, and waveform-relaxation semantics remain deliberately eager until
+jump timing, event replay, and static-buffer contracts are specified.
 
 ## The gap
 
@@ -51,7 +51,8 @@ contracts are specified.
 takes no key, no process is handed one, and `SchedulerResult` has no replicate
 axis. `jax.random` appears only in `steady_state.py` (basin sampling) and
 `neuralode.py` (init and batching). That is the one structural change; the rest
-is assembly.
+is assembly. *Status 2026-09-11:* done — `Scheduler.run(key=)`, split per
+macro window and per batch member.
 
 ## Design: a stochastic group integrator
 

@@ -83,7 +83,6 @@ def cps_to_sbml(
             f"L{SBML_LEVEL}V{SBML_VERSION}: "
             f"{COPASI.CCopasiMessage.getAllMessageText()}"
         )
-    _drop_model_history(out_path)
     log.info(
         "Converted COPASI '%s' to SBML L%dV%d.",
         cps_path.name,
@@ -91,34 +90,6 @@ def cps_to_sbml(
         SBML_VERSION,
     )
     return str(out_path)
-
-
-def _drop_model_history(path: Path) -> None:
-    """Remove the RDF creation history COPASI writes on export.
-
-    libsbml reads it back as a *warning* — the annotation is missing
-    attributes libsbml wants — and ``sbmltoodejax.parse`` refuses any document
-    with ``getNumErrors() > 0``, warnings included. So every COPASI export
-    fails to import over provenance metadata that carries no dynamics. Dropped
-    here rather than worked around downstream, because the file this writes is
-    a build artefact, not the deposit.
-    """
-    import libsbml
-
-    doc = libsbml.readSBML(str(path))
-    model = doc.getModel()
-    if model is None:
-        return
-    model.unsetModelHistory()
-    for getter, count in (
-        (model.getSpecies, model.getNumSpecies()),
-        (model.getReaction, model.getNumReactions()),
-        (model.getCompartment, model.getNumCompartments()),
-        (model.getParameter, model.getNumParameters()),
-    ):
-        for i in range(count):
-            getter(i).unsetModelHistory()
-    libsbml.writeSBMLToFile(doc, str(path))
 
 
 def is_cps(path) -> bool:

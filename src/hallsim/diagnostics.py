@@ -33,7 +33,7 @@ before trusting a composite; ``demos/subsystem_diagnostics.py`` is the visual
 version.
 
 **Is it the model or is it us?** When an SBML import is flagged, the screen
-re-integrates it with sbmltoodejax's own stepper and reports via
+re-integrates it with an independent explicit integrator and reports via
 ``ScreenReport.framework_suspect``. Bounded there but failing here means the
 problem is solver config, atol scale, or timescale grouping — not the model.
 """
@@ -414,31 +414,46 @@ def _verdict(
     )
 
 
-def _sbmltoodejax_native_finite(process, t_end: float, n_steps: int):
-    """Integrate an SBML-imported process with sbmltoodejax's own stepper.
+def _native_finite(process, t_end: float, n_steps: int):
+    """Integrate an SBML-imported process with an independent explicit
+    adaptive integrator (``jax.experimental.ode.odeint``, Dormand–Prince).
 
-    Rolls the generated ``ModelStep`` (which wraps the upstream odeint at
-    its generation-time tolerances) forward over ``[0, t_end]`` on the
-    model's native clock — the independent reference for the "is it the
-    model or is it us?" check. Returns ``(max_abs, finite)``, or ``None``
-    for a non-SBML process (no native reference exists) or if the native
-    run itself errors.
+    Rolls the compiled core forward over ``[0, t_end]`` on the model's
+    native clock, recomputing the assignment rules between steps — the
+    independent reference for the "is it the model or is it us?" check.
+    Returns ``(max_abs, finite)``, or ``None`` for a non-SBML process (no
+    native reference exists) or if the run itself errors.
     """
-    model = getattr(process, "_model", None)
-    if model is None or not hasattr(process, "_species_y0"):
+    core = getattr(process, "_model", None)
+    if core is None or not hasattr(process, "_species_y0"):
         return None
     try:
+        from jax.experimental.ode import odeint
+
         y0 = jnp.asarray(process._species_y0)
         c0 = process._c
         dt = t_end / n_steps
 
+        def rhs(y, t, w):
+            return core.ratefunc(y, t, w, c0)
+
         def step(carry, _):
-            y, w, c, t = carry
-            y, w, c, t = model(y, w, c, t, dt)
-            return (y, w, c, t), y
+            y, w, t = carry
+            y = odeint(
+                rhs,
+                y,
+                jnp.array([t, t + dt]),
+                w,
+                atol=1e-6,
+                rtol=1e-12,
+                mxstep=5_000_000,
+            )[-1]
+            t = t + dt
+            w = core.assignmentfunc(y, w, c0, t)
+            return (y, w, t), y
 
         _, ys = jax.lax.scan(
-            step, (y0, process._w0, c0, 0.0), None, length=n_steps
+            step, (y0, process._w0, 0.0), None, length=n_steps
         )
         ys = np.asarray(ys)
     except Exception:
@@ -546,7 +561,7 @@ def screen_process(
     ``tol_rel_threshold``, peak-normalised), and ``negative`` (a non-negative
     state dipped out of domain). Exceeding ``max_steps`` reads as exploding.
 
-    An SBML import flagged exploding is re-integrated with sbmltoodejax's own
+    An SBML import flagged exploding is re-integrated with an independent
     stepper; bounded there sets ``framework_suspect``. A component that only
     moves when driven would read as ``vanishing``, so it is re-screened with
     unfed INPUT paths held at ``input_probe`` — if that wakes it the report is
@@ -604,12 +619,12 @@ def screen_process(
     except TypeError:  # bad sched_kwargs, not an unintegrable model
         raise
     except Exception as exc:  # max_steps / non-finite blow the solve up
-        native = _sbmltoodejax_native_finite(proc, t_end, n_save)
+        native = _native_finite(proc, t_end, n_save)
         suspect = native is not None and native[1]
         detail = f"solver failed: {type(exc).__name__}"
         if suspect:
             detail += (
-                f"; sbmltoodejax integrates it bounded (max|y|={native[0]:.3g})"
+                f"; an independent integrator keeps it bounded (max|y|={native[0]:.3g})"
                 " — framework issue, not the model"
             )
         return ScreenReport(
@@ -660,12 +675,12 @@ def screen_process(
 
     framework_suspect = False
     if v.exploding:
-        native = _sbmltoodejax_native_finite(proc, t_end, n_save)
+        native = _native_finite(proc, t_end, n_save)
         if native is not None and native[1]:
             framework_suspect = True
             v.detail = _and(
                 v.detail,
-                f"sbmltoodejax integrates it bounded (max|y|={native[0]:.3g})"
+                f"an independent integrator keeps it bounded (max|y|={native[0]:.3g})"
                 " — framework issue, not the model",
             )
 
@@ -845,14 +860,13 @@ class CouplingRecommendation:
 def _reaction_roles(proc):
     """``(produced, consumed)`` boolean arrays per species.
 
-    Read off the stoichiometric matrix sbmltoodejax bakes into the imported
-    model (species × reactions): a positive entry produces the species in
+    Read off the compiled core's stoichiometric matrix (species ×
+    reactions): a positive entry produces the species in
     some reaction, a negative one consumes it. This is the same matrix the
     rate law integrates, so producer/consumer structure is exact, not
     re-parsed from the SBML.
     """
-    host = getattr(proc._model, "modelstepfunc", proc._model)
-    sm = np.asarray(host.ratefunc.stoichiometricMatrix)
+    sm = np.asarray(proc._model.stoichiometry)
     return np.any(sm > 0, axis=1), np.any(sm < 0, axis=1)
 
 
@@ -1128,3 +1142,114 @@ def screen_sensitivity(
                 )
             )
     return reports
+
+
+# ── Trajectory agreement ──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Agreement:
+    """How far a candidate trajectory sits from a reference one.
+
+    ``kind`` says which test applied: ``"level"`` scores the pointwise
+    maximum deviation against the reference's peak magnitude; ``"cycle"``
+    is used when the reference oscillates (at least ``min_peaks`` peaks) and
+    scores the cycle mean, the amplitude and the period instead — a phase
+    shift on an otherwise identical orbit reads as the full amplitude
+    pointwise and as nothing here. ``rel_dev`` is the number to threshold.
+    """
+
+    kind: str
+    rel_dev: float
+    detail: str
+
+
+def _cycle_statistics(ts, y, peaks):
+    from scipy.signal import find_peaks
+
+    lo, hi = peaks[0], peaks[-1]
+    mean = float(
+        np.trapezoid(y[lo : hi + 1], ts[lo : hi + 1]) / (ts[hi] - ts[lo])
+    )
+    troughs, _ = find_peaks(-y[lo:hi])
+    trough = (
+        float(np.mean(y[lo:hi][troughs]))
+        if troughs.size
+        else float(np.min(y[lo:hi]))
+    )
+    amplitude = float(np.mean(y[peaks])) - trough
+    period = float(np.mean(np.diff(ts[peaks])))
+    return mean, amplitude, period
+
+
+def trajectory_agreement(
+    ts,
+    reference,
+    candidate,
+    *,
+    min_peaks: int = 3,
+    prominence: float = 0.05,
+    floor: float = 1e-12,
+) -> Agreement:
+    """Score one candidate signal against one reference signal on ``ts``.
+
+    The reference decides the test: a signal with ``min_peaks`` or more
+    peaks of prominence ``prominence`` × its range is scored on cycle
+    statistics, anything else pointwise. Deviations are relative to the
+    reference's peak magnitude, floored at ``floor``: pass a fraction of
+    the model's largest state so a species living at the integrator's
+    absolute tolerance is not judged against its own noise.
+    """
+    from scipy.signal import find_peaks
+
+    ts = np.asarray(ts, float)
+    ref = np.asarray(reference, float)
+    cand = np.asarray(candidate, float)
+    if ref.shape != cand.shape or ref.shape != ts.shape:
+        raise ValueError(
+            f"shapes differ: ts {ts.shape}, reference {ref.shape}, "
+            f"candidate {cand.shape}"
+        )
+    if not (np.isfinite(ref).all() and np.isfinite(cand).all()):
+        return Agreement("level", float("inf"), "non-finite values")
+    scale = max(float(np.max(np.abs(ref))), floor, 1e-12)
+    span = float(np.max(ref) - np.min(ref))
+    peaks, _ = (
+        find_peaks(ref, prominence=prominence * span)
+        if span > max(floor, 1e-12)
+        else ([], None)
+    )
+    if len(peaks) >= min_peaks:
+        cand_peaks, _ = find_peaks(cand, prominence=prominence * span)
+        if len(cand_peaks) < min_peaks:
+            return Agreement(
+                "cycle",
+                float("inf"),
+                f"reference has {len(peaks)} peaks, candidate {len(cand_peaks)}",
+            )
+        m0, a0, p0 = _cycle_statistics(ts, ref, peaks)
+        m1, a1, p1 = _cycle_statistics(ts, cand, cand_peaks)
+        d_mean = abs(m1 - m0) / scale
+        d_amp = abs(a1 - a0) / max(abs(a0), 1e-12)
+        d_period = abs(p1 - p0) / max(abs(p0), 1e-12)
+        return Agreement(
+            "cycle",
+            float(max(d_mean, d_amp, d_period)),
+            f"cycle mean {d_mean:.2e}, amplitude {d_amp:.2e}, "
+            f"period {d_period:.2e} over {len(peaks)} peaks",
+        )
+    dev = float(np.max(np.abs(cand - ref)) / scale)
+    return Agreement("level", dev, f"max |Δ| / peak = {dev:.2e}")
+
+
+def trajectory_agreements(
+    ts, reference: dict, candidate: dict, **kwargs
+) -> dict[str, Agreement]:
+    """:func:`trajectory_agreement` per name present in both dicts."""
+    return {
+        name: trajectory_agreement(
+            ts, reference[name], candidate[name], **kwargs
+        )
+        for name in reference
+        if name in candidate
+    }

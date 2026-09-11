@@ -92,13 +92,9 @@ SENESCENCE_SBML_PATH = sbml_source(
     "dallepezze2014_BIOMD0000000582.xml",
     "BIOMD0000000582",
 )
-# The deposited BIOMD0000000232 leaves its rule-target parameters and its two
-# assignment-rule boundary species without values, which sbmltoodejax cannot
-# evaluate at t0. The sibling `_initialised` file supplies exactly those nine
-# attributes; see the directory README for the diff.
 BIOENERGETICS_SBML_PATH = sbml_source(
     "nazaret2009",
-    "nazaret2009_BIOMD0000000232_initialised.xml",
+    "nazaret2009_BIOMD0000000232.xml",
     "BIOMD0000000232",
 )
 REDOX_SBML_PATH = sbml_source(

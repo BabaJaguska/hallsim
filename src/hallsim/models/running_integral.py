@@ -17,6 +17,10 @@ apart and the integral accumulates frozen sync-point samples.
 
 from __future__ import annotations
 
+import sympy
+
+from hallsim.process import ReactionChannel
+
 from hallsim.process import Port, PortRole, Process
 
 
@@ -56,6 +60,24 @@ class RunningIntegral(Process):
                 description="Observable being integrated (read-only)",
             ),
         }
+
+    def reaction_channels(self):
+        channels = [
+            ReactionChannel(
+                "accumulate",
+                (("integral", 1.0),),
+                sympy.Symbol("source") ** float(self.power),
+            )
+        ]
+        if self.tau is not None:
+            channels.append(
+                ReactionChannel(
+                    "decay",
+                    (("integral", -1.0),),
+                    sympy.Symbol("integral") / float(self.tau),
+                )
+            )
+        return tuple(channels)
 
     def derivative(self, t, state):
         val = state["source"] ** self.power

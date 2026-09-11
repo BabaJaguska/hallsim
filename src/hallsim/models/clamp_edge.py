@@ -19,6 +19,10 @@ the ``k_clamp`` that meets a stated tolerance — pick the rate, don't guess it.
 
 from __future__ import annotations
 
+import sympy
+
+from hallsim.process import ReactionChannel
+
 import logging
 from dataclasses import dataclass
 
@@ -80,6 +84,12 @@ class ClampEdge(Process):
                 description="level the target is held at",
             ),
         }
+
+    def reaction_channels(self):
+        law = float(self.k_clamp) * (
+            sympy.Symbol("setpoint") - sympy.Symbol("target")
+        )
+        return (ReactionChannel("clamp", (("target", 1.0),), law),)
 
     def derivative(self, t, state):
         return {"target": self.k_clamp * (state["setpoint"] - state["target"])}

@@ -11,9 +11,10 @@ synthetic matrices. This builds the real ones: import each model, wrap it with
 -- the same point :func:`hallsim.stiffness.analyze_groups` linearises at, so the
 corpus matches shipped behaviour rather than inventing a new one.
 
-Import dominates: sbmltoodejax codegen runs per call and is not cached, at
-15-30 s a model, while the Jacobian itself is one ``jacfwd``. So the matrices go
-to ``~/.cache/hallsim/jacobians/`` and every later analysis reads ``.npz``.
+Import dominates: compiling a model's math takes seconds per file (cached
+per file within a process), while the Jacobian itself is one ``jacfwd``. So
+the matrices go to ``~/.cache/hallsim/jacobians/`` and every later analysis
+reads ``.npz``.
 
 ``rest_residual`` records how far the published IC is from a fixed point. A
 large value means the Jacobian sits on a transient rather than an attractor,

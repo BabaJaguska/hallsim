@@ -2,7 +2,10 @@
 
 import textwrap
 
+import jax
+import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from hallsim.sbml_import import process_from_sbml
 from hallsim.composite import Composite
@@ -64,7 +67,6 @@ def test_ssa_rejects_negative_propensities():
     class Negative:
         _species_names = ("A",)
         _species_y0 = (1.0,)
-        _reaction_propensity_functions = (None,)
 
         def reaction_channels(self):
             from hallsim.sbml_import import SBMLReactionChannel
@@ -90,7 +92,6 @@ def test_ssa_rejects_fractional_initial_counts():
     class Fractional:
         _species_names = ("A",)
         _species_y0 = (0.5,)
-        _reaction_propensity_functions = (None,)
 
         def reaction_channels(self):
             from hallsim.sbml_import import SBMLReactionChannel
@@ -160,3 +161,62 @@ def test_composite_rejects_continuous_writer_on_stochastic_count(tmp_path):
             },
             semantic_validation=False,
         )
+
+
+def _decay_composite(tmp_path, initial_amount=10):
+    path = tmp_path / "decay.xml"
+    path.write_text(
+        textwrap.dedent(MODEL).replace(
+            'initialAmount="10"', f'initialAmount="{initial_amount}"'
+        )
+    )
+    process = process_from_sbml(str(path), name="decay").as_stochastic()
+    return Composite(
+        processes={"decay": process},
+        topology={
+            "decay": {name: f"decay/{name}" for name in process._species_names}
+        },
+        validate=False,
+        semantic_validation=False,
+    )
+
+
+_SPAN = dict(t_span=(0.0, 1.0), macro_dt=0.25, save_dt=0.25)
+
+
+def test_batched_stochastic_members_draw_independent_noise(tmp_path):
+    composite = _decay_composite(tmp_path, initial_amount=200)
+    y0 = jnp.stack([composite.initial_state_vec()] * 3)
+
+    def run(seed):
+        return Scheduler().run(composite, y0=y0, seed=seed, **_SPAN)
+
+    result = run(3)
+    ys = np.asarray(result.ys)
+    assert ys.shape == (5, 3, 2)
+    assert np.all(ys[..., 0] + ys[..., 1] == 200)
+    same_01 = np.array_equal(ys[:, 0], ys[:, 1])
+    same_12 = np.array_equal(ys[:, 1], ys[:, 2])
+    assert not (same_01 and same_12), ys[-1]
+    assert np.all(np.asarray(result.stats["decay"]["num_events"]) > 0)
+    assert np.array_equal(np.asarray(run(3).ys), ys)
+    assert not np.array_equal(np.asarray(run(4).ys), ys)
+
+
+def test_key_argument_matches_seed(tmp_path):
+    composite = _decay_composite(tmp_path)
+    by_seed = Scheduler().run(composite, seed=7, **_SPAN)
+    by_key = Scheduler().run(composite, key=jax.random.PRNGKey(7), **_SPAN)
+    assert np.array_equal(np.asarray(by_seed.ys), np.asarray(by_key.ys))
+
+
+def test_eager_lane_is_seeded_and_refuses_a_batch(tmp_path):
+    composite = _decay_composite(tmp_path)
+    eager = Scheduler(progress=True)
+    first = eager.run(composite, seed=7, **_SPAN)
+    again = eager.run(composite, seed=7, **_SPAN)
+    assert np.array_equal(np.asarray(first.ys), np.asarray(again.ys))
+    assert np.all(first.ys[:, 0] + first.ys[:, 1] == 10)
+    y0 = jnp.stack([composite.initial_state_vec()] * 2)
+    with pytest.raises(ValueError, match="unbatched"):
+        eager.run(composite, y0=y0, **_SPAN)

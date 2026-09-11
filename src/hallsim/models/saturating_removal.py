@@ -17,6 +17,11 @@ Nat Commun 10:5495 (2019); Reinhardt & Yaffe, Curr Opin Cell Biol 21:245 (2009).
 
 from __future__ import annotations
 
+import sympy
+
+from hallsim.process import ReactionChannel
+from hallsim.sbml_math import TIME
+
 import jax.numpy as jnp
 
 from hallsim.process import Port, PortRole, Process
@@ -50,6 +55,17 @@ class SaturatingRemoval(Process):
                 },  # cellular response to DNA damage
             ),
         }
+
+    def reaction_channels(self):
+        D_pos = sympy.Max(sympy.Symbol("damage"), 0)
+        production = float(self.alpha) + float(self.eta) * TIME * float(
+            self.tau_scale
+        )
+        repair = float(self.beta) * D_pos / (float(self.K) + D_pos)
+        return (
+            ReactionChannel("production", (("damage", 1.0),), production),
+            ReactionChannel("repair", (("damage", -1.0),), repair),
+        )
 
     def derivative(self, t, state):
         D = state["damage"]

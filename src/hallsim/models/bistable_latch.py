@@ -28,6 +28,11 @@ operating point (:meth:`CalibrationProblem.operating_ranges`).
 
 from __future__ import annotations
 
+import sympy
+
+from hallsim.kinetics import hill_gate_sympy
+from hallsim.process import ReactionChannel
+
 import equinox as eqx
 
 from hallsim.kinetics import hill_gate
@@ -96,6 +101,27 @@ class BistableLatch(Process):
                 reads_value=False,
             ),
         }
+
+    def reaction_channels(self):
+        latch, trigger = sympy.Symbol("latch"), sympy.Symbol("trigger")
+        kick = hill_gate_sympy(trigger, float(self.K_trig), float(self.n_trig))
+        auto = hill_gate_sympy(latch, float(self.K_fb), float(self.n_fb))
+        return (
+            ReactionChannel(
+                "induction", (("latch", 1.0),), float(self.k_trigger) * kick
+            ),
+            ReactionChannel(
+                "feedback",
+                (("latch", 1.0),),
+                float(self.k_feedback) * auto * (1 - latch),
+            ),
+            ReactionChannel(
+                "decay", (("latch", -1.0),), float(self.k_decay) * latch
+            ),
+            ReactionChannel(
+                "output", (("target", 1.0),), float(self.k_output) * latch
+            ),
+        )
 
     def derivative(self, t, state):
         latch = state["latch"]

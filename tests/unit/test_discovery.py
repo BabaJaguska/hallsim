@@ -6,6 +6,10 @@ and are matched client-side against a cached index. These cover the matching,
 the kwarg routing and the record normalisation, none of which need a network.
 """
 
+import sympy
+
+from hallsim.sbml_math import TIME
+
 import inspect
 
 import pytest
@@ -279,26 +283,20 @@ def test_nonconstant_delay_is_nan_so_it_is_rejected():
 
 
 class _Ev:
-    def __init__(self, name, trigger_ir):
+    def __init__(self, name, trigger):
         self._name = name
-        self._trigger_ir = trigger_ir
+        self._trigger = trigger
+
+
+_cascade, _c3 = sympy.symbols("cascade c3")
 
 
 def test_complementary_triggers_sharing_a_boundary_are_caught():
     from hallsim.sbml_events import trigger_pathologies
 
     # cascade <= 20 (and c3 >= 4.5)   vs   cascade > 20
-    a = _Ev(
-        "latch_on",
-        (
-            "and",
-            [
-                ("leq", ("var", "cascade"), ("const", 20.0)),
-                ("geq", ("var", "c3"), ("const", 4.5)),
-            ],
-        ),
-    )
-    b = _Ev("latch_off", ("gt", ("var", "cascade"), ("const", 20.0)))
+    a = _Ev("latch_on", sympy.And(_cascade <= 20.0, _c3 >= 4.5))
+    b = _Ev("latch_off", _cascade > 20.0)
     found = trigger_pathologies([a, b])
     assert any("round-off" in f and "hysteresis" in f for f in found), found
 
@@ -307,15 +305,15 @@ def test_a_hysteresis_band_is_not_flagged():
     from hallsim.sbml_events import trigger_pathologies
 
     # arm at 20, disarm at 18 — no value satisfies both, so no chatter
-    a = _Ev("arm", ("gt", ("var", "cascade"), ("const", 20.0)))
-    b = _Ev("disarm", ("lt", ("var", "cascade"), ("const", 18.0)))
+    a = _Ev("arm", _cascade > 20.0)
+    b = _Ev("disarm", _cascade < 18.0)
     assert trigger_pathologies([a, b]) == []
 
 
 def test_equality_against_time_is_caught():
     from hallsim.sbml_events import trigger_pathologies
 
-    ev = _Ev("release", ("eq", ("time",), ("const", 2000.0)))
+    ev = _Ev("release", sympy.Eq(TIME, 2000.0))
     found = trigger_pathologies([ev])
     assert any("equality against time" in f for f in found), found
 
@@ -323,7 +321,7 @@ def test_equality_against_time_is_caught():
 def test_a_time_threshold_crossing_is_not_flagged():
     from hallsim.sbml_events import trigger_pathologies
 
-    ev = _Ev("release", ("geq", ("time",), ("const", 2000.0)))
+    ev = _Ev("release", sympy.Ge(TIME, 2000.0))
     assert trigger_pathologies([ev]) == []
 
 

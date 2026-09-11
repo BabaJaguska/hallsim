@@ -28,6 +28,16 @@ def hill_gate(x: jnp.ndarray, K: jnp.ndarray, n: jnp.ndarray) -> jnp.ndarray:
     return x_n / (K_n + x_n + _EPS)
 
 
+def hill_gate_sympy(x, K, n):
+    """:func:`hill_gate` as a sympy expression, term for term — the form a
+    process declares in :meth:`~hallsim.process.Process.reaction_channels`."""
+    import sympy
+
+    x_pos = sympy.Max(x, 0)
+    x_n = x_pos**n
+    return x_n / (K**n + x_n + _EPS)
+
+
 def hill_inhibition(
     x: jnp.ndarray, K: jnp.ndarray, n: jnp.ndarray
 ) -> jnp.ndarray:

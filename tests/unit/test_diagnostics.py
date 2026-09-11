@@ -344,3 +344,60 @@ def test_clean_report_has_no_advisories():
     report = ScreenReport("m", False, False, False, 1.0, 1e-9, tunes=True)
     assert report.ok and not report.blocking
     assert report.advisories == ()
+
+
+# ── trajectory_agreement ───────────────────────────────────────────────
+
+
+def _sine(ts, amp=1.0, period=2.0, phase=0.0, offset=3.0):
+    import numpy as np
+
+    return offset + amp * np.sin(2 * np.pi * ts / period + phase)
+
+
+def test_agreement_scores_a_phase_shift_on_cycle_statistics():
+    import numpy as np
+    from hallsim.diagnostics import trajectory_agreement
+
+    ts = np.linspace(0.0, 20.0, 4001)
+    a = trajectory_agreement(ts, _sine(ts), _sine(ts, phase=0.5))
+    assert a.kind == "cycle"
+    assert a.rel_dev < 2e-3, a
+    assert np.max(np.abs(_sine(ts) - _sine(ts, phase=0.5))) > 0.4
+
+
+def test_agreement_sees_an_amplitude_and_a_period_error():
+    import numpy as np
+    from hallsim.diagnostics import trajectory_agreement
+
+    ts = np.linspace(0.0, 20.0, 4001)
+    amp = trajectory_agreement(ts, _sine(ts), _sine(ts, amp=1.1))
+    assert amp.kind == "cycle" and 0.09 < amp.rel_dev < 0.11, amp
+    per = trajectory_agreement(ts, _sine(ts), _sine(ts, period=2.2))
+    assert per.kind == "cycle" and 0.09 < per.rel_dev < 0.11, per
+
+
+def test_agreement_scores_a_level_signal_pointwise():
+    import numpy as np
+    from hallsim.diagnostics import trajectory_agreement, trajectory_agreements
+
+    ts = np.linspace(0.0, 5.0, 501)
+    ref = 2.0 * np.exp(-ts)
+    a = trajectory_agreement(ts, ref, ref * 1.01)
+    assert a.kind == "level" and a.rel_dev == pytest.approx(0.01, rel=1e-6)
+    table = trajectory_agreements(
+        ts, {"x": ref, "y": ref}, {"x": ref, "z": ref}
+    )
+    assert set(table) == {"x"} and table["x"].rel_dev == 0.0
+    bad = trajectory_agreement(ts, ref, np.where(ts > 4, np.nan, ref))
+    assert bad.rel_dev == float("inf")
+
+
+def test_agreement_treats_sub_floor_noise_as_a_level():
+    import numpy as np
+    from hallsim.diagnostics import trajectory_agreement
+
+    ts = np.linspace(0.0, 5.0, 501)
+    noise = 1e-12 * np.sin(20 * ts)
+    a = trajectory_agreement(ts, noise, 0.9 * noise, floor=1e-6)
+    assert a.kind == "level" and a.rel_dev < 1e-6, a

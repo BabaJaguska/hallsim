@@ -141,7 +141,7 @@ def tellurium_fd_grad(theta, pnames, factors):
 
 
 # ----- correctness: hallsim autodiff vs hallsim's OWN finite difference -----
-# Cross-tool numerical agreement is not meaningful here: sbmltoodejax and
+# Cross-tool numerical agreement is not meaningful here: HallSim's import and
 # roadrunner number reaction rate constants differently, so a given name moves
 # different physical constants in each tool (trajectories still match at the
 # nominal defaults). The rigorous check that the autodiff is exact is therefore

@@ -37,17 +37,16 @@ def test_is_cps_is_by_extension():
     assert not is_cps("model.xml") and not is_cps(42)
 
 
-def test_converts_to_sbml_a_libsbml_reader_accepts_without_warnings(cps_file):
-    """COPASI writes an RDF creation history libsbml reads back as a warning,
-    and `sbmltoodejax.parse` rejects any document with `getNumErrors() > 0` —
-    warnings included. Every COPASI export would fail to import over
-    provenance metadata carrying no dynamics."""
+def test_converts_to_sbml_that_imports(cps_file):
+    """COPASI's export carries an RDF creation history libsbml reads back
+    as a warning; the importer takes the file as it is."""
     import libsbml
 
+    from hallsim.sbml_import import process_from_sbml
+
     out = cps_to_sbml(cps_file)
-    doc = libsbml.readSBML(out)
-    assert doc.getNumErrors() == 0
-    assert doc.getModel().getNumReactions() == 2
+    assert libsbml.readSBML(out).getModel().getNumReactions() == 2
+    assert len(process_from_sbml(out).reaction_channels()) == 2
 
 
 def test_conversion_is_cached_on_content(cps_file):
