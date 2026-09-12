@@ -1650,3 +1650,121 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   and 2395× on record were a 3-species ODE and an event composite, the
   shapes the orchestration is not for; the gz06 case re-measured here at
   1.3×. The README line is the user's.
+
+- [x] **P0.92 — `hill_gate` had an undocumented `1e-12` denominator floor that
+  killed every low-magnitude coupling edge.** Filed and fixed 2026-09-12. The
+  docstring promised `x^n / (K^n + x^n)`; the code computed
+  `x^n / (K^n + x^n + 1e-12)`, which dominates whenever `x^n` is near or below
+  the floor. `hill_gate(K, K, n)` is 0.5 by definition, and was not:
+
+  | K | n=1 | n=2 | n=4 |
+  |---:|---:|---:|---:|
+  | 1e-4 | 0.5000 | 0.4999 | **0.0001** |
+  | 1e-6 | 0.5000 | **0.3333** | **0.0000** |
+  | 1e-8 | 0.4999 | **0.0001** | **0.0000** |
+
+  On a real edge — kowald2006 H2O2, `K=9.67e-10` — `place_hill_gate`
+  certified `ok=True` and the edge delivered a **2.84× dynamic range where
+  196.1× was intended, a 69× shortfall**. Scaling both operating levels by 1e8
+  (identical ratio) restored the full 196.1×, which isolates magnitude as the
+  cause. The framework's own gate-placement check passed the dead edge, which
+  is what made it dangerous rather than merely wrong.
+
+  *Fixed* by guarding the division with a doubled `jnp.where` instead of an
+  additive floor, in `hill_gate`, `michaelis_menten` and the sympy spelling.
+  Now 0.5 to machine precision at every magnitude and every `n`, the gradient
+  stays finite at the guarded point, and `d/dx` at `x=K` matches central
+  differences. The two Hill edges in the multi-hallmark composite have
+  `K^n` of 38.78 and 0.1145, so their trajectories are unchanged and figures
+  produced before the fix remain comparable.
+
+- [x] **P0.93 — Nesting discarded a sub-composite's `initial=`, a parent
+  topology row, and any topology key that was not a port.** Filed and fixed
+  2026-09-12. Three silent wrong answers with one cause:
+  `_flatten_subcomposites` rebuilt a composite's wiring from the port schema
+  and dropped what the caller had written.
+
+  | | measured | now |
+  |---|---|---|
+  | sub-composite `initial=` dropped | standalone `x(10)=2.891216716`, nested `0.683939773` — **4.2×**, 0 warnings | merged with the namespace prefix; caller's own `initial=` wins |
+  | parent `topology=` row for a sub-composite key | discarded, target path never reached the store, 0 warnings | raises, naming the flattened spelling to use |
+  | topology key that is not a port | port took its auto-path instead — **99.7%** downstream error, 0 warnings | raises, listing the schema's ports |
+
+  The port-name check already existed in `validate_topology` and was
+  unreachable from the constructor, because the row was rebuilt before
+  validation saw it.
+
+- [x] **P0.94 — `store_keys()` was not reproducible across processes.** Filed
+  and fixed 2026-09-12. Zero-padded spellings of one number (`node2`,
+  `node02`) produce the same natural-sort key, and the source is a set, so ties
+  resolved by hash order: **3 distinct column layouts across 8 `PYTHONHASHSEED`
+  values**, and a state vector saved in one process reloaded permuted with no
+  error. The path itself now breaks ties, giving a total order — 8/8 seeds
+  identical.
+
+- [x] **P0.95 — `Composite.flatten` compiled one XLA operand per store
+  path.** Filed and fixed 2026-09-12. The compile is superquadratic in the
+  path count with a *climbing* exponent (n^1.92 → 2.19 → 2.54), 742 s at
+  n=50 000 and unfinished after 40 minutes at n=100 000, at flat memory and
+  with no HallSim-level message — XLA's own `slow_operation_alarm` at 2m43s
+  was the only diagnostic anywhere. It is slower warm as well:
+
+  | paths | value type | before | after |
+  |---:|---|---:|---:|
+  | 2 000 | python float | 59.6 ms | **1.56 ms** |
+  | 2 000 | device scalar | 32.7 ms | **4.73 ms** |
+  | 2 000 | device `(8,)` | 49.4 ms | **5.48 ms** |
+
+  *Fixed* by assembling the array in numpy when nothing is traced, keeping
+  `jnp.stack` for the traced path where a tracer is the only thing that can
+  carry the value. Shape polymorphism, `jit`, and forward/reverse gradients
+  all verified unchanged. This was one of the stop-rule instances — a bare
+  `jnp.asarray(list)` beat the framework 17× — and it is now closed.
+
+- [x] **P0.96 — `build_rhs` computed a per-process abstract trace and threw it
+  away.** Filed and fixed 2026-09-12. `_assignments_read_by` ran
+  unconditionally and its first statement is `_columns_read`, one
+  `jax.eval_shape` per process, whose result the loop never uses when there are
+  no ASSIGNED ports. **87% of `build_rhs`, 24.7× at N=5000**, and the sole
+  source of its superlinearity (N^1.23 → N^1.005 without it). The early-out
+  pattern already existed eleven lines earlier for a sibling method.
+
+- [x] **P0.97 — `SchedulerResult.ok` raised on any composite with a stochastic
+  member.** Filed and fixed 2026-09-12. Lanes report either a diffrax `RESULTS`
+  enum or a plain string, and comparing the two raises `Can only compare
+  equality between enumerations of the same type` rather than returning False —
+  so the documented health check was unavailable on the lane where a silently
+  truncated run is most likely. Both spellings are now handled.
+
+- [x] **P0.98 — Composing members on different declared clocks emitted no
+  warning from anywhere.** Filed and fixed 2026-09-12. dp14 (days) with gz06
+  (hours), unreconciled: **0 p53 peaks instead of 10**, 24.46% mean error,
+  `res.ok=True`, 0 build warnings, 0 run warnings from `Composite`, the
+  validator or the `Scheduler`. A new `ClockChecker` compares each member's
+  effective clock — `native_time_seconds × time_scale`, which reconciliation
+  equalises — and raises a unit ERROR naming both clocks and the remedy, in
+  keeping with this repo's rule that unit conflicts raise while everything else
+  warns. It names members whose clock was *assumed* rather than declared, since
+  there the mismatch may be an undeclared unit. Verified that the
+  multi-hallmark composite still builds: all three members reconcile to
+  `effective=86400`.
+
+- [x] **P0.99 — `with_params` could not address a nested process.** Filed and
+  fixed 2026-09-12. The address was split on the *first* dot, but a nested
+  process is itself named `<outer>.<inner>`, so `cell.decay.rate` raised
+  `KeyError` and `calibration_targets()` returned addresses that `with_params`
+  then rejected. Splitting on the last dot handles both spellings.
+
+- [x] **P0.100 — The stiffness verdict cache missed on a one-ULP difference in
+  `macro_dt`.** Filed and fixed 2026-09-11. `_integrator_signature` compared
+  `macro_dt` as an exact float, and callers derive it by subtracting window
+  bounds: `(t0 + span) - t0` differs from `span` by an ULP that varies with
+  `t0`. Measured in the neural-ODE shooting fit, one warmed verdict was found
+  by one window and missed by the rest — 6 of 13 lookups hit. Rounded to 12
+  significant digits in the key; no two `macro_dt` a stiffness verdict can
+  distinguish are that close. `fit_neuralode_shooting` also never called
+  `warm_up`, so every step routed by cold-cache fallback to the implicit
+  solver; with both fixed the learned p53 field measures **non-stiff**
+  (`max|Re λ| = 36.5` against the mechanical model's 3.26e+05) and routes to
+  Tsit5, **3.5× faster end to end** (1057 s against 3703 s) at bit-identical
+  loss.

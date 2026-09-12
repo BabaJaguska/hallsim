@@ -809,6 +809,62 @@ class DriverSemanticChecker:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+class ClockChecker:
+    """Flags members that disagree about how long one unit of ``t`` is.
+
+    An imported process carries the clock its source declared, and
+    ``reconciled_to`` rescales its rate laws onto a shared one. A member's
+    effective clock is ``native_time_seconds * time_scale``: equal across the
+    composite once reconciled, and equal to each source's own unit before.
+    Composing unreconciled members leaves them running at different speeds on
+    one shared ``t``, which produces a finite, plausible, meaningless
+    trajectory.
+    """
+
+    def check(
+        self,
+        processes: dict[str, Process],
+        topology: dict[str, dict[str, str]],
+    ) -> list[ValidationResult]:
+        clocks: dict[float, list[str]] = {}
+        assumed: list[str] = []
+        for name, proc in processes.items():
+            native = getattr(proc, "native_time_seconds", None)
+            if native is None:
+                continue
+            scale = float(getattr(proc, "time_scale", 1.0) or 1.0)
+            effective = float(native) * scale
+            clocks.setdefault(effective, []).append(name)
+            if getattr(proc, "native_time_source", "declared") != "declared":
+                assumed.append(name)
+
+        if len(clocks) < 2:
+            return []
+
+        shown = "; ".join(
+            f"{seconds:g} s/unit: {', '.join(sorted(names))}"
+            for seconds, names in sorted(clocks.items())
+        )
+        note = (
+            f" {len(assumed)} of these did not declare a time unit and were "
+            f"assumed to be in seconds "
+            f"({', '.join(sorted(assumed))}), so the mismatch may be an "
+            f"undeclared unit rather than a real difference."
+            if assumed
+            else ""
+        )
+        return [
+            ValidationResult(
+                Severity.ERROR,
+                "units",
+                f"Members disagree about how long one unit of t is, so they "
+                f"advance at different real-world rates on a shared clock -- "
+                f"{shown}. Put them on one clock with "
+                f"proc.reconciled_to(canonical_seconds).{note}",
+            )
+        ]
+
+
 class CompositeValidator:
     """Orchestrates all validation subsystems.
 
@@ -840,6 +896,7 @@ class CompositeValidator:
         self.checkers: list[Any] = []
         if check_units:
             self.checkers.append(UnitChecker())
+            self.checkers.append(ClockChecker())
         if check_semantics:
             self.checkers.append(SemanticChecker())
         if check_redundancy:

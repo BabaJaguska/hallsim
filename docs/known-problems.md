@@ -115,6 +115,16 @@ The framework returns a plausible number and nothing indicates it is wrong.
   *Fix:* find why Strang loses its second order; add the order test
   `design-multiscale-scheduler.md:445` has called for since day one.
 
+  **Measured on a clean split, 2026-09-12.** Every configuration above is
+  confounded — by a reporter, by an oscillation, or by a coupling cycle, which
+  P1.28 has since shown makes a single-sweep split first order whatever the
+  scheme. Re-run on a *genuinely acyclic* two-group split, halving the macro
+  step: **Strang attains order 1.00 ± 0.04, not 2.** So the deficit is not the
+  cycle confound this entry has been hedging against since day one, and it is
+  not a reporter artefact. Whatever costs Strang its second order is in the
+  scheme as implemented. Scripts in
+  `scratch/2026-09-12_stress/execution/`.
+
   **Third configuration, 2026-09-05** — the natural three-model split with
   Kallenberger in (DP14 slow / GZ06 + K14 + edges fast), six reporters, against
   a Lie@0.05 reference. The sign is **opposite** to the row above:
@@ -1239,6 +1249,155 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `atol` comparison per iteration, which is a few more kernels on exactly the
   path that cannot afford them.
 
+- [ ] **P0.83 — Swapping in a process with a different port layout silently
+  unfeeds every consumer of the one it replaced, and the composite still
+  runs.** Filed 2026-09-12. `SBMLProcess` puts each species on its own port,
+  so GZ06's p53 is at `gz06/x`. `NeuralODEProcess` puts all its fields behind
+  one stacked state port — the consolidation that makes it vectorizable — so
+  the same species is at `gz06/state/x`. Swap the block into the multi-hallmark
+  composite and every downstream reader is left addressing a path the new
+  process does not write.
+
+  Nothing fails. `gz06/x` still *exists* in the store, because the consumer's
+  own unfed INPUT port is what declares it, so the read returns that port's
+  default forever. Measured on the §3.3 hybrid, DDB2 against genomic-instability
+  severity at the composite's held α_y:
+
+  | severity | 0.0 | 0.25 | 0.5 | 0.75 | 1.0 | ∂/∂severity |
+  |---|---|---|---|---|---|---|
+  | mechanistic | 0.3281 | 0.3507 | 0.3691 | 0.4518 | 0.4787 | — |
+  | hybrid, edge severed | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0 autodiff, 0.0 finite-diff |
+
+  A whole arm of a figure, plus an end-to-end differentiability claim that
+  inverted into its own refutation, from a swap that reported success. With the
+  readers retargeted, the same composite reproduces mechanistic `dp14/CDKN1A`
+  to ~0.1% (std 8.6079 vs 8.5962) where the severed version was ~20% off.
+
+  The validation layer *did* catch it — `Unfed input: p53_cdkn1a.source reads
+  from 'gz06/x' but no process writes there. Will use default value only` — as
+  a warning, eight times, in a log alongside routine solver chatter. A warning
+  is the wrong severity for "a coupling edge you wired is not connected": there
+  is no composite in which reading a hardcoded default in place of a live
+  trajectory is the intent, and the failure is invisible in the output because
+  defaults are plausible numbers.
+
+  *Fix:* promote unfed INPUT to an error by default, with an opt-out for the
+  genuinely-constant case, so a severed edge stops the run instead of quietly
+  changing what was measured. Separately, give a process a way to declare the
+  store layout it presents, so a replacement can be checked against the one it
+  replaces at swap time rather than discovered downstream.
+
+- [ ] **P0.84 — `simulate_conditioned` returns trajectories on a grid the
+  caller cannot discover.** Filed 2026-09-12. It takes `ts`, and returns
+  `(ys, us)` — never the times `ys` is actually on. The Scheduler's antialias
+  guardrail refines `save_dt` when the requested grid would alias the fastest
+  oscillation, so for a coarse request the returned array is longer than `ts`
+  and every caller pairs it with the grid it asked for rather than the one it
+  got. Requesting 40 points over GZ06's t=2 returns 200-point-equivalent
+  refinement: `auto-reduced save_dt 0.05128 -> 0.02822`, `ys` of shape
+  `(6, 72, 3)` against `ts` of length 40. It is silent whenever the request is
+  already fine enough, which is why the demo's own 200-point grid never
+  exposed it.
+
+  **Same gap as P1.27, found from the other end.** That entry is interpolated
+  coupling and Strang returning their own grid; this one is the antialias
+  guardrail returning its own grid. Three paths, one cause: a returned
+  trajectory does not carry the time axis it is on, so every caller supplies
+  the axis it asked for and is right only by luck. Two people found it
+  independently within a day, in different subsystems, which is the signal
+  that the call sites are not where it should be fixed.
+
+  *Fix:* make the time axis part of what a run returns, and make every path
+  that changes the grid say so — in P1.27's terms, return `ys` at the
+  requested times and keep the lane's own sampling internal.
+  `simulate_conditioned` then either inherits that or, until it lands,
+  returns `(ts, ys, us)` instead of `(ys, us)`.
+
+- [ ] **P0.85 — `fit_neuralode_shooting` returns the last iterate, not the
+  best one.** Filed 2026-09-12. The loop tracks no best-so-far, so a fine-tune
+  that converges and then drifts hands back the drifted weights. Measured on
+  the §3.3 block, 250 steps: 0.1196 at step 0, 0.0320 at 124, 0.0355 at 186,
+  0.0524 at 248 — the returned block is ~1.6× worse than the one the run
+  passed through. Keeping the argmin is not a one-liner, because the logged
+  loss is on a resampled minibatch and ranking on it would chase sampling
+  noise; it needs a fixed evaluation batch held aside for the purpose. Until
+  then, callers that care must score the stage against something external —
+  which is what the demo does, and why the drift was visible rather than
+  merely shipped.
+
+- [ ] **P0.86 — One eager `run()` disables forward-mode autodiff for that
+  Scheduler.** Filed 2026-09-12. `_plan_for`'s memo key carries `y0`'s shape
+  and dtype; a JVP tracer shares both, so the plan built eagerly — carrying
+  `RecursiveCheckpointAdjoint`, a `custom_vjp` — is a cache *hit* under a later
+  forward trace and `_resolve_adjoint` never runs. Measured on dp14, and the
+  order is the whole finding:
+
+  | first call | then `jacfwd` / `jvp` |
+  |---|---|
+  | `jacfwd` | both fine, 79.68600986 |
+  | **eager `run()`** | **both raise** `TypeError: can't apply forward-mode autodiff (jvp) to a custom_vjp function` |
+  | `jax.grad` | both fine — reverse mode does not poison the memo |
+
+  "Evaluate eagerly, then differentiate" is what `Scheduler.run`'s own
+  docstring advertises, and `warm_up`-then-differentiate is the contract the
+  stiffness cache is built around. *Fix:* the memo key has to separate a
+  concrete call from a traced one — shape and dtype do not, because that is
+  exactly what a tracer reproduces.
+
+- [ ] **P0.87 — A scalar port bound to several store paths reads only the
+  first, through a complete run.** Filed 2026-09-12. Finite, plausible numbers,
+  0 warnings, and two of three bound paths contributing nothing. *Fix:* decide
+  what the binding means — sum the paths, forbid the binding, or make a
+  multi-path port a distinct declaration — and make the other two cases an
+  error.
+
+- [ ] **P0.88 — A block port forfeits the Jacobian sparsity the equivalent
+  process spelling declares.** Filed 2026-09-12. The same maths written as one
+  block-ported process declares a **100% dense** Jacobian (400 colours) where
+  the N-process spelling declares **0.50%** (2 colours), and
+  `steady_state._jacobian` has no crossover test. Block ports are what this
+  repo recommends at scale, so the recommended spelling is the slow one.
+
+- [ ] **P0.89 — Every topology path string and `ProcessKind` is a pytree
+  leaf.** Filed 2026-09-12. At 3 000 ports that is 14 998 leaves and **20.7 ms
+  to dispatch a no-op `filter_jit`**, plus 73 ms in `_param_digest`, which runs
+  on every `plan()`. Latent hazard beside the cost:
+  `np.asarray(enum).tobytes()` hashes a *pointer*, into a cache whose job is
+  correctness.
+
+- [ ] **P0.90 — `tests/unit` cannot complete in one interpreter, and the
+  reason is not known.** Filed 2026-09-12. A full-suite run aborts inside
+  `backend_compile_and_load` at a fixed point (~78–79%), and reports a handful
+  of `test_steady_state.py` / `test_stiffness_large_group.py` failures that do
+  not reproduce in isolation. Ruled out by measurement: machine load (aborts
+  identically at load 1.58 and at 303); `TMPDIR` on the full root partition (it
+  was already on a 4 TB volume, and forcing it elsewhere changes nothing); the
+  persistent compile cache (`HALLSIM_COMPILATION_CACHE_DIR=off` aborts at the
+  same place with **zero** preceding failures); any single test file (files
+  1–18, 19–27 and 28–36 each pass cleanly with the victim appended); and
+  `Composite.flatten`'s n-operand stack (fixed, and the abort merely moved one
+  file later). The failure *count* has been 0, 3, 5 and 7 across identical
+  code, tracking cache state rather than anything in the tree — so there is no
+  evidence of a failing test, only of a run that cannot finish.
+
+  Mitigated, not fixed: `make test` now runs the files in chunks of
+  `TEST_CHUNK` (12) so each gets a fresh interpreter — 861 passed, 0 failed —
+  and `make test-single-process` is kept so the ceiling stays reproducible.
+  *Fix:* find the mechanism. It is an abort inside XLA compilation, so the
+  first question is whether jaxlib leaks a per-compilation resource, and
+  whether the ceiling moves with jaxlib version or with the number of distinct
+  compilations rather than the number of tests.
+
+- [ ] **P0.91 — Four registry entries and a docs page cite benchmark scripts
+  that are not in the tree.** Filed 2026-09-12. `scripts/bench_scheduler.py`,
+  `scripts/bench_field.py` and `scripts/verify_gpu_batch.py` are cited as the
+  evidence for P0.81's and P0.82's resolutions, P1.28, P1.29 and
+  `docs/gpu-verification.md`. They do not exist, are not gitignored, and have
+  never been committed. The numbers may be sound — they are not reproducible
+  from this repository, which is the standard P0.81 was filed to insist on.
+  *Fix:* commit them, or re-derive the numbers with something that is
+  committed.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -1559,6 +1718,17 @@ The check that would catch a mistake does not exist, does not run, or fails open
   times (the union grid, subset on return), and give Strang the same
   contract. Until then, at least warn when the returned grid is not the
   requested one.
+
+  **Correction 2026-09-12:** this entry credits `RunPlan` with recording
+  `requested_save_dt` beside the `save_dt` it used. Measured: `RunPlan.save_dt`
+  records the value that was *requested*, not the one used, so the plan does
+  not carry the information either.
+
+  The antialias guardrail is a third path with the same behaviour, reached
+  without coupling or Strang — see P0.84, where a request for 40 save points
+  came back as 72 with nothing in the return value saying so. Whatever
+  contract is chosen here should cover all three, since the caller cannot
+  tell which path rewrote its grid.
 
 - [ ] **P1.28 — On a feedback loop the default coupling is frozen in effect, the split is first order in the macro step, and nothing says so.** Measured 2026-09-11 with `scripts/bench_scheduler.py` on a diffusion chain (τ = 1) closed through an 8-state stiff block (`chain:64`, `chain:256`; the loop is x0 → x1 → z → x0). With the default single sweep, `interpolated` equals `frozen` to three digits — 0.501 against 0.502 of the signal range at macro_dt 1.0, 0.133 against 0.133 at 0.25, 0.0537 against 0.0535 at 0.1 — because the stiff block is solved first and sees the chain frozen; an interpolant only ever helps a forward edge, which `_effective_coupling` says in its docstring and the plan never checks. The error falls linearly with the macro step (0.50 → 0.13 → 0.054): Lie splitting on a loop with one sweep is O(macro_dt) whatever the coupling mode, and at a macro step equal to the chain's time constant the default loses half the signal without a warning. `waveform_sweeps=2` costs 2× and takes the error to 0.021 / 5.6e-4 / 1.9e-4; Strang costs 5 % for 0.078 / 0.018 / 0.0069. On the multi-hallmark composite, where forward edges dominate, the ordering reverses: the default is the best point measured (1.2e-3 at macro 0.5 and 2.2e-4 at 0.1, at 2.6× and 2.1× the bare implicit speed), a second sweep buys nothing at 2× the cost, and Strang is 20× worse because it forbids the interpolant. So no single default wins both, and the missing piece is the check: a plan whose coupling graph has a cycle, run with one sweep, is silently first-order. *Proposal:* detect the cycle at plan time (the cross-group edges are already known to the coupling chooser) and warn naming `waveform_sweeps=2`; taking the second sweep automatically is a 2× cost on every looped composite and is a decision, not a fix. Full tables in `docs/benchmarks.md`.
 

@@ -600,11 +600,13 @@ def _ddb2_for_severity(comp_processes, severity):
         macro_dt=GRID.macro_dt,
         save_dt=GRID.save_dt,
     )
-    # Read the path the reporter itself declares, so the demo cannot drift
-    # from the registry. Both blocks expose p53 there.
-    return DDB2.summary(
-        r.ts, r.get(DDB2.observable), jnp.array([DDB2_READ_DAY])
-    )[0]
+    # The reporter names the species; where that species sits depends on
+    # which block is in place, so resolve it the same way the topology does.
+    proc_name, field = DDB2.observable.split("/", 1)
+    obs = (
+        _gz_path(procs, field) if proc_name == "gz06" else DDB2.observable
+    )
+    return DDB2.summary(r.ts, r.get(obs), jnp.array([DDB2_READ_DAY]))[0]
 
 
 def _procs_at(alpha_y, block):
@@ -627,13 +629,42 @@ def _procs_at(alpha_y, block):
     return mech, {**mech, "gz06": neural_gz}
 
 
-def _topology_for(procs):
-    """The demo topology, with GZ06's α_x port named for whichever block is
-    in place: the SBML process exposes ``alpha_x_in``, the learned block
-    exposes the control field itself."""
-    topo = {k: dict(v) for k, v in TOPOLOGY.items()}
+def _gz_path(procs, field):
+    """Store path of one GZ06 species for whichever block is in place.
+
+    The SBML process gives each species its own port; the learned block gives
+    its fields one stacked state port, whose elements expand a level deeper.
+    """
     if isinstance(procs["gz06"], NeuralODEProcess):
-        topo["gz06"] = {"alpha_x": "gz06/alpha_x_signal"}
+        return f"gz06/{STATE_PORT}/{field}"
+    return f"gz06/{field}"
+
+
+def _topology_for(procs):
+    """The demo topology retargeted for whichever block is in place.
+
+    Two things move with the swap, not one: GZ06's α_x input (``alpha_x_in``
+    on the SBML process, the control field itself on the block), and every
+    downstream reader of a GZ06 species. Leave the readers behind and they
+    address a path nothing writes, which reads as an unfed default rather
+    than failing.
+    """
+    topo = {k: dict(v) for k, v in TOPOLOGY.items()}
+    if not isinstance(procs["gz06"], NeuralODEProcess):
+        return topo
+    topo["gz06"] = {"alpha_x": "gz06/alpha_x_signal"}
+    remap = {f"gz06/{f}": _gz_path(procs, f) for f in FIELDS}
+
+    def moved(paths):
+        # A port's wiring is a tuple of store paths once the Composite has
+        # normalised it, and a bare string before that.
+        if isinstance(paths, str):
+            return remap.get(paths, paths)
+        return tuple(remap.get(p, p) for p in paths)
+
+    for ports in topo.values():
+        for port, paths in ports.items():
+            ports[port] = moved(paths)
     return topo
 
 
@@ -725,7 +756,7 @@ def ddb2_figure(results):
 
 def _mean_abs_amp_err(neural, mech):
     d = [abs(a - b) for a, b in zip(neural["ay"], mech["ay"])]
-    p = [abs(a - b) for a, b in zip(neural["psi"], mech["psi"])]
+    p = [abs(a - b) for a, b in zip(neural["ax"], mech["ax"])]
     return sum(d + p) / len(d + p)
 
 
@@ -736,17 +767,19 @@ def write_provenance(prov):
         "# Hybrid composite — run provenance\n",
         f"_{prov['timestamp']}_\n",
         "## What this run did\n",
-        "Recovered the Geva-Zatorsky 2006 p53–Mdm2 oscillator as a "
-        "(ψ, α_y)-conditioned NeuralODE, swapped it into the multi-hallmark "
+        "Recovered the Geva-Zatorsky 2006 p53–Mdm2 oscillator as an "
+        "(α_x, α_y)-conditioned NeuralODE, swapped it into the multi-hallmark "
         "composite, and checked bifurcation capture, DDB2 reproduction, and "
         "end-to-end gradient flow.\n",
-        "## Recovery (held-out amplitude error)\n",
-        "Both blocks are scored only on (ψ, α_y) points held out of "
-        "training: the bifurcation sweeps run at ψ=1.0 and α_y=0.8 (neither "
-        "in the training grid), plus a "
-        f"{r['held_out_deriv']['n_points']}-point off-grid generalization "
-        "set. Mean |amplitude error| vs mechanistic:\n",
-        "| block | sweep (held-out) | grid (held-out) |",
+        "## Recovery (amplitude error)\n",
+        "Two different numbers. The **sweeps** are the figure's curves — "
+        "α_y at the deposit's α_x, α_x at the held α_y — and they interleave "
+        "training points, so they measure shape recovery, not "
+        "generalization. The **off-grid** number is the generalization one: "
+        f"{r['held_out_deriv']['n_points']} (α_x, α_y) points, every one "
+        "absent from the training grid, asserted at import. Mean "
+        "|amplitude error| vs mechanistic:\n",
+        "| block | sweep (curve) | off-grid (held-out) |",
         "|---|---|---|",
         f"| derivative | {r['deriv_amp_err']:.3f} | "
         f"{r['held_out_deriv']['mean_abs_amp_err']:.3f} |",
@@ -794,8 +827,11 @@ def write_provenance(prov):
     log.info("wrote provenance.json/.md")
 
 
-def _load_block():
-    """Deserialise the trained block from disk into a matching skeleton."""
+def _load_block(which=""):
+    """Deserialise a trained block from disk into a matching skeleton.
+
+    ``which`` picks a stage — "deriv", "shoot" — or the kept block by default.
+    """
     skeleton = NeuralODEProcess(
         fields=FIELDS,
         input_fields=CONDITIONING,
@@ -805,9 +841,22 @@ def _load_block():
         timescale=3600.0,
         key=jax.random.PRNGKey(1),
     )
-    return eqx.tree_deserialise_leaves(
-        str(OUT / "gz06_neural_block.eqx"), skeleton
-    )
+    name = f"gz06_neural_block{'_' + which if which else ''}.eqx"
+    return eqx.tree_deserialise_leaves(str(OUT / name), skeleton)
+
+
+def _load_curves():
+    """The α_y amplitude sweep for the mechanistic model and the kept block.
+
+    Read off the training record rather than re-solved: the sweep is ~30
+    sequential composite runs and nothing about it changes when a figure does.
+    """
+    rec = json.loads((OUT / "training_record.json").read_text())
+    stage = "shoot" if rec["kept_block"] == "shooting-refined" else "deriv"
+    return {
+        "mech": rec["bifurcation"]["mech"]["ay"],
+        "block": rec["bifurcation"][stage]["ay"],
+    }
 
 
 def _load_flag():
@@ -817,6 +866,11 @@ def _load_flag():
 
 # At the deposit's damaged α_x, α_y picks one regime on each side of the two
 # Hopfs; the last case crosses the α_x Hopf instead, at the held α_y.
+# Below the lower Hopf p53 sits at a fixed point three orders of magnitude
+# under the limit cycle, and autoscaling that panel turns 1e-3 of the system's
+# range into what reads as a qualitative failure. Floor every top panel's
+# y-range at this fraction of the widest one so the three are comparable.
+COMBINED_MIN_YSPAN = 0.12
 COMBINED_TOP_CASES = [
     (GZ06_ALPHA_X_DAMAGED, 0.011, "fixed point", "below lower α_y Hopf"),
     (GZ06_ALPHA_X_DAMAGED, ALPHA_Y_HELD, "limit cycle", "deposited α_y"),
@@ -841,15 +895,32 @@ def combined_figure(block, flag):
     gs = fig.add_gridspec(2, 6, hspace=0.5, wspace=0.55)
 
     top = [fig.add_subplot(gs[0, 2 * i : 2 * i + 2]) for i in range(3)]
+    traces = [
+        (
+            _run_traj(_solo(_gz_with(axv, ay))),
+            _run_traj(neural_solo(block, axv, ay)),
+        )
+        for axv, ay, _, _ in COMBINED_TOP_CASES
+    ]
+    spans = [
+        max(float(jnp.max(xm)), float(jnp.max(xn)))
+        - min(float(jnp.min(xm)), float(jnp.min(xn)))
+        for (_, xm), (_, xn) in traces
+    ]
+    floor = COMBINED_MIN_YSPAN * max(spans)
     for i, (ax, (axv, ay, regime, note)) in enumerate(
         zip(top, COMBINED_TOP_CASES)
     ):
-        tm, xm = _run_traj(_solo(_gz_with(axv, ay)))
-        tn, xn = _run_traj(neural_solo(block, axv, ay))
+        (tm, xm), (tn, xn) = traces[i]
         ax.plot(tm, xm, color=C_M, lw=1.9, label="mechanistic GZ06")
         ax.plot(
             tn, xn, color=C_N, lw=1.7, ls="--", label="NeuralODE surrogate"
         )
+        if spans[i] < floor:
+            lo = min(float(jnp.min(xm)), float(jnp.min(xn)))
+            hi = max(float(jnp.max(xm)), float(jnp.max(xn)))
+            mid = 0.5 * (lo + hi)
+            ax.set_ylim(mid - 0.5 * floor, mid + 0.5 * floor)
         title = rf"$\alpha_x$ = {axv:.4g}, $\alpha_y$ = {ay:g}   {regime}"
         if note:
             title += f"\n({note})"
@@ -861,10 +932,43 @@ def combined_figure(block, flag):
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
 
-    bot = [fig.add_subplot(gs[1, 0:3]), fig.add_subplot(gs[1, 3:6])]
-    for i, (ax, k) in enumerate(
-        zip(bot, sorted(flag, key=lambda z: float(z)))
-    ):
+    # Left: what the block keeps on its own — GZ06's oscillatory window
+    # between the two α_y Hopfs, kept block only. Right: what survives
+    # composition — the readout the whole composite produces.
+    curves = _load_curves()
+    a_bif = fig.add_subplot(gs[1, 0:3])
+    a_bif.plot(
+        AY_SWEEP, curves["mech"], "o-", color=C_M, label="mechanistic GZ06"
+    )
+    a_bif.plot(
+        AY_SWEEP, curves["block"], "s--", color=C_N, label="NeuralODE block"
+    )
+    hopfs = [h for h in hopf_points("alpha_y") if h is not None]
+    if len(hopfs) == 2:
+        a_bif.axvspan(hopfs[0], hopfs[1], color="#f1f5f9", zorder=0)
+    for h in hopfs:
+        a_bif.axvline(h, color="#94a3b8", lw=1.1, ls="--")
+        a_bif.text(
+            h,
+            a_bif.get_ylim()[1],
+            f" Hopf\n α_y={h:.2f}",
+            fontsize=7,
+            color="#64748b",
+            va="top",
+            ha="left",
+        )
+    a_bif.set_xlabel(r"$\alpha_y$ (Mdm2 degradation)")
+    a_bif.set_ylabel("p53 pulse amplitude")
+    a_bif.set_title(
+        r"$\alpha_y$: two Hopfs bound the oscillatory window", fontsize=10.5
+    )
+    a_bif.legend(frameon=False, fontsize=8.5)
+    for s in ("top", "right"):
+        a_bif.spines[s].set_visible(False)
+
+    panels = sorted(flag, key=lambda z: float(z))
+    bot = [fig.add_subplot(gs[1, 3:6])]
+    for i, (ax, k) in enumerate(zip(bot, panels)):
         r = flag[k]
         sev = r["severities"]
         ax.plot(sev, r["mech"], "o-", color=C_M, label="mechanistic")
@@ -888,8 +992,8 @@ def combined_figure(block, flag):
     fig.text(
         0.5,
         0.965,
-        "NeuralODE surrogate reproduces GZ06's two Hopf bifurcations "
-        r"(held-out $\psi$ = 1.0)",
+        "NeuralODE surrogate reproduces GZ06's Hopf bifurcations on both "
+        r"conditioning axes ($\alpha_x$, $\alpha_y$)",
         ha="center",
         fontsize=13.5,
         fontweight="bold",
@@ -897,7 +1001,7 @@ def combined_figure(block, flag):
     fig.text(
         0.5,
         0.455,
-        "Hybrid composite reproduces the mechanistic readout",
+        "The block keeps GZ06's bifurcation; the composite keeps its readout",
         ha="center",
         fontsize=13.5,
         fontweight="bold",
@@ -918,7 +1022,13 @@ def main():
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
-        "mode", nargs="?", default="all", choices=("all", "combined")
+        "mode",
+        nargs="?",
+        default="all",
+        choices=("all", "combined", "figures"),
+        help="all: train and draw everything. figures: redraw from the "
+        "trained blocks and sweeps already on disk. combined: the single "
+        "preprint figure only.",
     )
     mode = ap.parse_args().mode
 
@@ -928,6 +1038,31 @@ def main():
 
     if mode == "combined":
         combined_figure(_load_block(), _load_flag())
+        return
+
+    if mode == "figures":
+        rec = json.loads((OUT / "training_record.json").read_text())
+        b = rec["bifurcation"]
+        bifurcation_figure(b["mech"], b["deriv"], b["shoot"])
+        best_name = rec["kept_block"]
+        best = _load_block()
+        log.info("drawing from the %s block", best_name)
+        time_domain_figure(best)
+        flag = ddb2_results(best)
+        ddb2_figure(flag)
+        combined_figure(best, flag)
+        write_provenance(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "config": rec["config"],
+                "kept_block": best_name,
+                "recovery": rec["recovery"],
+                "bifurcation": b,
+                "ddb2": flag,
+            }
+        )
         return
 
     deriv, shoot, _ = train_stages()

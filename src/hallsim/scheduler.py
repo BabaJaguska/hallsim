@@ -291,11 +291,16 @@ class SchedulerResult:
         ]
         if not codes:
             return jnp.asarray(True)
+        # Lanes report either a diffrax RESULTS enum or a plain string;
+        # comparing a string to the enum raises rather than returning False,
+        # which took `ok` away from every composite with a stochastic member.
+        def _succeeded(code):
+            if isinstance(code, str):
+                return jnp.asarray(code == "successful")
+            return jnp.asarray(code == dfx.RESULTS.successful)
+
         return jnp.all(
-            jnp.stack(
-                [jnp.asarray(c == dfx.RESULTS.successful) for c in codes]
-            ),
-            axis=0,
+            jnp.stack([_succeeded(c) for c in codes]), axis=0
         )
 
     def __contains__(self, key: str) -> bool:

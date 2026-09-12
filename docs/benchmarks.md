@@ -427,6 +427,49 @@ default lane (§7's A/B table).
   view's gather, slice and restack are what is left of P3.21, and the solve
   bounds them by the implicit step's share of RHS work.
 
+## 9. Per-group stiffness routing against a pinned solver
+
+Measured 2026-09-12, CPU (`JAX_PLATFORMS=cpu`), x64, compile cache off, load
+10.7–13.6. Median of repeats, `[min–max]` beside it. Three composites: a stiff
+group alone, a non-stiff group alone, and a mixed pair the timescale clustering
+splits into two groups. `rel err` is against a reference at tighter tolerance.
+
+| composite | arm | solver(s) chosen | warm | steps (rejected) | rel err |
+|---|---|---|---|---|---|
+| **stiff** k=1e4, 1 group | `auto_stiffness=True` | Kvaerno5 | **194.2 ms** | 122 (20) | 3.74e-05 |
+| | `auto_stiffness=False` | Tsit5 | 2 694.2 ms | 145 083 (31 293) | 2.82e-06 |
+| | pinned Tsit5 | Tsit5 | 2 719.3 ms | 145 083 (31 293) | 2.82e-06 |
+| | pinned Kvaerno5 | Kvaerno5 | 152.1 ms | 122 (20) | 3.74e-05 |
+| **non-stiff** k=1, 1 group | `auto_stiffness=True` | Tsit5 | **6.4 ms** | 175 (26) | 1.96e-06 |
+| | pinned Tsit5 | Tsit5 | 5.7 ms | 175 (26) | 1.96e-06 |
+| | pinned Kvaerno5 | Kvaerno5 | 138.9 ms | 114 (17) | 3.38e-05 |
+| **mixed** k=1e4, 2 auto groups | `auto_stiffness=True` | Kvaerno5 + **Tsit5** | **345.4 ms** | 3 974 (653) | **2.23e-08** |
+| | `auto_stiffness=False` | Tsit5 + Tsit5 | 1 572.5 ms | 146 637 (31 194) | 1.01e-06 |
+| | pinned Tsit5 | Tsit5 + Tsit5 | 1 536.1 ms | 146 637 (31 194) | 1.01e-06 |
+| | pinned Kvaerno5 | Kvaerno5 + Kvaerno5 | 671.1 ms | 3 973 (653) | 6.07e-07 |
+
+**On the mixed composite the split lane wins on both axes at once** — the only
+row where that happens:
+
+| against | speed | accuracy |
+|---|---|---|
+| all-implicit (pinned Kvaerno5) | **1.9× faster** | **27× more accurate** |
+| all-explicit (pinned Tsit5) | **4.6× faster** | **45× more accurate** |
+
+**What a wrong pin costs, both directions:**
+
+| mistake | wall clock | solver steps |
+|---|---|---|
+| explicit on a stiff group | **13.9×** (2 694 ms vs 194 ms) | **1 189×** (145 083 vs 122) |
+| implicit on a non-stiff group | **21.7×** (138.9 ms vs 6.4 ms) | 0.65× (114 vs 175) |
+
+Note the explicit-on-stiff row is *more accurate* (2.8e-06 against 3.7e-05):
+the stability-limited step over-resolves. Accuracy is not the symptom of a
+wrong solver choice — wall clock and step count are.
+
+This is the per-group routing half of what §7 measures for the orchestration
+as a whole, and it pays on the shape it was built for.
+
 ## Reproducing
 
 ```bash

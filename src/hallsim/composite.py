@@ -32,6 +32,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from hallsim.process import PortRole, Process, ProcessKind
+from hallsim.tracing import is_traced
 from hallsim.store import (
     as_paths,
     build_initial_store,
@@ -64,7 +65,7 @@ def _natural_key(path: str) -> tuple[Any, ...]:
 def _flatten_subcomposites(
     items: dict[str, Process | "Composite"],
     extra_topology: dict[str, dict[str, str]],
-) -> tuple[dict[str, Process], dict[str, dict[str, str]]]:
+) -> tuple[dict[str, Process], dict[str, dict[str, str]], dict[str, float]]:
     """Expand sub-Composites into a flat (processes, topology) pair.
 
     A value that is a :class:`Composite` contributes its internal
@@ -79,10 +80,21 @@ def _flatten_subcomposites(
     """
     flat_processes: dict[str, Process] = {}
     flat_topology: dict[str, dict[str, str]] = {}
+    flat_initial: dict[str, float] = {}
 
     for outer_key, item in items.items():
         if isinstance(item, Composite):
             prefix = f"{outer_key}/"
+            if outer_key in extra_topology:
+                raise ValueError(
+                    f"topology[{outer_key!r}] names a sub-composite, whose "
+                    f"ports belong to its own processes. Wire the inner "
+                    f"process by its flattened name "
+                    f"({outer_key}.<process>), or pass rewire= to redirect "
+                    f"a store path."
+                )
+            for q, v in item.initial.items():
+                flat_initial[q if q.startswith(prefix) else prefix + q] = v
             for sub_name, sub_proc in item.processes.items():
                 merged_name = f"{outer_key}.{sub_name}"
                 if merged_name in flat_processes:
@@ -115,6 +127,15 @@ def _flatten_subcomposites(
             # canonical path elsewhere stays explicit.
             user_topo = extra_topology.get(outer_key, {})
             schema = item.ports_schema()
+            unknown = set(user_topo) - set(schema)
+            if unknown:
+                raise ValueError(
+                    f"topology[{outer_key!r}] maps "
+                    f"{sorted(unknown)}, which "
+                    f"{'is' if len(unknown) == 1 else 'are'} not in "
+                    f"{type(item).__name__}.ports_schema(); available: "
+                    f"{sorted(schema)}"
+                )
             flat_topology[outer_key] = {
                 port: user_topo.get(port, _auto_paths(outer_key, port, spec))
                 for port, spec in schema.items()
@@ -125,7 +146,7 @@ def _flatten_subcomposites(
                 f"got {type(item).__name__}"
             )
 
-    return flat_processes, flat_topology
+    return flat_processes, flat_topology, flat_initial
 
 
 def _auto_paths(outer_key, port, spec):
@@ -613,7 +634,7 @@ class Composite(eqx.Module):
         validate: bool = True,
         semantic_validation: bool | dict = True,
     ) -> None:
-        flat_processes, flat_topology = _flatten_subcomposites(
+        flat_processes, flat_topology, sub_initial = _flatten_subcomposites(
             processes, topology or {}
         )
         flat_processes, flat_topology = _compose_events(
@@ -642,7 +663,9 @@ class Composite(eqx.Module):
             for proc_name, topo in flat_topology.items()
         }
         flat_topology = self.topology
-        self.initial = dict(initial or {})
+        # A sub-composite's own initial= carries its namespace prefix; an
+        # explicit initial= on this composite is the caller's last word.
+        self.initial = {**sub_initial, **dict(initial or {})}
         if validate:
             errors = validate_topology(flat_processes, flat_topology)
             if errors:
@@ -676,8 +699,14 @@ class Composite(eqx.Module):
 
     def store_keys(self) -> list[str]:
         """All store paths, in flat-state order. Natural-sorted, so
-        ``net/node2`` precedes ``net/node10``."""
-        return sorted(self.store_paths(), key=_natural_key)
+        ``net/node2`` precedes ``net/node10``.
+
+        The path itself breaks ties: zero-padded spellings of one number
+        (``node2``, ``node02``) share a natural key, and the source is a set,
+        so without a total order the column layout varies between processes
+        and an externally-saved state vector reloads permuted.
+        """
+        return sorted(self.store_paths(), key=lambda p: (_natural_key(p), p))
 
     def store_index(self) -> dict[str, int]:
         """Store path → its column in the flat state vector. Align any
@@ -699,7 +728,15 @@ class Composite(eqx.Module):
         """
         if keys is None:
             keys = self.store_keys()
-        return jnp.stack([jnp.asarray(state[k]) for k in keys], axis=-1)
+        vals = [state[k] for k in keys]
+        # One XLA operand per store path: the compile is superquadratic in the
+        # path count, and composites here are large and generated. Outside a
+        # trace the same array assembles in numpy without entering XLA at all
+        # — measured at 2 000 paths, 59.6 ms → 1.56 ms for plain floats and
+        # 32.7 ms → 4.73 ms for values already on device.
+        if vals and not is_traced(*vals):
+            return jnp.asarray(np.stack([np.asarray(v) for v in vals], -1))
+        return jnp.stack([jnp.asarray(v) for v in vals], axis=-1)
 
     def initial_state_vec(self, keys: list[str] | None = None) -> jnp.ndarray:
         """Initial state as a flat ``(n_vars,)`` tensor — the default y0 for
@@ -829,8 +866,9 @@ class Composite(eqx.Module):
             if write_pairs.ports:
                 pre.append((proc, read_pairs, write_pairs))
         assign_pre = self._assignment_pre(proc_names, keys, key_to_idx, canon)
-        _check_assignments(assign_pre, len(keys))
-        assign_pre = _assignments_read_by(assign_pre, pre, len(keys))
+        if assign_pre:
+            _check_assignments(assign_pre, len(keys))
+            assign_pre = _assignments_read_by(assign_pre, pre, len(keys))
 
         return (
             _FlatRHS(
@@ -936,8 +974,10 @@ class Composite(eqx.Module):
 
         procs = dict(self.processes)
         for address, value in overrides.items():
-            name, _, field = address.partition(".")
-            if not field:
+            # Split on the LAST dot: a nested process is itself named
+            # ``<outer>.<inner>``, so the first dot is part of the name.
+            name, _, field = address.rpartition(".")
+            if not name:
                 raise ValueError(
                     f"Override key {address!r} must be "
                     f"'<process>.<field>', e.g. 'mtor_nfkb.k_act'."
