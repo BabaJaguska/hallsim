@@ -1,0 +1,132 @@
+"""The lever page renders what it claims: every mean-field panel carries a
+control and a current trace, the population row carries the spread band and
+the three summary lines, a setting not yet sampled is drawn faded and
+marked, a pulled lever moves the parameters it names, and the exposure
+window is shaded. Bound to the multi-hallmark composite, so it is a demo
+test and a slow one."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+pytest.importorskip("dash")
+pytest.importorskip("plotly")
+
+from demos.hallmark_levers import (  # noqa: E402
+    LEVERS,
+    PANELS,
+    POPULATION_MODELS,
+    PRESETS,
+    LeverModel,
+    render,
+    render_population,
+)
+
+pytestmark = [pytest.mark.demo, pytest.mark.slow]
+
+
+@pytest.fixture(scope="module")
+def lever_model():
+    return LeverModel(n_cells=2)
+
+
+def _annotation_texts(fig) -> list[str]:
+    return [a.text or "" for a in fig.layout.annotations]
+
+
+def test_etoposide_starts_p53_pulsing(lever_model):
+    lm = lever_model
+    col = lm.keys.index("gz06/x")
+    _, ys = lm.solve(PRESETS["etoposide"])
+    late = lm.ts >= 7.0
+    swing_ctrl = np.ptp(lm.control[late, col])
+    swing_ddis = np.ptp(ys[late, col])
+    assert swing_ddis > 10 * max(swing_ctrl, 1e-9)
+
+
+def test_render_draws_every_panel(lever_model):
+    """A preset is sampled at construction, so its lever request already
+    draws the population row; an unsampled setting draws its mean field
+    faded and marked, and the badge says so."""
+    lm = lever_model
+    n_models, n_levers = len(PANELS), len(LEVERS)
+    out = render(lm, lm, *PRESETS["+rapamycin"])
+    assert len(out) == n_models + n_levers + 3
+    figures = out[:n_models]
+    values = out[n_models : n_models + n_levers]
+    badge, legend, chips = out[-3], out[-2], out[-1]
+    assert chips == ["chip", "chip", "chip selected"]
+    for model, fig in zip(PANELS, figures):
+        per_panel = 7 if model in POPULATION_MODELS else 2
+        assert len(fig.data) == per_panel * len(PANELS[model])
+        for trace in fig.data:
+            assert np.isfinite(np.asarray(trace.y, dtype=float)).all()
+        # Etoposide and rapamycin are on: both periods shaded in every
+        # panel, named only in the legend.
+        assert len(fig.layout.shapes) == 2 * len(PANELS[model])
+        assert _annotation_texts(fig) == [label for _, label in PANELS[model]]
+    assert list(values) == ["1.00", "-1.00", "0.00"]
+    assert badge.className == "pop"
+    assert badge.children == ""
+    names = [item.children[-1] for item in legend]
+    assert names[:2] == ["current setting", "control"]
+    assert names[-2:] == ["etoposide", "rapamycin"]
+
+    out = render(lm, lm, 0.5, 0.0, 0.0)
+    for model, fig in zip(PANELS, out[:n_models]):
+        assert len(fig.data) == 2 * len(PANELS[model])
+        assert len(fig.layout.shapes) == len(PANELS[model])
+        texts = _annotation_texts(fig)
+        assert ("sampling…" in texts) == (model in POPULATION_MODELS)
+    badge, legend, chips = out[-3], out[-2], out[-1]
+    assert badge.className == "pop pending"
+    assert badge.children[-1] == "sampling…"
+    names = [item.children[-1] for item in legend]
+    assert names[-1] == "etoposide" and "rapamycin" not in names
+    assert chips == ["chip", "chip", "chip"]
+
+    # A window still compiling: the fallback's rows, all marked.
+    out = render(None, lm, *PRESETS["control"])
+    for fig in out[:n_models]:
+        assert "compiling…" in _annotation_texts(fig)
+        assert len(fig.layout.shapes) == 0
+    assert out[-3].children[-1] == "compiling…"
+    names = [item.children[-1] for item in out[-2]]
+    assert not {"etoposide", "rapamycin", "mTORC1 drive"} & set(names)
+    assert out[-1] == ["chip selected", "chip", "chip"]
+
+
+def test_population_row_carries_the_spread(lever_model):
+    lm = lever_model
+    *figures, badge = render_population(lm, 0.5, 0.0, 0.0)
+    assert len(figures) == len(POPULATION_MODELS)
+    # Per panel: two band edges for control, two for this setting, then the
+    # control mean, the mean field and the population mean.
+    for model, fig in zip(POPULATION_MODELS, figures):
+        assert len(fig.data) == 7 * len(PANELS[model])
+    # The member is coupled: with ROS read from DallePezze it misfolds, so
+    # free ubiquitin is drawn down from the deposit's full pool in every cell.
+    ub = lm.keys.index("p07/Ub")
+    ys, events = lm.population((0.5, 0.0, 0.0))
+    assert events > 1e5
+    assert (ys[-1, :, ub] < 300).all()
+    assert badge.className == "pop"
+    # Sampled once: a second request for the same setting is the same
+    # object.
+    assert lm.population((0.5, 0.0, 0.0)) is lm.population_cached(
+        (0.5, 0.0, 0.0)
+    )
+
+
+def test_moved_reports_the_registry_targets(lever_model):
+    lm = lever_model
+    gi, dns, lop = LEVERS
+    assert [m["target"] for m in lm.moved(gi, 1.0)] == [
+        "irradiation_pulse · amplitude"
+    ]
+    (rapa,) = lm.moved(dns, -1.0)
+    assert rapa["target"] == "rapamycin_drive · after"
+    assert rapa["now"] < rapa["control"]
+    (k69,) = lm.moved(lop, 1.0)
+    assert k69["now"] == 0.0

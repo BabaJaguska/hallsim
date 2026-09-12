@@ -354,3 +354,40 @@ def test_saved_trajectory_carries_the_sampled_path_inside_a_window(tmp_path):
     # strictly monotone non-increasing, and moving inside the window
     assert np.all(np.diff(a) <= 0)
     assert np.count_nonzero(np.diff(a)) >= 3
+
+
+def test_an_assignment_only_the_stochastic_member_reads_reaches_it(tmp_path):
+    """A rate constant driven through an ASSIGNED edge that no derivative
+    reads: the RHS prunes that assignment, and the member must still see the
+    driven value rather than the slot's default, in both lanes."""
+    from hallsim.models.forcing import StepSource
+
+    path = tmp_path / "decay.xml"
+    path.write_text(textwrap.dedent(MODEL))
+    process = (
+        process_from_sbml(str(path), name="decay")
+        .as_stochastic()
+        .with_param_input("k", "k_in")
+    )
+    topology = {name: f"decay/{name}" for name in process._species_names}
+    topology["k_in"] = "drive/k"
+
+    def run(level, **scheduler_kwargs):
+        composite = Composite(
+            processes={
+                "decay": process,
+                "drive": StepSource(before=level, after=level, t_step=0.0),
+            },
+            topology={"decay": topology, "drive": {"signal": "drive/k"}},
+            validate=False,
+            semantic_validation=False,
+        )
+        return Scheduler(**scheduler_kwargs).run(
+            composite, t_span=(0.0, 1.0), macro_dt=0.25, save_dt=0.25, seed=3
+        )
+
+    driven = run(8.0)
+    assert driven.stats["decay"]["num_events"] > 0
+    assert float(driven.ys[-1, driven.keys.index("decay/A")]) < 10
+    assert run(0.0).stats["decay"]["num_events"] == 0
+    assert run(8.0, progress=True).stats["decay"]["num_events"] > 0

@@ -261,9 +261,11 @@ stack (P0.70). The GPU claim ("near-flat") is unmeasured on this machine.
 
 ## 7. What the Scheduler is for, measured against a bare solve
 
-`scripts/bench_scheduler.py`, 2026-09-11. Every row solves the same reduced
-field with the same Kvaerno5, the same chord root finder, the same PID
-controller and `dt0=None`; only the orchestration differs. The reference is
+`scripts/bench_scheduler.py`, 2026-09-11/12. Every row solves the same
+reduced field with the same Kvaerno5, the same chord root finder, the same
+PID controller and `dt0=None`; only the orchestration differs. The chain
+declares one block port per process (first measured with one scalar port
+per node, which taxed every row; see the end of this section). The reference is
 a bare Kvaerno5 at `rtol 1e-10, atol 1e-13`; *error* is the largest
 deviation over the saved points divided by the largest reference value.
 Warm is the median of three calls, cold the first call with the compilation
@@ -277,9 +279,9 @@ bare call — the cost of the wrapper.
 
 | system | bare Kvaerno5 | Scheduler, one group |
 |---|---|---|
-| chain, 72 states | 75 ms, 139 steps | 81 ms (+8 %) |
-| chain, 264 states | 827–924 ms, 122 steps | 957–969 ms (+5 to +16 %) |
-| chain, 1 032 states | 10.1 s, 106 steps | 10.1 s (0 %) |
+| chain, 72 states | 47 ms, 139 steps | 50–52 ms (+6 to +11 %) |
+| chain, 264 states | 361–377 ms, 122 steps | 373–386 ms (+2.6 %) |
+| chain, 1 032 states | 6.39 s, 106 steps | 6.47 s (+1.3 %) |
 | multi-hallmark, 60 states | 2.65–3.6 s, 1 707 steps | 2.57–3.3 s (−3 to −7 %) |
 | gz06 alone, 3 species | 6.7 ms | 8.6 ms (+28 %) |
 
@@ -291,23 +293,34 @@ Kvaerno5 and the chain on Tsit5. Time, then error.
 
 | macro step | Lie, interpolated (auto) | frozen | Strang | interpolated, 2 sweeps | bare Kvaerno5 | bare Tsit5 |
 |---|---|---|---|---|---|---|
-| 1.0 | 76 ms, 0.50 | 78 ms, 0.50 | 78 ms, 0.078 | 189 ms, 0.021 | 827 ms, 4.0e-5 | 1.95 s, 7.0e-6 |
-| 0.25 | 218 ms, 0.13 | 200 ms, 0.13 | 225 ms, 0.018 | 431 ms, 5.6e-4 | 924 ms, 4.1e-5 | 1.95 s, 8.1e-6 |
+| 1.0 | 47 ms, 0.50 | 48 ms, 0.50 | 49 ms, 0.078 | 122 ms, 0.021 | 377 ms, 4.0e-5 | 1.23 s, 7.0e-6 |
+| 0.25 | 141 ms, 0.13 | 135 ms, 0.13 | 150 ms, 0.018 | 286 ms, 5.6e-4 | 361 ms, 4.1e-5 | 1.23 s, 8.1e-6 |
 
-**Chain with 72 states**, where the bare solve is 75 ms at every macro step
-and bare Tsit5 1.25–1.35 s:
+**Chain with 72 states**, where the bare solve is 47 ms at every macro step
+and bare Tsit5 0.78–0.79 s:
 
 | macro step | auto | Strang | 2 sweeps |
 |---|---|---|---|
-| 1.0 | 55 ms, 0.50 | 57 ms, 0.078 | 130 ms, 0.021 |
-| 0.25 | 167 ms, 0.13 | 178 ms, 0.018 | 325 ms, 5.6e-4 |
-| 0.1 | 356 ms, 0.054 | 382 ms, 0.0069 | 798 ms, 1.9e-4 |
+| 1.0 | 37 ms, 0.50 | 38 ms, 0.078 | 91 ms, 0.021 |
+| 0.25 | 108 ms, 0.13 | 124 ms, 0.018 | 214 ms, 5.6e-4 |
+| 0.1 | 248 ms, 0.054 | 260 ms, 0.0069 | 475 ms, 1.9e-4 |
 
 **Chain with 1 032 states, macro step 0.25:**
 
 | auto | frozen | Strang | 2 sweeps | bare Kvaerno5 | bare Tsit5 |
 |---|---|---|---|---|---|
-| 271 ms, 0.13 | 252 ms, 0.13 | 292 ms, 0.018 | 516 ms, 5.6e-4 | 10.1 s, 7.0e-5 | 3.69 s, 1.6e-5 |
+| 245 ms, 0.13 | 241 ms, 0.13 | 260 ms, 0.018 | 513 ms, 5.6e-4 | 6.39 s, 7.0e-5 | 3.60 s, 1.6e-5 |
+
+**Chain with 10 008 states, macro step 0.25.** A dense implicit solve is
+impractical here (a 10 008² factorisation per stage), so the reference is
+bare Tsit5 at 1e-10/1e-13 (145 083 steps, 33 s warm) and the implicit rows
+are absent. Routing on the 10 000-state group went through the matrix-free
+estimate. The plan, routing included, took 67 s and the first compiled
+call 46 s; the plan's share is profiled at the end of this section.
+
+| bare Tsit5 | auto | 2 sweeps |
+|---|---|---|
+| 32.8 s, 4.9e-5 | 1.11 s, 0.13 | 2.23 s, 5.6e-4 |
 
 **Multi-hallmark composite**, both groups implicit:
 
@@ -336,10 +349,13 @@ Scheduler is 0.38 s.
 
 **What it says.**
 
-- The split pays where it is for. At 1 032 states it is 20× faster than the
-  best bare solve at an error of 5.6e-4 (two sweeps), or 37× at 0.13 (the
-  default); the bare implicit solve factorises a 1 032² Jacobian per stage.
-  At 72 states it never pays: the bare solve is 75 ms.
+- The split pays where it is for. At 1 032 states it is 7× faster than the
+  best bare solve (Tsit5, 3.6 s) at an error of 5.6e-4 with two sweeps, 15×
+  at 0.13 with the default, and 12× and 26× against the bare implicit
+  solve, which factorises a 1 032² Jacobian per stage. At 10 008 states,
+  where only an explicit bare solve is practical, it is 15× faster at
+  5.6e-4 and 30× at 0.13. At 72 states it never pays: the bare solve is
+  47 ms.
 - On the multi-hallmark composite the default is the best point on the
   table: 2.6× and 2.1× faster than the bare implicit solve at 1.2e-3 and
   2.2e-4. A second sweep buys nothing there (forward edges dominate), and
@@ -350,8 +366,21 @@ Scheduler is 0.38 s.
   cost; Strang 7× at 5 %. The plan now warns when its coupling graph has a
   cycle and one sweep (P1.28).
 - Explicit on everything crosses over: bare Tsit5 loses to bare Kvaerno5 by
-  17× at 72 states, by 2× at 264, and wins by 2.7× at 1 032. Routing decides
-  per group, so the split never has to pick.
+  17× at 72 states, by 3.3× at 264, and wins by 1.8× at 1 032. Routing
+  decides per group, so the split never has to pick.
+- Scalar ports are a tax on every row. The same chain with one port per
+  node instead of one block port per process: bare 75 against 47 ms at 72
+  states, 827–924 against 361–377 ms at 264, 10.1 against 6.4 s at 1 032;
+  the split 55 against 37 ms, 218 against 141 ms, 271 against 245 ms.
+  Steps and errors identical. The tax falls on whichever side carries the
+  ports, so the earlier scalar-port ratios overstated the split's win over
+  the bare implicit solve (20× read as 12× at 1 032). Declare block ports.
+- The plan at 10 008 states, profiled: composite build and RHS negligible,
+  `analyze_groups` 59 s of the 67 s, 74 633 Jacobian-vector products
+  through ARPACK against 1 597 at 1 024 states — a ring's top eigenvalues
+  differ in the seventh digit at that size and the restarts multiply. The
+  verdict is right and cached; the cost is one-off and filed as P3.22 with
+  a Gershgorin-first proposal.
 - Found on the way: routing crashed above 512 states on a clustered
   spectrum (P0.82, fixed); interpolated coupling returns its own save grid
   (P1.27); the routing verdict is measured at `y0` only — gz06's abscissa

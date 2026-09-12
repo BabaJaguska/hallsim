@@ -852,6 +852,40 @@ def multi_hallmark_ssa(t_end, save_dt, seed, max_events):
     )
 
 
+@simulate.command("hallmark-levers")
+@click.option("--port", type=int, default=8050, show_default=True)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--debug", is_flag=True, help="Dash debug mode")
+@click.option(
+    "--cells",
+    type=click.IntRange(min=0),
+    default=4,
+    show_default=True,
+    help="cells in the Proctor 2007 population (one Gillespie path each). "
+    "A sample costs about 3 s plus 0.7 s per cell; the presets are "
+    "sampled at startup and each new setting once. 0 draws the mean "
+    "field instead",
+)
+@click.option(
+    "--seed", type=int, default=0, show_default=True, help="population seed"
+)
+def hallmark_levers(port, host, debug, cells, seed):
+    """Serve the hallmark-lever page: one slider per hallmark of aging,
+    wired into the multi-hallmark composite. Every pull applies the
+    severity through the hallmark layer, re-solves DallePezze 2014,
+    Geva-Zatorsky 2006 and Proctor 2007 as one system and redraws them
+    against control. The etoposide
+    exposure window is shaded, with longer windows on a switch; Proctor
+    2007 is drawn as a population of cells at reaction level, with its mean
+    field over it.
+
+    Needs the `app` extra: pip install "hallsim[app]".
+    """
+    from demos.hallmark_levers import main
+
+    main(port=port, host=host, debug=debug, cells=cells, seed=seed)
+
+
 @simulate.command("info")
 def info():
     """Show info about the composable architecture."""

@@ -1638,9 +1638,11 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   controller, `dt0=None`, reference at 1e-10/1e-13. The wrapper: +8 % at 72
   states, +5–16 % at 264, 0 % at 1 032 and on the multi-hallmark composite,
   +28 % on a 7 ms gz06 solve — a fixed few milliseconds per call, not a
-  scaling cost. The split: at 1 032 states 20× faster than the best bare
-  solve at an error of 5.6e-4 (two sweeps) and 37× at 0.13 (default), where
-  the bare implicit solve factorises a 1 032² Jacobian per stage; on the
+  scaling cost. The split (block-port chain, 2026-09-12): at 1 032 states 7× faster
+  than the best bare solve (Tsit5) at an error of 5.6e-4 with two sweeps and
+  15× at 0.13 with the default, 12× and 26× against the bare implicit solve
+  that factorises a 1 032² Jacobian per stage; at 10 008 states 15× and 30×
+  against the only bare solve that runs; on the
   multi-hallmark composite 2.6× and 2.1× faster than bare Kvaerno5 at 1.2e-3
   and 2.2e-4 (macro 0.5 and 0.1), with the default coupling the best point
   measured; at 72 states it never pays, the bare solve being 75 ms. Found on
@@ -1768,3 +1770,4 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   (`max|Re λ| = 36.5` against the mechanical model's 3.26e+05) and routes to
   Tsit5, **3.5× faster end to end** (1057 s against 3703 s) at bit-identical
   loss.
+- [x] **P0.101 — A stochastic member read its coupling inputs from unfilled slots: the assignment pass it was handed was the derivative's pruned one.** `build_rhs` prunes the assignment pass to what a derivative reads (2026-09-11 night, `_assignments_read_by`), and both stochastic lanes took their pass from `build_rhs().assign_*`. An edge that feeds only a reaction-level member — every edge into Proctor 2007 once it runs as one — is read by no derivative, so it left the pass, and the member read the raw flat slot instead: `p07/ROS` at 0.0 and `p07/k1_signal` at its port default 0.005 for the whole run, while the saved trajectory (materialised through the complete pass) showed the right 14.1 and 0.0102. Measured 2026-09-12 on the multi-hallmark composite with `p07.as_stochastic()`, 4 cells, control: MisP 0 and free Ub 300 at every save point against the mean field's 5–7 and 50–75, NatP growing linearly to 6 980 at day 14 against 252, 6 800 events per cell over 15 days where the same member standalone with ROS = 14 fires 48 000 in one day. No warning anywhere; `proteostasis_population.png` predates the pruning. The existing lane test drove its constant from a plain store path, which the pruning cannot touch. **Fixed 2026-09-12:** `Composite.assignment_pass()` is the complete, ordered, checked pass (what `materialize_assigned` already built), and both stochastic lanes apply that; the derivative keeps its pruned copy. `tests/unit/test_stochastic.py::test_an_assignment_only_the_stochastic_member_reads_reaches_it` drives the member's rate through a `StepSource` no derivative reads — zero events before the fix, decays after.

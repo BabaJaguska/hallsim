@@ -150,7 +150,12 @@ ARM_CONDITIONS = {arm: cond for arm, (cond, _) in ARM_PAIRS.items()}
 # their placed values: freed, the fit moves Mdm2 degradation over the Hopf
 # the gate was placed against and the composite stops pulsing in either
 # arm, for 2.6 % of loss the data cannot resolve (docs/known-problems.md).
-DEFAULT_FIT = ("sa_beta_gal_decay", "CDKN1A_transcr", "mtor_synthesis_gain")
+DEFAULT_FIT = (
+    "sa_beta_gal_decay",
+    "CDKN1A_transcr",
+    "mdm2_degradation",
+    "mtor_synthesis_gain",
+)
 
 
 def _default_fit_params(composite, published) -> dict:

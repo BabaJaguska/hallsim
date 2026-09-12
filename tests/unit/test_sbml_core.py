@@ -19,9 +19,7 @@ HEAD = """<?xml version="1.0" encoding="UTF-8"?>
 """
 TAIL = "</model></sbml>\n"
 
-COMPARTMENTS = (
-    HEAD
-    + """
+COMPARTMENTS = HEAD + """
 <listOfCompartments>
   <compartment id="cyt" spatialDimensions="3" size="2.5" constant="true"/>
   <compartment id="nuc" spatialDimensions="3" size="0.4" constant="true"/>
@@ -47,13 +45,9 @@ COMPARTMENTS = (
     </kineticLaw>
   </reaction>
 </listOfReactions>
-"""
-    + TAIL
-)
+""" + TAIL
 
-RULES = (
-    HEAD
-    + """
+RULES = HEAD + """
 <listOfFunctionDefinitions>
   <functionDefinition id="hill"><math xmlns="http://www.w3.org/1998/Math/MathML"><lambda><bvar><ci>x</ci></bvar><bvar><ci>K</ci></bvar><bvar><ci>n</ci></bvar>
     <apply><divide/><apply><power/><ci>x</ci><ci>n</ci></apply><apply><plus/><apply><power/><ci>K</ci><ci>n</ci></apply><apply><power/><ci>x</ci><ci>n</ci></apply></apply></apply></lambda></math></functionDefinition>
@@ -87,9 +81,7 @@ RULES = (
     <kineticLaw><math xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/><ci>cell</ci><ci>vmax</ci><apply><ci>hill</ci><ci>S</ci><ci>K</ci><cn>2</cn></apply><apply><ci>hill</ci><ci>D</ci><cn>0.5</cn><cn>1</cn></apply></apply></math></kineticLaw>
   </reaction>
 </listOfReactions>
-"""
-    + TAIL
-)
+""" + TAIL
 
 
 def _write(tmp_path, name, text):

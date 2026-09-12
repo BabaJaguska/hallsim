@@ -45,6 +45,10 @@ cuda = [
 # drawer falls back to spring layout and says so.
 graph = ["netgraph>=4.13"]
 
+# The hallmark-lever page (`simulate hallmark-levers`): a Dash server with
+# Plotly panels. Interactive only, so it stays out of the base install.
+app = ["dash>=2.17", "plotly>=5.22"]
+
 # COPASI's own bindings, used only to convert a .cps deposit to SBML on the
 # way in (hallsim.cps_import). A paper's supplement is often a .cps rather
 # than an SBML file, and COPASI exports SBML natively — reimplementing that
@@ -71,6 +75,8 @@ hallsim = [
   "reference/**/*.md",
 ]
 "demos.models" = ["sbml/**/*.xml"]
+# The lever page's Dash assets (the institute wordmark).
+demos = ["assets/*"]
 
 [project.urls]
 Documentation = "https://github.com/BabaJaguska/HallSim#readme"

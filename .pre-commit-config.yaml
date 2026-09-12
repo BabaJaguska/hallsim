@@ -1,6 +1,9 @@
 repos:
+  # Pinned to the black in the dev environment: the 2024 and 2026 stable
+  # styles disagree on string concatenations, so `make format` and this
+  # hook must run the same release.
   - repo: https://github.com/psf/black
-    rev: 24.10.0
+    rev: 26.5.1
     hooks:
       - id: black
         args: [--line-length=79]

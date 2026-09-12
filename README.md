@@ -145,7 +145,14 @@ simulate multi-hallmark run        # score it out of the box, no fitting
 simulate multi-hallmark calibrate  # fit, then evaluate on held-out arms
 simulate multi-hallmark sweep      # two-hallmark severity sweep
 simulate multi-hallmark-ssa        # one-way DP14/GZ06 + Proctor SSA hybrid
+simulate hallmark-levers           # browser page: pull a hallmark, watch all three re-solve
 ```
+
+The lever page needs the `app` extra (`pip install "hallsim[app]"`). Each
+slider is a hallmark severity; a pull re-solves the composite against
+control. Proctor 2007 runs as a
+population of cells at reaction level, and the etoposide exposure window
+is shaded, with longer windows on a switch.
 
 ## What you can do with it
 

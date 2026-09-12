@@ -1,0 +1,116 @@
+/* hallsim lever page. Every colour and face is a token: the values are
+   emitted into :root by the page from demos/hallmark_levers.py TOKENS, so
+   the Plotly figures and this sheet read the same source. */
+
+body { font-family: var(--font-body); font-size: 13px; line-height: 1.5;
+       color: var(--color-text); background: var(--color-bg); margin: 0; }
+
+.wrap { display: flex; gap: 24px; padding: 18px 22px; }
+.side { flex: 0 0 300px; }
+.main { flex: 1 1 auto; min-width: 0; }
+
+/* Wordmark and tagline */
+h1 { font-family: var(--font-heading); font-size: 52px; font-weight: 700;
+     line-height: 1; letter-spacing: -0.01em; margin: 0; }
+/* The subtitle behaves like a field value: mono, lowercase, on a rule. */
+.tag { display: flex; align-items: center; gap: 12px;
+       font-family: var(--font-mono); font-size: 12.5px;
+       text-transform: lowercase; color: var(--color-neutral-700);
+       margin: 12px 0 16px; }
+.tag::before { content: ""; width: 30px; height: 1px;
+               background: var(--color-neutral-400); }
+
+/* Scenario chips: hairline, the selected one in the accent */
+.chip { font-family: var(--font-heading); font-size: 12px; font-weight: 500;
+        letter-spacing: 0.16em; text-transform: uppercase;
+        color: var(--color-text); background: transparent;
+        border: 1px solid var(--color-neutral-400); border-radius: 0;
+        padding: 4px 10px; margin: 0 6px 14px 0; cursor: pointer; }
+.chip:hover { border-color: var(--color-text); }
+.chip.selected { color: var(--color-bg); background: var(--color-accent);
+                 border-color: var(--color-accent); }
+
+/* Lever cards: hairline dividers, condensed names, mono values */
+.card { border-top: 1px solid var(--color-divider); padding: 14px 0 12px;
+        margin: 0; }
+.card h3 { font-family: var(--font-heading); font-size: 12px;
+           font-weight: 500; letter-spacing: 0.16em;
+           text-transform: uppercase; color: var(--color-text);
+           margin: 0 0 8px; display: flex; justify-content: space-between;
+           align-items: baseline; }
+.card h3 .val { font-family: var(--font-mono); font-size: 14px;
+                font-weight: 500; letter-spacing: 0; text-transform: none;
+                font-variant-numeric: tabular-nums; }
+
+/* Slider: a 1px rule, a 9px ink square, mono ticks */
+.card .dash-slider-track { height: 1px; background: var(--color-neutral-400);
+                           border-radius: 0; }
+.card .dash-slider-root .dash-slider-range {
+  background-color: var(--color-neutral-400) !important; }
+.card .dash-slider-thumb { width: 9px; height: 9px;
+                           background: var(--color-text); border: none;
+                           border-radius: 0; box-shadow: none; }
+.card .dash-slider-thumb:hover, .card .dash-slider-thumb:focus {
+  background: var(--color-text); outline: none; box-shadow: none; }
+.card .dash-slider-mark { font-family: var(--font-mono); font-size: 10px;
+                          color: var(--color-text);
+                          font-variant-numeric: tabular-nums; }
+.card .dash-slider-mark-outside-selection { color: var(--color-neutral-700); }
+
+/* Exposure switch: a segmented control, the chosen segment in ink, a
+   segment whose composite is still compiling greyed and disabled */
+.seg-group { display: inline-flex; border: 1px solid var(--color-neutral-400);
+             margin: 2px 0 4px; }
+.seg { position: relative; font-family: var(--font-mono);
+       text-transform: uppercase; color: var(--color-text);
+       background: transparent; border: none;
+       border-left: 1px solid var(--color-neutral-400); padding: 4px 10px 5px;
+       cursor: pointer; overflow: hidden; }
+.seg:first-child { border-left: none; }
+.seg-top { display: block; font-size: 11px; font-weight: 500;
+           line-height: 1.2; }
+.seg-sub { display: block; font-size: 8px; letter-spacing: 0.14em;
+           margin-top: 1px; }
+.seg.selected { color: var(--color-bg); background: var(--color-text); }
+.seg.compiling { color: var(--color-neutral-400); cursor: default; }
+.seg-note { font-family: var(--font-mono); font-size: 9.5px;
+            letter-spacing: 0.08em; text-transform: uppercase;
+            color: var(--color-neutral-700); min-height: 12px; }
+
+/* Model rows */
+.row h2 { font-family: var(--font-heading); font-size: 15px;
+          font-weight: 600; letter-spacing: 0.2em; text-transform: uppercase;
+          margin: 10px 0 0; }
+.row .dep { font-family: var(--font-mono); font-size: 11px;
+            font-weight: 400; letter-spacing: 0; text-transform: none;
+            color: var(--color-neutral-700); margin-left: 8px; }
+.row h2 .pop { font-family: var(--font-mono); font-size: 10px;
+               font-weight: 400; letter-spacing: 0; text-transform: none;
+               color: var(--color-neutral-700); margin-left: 14px; }
+.row h2 .pop.pending { color: var(--color-text); }
+.spin { display: inline-block; width: 9px; height: 9px; margin-right: 6px;
+        border: 1.5px solid var(--color-text); border-top-color: transparent;
+        border-radius: 50%; animation: spin 0.8s linear infinite;
+        vertical-align: -1px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Legend for the shaded periods */
+.legend { display: flex; flex-wrap: wrap; gap: 4px 22px;
+          font-family: var(--font-heading); font-size: 11.5px;
+          font-weight: 500; letter-spacing: 0.16em; text-transform: uppercase;
+          color: var(--color-neutral-700); min-height: 16px; margin: 0 0 4px; }
+.legend > span { white-space: nowrap; }
+.sw { display: inline-block; width: 11px; height: 11px; margin-right: 6px;
+      vertical-align: -1px; }
+.ln { display: inline-block; width: 22px; height: 2px; margin-right: 6px;
+      vertical-align: 3px; background: var(--color-text); }
+.ln.dotted { background: repeating-linear-gradient(90deg,
+               var(--color-neutral-700) 0 1.5px, transparent 1.5px 4.5px); }
+.ln.dashed { background: repeating-linear-gradient(90deg,
+               var(--color-text) 0 9px, transparent 9px 14px); }
+
+/* Institute and lab marks */
+.logos { display: flex; align-items: center; gap: 22px; margin-top: 22px; }
+.logos img { height: 24px; width: auto; }
+/* The lab lockup carries a tagline line; it needs the extra height to read. */
+.logos img[alt="Furman Lab"] { height: 40px; }

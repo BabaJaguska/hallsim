@@ -603,9 +603,7 @@ def _ddb2_for_severity(comp_processes, severity):
     # The reporter names the species; where that species sits depends on
     # which block is in place, so resolve it the same way the topology does.
     proc_name, field = DDB2.observable.split("/", 1)
-    obs = (
-        _gz_path(procs, field) if proc_name == "gz06" else DDB2.observable
-    )
+    obs = _gz_path(procs, field) if proc_name == "gz06" else DDB2.observable
     return DDB2.summary(r.ts, r.get(obs), jnp.array([DDB2_READ_DAY]))[0]
 
 

@@ -291,6 +291,7 @@ class SchedulerResult:
         ]
         if not codes:
             return jnp.asarray(True)
+
         # Lanes report either a diffrax RESULTS enum or a plain string;
         # comparing a string to the enum raises rather than returning False,
         # which took `ok` away from every composite with a stochastic member.
@@ -299,9 +300,7 @@ class SchedulerResult:
                 return jnp.asarray(code == "successful")
             return jnp.asarray(code == dfx.RESULTS.successful)
 
-        return jnp.all(
-            jnp.stack([_succeeded(c) for c in codes]), axis=0
-        )
+        return jnp.all(jnp.stack([_succeeded(c) for c in codes]), axis=0)
 
     def __contains__(self, key: str) -> bool:
         return key in self._index
@@ -1448,13 +1447,8 @@ class Scheduler:
             if stochastic_procs:
                 from hallsim.stochastic import simulate_ssa
 
-                full_rhs, _ = composite.build_rhs()
                 materialised = Composite._apply_assignments(
-                    zip(
-                        full_rhs.assign_procs,
-                        full_rhs.assign_read_maps,
-                        full_rhs.assign_write_maps,
-                    ),
+                    composite.assignment_pass(),
                     t,
                     state,
                 )
@@ -2063,17 +2057,11 @@ class Scheduler:
                 p for p in proc.ports_schema() if p not in proc._species_names
             )
             held_idxs = tuple(idx_of(p) for p in held_ports)
-            # The member reads the store as the RHS reads it: with every
-            # ASSIGNED path holding its algebraic value, which the flat state
-            # itself does not carry between windows.
-            full_rhs, _ = composite.build_rhs()
-            assign_pre = tuple(
-                zip(
-                    full_rhs.assign_procs,
-                    full_rhs.assign_read_maps,
-                    full_rhs.assign_write_maps,
-                )
-            )
+            # The member reads the store with every ASSIGNED path holding
+            # its algebraic value, which the flat state itself does not carry
+            # between windows. The complete pass, not the derivative's: an
+            # edge that feeds only this member is one no derivative reads.
+            assign_pre = composite.assignment_pass()
             stochastic_info = (
                 proc_name,
                 proc,

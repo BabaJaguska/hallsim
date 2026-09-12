@@ -793,6 +793,26 @@ class Composite(eqx.Module):
 
     _apply_assignments = staticmethod(_apply_assignments)
 
+    def assignment_pass(self, proc_names: list[str] | None = None):
+        """The complete assignment-rule pass: dependency-ordered
+        ``(proc, read_map, assign_map)`` for every ASSIGNED port of
+        ``proc_names`` (default: every CONTINUOUS process), checked for
+        duplicate writers. Apply it with :meth:`_apply_assignments` to put
+        every algebraic value into a flat state.
+
+        :meth:`build_rhs` keeps only the assignments a derivative reads;
+        a reader outside the derivative — a stochastic member, a saved
+        trajectory — needs this one, or it reads a slot the pruned pass
+        never fills."""
+        if proc_names is None:
+            proc_names = list(self.continuous_processes().keys())
+        keys = self.store_keys()
+        key_to_idx = {k: i for i, k in enumerate(keys)}
+        canon = canonical_units(self.processes, self.topology)
+        assign_pre = self._assignment_pre(proc_names, keys, key_to_idx, canon)
+        _check_assignments(assign_pre, len(keys))
+        return tuple(assign_pre)
+
     def materialize_assigned(self, ts, ys, proc_names=None):
         """Overwrite the ASSIGNED (algebraic) columns of a saved trajectory
         ``ys`` with their true values, recomputed from each saved state.
@@ -807,12 +827,7 @@ class Composite(eqx.Module):
         shape. No-op when the composite has no ASSIGNED paths."""
         import jax
 
-        if proc_names is None:
-            proc_names = list(self.continuous_processes().keys())
-        keys = self.store_keys()
-        key_to_idx = {k: i for i, k in enumerate(keys)}
-        canon = canonical_units(self.processes, self.topology)
-        assign_pre = self._assignment_pre(proc_names, keys, key_to_idx, canon)
+        assign_pre = self.assignment_pass(proc_names)
         if not assign_pre:
             return ys
         # vmap over TIME (axis 0, per SchedulerResult); _apply_assignments
