@@ -72,7 +72,12 @@ class Lever:
 
 LEVERS = (
     Lever("Genomic Instability", 0.0, 1.0, "Genomic instability"),
-    Lever("Deregulated Nutrient Sensing", -1.0, 1.0, "Nutrient sensing"),
+    Lever(
+        "Deregulated Nutrient Sensing",
+        -1.0,
+        1.0,
+        "Deregulated nutrient sensing",
+    ),
     Lever("Loss of Proteostasis", 0.0, 1.0, "Loss of proteostasis"),
 )
 

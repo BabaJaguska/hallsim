@@ -78,6 +78,19 @@ ITERATIVE_EIGS_NCV = 256
 #: densely up to this size (about 20 s at 4096, once per plan, cached).
 DENSE_FALLBACK_MAX_DIM = 4096
 
+#: Colours the sparse Jacobian may need before the Gershgorin certificate
+#: switches from the coloured pass to a column-chunked one.
+GERSHGORIN_MAX_COLOURS = 64
+
+#: Columns per chunk of the dense Gershgorin pass: one batched directional
+#: derivative per chunk, memory ``chunk × n`` rather than ``n × n``.
+GERSHGORIN_CHUNK = 256
+
+#: Entries the sparsity pattern may hold before it is not built at all: a
+#: block port declares every element against every other, and materialising
+#: that as a pattern is an ``n²`` Python list before any colouring.
+GERSHGORIN_MAX_ENTRIES = 2_000_000
+
 
 @dataclass
 class GroupStiffness:
@@ -126,6 +139,10 @@ class GroupStiffness:
     jacobian_cond: float = float("nan")
     state_scale_spread: float = float("nan")
     eigenvalues: np.ndarray = field(default=None, repr=False)
+    #: True when ``spectral_abscissa`` is a Gershgorin upper bound from the
+    #: sparse Jacobian rather than a measured eigenvalue — enough to certify
+    #: "not stiff" without an eigenvalue estimate.
+    bounded: bool = False
 
     def __str__(self) -> str:
         verdict = "STIFF → implicit" if self.stiff else "non-stiff → explicit"
@@ -225,6 +242,78 @@ def _extremal_eigenvalues(
         ) from exc
 
 
+def _pattern_entries(composite) -> int:
+    """How many entries the composite's Jacobian pattern would hold, from
+    port widths alone — before any of them is materialised."""
+    from hallsim.store import as_paths
+
+    total = 0
+    for name, proc in composite.continuous_processes().items():
+        topo = composite.topology.get(name, {})
+        for port, deps in proc.port_dependencies().items():
+            width = len(as_paths(topo[port]))
+            total += width * sum(len(as_paths(topo[d])) for d in deps)
+    return total
+
+
+def _gershgorin_abscissa(composite, rhs, y0, idxs, t0: float):
+    """An upper bound on the group's spectral abscissa from Gershgorin's
+    discs over its sparse Jacobian, formed in as many directional
+    derivatives as the pattern has colours — three for a chain, tens for a
+    reaction network. ``None`` when the pattern needs more colours than
+    the estimate it would replace."""
+    from hallsim.structure import colour_columns, jacobian_pattern
+
+    idxs = np.asarray(idxs)
+    n = int(idxs.size)
+    g = _restricted_fn(rhs, y0, idxs, t0)
+    v0 = y0[idxs]
+    batched = jax.jit(jax.vmap(lambda sd: jax.jvp(g, (v0,), (sd,))[1]))
+    diag = np.zeros(n)
+    radius = np.zeros(n)
+    n_colours = None
+    if _pattern_entries(composite) <= GERSHGORIN_MAX_ENTRIES:
+        pattern = jacobian_pattern(composite)
+        local = {int(gi): i for i, gi in enumerate(idxs)}
+        kept = [
+            (local[int(r)], local[int(c)])
+            for r, c in zip(pattern.rows, pattern.cols)
+            if int(r) in local and int(c) in local
+        ]
+        if not kept:
+            return 0.0
+        rows = np.asarray([r for r, _ in kept], dtype=np.int32)
+        cols = np.asarray([c for _, c in kept], dtype=np.int32)
+        colour, n_colours = colour_columns(n, rows, cols)
+    if n_colours is not None and n_colours <= GERSHGORIN_MAX_COLOURS:
+        seeds = np.zeros((n_colours, n))
+        seeds[colour, np.arange(n)] = 1.0
+        tangents = np.asarray(
+            _concrete(batched(jnp.asarray(seeds, dtype=v0.dtype)))
+        )
+        values = tangents[colour[cols], rows]
+        on = rows == cols
+        diag[rows[on]] = values[on]
+        np.add.at(radius, rows[~on], np.abs(values[~on]))
+        return float(np.max(radius - diag))
+    # No usable sparsity (a block port declares none): walk the columns in
+    # chunks, one batched derivative per chunk, never holding n × n.
+    for start in range(0, n, GERSHGORIN_CHUNK):
+        columns = np.arange(start, min(n, start + GERSHGORIN_CHUNK))
+        seeds = np.zeros((GERSHGORIN_CHUNK, n))
+        seeds[np.arange(columns.size), columns] = 1.0
+        tangents = np.asarray(
+            _concrete(batched(jnp.asarray(seeds, dtype=v0.dtype)))
+        )[: columns.size]
+        block = tangents.T  # J[:, columns]
+        k = np.arange(columns.size)
+        diag[columns] = block[columns, k]
+        block = np.abs(block)
+        block[columns, k] = 0.0
+        radius += block.sum(axis=1)
+    return float(np.max(radius - diag))
+
+
 def classify_spectrum(
     name: str,
     dim: int,
@@ -234,6 +323,7 @@ def classify_spectrum(
     max_explicit_substeps: float = DEFAULT_MAX_EXPLICIT_SUBSTEPS,
     jacobian_cond: float = float("nan"),
     state_scale_spread: float = float("nan"),
+    bounded: bool = False,
 ) -> GroupStiffness:
     """Build a :class:`GroupStiffness` verdict from an eigenvalue spectrum.
 
@@ -274,6 +364,7 @@ def classify_spectrum(
         stiffness_index=stiffness_index,
         stiff=stiff,
         eigenvalues=eigenvalues,
+        bounded=bounded,
     )
 
 
@@ -331,6 +422,7 @@ def analyze_groups(
             )
             continue
         rhs, _ = composite.build_rhs(proc_names)
+        bounded = False
         if idxs.size <= DENSE_JACOBIAN_MAX_DIM:
             jac = _restricted_jacobian(rhs, state, idxs, t0)
             eig = np.linalg.eigvals(jac)
@@ -341,7 +433,22 @@ def analyze_groups(
         else:
             # cond needs the smallest singular value, which no extremal
             # method gives cheaply; it is diagnostic, so it abstains.
-            eig = _extremal_eigenvalues(rhs, state, idxs, t0, ITERATIVE_EIGS_K)
+            # A Gershgorin bound below the budget is a certificate of "not
+            # stiff" in a handful of derivatives; only a group it cannot
+            # clear pays for the eigenvalue estimate.
+            bound = _gershgorin_abscissa(composite, rhs, state, idxs, t0)
+            if (
+                bound is not None
+                and np.isfinite(bound)
+                and bound * dt <= max_explicit_substeps
+            ):
+                eig = np.asarray([-bound + 0j])
+                bounded = True
+            else:
+                eig = _extremal_eigenvalues(
+                    rhs, state, idxs, t0, ITERATIVE_EIGS_K
+                )
+                bounded = False
             cond = float("nan")
         mags = np.abs(np.asarray(state)[idxs])
         nz = mags[mags > 0]
@@ -354,5 +461,6 @@ def analyze_groups(
             max_explicit_substeps=max_explicit_substeps,
             jacobian_cond=cond,
             state_scale_spread=spread,
+            bounded=bounded,
         )
     return out

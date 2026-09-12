@@ -709,6 +709,41 @@ def _placement_advice(sug) -> str:
     return f"K={sug.K:.4g} would open it, but {sug.note}"
 
 
+def _validate_parameter_ref(pname: str, pref, proc) -> None:
+    """The field a :class:`ParameterRef` names must exist on the process,
+    must not be static, and must hold a scalar — checked once when the
+    problem is wired, where the failure can name the field, instead of
+    inside a derivative several frames from anything the user wrote."""
+    import dataclasses
+
+    address = f"{pref.process_name}.{pref.field}"
+    top = pref.field.split(".")[0]
+    static = {
+        f.name
+        for f in dataclasses.fields(type(proc))
+        if f.metadata.get("static")
+    }
+    if top in static:
+        raise ValueError(
+            f"params[{pname!r}] fits {address}, a static field: that is "
+            "structure, not a value an optimizer can move."
+        )
+    try:
+        value = read_param(proc, pref.field)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"params[{pname!r}] fits {address}, which {type(proc).__name__} "
+            f"does not have ({exc})."
+        ) from exc
+    if jnp.ndim(value) != 0:
+        raise ValueError(
+            f"params[{pname!r}] fits {address}, which holds a "
+            f"{type(value).__name__} of shape {tuple(jnp.shape(value))}, not "
+            "a scalar. A tuple-valued field such as a Hill edge's K or n is "
+            "not fittable through a ParameterRef."
+        )
+
+
 def _reject_overwritten_edit(pname: str, pref, proc, baseline) -> None:
     """Raise if a fitted field changed after the problem was wired.
 
@@ -877,6 +912,9 @@ class CalibrationProblem:
                     f"not in composite.processes "
                     f"(have {sorted(composite.processes.keys())})"
                 )
+            _validate_parameter_ref(
+                pname, pref, composite.processes[pref.process_name]
+            )
 
         # Block fitting a severity *dial* (a transform that ignores `base`, so
         # severity would overwrite the fitted value) but allow fitting the

@@ -255,9 +255,29 @@ class _PortMap:
         return isinstance(other, _PortMap) and self._key == other._key
 
 
-def _read_entry(port, entry, spec, canon, key_to_idx):
+def _check_binding(port, paths, spec, owner=""):
+    """A port binds exactly as many paths as it declares: one for a plain
+    port, its element count for a block port. A plain port bound to several
+    paths would read the first and drop the rest."""
+    want = 1 if spec.width is None else spec.width
+    if len(paths) != want:
+        kind = (
+            "a plain port"
+            if spec.width is None
+            else f"a {spec.width}-wide block port"
+        )
+        where = f"{owner}.{port}" if owner else port
+        raise ValueError(
+            f"{where} is {kind} bound to {len(paths)} store paths "
+            f"{list(paths)}. Bind exactly {want}, or declare a block port "
+            "with elements=(...) naming one per path."
+        )
+
+
+def _read_entry(port, entry, spec, canon, key_to_idx, owner=""):
     """One port's gather plan: its columns, canonical->port factors, width."""
     paths = as_paths(entry)
+    _check_binding(port, paths, spec, owner)
     return (
         port,
         [key_to_idx[sp] for sp in paths],
@@ -266,9 +286,10 @@ def _read_entry(port, entry, spec, canon, key_to_idx):
     )
 
 
-def _write_entry(port, entry, spec, canon, key_to_idx):
+def _write_entry(port, entry, spec, canon, key_to_idx, owner=""):
     """One port's scatter plan: its columns, port->canonical factors, width."""
     paths = as_paths(entry)
+    _check_binding(port, paths, spec, owner)
     return (
         port,
         [key_to_idx[sp] for sp in paths],
@@ -774,12 +795,16 @@ class Composite(eqx.Module):
             proc_topo = self.topology[proc_name]
             schema = proc.ports_schema()
             read_pairs = _as_port_map(
-                _read_entry(port, entry, schema[port], canon, key_to_idx)
+                _read_entry(
+                    port, entry, schema[port], canon, key_to_idx, proc_name
+                )
                 for port, entry in proc_topo.items()
             )
             assign_pairs = _as_port_map(
                 (
-                    _write_entry(port, proc_topo[port], p, canon, key_to_idx)
+                    _write_entry(
+                        port, proc_topo[port], p, canon, key_to_idx, proc_name
+                    )
                     for port, p in schema.items()
                     if p.role == PortRole.ASSIGNED
                 ),
@@ -867,12 +892,16 @@ class Composite(eqx.Module):
             proc_topo = self.topology[proc_name]
             schema = proc.ports_schema()
             read_pairs = _as_port_map(
-                _read_entry(port, entry, schema[port], canon, key_to_idx)
+                _read_entry(
+                    port, entry, schema[port], canon, key_to_idx, proc_name
+                )
                 for port, entry in proc_topo.items()
             )
             write_pairs = _as_port_map(
                 (
-                    _write_entry(port, proc_topo[port], p, canon, key_to_idx)
+                    _write_entry(
+                        port, proc_topo[port], p, canon, key_to_idx, proc_name
+                    )
                     for port, p in schema.items()
                     if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE)
                 ),
@@ -1159,13 +1188,44 @@ class Composite(eqx.Module):
 
         groups[f"group_{group_idx}"] = current_group
 
-        # Add undeclared to default group
         if without_ts:
-            groups["default"] = without_ts
+            groups = self._attach_untimed(groups, without_ts)
 
         ordered = self._order_by_coupling(groups)
         self._warn_cyclic_groups(ordered)
         return ordered
+
+    def _attach_untimed(
+        self, groups: dict[str, list[str]], untimed: list[str]
+    ) -> dict[str, list[str]]:
+        """Place each process without a timescale in the group of a process
+        that reads what it writes, failing that one whose output it reads,
+        failing that a group of its own. A coupling edge then solves inside
+        the window of the model it drives rather than across a split from
+        it, where a Lie step the length of the run would freeze the model.
+        """
+        rw = {
+            name: read_write_paths(
+                self.processes[name].ports_schema(),
+                self.topology.get(name, {}),
+            )
+            for name in self.continuous_processes()
+        }
+        group_of = {p: g for g, procs in groups.items() for p in procs}
+        alone: list[str] = []
+        for name in untimed:
+            reads, writes = rw[name]
+            consumers = [g for p, g in group_of.items() if rw[p][0] & writes]
+            sources = [g for p, g in group_of.items() if rw[p][1] & reads]
+            home = (consumers or sources or [None])[0]
+            if home is None:
+                alone.append(name)
+            else:
+                groups[home].append(name)
+                group_of[name] = home
+        if alone:
+            groups["default"] = alone
+        return groups
 
     def _group_drivers(
         self, groups: dict[str, list[str]]

@@ -445,6 +445,7 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
                     post[arm][t].spearman_r,
                     pre[arm][t].mean_abs_error,
                     post[arm][t].mean_abs_error,
+                    post[arm][t].null_abs_error,
                 )
             )
 
@@ -458,11 +459,20 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
                 "rho_cal",
                 "mean_abs_err_oob",
                 "mean_abs_err_cal",
+                "mean_abs_err_null",
             ]
         )
-        for arm, day, ro, rc, eo, ec in rows:
+        for arm, day, ro, rc, eo, ec, en in rows:
             w.writerow(
-                [arm, day, f"{ro:.3f}", f"{rc:.3f}", f"{eo:.3f}", f"{ec:.3f}"]
+                [
+                    arm,
+                    day,
+                    f"{ro:.3f}",
+                    f"{rc:.3f}",
+                    f"{eo:.3f}",
+                    f"{ec:.3f}",
+                    f"{en:.3f}",
+                ]
             )
 
     IMP, REG, DIM, INK = "#1a7f4b", "#c0552b", "#6b7280", "#1f2937"
@@ -473,12 +483,23 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
         "ρ (cal)",
         "mean|err| (oob)",
         "mean|err| (cal)",
+        "mean|err| (no change)",
     ]
-    text, colors = [header], [[INK] * 6]
-    for arm, day, ro, rc, eo, ec in rows:
+    text, colors = [header], [[INK] * 7]
+    for arm, day, ro, rc, eo, ec, en in rows:
         text.append(
-            [arm, day, f"{ro:+.2f}", f"{rc:+.2f}", f"{eo:.2f}", f"{ec:.2f}"]
+            [
+                arm,
+                day,
+                f"{ro:+.2f}",
+                f"{rc:+.2f}",
+                f"{eo:.2f}",
+                f"{ec:.2f}",
+                f"{en:.2f}",
+            ]
         )
+        # the calibrated error is green only when it beats both the
+        # out-of-the-box model and predicting no change at all
         colors.append(
             [
                 INK,
@@ -486,17 +507,18 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
                 DIM,
                 IMP if rc >= ro else REG,
                 DIM,
-                IMP if ec <= eo else REG,
+                IMP if ec <= eo and ec <= en else REG,
+                DIM,
             ]
         )
 
-    fig, ax = plt.subplots(figsize=(8.6, 0.55 + 0.42 * len(text)))
+    fig, ax = plt.subplots(figsize=(9.6, 0.55 + 0.42 * len(text)))
     ax.axis("off")
     tbl = ax.table(
         cellText=text,
         cellLoc="center",
         loc="center",
-        colWidths=[0.26, 0.10, 0.14, 0.14, 0.18, 0.18],
+        colWidths=[0.22, 0.08, 0.12, 0.12, 0.15, 0.15, 0.16],
     )
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(10.5)

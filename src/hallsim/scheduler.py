@@ -875,13 +875,21 @@ class Scheduler:
         is deliberately the weakest thing that keeps a sweep loop off the
         re-tracing path.
         """
+        # The adjoint the run will actually use, not the one asked for: a
+        # forward-mode trace swaps in ForwardMode, and a plan built eagerly
+        # carries a custom_vjp that a later jvp through a memo hit cannot use.
+        resolved = (
+            adjoint
+            if adjoint is not None
+            else self._resolve_adjoint(composite, y0)
+        )
         key = (
             composite.structural_fingerprint(),
             _param_digest(composite),
             tuple(float(t) for t in t_span),
             float(macro_dt),
             None if save_dt is None else float(save_dt),
-            None if adjoint is None else type(adjoint).__name__,
+            type(resolved).__name__,
             bool(antialias),
             (
                 None

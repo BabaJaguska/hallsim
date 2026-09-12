@@ -889,6 +889,9 @@ class ConcordanceResult:
     spearman_r: float = 0.0
     n_compared: int = 0
     mean_abs_error: float = 0.0
+    #: Mean |Δ_data|: the error of predicting no change at all, the floor
+    #: any model's ``mean_abs_error`` has to beat.
+    null_abs_error: float = 0.0
 
     def __str__(self) -> str:
         lines = [
@@ -974,4 +977,5 @@ def compute_concordance(
         spearman_r=float(rho) if np.isfinite(rho) else 0.0,
         n_compared=n,
         mean_abs_error=float(np.mean(np.abs(sims - datas))),
+        null_abs_error=float(np.mean(np.abs(datas))),
     )

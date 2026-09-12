@@ -379,8 +379,11 @@ Scheduler is 0.38 s.
   `analyze_groups` 59 s of the 67 s, 74 633 Jacobian-vector products
   through ARPACK against 1 597 at 1 024 states — a ring's top eigenvalues
   differ in the seventh digit at that size and the restarts multiply. The
-  verdict is right and cached; the cost is one-off and filed as P3.22 with
-  a Gershgorin-first proposal.
+  verdict is right and cached per Scheduler instance. Fixed the same day
+  (P3.22): a Gershgorin bound over the Jacobian, in column chunks when the
+  pattern would be dense, certifies the chain not stiff before any
+  estimate — `analyze_groups` 59 s → 1.6 s, the plan 67 s → 0.9 s, same
+  routing.
 - Found on the way: routing crashed above 512 states on a clustered
   spectrum (P0.82, fixed); interpolated coupling returns its own save grid
   (P1.27); the routing verdict is measured at `y0` only — gz06's abscissa

@@ -423,29 +423,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `cmd_run` end to end including every figure, so the report path is exercised
   on every CI run rather than the next time someone waits out a fit.
 
-- [ ] **P0.65 — A coupling edge with `timescale=None` gets its own scheduler
-  group, so `macro_dt = span` freezes the model it couples.** Filed
-  2026-09-06 (Proctor 2013 maths review, FW3).
-
-  `HillEdge.timescale` defaults to `None`, so `auto_groups` cannot place the
-  edge with the process it drives and gives it a group of its own. Run with
-  `macro_dt = t_end` — a natural choice, and the one
-  :func:`hallsim.intake.coupling_response` makes — that is a **single Lie step
-  over the whole span with every other group frozen**. The RHS is correct
-  throughout; only the schedule is wrong.
-
-  It produced "a fully plausible, fully wrong reject-this-model number" on a
-  reviewer's first pass. Nothing warns.
-
-  `coupling_response` itself is not currently exposed — it builds a
-  single-process composite, so there is exactly one group (verified on
-  MODEL2201210001 and BIOMD0000000534). It becomes exposed the moment the
-  function is pointed at a composite with edges, which is the obvious next use.
-
-  *Fix:* an edge should inherit the timescale of what it drives, or grouping
-  should refuse to isolate a process whose ports all bind another group's
-  paths. Failing both, warn when a group contains only edges.
-
 - [ ] **P0.68 — BIOMD0000000105 (Proctor 2007, ubiquitin–proteasome) ships
   `k69 = 0`, against the paper's `1.0E-3 s^-1`.** Filed 2026-09-07. `k69`
   is the proteasome's degradation rate, so in the deposit no substrate is
@@ -493,21 +470,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   *Fix:* one solve plus an SVD of the reporter trajectories. Rank below panel
   size means the extra reporters are not independent evidence and scoring them
   double-counts. Would have rejected both deposits for one solve.
-
-- [ ] **P0.62 — `rest_residual` is normalised by `‖y₀‖`, so one large species
-  hides every other state's motion.** Filed 2026-09-06.
-
-  Proctor 2013 reports `‖f(y₀)‖/‖y₀‖ = 2.48e-05` and reads as equilibrated. It
-  is not: `‖y₀‖ = 100,006` and `Aggrecan_Collagen2` alone is 100,000 of it.
-  Per species, `IL1` has **τ = 0.03 h**, and two states drift with no stimulus
-  — `Matriptase` to 0.6% of its IC, `TIMP3` to exactly 2× (its IC is half its
-  own basal steady state). The aggregate was reported to the user as the
-  candidate's strongest property.
-
-  Affects any model with a wide magnitude spread, which is most of them.
-
-  *Fix:* report a per-species relative rate — `|f_i(y0)| / max(|y0_i|, floor)`
-  — and flag the worst, alongside the norm.
 
 - [ ] **P0.57 — Triage cannot tell a deposit that was written for stochastic
   simulation, so it imports one as an ODE and silently deletes a mechanism.**
@@ -720,39 +682,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   exists and is the right signal — the defect is that a tool-default unit is
   recorded as declared rather than as absent. Distinguish "the file says
   seconds" from "the file says nothing and the writer defaulted to seconds".
-
-- [ ] **P0.37 — `rest_residual` is a global ratio, so one large state with zero
-  derivative hides that every other state is moving.** Filed 2026-09-04.
-  `‖f(y₀)‖/‖y₀‖` puts every state in one quotient. A species that is large and
-  stationary contributes to the denominator and nothing to the numerator, so it
-  divides the residual down and the model reads "at rest".
-
-  Measured on Stucki 2005 (BIOMD0000001059). Reported `rest_residual` **0.0415**
-  — comfortably the best of any candidate screened this session, and the reason
-  it was promoted past four rejected models. The `smacmit` pool sits at 10 with
-  derivative exactly 0 until its event fires, contributing ~10 to ‖y₀‖ and 0 to
-  ‖f(y₀)‖. **Per state, τ is 1.2–3.0 s against a 7000 s horizon.** Nothing in
-  that model is at rest.
-
-  What it hid: with the insult removed entirely (`k7 = 0`), active caspase-3
-  rises 0.7104 → 6.65 and crosses the model's own commitment threshold
-  `c3 ≥ 4.5` at **t = 690 s**, 1310 s before the insult is scheduled to arrive
-  at t = 2000. The apparent switch is relaxation from a non-rest IC to the
-  single attractor, which sits above the threshold. The entire pro-apoptotic
-  insult moves caspase-3 by **log2FC +0.11**. This is DallePezze's P0.14 defect
-  in a sharper form, and the screen that was supposed to catch it reported the
-  best rest residual of the day.
-
-  *Fix:* report `rest_residual` **per state** alongside the global ratio, and
-  make `ScreenReport` flag the case where the global figure is dominated by
-  states with near-zero derivative. `diagnostics.rest_timescale` already
-  computes per-state τ — the intake summary just does not surface it.
-
-  **Related, and now overdue:** the zero-perturbation control run specified in
-  [design-spontaneous-endpoint.md](design-spontaneous-endpoint.md) would have
-  caught this in seconds, without a reviewer. It has now been the deciding
-  check on two models (DallePezze, Stucki) and remains unbuilt. It belongs
-  before the reviewer panel in the intake order, not after it.
 
 - [ ] **P0.36 — A composite silently drops a model's events, so the model runs
   with its own mechanism disabled and reports plausible numbers.** Filed
@@ -1325,32 +1254,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   which is what the demo does, and why the drift was visible rather than
   merely shipped.
 
-- [ ] **P0.86 — One eager `run()` disables forward-mode autodiff for that
-  Scheduler.** Filed 2026-09-12. `_plan_for`'s memo key carries `y0`'s shape
-  and dtype; a JVP tracer shares both, so the plan built eagerly — carrying
-  `RecursiveCheckpointAdjoint`, a `custom_vjp` — is a cache *hit* under a later
-  forward trace and `_resolve_adjoint` never runs. Measured on dp14, and the
-  order is the whole finding:
-
-  | first call | then `jacfwd` / `jvp` |
-  |---|---|
-  | `jacfwd` | both fine, 79.68600986 |
-  | **eager `run()`** | **both raise** `TypeError: can't apply forward-mode autodiff (jvp) to a custom_vjp function` |
-  | `jax.grad` | both fine — reverse mode does not poison the memo |
-
-  "Evaluate eagerly, then differentiate" is what `Scheduler.run`'s own
-  docstring advertises, and `warm_up`-then-differentiate is the contract the
-  stiffness cache is built around. *Fix:* the memo key has to separate a
-  concrete call from a traced one — shape and dtype do not, because that is
-  exactly what a tracer reproduces.
-
-- [ ] **P0.87 — A scalar port bound to several store paths reads only the
-  first, through a complete run.** Filed 2026-09-12. Finite, plausible numbers,
-  0 warnings, and two of three bound paths contributing nothing. *Fix:* decide
-  what the binding means — sum the paths, forbid the binding, or make a
-  multi-path port a distinct declaration — and make the other two cases an
-  error.
-
 - [ ] **P0.88 — A block port forfeits the Jacobian sparsity the equivalent
   process spelling declares.** Filed 2026-09-12. The same maths written as one
   block-ported process declares a **100% dense** Jacobian (400 colours) where
@@ -1512,6 +1415,8 @@ The check that would catch a mistake does not exist, does not run, or fails open
   uncommitted in a sandbox tree, so the reporter is not reproducible here yet —
   porting it is the actionable, and it should land before any concordance number
   is quoted again.
+
+  **Baseline reported 2026-09-12:** `ConcordanceResult.null_abs_error` is the mean |Δ_data| — the error of predicting no change — and the demo's concordance table carries it as a column beside the out-of-the-box and calibrated errors; the calibrated cell is green only when it beats both. What remains open here is the metric argument above, not the missing floor. Measured on the four-parameter fit (2026-09-12_08-59-29, rapamycin gain 0.7), mean |log2FC error| over the seven reporters — published / calibrated / no change: DDIS day 7 0.347 / 0.240 / 0.265, day 14 0.409 / 0.282 / 0.293; RAPA day 7 0.371 / 0.316 / **0.127**, day 14 0.504 / 0.548 / **0.221**. On the fitted arm the calibration beats the floor by a hair; on the held-out arm predicting no change beats both models by 2.5×, because the measured rapamycin changes are small and the model overshoots them.
 - [ ] **P1.7 — No parameter provenance.** Nothing distinguishes measured from
   fitted from invented, so a benchmark can be scored against a parameter fitted
   to it — which happened in both models reviewed.
@@ -1531,18 +1436,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   subsystem, hold the oscillator at its published initial condition. Until then
   `equilibrate=True` should refuse with this explanation rather than fail in the
   solver.
-
-- [ ] **P1.11 — A `ParameterRef` is never validated against the field it
-  names.** Point one at a tuple-valued field — `HillActivationEdge.K`, `.n`,
-  which are `tuple` and deliberately *not* `calibratable` — and nothing objects.
-  Substitution writes a scalar over the tuple and the run dies inside
-  `HillActivationEdge.derivative` with `TypeError: iteration over a 0-d array`,
-  several frames from anything the user wrote. Observed in an agent session,
-  which lost a fit step to it and concluded the framework had a bug in the edge.
-  *Fix:* validate every `ParameterRef` at problem construction — the field must
-  exist, must not be static, and its current value must be a scalar. Say which
-  of those failed and, for a non-`calibratable` field, that fitting it is
-  unsupported. The check is cheap and the failure it replaces is unreadable.
 
 - [ ] **P1.16 — The multi-group scheduler has no in-repo workload, so every
   defect in it was found by hand-forcing a configuration.** Found 2026-08-31
@@ -1673,32 +1566,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   where pointwise read as a phase shift). The tolerance screen still scores
   pointwise.
 
-- [ ] **P1.24 — A coupling edge with no `timescale` is auto-grouped away from
-  the models it couples, and the default macro step then carries an O(1)
-  splitting error behind a warning with no number on it.** Found 2026-09-11
-  by the composite conformance case (`scripts/conformance.py`). Two
-  imported models sharing a species, a Hill edge, a gain level and a clamp:
-  `auto_groups()` returns `{group_0: [a, b], default: [drive, bridge, hold]}`
-  because the edges' `timescale` is `None`, and Lie splitting at the default
-  `macro_dt = 1.0` leaves the clamped species 54% off the monolithic
-  solution — libRoadRunner and COPASI on the exported document, and HallSim
-  itself with all five processes in one group, agree to 1e-7. First order
-  in the step, as Lie splitting is:
-
-  | macro_dt | worst species | rel. dev |
-  |---|---|---|
-  | 6.0 | a_B | 8.8e-1 |
-  | 1.0 | a_B | 5.4e-1 |
-  | 0.1 | a_B | 9.0e-2 |
-  | 0.01 | a_B | 8.1e-3 |
-
-  The warning says a cycle is cut and to size `macro_dt`; nothing on the
-  result says how far the run sits from the unsplit one.
-  *Fix:* an edge that declares no timescale has no dynamics of its own and
-  belongs on its neighbours' clock — group it with the processes it reads
-  and writes. And when a cycle does cross groups, put a splitting-error
-  estimate (one macro step re-run at half size) on the result.
-
 - [ ] **P1.27 — Under interpolated coupling the Scheduler returns a
   trajectory on a grid it chose, not the one asked for, and under Strang
   only window ends; the requested times are not in the result and nothing
@@ -1732,8 +1599,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
 
 - [ ] **P1.28 — On a feedback loop the default coupling is frozen in effect, the split is first order in the macro step, and nothing says so.** Measured 2026-09-11 with `scripts/bench_scheduler.py` on a diffusion chain (τ = 1) closed through an 8-state stiff block (`chain:64`, `chain:256`; the loop is x0 → x1 → z → x0). With the default single sweep, `interpolated` equals `frozen` to three digits — 0.501 against 0.502 of the signal range at macro_dt 1.0, 0.133 against 0.133 at 0.25, 0.0537 against 0.0535 at 0.1 — because the stiff block is solved first and sees the chain frozen; an interpolant only ever helps a forward edge, which `_effective_coupling` says in its docstring and the plan never checks. The error falls linearly with the macro step (0.50 → 0.13 → 0.054): Lie splitting on a loop with one sweep is O(macro_dt) whatever the coupling mode, and at a macro step equal to the chain's time constant the default loses half the signal without a warning. `waveform_sweeps=2` costs 2× and takes the error to 0.021 / 5.6e-4 / 1.9e-4; Strang costs 5 % for 0.078 / 0.018 / 0.0069. On the multi-hallmark composite, where forward edges dominate, the ordering reverses: the default is the best point measured (1.2e-3 at macro 0.5 and 2.2e-4 at 0.1, at 2.6× and 2.1× the bare implicit speed), a second sweep buys nothing at 2× the cost, and Strang is 20× worse because it forbids the interpolant. So no single default wins both, and the missing piece is the check: a plan whose coupling graph has a cycle, run with one sweep, is silently first-order. *Proposal:* detect the cycle at plan time (the cross-group edges are already known to the coupling chooser) and warn naming `waveform_sweeps=2`; taking the second sweep automatically is a 2× cost on every looped composite and is a decision, not a fix. Full tables in `docs/benchmarks.md`.
 
-- [ ] **P1.29 — `symbolic_field` folds a boundary species' time-dependent rule into a constant.** Found 2026-09-11 by `scripts/bench_field.py`: the DallePezze field re-emitted from `hallsim.structure.symbolic_field` agrees with the member's program at t = 0 to 6e-16 and disagrees at every later time by up to 6e4 relative on `DNA_damage`. `Irradiation` is a boundary species whose rule is a piecewise in time (a pulse for 0 ≤ t < 0.003472 days); the symbolic form lists it under `field.parameters` at its initial value 1.0, so the generated field irradiates forever (663 steps against 1 140, day-14 state off by 3.4e3 relative). The compiled program and the composite RHS are right — they refresh boundary rules through `boundaryfunc` — so no solve is affected; what is affected is everything built from the symbolic form: `identifiability.structural_redundancy` (which now lists `Irradiation` as a parameter) and any exported single function. The "68 ms for the identical field as one generated function" behind P3.21's factor of two was this field, a different and harder problem; the like-for-like numbers are in P3.21 now. *Fix:* a boundary species with a rule is a rule in the symbolic form, not a parameter — emit it as a `TIME`-dependent expression in the derivatives and keep `parameters` to declared constants.
-
 ## P2 — cannot see what was built
 
   *Progress 2026-09-11.* `Composite.to_sbml()` (`hallsim.sbml_export`)
@@ -1759,10 +1624,7 @@ The check that would catch a mistake does not exist, does not run, or fails open
   `dimensionless`), so the UnitChecker cannot fire on the framework's primary
   model source, and declaring a real unit on a port that touches an imported
   species is a hard error.
-- [ ] **P2.5 — sbmltoodejax's `w` vector is computed and thrown away.**
-  Assignment-rule species report stale constants; a model's own conservation is
-  visibly violated in the output with no warning. Fluxes are unreadable and
-  unusable as coupling sources.
+
 - [ ] **P2.7 — The `ValidationReport` is computed on every construction and
   thrown away, including the interaction graph P2.1 is asking for.** Found
   2026-08-31 (external systems review). `Composite.__init__` builds a full
@@ -1879,7 +1741,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   together measured 2.65× on the Scheduler's default lane in an
   interleaved A/B against 98c3665 (`docs/benchmarks.md` §7).
 
-- [ ] **P3.22 — Routing a 10 000-state group costs a minute: the matrix-free estimate needs 75 000 Jacobian products on a clustered spectrum.** Measured 2026-09-12 on the block-port chain (`scripts/bench_scheduler.py chain:10000`): `Scheduler.plan` 67 s, of which `analyze_groups` 59 s and 74 633 Jacobian-vector products through ARPACK (k = 32, 256-vector Krylov space, tol 1e-3), against 1 597 products at 1 024 states — a ring's top eigenvalues differ in the seventh digit at 10⁴ and the restarts multiply. The verdict is right (abscissa 2.05, not stiff; the 8-state block stiff at 10⁴) and the solve it enables takes 1.1 s, so the plan costs sixty solves; it is cached per `Scheduler` instance, not per composite — a fresh `Scheduler()` on the same composite measured again (second plan 50.9 s), and the benchmark's every variant paid it — so nothing is wrong, only slow, and at 10⁵ it would be an hour per instance. *Proposal:* the verdict reads the abscissa to a factor, so bound it before estimating it. The coloured sparse Jacobian (`structure.jacobian_pattern` + `compressed_jacobian`) costs as many products as the pattern has colours — three for a chain, tens for a reaction network — and Gershgorin's discs on its rows give an upper bound on the abscissa in one pass. A bound below the explicit-substep budget decides "not stiff" outright; only a group whose bound exceeds it goes to the eigenvalue estimate, and that one can ask for k = 8 at tol 1e-2 with a capped iteration count (measured on the 1 024 ring: 1 725 products). Over-routing to implicit on a loose bound is the safe direction and would show up in the benchmark, not in a wrong answer.
 - [ ] **P3.23 — A reaction-level sample is seconds of serial event loop, and the cost grows with the cell count.** Measured 2026-09-12 on the multi-hallmark composite with Proctor 2007 at reaction level (`demos/hallmark_levers.py`, 11-core M3 Pro): 3.0 s for one cell, 4.7 s for two, 5.8 s for four, 8.9 s for eight; ~6.9×10⁵ reaction events per cell over the 15-day run, ~4 µs an iteration. Direct SSA pays one loop iteration per event and, batched, evaluates every cell per iteration and runs each window to the slowest cell, so a population costs ~3 s + 0.7 s per cell and the lever page shows a stale mean field for that long after every pull. *What does not help here — measured before proposing it:* tau-leaping. At Proctor's settled operating point (ROS 14, day 3 of an exact run) the free E1 and E2 pools sit at 1 molecule, MisP at 4 and every MisP–ubiquitin conjugate at 0–4, so the Cao–Gillespie–Petzold step selection (ε 0.03 or 0.1, critical threshold 3 or 10 firings) allows a leap of 7–8 s that absorbs 0.5–0.8 events, while 57–68 % of all events are on the critical set and would be simulated exactly anyway. The model is small-number by construction — that is why it is stochastic — and leaping is for pools in the thousands. An earlier version of this entry proposed it as a hundredfold saving; it is not one. *What does help:* (1) independent members on host threads instead of one vectorised loop — four one-cell loops on four threads 4.4 s against 6.9 s batched and 17.4 s sequential, eight on eight threads 5.5 s against 8.9 s; belongs in the Scheduler's batched lane (a stochastic-only batch sharded over host threads or devices), not in a demo-side pool; the earlier shard_map attempt is in `docs/benchmarks.md`. (2) The per-iteration cost, measured through the Scheduler on one cell over 15 days (2026-09-12): 6.5 µs an event with the generated propensities; 2.3 µs with the propensity call replaced by a constant vector, so the evaluation is about two thirds of the iteration and the loop's own work (two draws, the categorical pick over 94 channels, the stoichiometry column, the save bookkeeping) the rest. A prototype that evaluates the 84 monomial laws as one 94×38 exponent-matrix product (exact to 4×10⁻¹⁶ against the generated laws, the nine x(x−1)/2 dimerisations and the driven synthesis coefficient handled) ran at 9.4 µs — slower: XLA fuses the generated scalar expressions well and the dense elementwise product is more work, not less. What is left inside the evaluation is the per-call rebuild of the species dict and `_constants(t)` with the driven-parameter scatter, unmeasured on their own. (3) A slow-scale reduction of the ubiquitin charging cycle (partial equilibrium, Cao–Gillespie–Petzold 2005), which removes the E1/E2 firings — 52 % of one cell-day from the published initial state — rather than leaping over them; model-specific, and the same facility P3.5 asks for.
 - [ ] **P3.1 — Severity cannot be a state.** A hallmark dial is a constant set
   before the run, so aging is imposed as an initial condition. For an attractor

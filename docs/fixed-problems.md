@@ -1771,3 +1771,167 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   Tsit5, **3.5× faster end to end** (1057 s against 3703 s) at bit-identical
   loss.
 - [x] **P0.101 — A stochastic member read its coupling inputs from unfilled slots: the assignment pass it was handed was the derivative's pruned one.** `build_rhs` prunes the assignment pass to what a derivative reads (2026-09-11 night, `_assignments_read_by`), and both stochastic lanes took their pass from `build_rhs().assign_*`. An edge that feeds only a reaction-level member — every edge into Proctor 2007 once it runs as one — is read by no derivative, so it left the pass, and the member read the raw flat slot instead: `p07/ROS` at 0.0 and `p07/k1_signal` at its port default 0.005 for the whole run, while the saved trajectory (materialised through the complete pass) showed the right 14.1 and 0.0102. Measured 2026-09-12 on the multi-hallmark composite with `p07.as_stochastic()`, 4 cells, control: MisP 0 and free Ub 300 at every save point against the mean field's 5–7 and 50–75, NatP growing linearly to 6 980 at day 14 against 252, 6 800 events per cell over 15 days where the same member standalone with ROS = 14 fires 48 000 in one day. No warning anywhere; `proteostasis_population.png` predates the pruning. The existing lane test drove its constant from a plain store path, which the pruning cannot touch. **Fixed 2026-09-12:** `Composite.assignment_pass()` is the complete, ordered, checked pass (what `materialize_assigned` already built), and both stochastic lanes apply that; the derivative keeps its pruned copy. `tests/unit/test_stochastic.py::test_an_assignment_only_the_stochastic_member_reads_reaches_it` drives the member's rate through a `StepSource` no derivative reads — zero events before the fix, decays after.
+
+- [x] **P0.37 — `rest_residual` is a global ratio, so one large state with zero
+  derivative hides that every other state is moving.** Filed 2026-09-04.
+  `‖f(y₀)‖/‖y₀‖` puts every state in one quotient. A species that is large and
+  stationary contributes to the denominator and nothing to the numerator, so it
+  divides the residual down and the model reads "at rest".
+
+  Measured on Stucki 2005 (BIOMD0000001059). Reported `rest_residual` **0.0415**
+  — comfortably the best of any candidate screened this session, and the reason
+  it was promoted past four rejected models. The `smacmit` pool sits at 10 with
+  derivative exactly 0 until its event fires, contributing ~10 to ‖y₀‖ and 0 to
+  ‖f(y₀)‖. **Per state, τ is 1.2–3.0 s against a 7000 s horizon.** Nothing in
+  that model is at rest.
+
+  What it hid: with the insult removed entirely (`k7 = 0`), active caspase-3
+  rises 0.7104 → 6.65 and crosses the model's own commitment threshold
+  `c3 ≥ 4.5` at **t = 690 s**, 1310 s before the insult is scheduled to arrive
+  at t = 2000. The apparent switch is relaxation from a non-rest IC to the
+  single attractor, which sits above the threshold. The entire pro-apoptotic
+  insult moves caspase-3 by **log2FC +0.11**. This is DallePezze's P0.14 defect
+  in a sharper form, and the screen that was supposed to catch it reported the
+  best rest residual of the day.
+
+  *Fix:* report `rest_residual` **per state** alongside the global ratio, and
+  make `ScreenReport` flag the case where the global figure is dominated by
+  states with near-zero derivative. `diagnostics.rest_timescale` already
+  computes per-state τ — the intake summary just does not surface it.
+
+  **Related, and now overdue:** the zero-perturbation control run specified in
+  [design-spontaneous-endpoint.md](design-spontaneous-endpoint.md) would have
+  caught this in seconds, without a reviewer. It has now been the deciding
+  check on two models (DallePezze, Stucki) and remains unbuilt. It belongs
+  before the reviewer panel in the intake order, not after it.
+
+  **Closed 2026-09-12:** `ScreenReport.rest_tau` and `rest_state` report exactly this — how fast the quickest state leaves its declared initial condition, and which state — alongside the norm, and `not_at_rest` reads off them; the intake protocol in CLAUDE.md documents it. The global ratio stays as a summary, no longer as the verdict.
+
+- [x] **P0.62 — `rest_residual` is normalised by `‖y₀‖`, so one large species
+  hides every other state's motion.** Filed 2026-09-06.
+
+  Proctor 2013 reports `‖f(y₀)‖/‖y₀‖ = 2.48e-05` and reads as equilibrated. It
+  is not: `‖y₀‖ = 100,006` and `Aggrecan_Collagen2` alone is 100,000 of it.
+  Per species, `IL1` has **τ = 0.03 h**, and two states drift with no stimulus
+  — `Matriptase` to 0.6% of its IC, `TIMP3` to exactly 2× (its IC is half its
+  own basal steady state). The aggregate was reported to the user as the
+  candidate's strongest property.
+
+  Affects any model with a wide magnitude spread, which is most of them.
+
+  *Fix:* report a per-species relative rate — `|f_i(y0)| / max(|y0_i|, floor)`
+  — and flag the worst, alongside the norm.
+
+  **Closed 2026-09-12:** the per-species rate is `ScreenReport.rest_tau` with the worst state named in `rest_state`; see P0.37.
+
+- [x] **P2.5 — sbmltoodejax's `w` vector is computed and thrown away.**
+  Assignment-rule species report stale constants; a model's own conservation is
+  visibly violated in the output with no warning. Fluxes are unreadable and
+  unusable as coupling sources.
+
+  **Closed 2026-09-12:** obsolete. sbmltoodejax was deleted with the native importer (`hallsim.sbml_core`); the member program computes every assignment rule, `Composite.materialize_assigned` writes assigned species into the saved trajectory, and reaction velocities are readable through `SBMLCore.reaction_velocities`.
+
+- [x] **P0.87 — A scalar port bound to several store paths reads only the
+  first, through a complete run.** Filed 2026-09-12. Finite, plausible numbers,
+  0 warnings, and two of three bound paths contributing nothing. *Fix:* decide
+  what the binding means — sum the paths, forbid the binding, or make a
+  multi-path port a distinct declaration — and make the other two cases an
+  error.
+
+  **Fixed 2026-09-12:** forbidden. `build_rhs` checks every binding: a plain port binds one path, a block port exactly its element count; anything else raises naming the process, the port, the paths and the block-port declaration to use. `tests/unit/test_port_binding.py`.
+
+- [x] **P1.11 — A `ParameterRef` is never validated against the field it
+  names.** Point one at a tuple-valued field — `HillActivationEdge.K`, `.n`,
+  which are `tuple` and deliberately *not* `calibratable` — and nothing objects.
+  Substitution writes a scalar over the tuple and the run dies inside
+  `HillActivationEdge.derivative` with `TypeError: iteration over a 0-d array`,
+  several frames from anything the user wrote. Observed in an agent session,
+  which lost a fit step to it and concluded the framework had a bug in the edge.
+  *Fix:* validate every `ParameterRef` at problem construction — the field must
+  exist, must not be static, and its current value must be a scalar. Say which
+  of those failed and, for a non-`calibratable` field, that fitting it is
+  unsupported. The check is cheap and the failure it replaces is unreadable.
+
+  **Fixed 2026-09-12:** every `ParameterRef` is validated when the problem is wired — the field must exist on the process, must not be a static field, and must hold a scalar — and the error names the reference, the address and which of the three failed (a tuple-valued Hill `K`/`n` is named as not fittable). `tests/unit/test_parameter_ref_validation.py`.
+
+- [x] **P0.65 — A coupling edge with `timescale=None` gets its own scheduler
+  group, so `macro_dt = span` freezes the model it couples.** Filed
+  2026-09-06 (Proctor 2013 maths review, FW3).
+
+  `HillEdge.timescale` defaults to `None`, so `auto_groups` cannot place the
+  edge with the process it drives and gives it a group of its own. Run with
+  `macro_dt = t_end` — a natural choice, and the one
+  :func:`hallsim.intake.coupling_response` makes — that is a **single Lie step
+  over the whole span with every other group frozen**. The RHS is correct
+  throughout; only the schedule is wrong.
+
+  It produced "a fully plausible, fully wrong reject-this-model number" on a
+  reviewer's first pass. Nothing warns.
+
+  `coupling_response` itself is not currently exposed — it builds a
+  single-process composite, so there is exactly one group (verified on
+  MODEL2201210001 and BIOMD0000000534). It becomes exposed the moment the
+  function is pointed at a composite with edges, which is the obvious next use.
+
+  *Fix:* an edge should inherit the timescale of what it drives, or grouping
+  should refuse to isolate a process whose ports all bind another group's
+  paths. Failing both, warn when a group contains only edges.
+
+  **Fixed 2026-09-12:** `auto_groups` places a process with no timescale in the group of a process that reads what it writes, failing that one whose output it reads, failing that a group of its own — so a coupling edge solves inside the window of the model it drives instead of across a split from it. The multi-hallmark composite's grouping is unchanged (its edges declare timescales). `tests/unit/test_untimed_grouping.py`. Same fix closes P1.24.
+
+- [x] **P1.24 — A coupling edge with no `timescale` is auto-grouped away from
+  the models it couples, and the default macro step then carries an O(1)
+  splitting error behind a warning with no number on it.** Found 2026-09-11
+  by the composite conformance case (`scripts/conformance.py`). Two
+  imported models sharing a species, a Hill edge, a gain level and a clamp:
+  `auto_groups()` returns `{group_0: [a, b], default: [drive, bridge, hold]}`
+  because the edges' `timescale` is `None`, and Lie splitting at the default
+  `macro_dt = 1.0` leaves the clamped species 54% off the monolithic
+  solution — libRoadRunner and COPASI on the exported document, and HallSim
+  itself with all five processes in one group, agree to 1e-7. First order
+  in the step, as Lie splitting is:
+
+  | macro_dt | worst species | rel. dev |
+  |---|---|---|
+  | 6.0 | a_B | 8.8e-1 |
+  | 1.0 | a_B | 5.4e-1 |
+  | 0.1 | a_B | 9.0e-2 |
+  | 0.01 | a_B | 8.1e-3 |
+
+  The warning says a cycle is cut and to size `macro_dt`; nothing on the
+  result says how far the run sits from the unsplit one.
+  *Fix:* an edge that declares no timescale has no dynamics of its own and
+  belongs on its neighbours' clock — group it with the processes it reads
+  and writes. And when a cycle does cross groups, put a splitting-error
+  estimate (one macro step re-run at half size) on the result.
+
+  **Fixed 2026-09-12** with P0.65: an untimed edge joins the group of the model it drives, so the conformance composite's five processes no longer split across the edges at the default macro step.
+
+- [x] **P0.86 — One eager `run()` disables forward-mode autodiff for that
+  Scheduler.** Filed 2026-09-12. `_plan_for`'s memo key carries `y0`'s shape
+  and dtype; a JVP tracer shares both, so the plan built eagerly — carrying
+  `RecursiveCheckpointAdjoint`, a `custom_vjp` — is a cache *hit* under a later
+  forward trace and `_resolve_adjoint` never runs. Measured on dp14, and the
+  order is the whole finding:
+
+  | first call | then `jacfwd` / `jvp` |
+  |---|---|
+  | `jacfwd` | both fine, 79.68600986 |
+  | **eager `run()`** | **both raise** `TypeError: can't apply forward-mode autodiff (jvp) to a custom_vjp function` |
+  | `jax.grad` | both fine — reverse mode does not poison the memo |
+
+  "Evaluate eagerly, then differentiate" is what `Scheduler.run`'s own
+  docstring advertises, and `warm_up`-then-differentiate is the contract the
+  stiffness cache is built around. *Fix:* the memo key has to separate a
+  concrete call from a traced one — shape and dtype do not, because that is
+  exactly what a tracer reproduces.
+
+  **Fixed 2026-09-12:** the plan memo keys on the adjoint the run will use — resolved from the trace, `ForwardMode` under a JVP tracer — rather than the one asked for, so an eager plan carrying the `custom_vjp` adjoint is not a hit for a later forward-mode trace. `tests/unit/test_forward_mode_after_eager.py`: eager run, then `jacfwd` of the same call.
+
+- [x] **P1.29 — `symbolic_field` folds a boundary species' time-dependent rule into a constant.** Found 2026-09-11 by `scripts/bench_field.py`: the DallePezze field re-emitted from `hallsim.structure.symbolic_field` agrees with the member's program at t = 0 to 6e-16 and disagrees at every later time by up to 6e4 relative on `DNA_damage`. `Irradiation` is a boundary species whose rule is a piecewise in time (a pulse for 0 ≤ t < 0.003472 days); the symbolic form lists it under `field.parameters` at its initial value 1.0, so the generated field irradiates forever (663 steps against 1 140, day-14 state off by 3.4e3 relative). The compiled program and the composite RHS are right — they refresh boundary rules through `boundaryfunc` — so no solve is affected; what is affected is everything built from the symbolic form: `identifiability.structural_redundancy` (which now lists `Irradiation` as a parameter) and any exported single function. The "68 ms for the identical field as one generated function" behind P3.21's factor of two was this field, a different and harder problem; the like-for-like numbers are in P3.21 now. *Fix:* a boundary species with a rule is a rule in the symbolic form, not a parameter — emit it as a `TIME`-dependent expression in the derivatives and keep `parameters` to declared constants.
+
+  **Fixed 2026-09-12:** `SBMLProcess.boundary_rules()` exposes the rules of the boundary species the field reads, in the model's own symbols, and `symbolic_field` substitutes them where the derivative reads them (recursively, so a rule's own parameters and `TIME` bind as everything else does) instead of listing the species as a constant parameter. DallePezze's `DNA_damage` derivative now carries the irradiation pulse as a piecewise in time and `Irradiation` is gone from `parameters`. `tests/unit/test_symbolic_boundary_rules.py`; the symbolic-form and identifiability suites pass unchanged.
+
+- [x] **P3.22 — Routing a 10 000-state group costs a minute: the matrix-free estimate needs 75 000 Jacobian products on a clustered spectrum.** Measured 2026-09-12 on the block-port chain (`scripts/bench_scheduler.py chain:10000`): `Scheduler.plan` 67 s, of which `analyze_groups` 59 s and 74 633 Jacobian-vector products through ARPACK (k = 32, 256-vector Krylov space, tol 1e-3), against 1 597 products at 1 024 states — a ring's top eigenvalues differ in the seventh digit at 10⁴ and the restarts multiply. The verdict is right (abscissa 2.05, not stiff; the 8-state block stiff at 10⁴) and the solve it enables takes 1.1 s, so the plan costs sixty solves; it is cached per `Scheduler` instance, not per composite — a fresh `Scheduler()` on the same composite measured again (second plan 50.9 s), and the benchmark's every variant paid it — so nothing is wrong, only slow, and at 10⁵ it would be an hour per instance. *Proposal:* the verdict reads the abscissa to a factor, so bound it before estimating it. The coloured sparse Jacobian (`structure.jacobian_pattern` + `compressed_jacobian`) costs as many products as the pattern has colours — three for a chain, tens for a reaction network — and Gershgorin's discs on its rows give an upper bound on the abscissa in one pass. A bound below the explicit-substep budget decides "not stiff" outright; only a group whose bound exceeds it goes to the eigenvalue estimate, and that one can ask for k = 8 at tol 1e-2 with a capped iteration count (measured on the 1 024 ring: 1 725 products). Over-routing to implicit on a loose bound is the safe direction and would show up in the benchmark, not in a wrong answer.
+
+  **Fixed 2026-09-12:** a Gershgorin bound on the group's Jacobian runs before any eigenvalue estimate — over the coloured sparse pattern when the pattern is small (its size is estimated from port widths first; a 10 000-wide block port would materialise 10⁸ entries, so it is not built), else in column chunks of 256 directional derivatives, never holding n × n. A bound below the explicit-substep budget certifies "not stiff" (`GroupStiffness.bounded`); only a group it cannot clear pays for the estimate. On the block-port chain at 10 008 states `analyze_groups` went 59 s → 1.6 s and `Scheduler.plan` 67 s → 0.9 s, with the same routing (Kvaerno5 on the 8-state block, Tsit5 on the chain; the chain's bound 3.05 against a measured abscissa 2.05). `tests/unit/test_stiffness_large_group.py` covers both branches. The verdict cache is still per Scheduler instance.

@@ -189,6 +189,21 @@ class SBMLProcess(ImportedODEProcess):
         the ``parameters`` surface, which is what the laws read."""
         return dict(self.parameters)
 
+    def boundary_rules(self) -> tuple:
+        """The rules of boundary species the field reads, in the model's own
+        symbols: inputs that vary with time without being integrated or
+        exposed as ports. A symbolic form substitutes these where the
+        derivative reads them; a driven one is replaced by its port."""
+        subs = self._driver_symbols()
+        driven = dict(self._input_drivers)
+        rules = dict(self._model.assignment_rules)
+        names = [self._model._w_names[j] for j in self._model._boundary_slots]
+        return tuple(
+            (name, rules[name].xreplace(subs) if subs else rules[name])
+            for name in names
+            if name in rules and name not in driven
+        )
+
     def _driver_symbols(self) -> dict:
         """Substitutions taking a driven quantity's symbol to the port that
         drives it, so the symbolic forms read what the RHS reads."""

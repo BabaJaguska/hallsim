@@ -517,6 +517,10 @@ def symbolic_field(composite, keys=None) -> SymbolicField:
         topo = composite.topology.get(name, {})
         schema = proc.ports_schema()
         values = proc.symbol_values()
+        # A boundary species with a rule is an input that varies in time;
+        # its rule is substituted where the derivative reads it, so it does
+        # not appear as a constant parameter at its initial value.
+        boundary = dict(getattr(proc, "boundary_rules", lambda: ())())
         scale = float(getattr(proc, "time_scale", 1.0))
 
         def read_symbol(port):
@@ -540,6 +544,8 @@ def symbolic_field(composite, keys=None) -> SymbolicField:
                     continue
                 if sym.name in schema:
                     subs[sym] = read_symbol(sym.name)
+                elif sym.name in boundary:
+                    subs[sym] = bind(boundary[sym.name])
                 elif sym.name in values:
                     full = sympy.Symbol(
                         f"{name}.{parameter_field(proc, sym.name)}"
