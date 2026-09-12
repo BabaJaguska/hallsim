@@ -56,6 +56,7 @@ from hallsim.gene_reporters import (  # noqa: E402
     GeneExpressionDataset,
 )
 from demos.models.multi_hallmark import (  # noqa: E402
+    MULTI_HALLMARK_GRID as GRID,
     build_multi_hallmark_composite,
     GZ06_ALPHA_X_CONTROL,
     RAPA_INTERVENTION_DAY,
@@ -308,16 +309,10 @@ def build_problem(
         fit_arms=["DDIS_vs_ctrl"],
         held_out_arms=["RAPA_vs_ctrl"],
         prior_weight=0.03,
-        t_end=14.0,
+        t_end=GRID.t_end,
         t_start=-PREROLL_DAYS,
-        macro_dt=0.5,
-        # The oscillating reporters (DDB2/MDM2) read raw p53 / Mdm2 /
-        # IκBα-transcript and take a zero-phase RMS/mean post-hoc, so the save
-        # grid must resolve the pulse: save_dt = 14/149 ≈ 0.094 d, under the
-        # ~0.145 d Nyquist for the ~0.29 d p53 period. Cost is memory (more save
-        # points), not solve time. Mirror-padded edges (odd=False) keep the
-        # endpoint query artifact-free — no margin needed.
-        n_save=150,
+        macro_dt=GRID.macro_dt,
+        n_save=GRID.n_save,
     )
 
 

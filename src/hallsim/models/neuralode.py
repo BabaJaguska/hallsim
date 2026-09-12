@@ -27,6 +27,9 @@ Usage
 from __future__ import annotations
 
 import logging
+import hashlib
+import time
+from pathlib import Path
 from typing import Any, Sequence
 
 import copy
@@ -34,6 +37,7 @@ import copy
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from hallsim.process import Port, PortRole, Process
 from hallsim.kinetics import hill_gate
@@ -438,8 +442,68 @@ class _ShootWrap(Process):
         }
 
     def derivative(self, t, state):
-        d = self.block.derivative(t, state)
-        return {**d, **{f: jnp.zeros_like(state[f]) for f in self.inp}}
+        # One port per field here, one stacked STATE_PORT on the block, so
+        # the view is restacked on the way in and split on the way out.
+        block_state = {
+            STATE_PORT: jnp.stack([state[f] for f in self.fld], axis=-1),
+            **{f: state[f] for f in self.inp},
+        }
+        d = self.block.derivative(t, block_state)[STATE_PORT]
+        return {
+            **{f: d[..., i] for i, f in enumerate(self.fld)},
+            **{f: jnp.zeros_like(state[f]) for f in self.inp},
+        }
+
+
+class _ConditionedRHS(Process):
+    """A conditioned RHS whose conditioning rides in the state.
+
+    The control values are EVOLVED ports with zero derivative, frozen at the
+    per-trajectory value in ``y0`` — the same device :class:`_ShootWrap` uses.
+    That makes the conditioning grid a batch axis over one Composite, rather
+    than one Composite and one Scheduler run per point.
+    """
+
+    fields: tuple[str, ...] = eqx.field(static=True, default=())
+    inputs: tuple[str, ...] = eqx.field(static=True, default=())
+    rhs_for_input: Any = eqx.field(static=True, default=None)
+
+    def ports_schema(self):
+        return {
+            f: Port(role=PortRole.EVOLVED, default=0.0, units="dimensionless")
+            for f in self.fields + self.inputs
+        }
+
+    def derivative(self, t, state):
+        y = jnp.stack([state[f] for f in self.fields], axis=-1)
+        u = jnp.stack([state[f] for f in self.inputs], axis=-1)
+        d = self.rhs_for_input(u)(t, y)
+        return {
+            **{f: d[..., i] for i, f in enumerate(self.fields)},
+            **{f: jnp.zeros_like(state[f]) for f in self.inputs},
+        }
+
+
+def _conditioned_cache_path(cache_key, ts, inputs, n_ics, y0_range, key):
+    """Where a conditioned trajectory set is cached.
+
+    Keyed on the model name the caller supplies plus every number that changes
+    the trajectories, so editing a grid produces a different file rather than
+    a stale hit.
+    """
+    h = hashlib.sha256()
+    h.update(str(cache_key).encode())
+    for arr in (np.asarray(ts), np.asarray(inputs), np.asarray(key)):
+        h.update(np.ascontiguousarray(arr).tobytes())
+        h.update(str(arr.dtype).encode())
+    h.update(repr((int(n_ics), tuple(float(v) for v in y0_range))).encode())
+    return (
+        Path.home()
+        / ".cache"
+        / "hallsim"
+        / "neuralode_data"
+        / f"{h.hexdigest()[:16]}.npz"
+    )
 
 
 def simulate_conditioned(
@@ -449,6 +513,7 @@ def simulate_conditioned(
     n_ics: int = 3,
     y0_range: tuple[float, float] = (0.0, 1.0),
     key: jax.Array | None = None,
+    cache_key: str | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Trajectories from a known input-conditioned RHS, for recovery fits.
 
@@ -468,6 +533,13 @@ def simulate_conditioned(
         Input values to condition on, shape ``(M, U)``.
     n_ics:
         Initial conditions sampled per input value.
+    cache_key:
+        Identifies the *model* these trajectories come from. Given one, the
+        result is cached under ``~/.cache/hallsim/neuralode_data/`` keyed on it
+        together with the grid, and a later call with the same model and grid
+        is a local read instead of one Scheduler run per conditioning point.
+        Omit it and nothing is cached — the key has to name the model because
+        the grid alone cannot tell two models apart.
 
     Returns
     -------
@@ -480,39 +552,81 @@ def simulate_conditioned(
     if key is None:
         key = jax.random.PRNGKey(0)
     ts = jnp.asarray(ts)
+    cache_path = (
+        _conditioned_cache_path(
+            cache_key, ts, jnp.asarray(inputs), n_ics, y0_range, key
+        )
+        if cache_key
+        else None
+    )
+    if cache_path is not None and cache_path.is_file():
+        with np.load(cache_path) as z:
+            log.info("cached trajectories: %s", cache_path.name)
+            return jnp.asarray(z["ys"]), jnp.asarray(z["us"])
     inputs = jnp.asarray(inputs)
     dim = _probe_dim(rhs_for_input(inputs[0]), ts)
     fields = tuple(f"v{i}" for i in range(dim))
-    sched = Scheduler(auto_stiffness=True)
+    u_dim = int(inputs.shape[-1])
+    u_names = tuple(f"u{i}" for i in range(u_dim))
     t0, t1 = float(ts[0]), float(ts[-1])
     save_dt = (t1 - t0) / (len(ts) - 1)
-    ys, us = [], []
-    for u in inputs:
-        comp = Composite(
-            {"m": _RHSProcess(fields=fields, rhs=rhs_for_input(u))},
-            topology={},
-            validate=False,
-            semantic_validation={"check_semantics": False},
-        )
-        idx = jnp.asarray([comp.store_keys().index(f"m/{f}") for f in fields])
-        key, k = jax.random.split(key)
-        y0v = jax.random.uniform(
-            k, (n_ics, dim), minval=y0_range[0], maxval=y0_range[1]
-        )
-        y0 = (
-            jnp.broadcast_to(
-                comp.initial_state_vec(), (n_ics, len(comp.store_keys()))
+
+    n_inputs = int(inputs.shape[0])
+    log.info(
+        "simulate_conditioned: %d conditioning points x %d ICs in one "
+        "batched run",
+        n_inputs,
+        n_ics,
+    )
+
+    comp = Composite(
+        {
+            "m": _ConditionedRHS(
+                fields=fields, inputs=u_names, rhs_for_input=rhs_for_input
             )
-            .at[:, idx]
-            .set(y0v)
+        },
+        topology={},
+        validate=False,
+        semantic_validation={"check_semantics": False},
+    )
+    keys_all = comp.store_keys()
+    s_idx = jnp.asarray([keys_all.index(f"m/{f}") for f in fields])
+    u_idx = jnp.asarray([keys_all.index(f"m/{f}") for f in u_names])
+
+    # Condition-major, matching the per-point loop this replaces: every IC of
+    # one conditioning point, then the next point.
+    y0v = jax.random.uniform(
+        key,
+        (n_inputs, n_ics, dim),
+        minval=y0_range[0],
+        maxval=y0_range[1],
+    ).reshape(n_inputs * n_ics, dim)
+    us_out = jnp.repeat(inputs, n_ics, axis=0)
+    y0 = (
+        jnp.broadcast_to(
+            comp.initial_state_vec(), (n_inputs * n_ics, len(keys_all))
         )
-        res = sched.run(
-            comp, t_span=(t0, t1), y0=y0, macro_dt=t1 - t0, save_dt=save_dt
-        )
-        traj = jnp.stack([res.get(f"m/{f}") for f in fields], axis=-1)
-        ys.append(jnp.moveaxis(traj, 0, 1))  # (n_ics, T, dim)
-        us.append(jnp.broadcast_to(u, (n_ics,) + u.shape))
-    return jnp.concatenate(ys, 0), jnp.concatenate(us, 0)
+        .at[:, s_idx]
+        .set(y0v)
+        .at[:, u_idx]
+        .set(us_out)
+    )
+
+    _t0 = time.time()
+    res = Scheduler(auto_stiffness=True).run(
+        comp, t_span=(t0, t1), y0=y0, macro_dt=t1 - t0, save_dt=save_dt
+    )
+    traj = jnp.stack([res.get(f"m/{f}") for f in fields], axis=-1)
+    ys_out = jnp.moveaxis(traj, 0, 1)  # (n_inputs*n_ics, T, dim)
+    jax.block_until_ready(ys_out)
+    log.info("  trajectories in %.1fs", time.time() - _t0)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_path.with_suffix(".tmp.npz")
+        np.savez_compressed(tmp, ys=np.asarray(ys_out), us=np.asarray(us_out))
+        tmp.replace(cache_path)
+        log.info("cached trajectories -> %s", cache_path.name)
+    return ys_out, us_out
 
 
 def _probe_dim(rhs, ts) -> int:

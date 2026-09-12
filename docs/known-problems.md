@@ -1201,6 +1201,86 @@ The framework returns a plausible number and nothing indicates it is wrong.
   a GPU, but it still needs a population entry point and a validated
   per-member step policy.
 
+- [ ] **P0.80 — The guarded chord costs 37% at one cell on a GPU, where it
+  saves 32% on a CPU. The single-member solve is kernel-launch bound and the
+  chord runs more, smaller sequential ops than Newton's two heavy ones.**
+  Measured 2026-09-11/12 on one Tesla T4, DallePezze 2014, Kvaerno5, float64,
+  rtol=1e-6/atol=1e-9, warm median of 3 with compile excluded, via
+  `scripts/verify_gpu_batch.py`. Step counts are unchanged across the whole
+  sequence, so this is cost per step, not more of them.
+
+  | commit | | GPU, 1 cell | GPU, 256 cells | CPU, 1 member |
+  |---|---|---:|---:|---:|
+  | `89bff6e` | Opt-in StepChord | 0.5069 | 2.3416 | — |
+  | `506afe6` | Jacobian work | 0.5611 | 3.4120 | 41 ms |
+  | `8207ee7` | Chord, proteostasis | 0.7698 | 2.1415 | 28 ms |
+  | `ad29af8` | Unpin dt0 | 0.8306 | 1.9827 | 31 ms |
+
+  **The sign flips with the device.** CPU 41 → 28 ms is the chord doing less
+  arithmetic than Newton, which is the point of it. GPU 0.5611 → 0.7698 s is
+  the same change costing 37% more, because at one cell there is no work to
+  hide a launch behind: a chord's many small sequential ops each pay full
+  launch latency where Newton's two heavy iterations amortise it. The
+  attribution is the launch count, **not** the sympy codegen — that lands in
+  the same window and is a separate axis, and the 256-cell column shows it:
+  at batch the chord is the commit that recovers 3.4120 → 2.1415.
+
+  So the shape of the cost inverted. Against jaxkineticmodel on the same T4
+  and model, HallSim went from 1.22× at one cell and 2.39× at 256, to 1.98×
+  at one cell and 2.02× at 256 — the batch scaling that P0.71 is about is
+  largely closed, and what is left is concentrated where the batch dimension
+  cannot help.
+
+  *Fix:* the default has to stop depending on the device. Either route the
+  root finder on batch width — Newton where a solve is launch-bound, chord
+  where it is arithmetic-bound — or fuse the chord's per-iteration ops so its
+  launch count stops scaling with iterations. Measure first whether the gap
+  is launches or the guards' own small ops: P0.79 added a growth check and an
+  `atol` comparison per iteration, which is a few more kernels on exactly the
+  path that cannot afford them.
+
+- [ ] **P0.81 — The Scheduler has never been measured against a bare solve on
+  a problem it is *for*. Every measurement on record has it losing.** The
+  orchestration is justified in the docs by multi-rate groups, events,
+  coupling and operator splitting. Searching the registries and the diary for
+  a measurement where the Scheduler is faster, cheaper, or otherwise pays for
+  itself against doing the same maths directly returns nothing. What does
+  exist:
+
+  | case | Scheduler vs one `diffeqsolve`, same maths | source |
+  |---|---|---|
+  | event composite, 8 species, 1 event | **2395× slower** | P0.35 |
+  | single-process stiff ODE, 3 species, 754 steps | **57× slower** | this entry |
+  | multi-rate groups | never measured | — |
+  | coupling (frozen / interpolated) | never measured | — |
+  | Lie / Strang splitting | never measured against a bare solve | P0.2 compares the two schemes' accuracy to each other |
+
+  The 57× is from 2026-09-11 on a T4: GZ06 at the stiffest conditioning point
+  of the hybrid demo's grid (α_x=0, α_y=0.005), warm on both sides, same
+  tolerances, `auto_stiffness` on and off within noise of each other (77.76 s
+  and 77.14 s) against 1.35 s for `dfx.diffeqsolve` over the same RHS at 754
+  steps. Note the event case is the feature most often named as the
+  justification, and it is the worst number on record.
+
+  **This is not a claim that the orchestration never pays.** Multi-rate and
+  coupled composites are exactly the shapes it was built for and exactly the
+  shapes nobody has measured, so the honest position is that the central
+  architectural claim of the repo is untested, not that it is false. The
+  danger is that it reads as established — it is repeated in prose as though
+  it had a number behind it, which is how it ended up asserted in a review
+  this entry exists to correct.
+
+  *Fix:* measure it. A composite with genuinely separated timescales — two
+  groups whose `timescale` differ by the `auto_groups` ratio or more — run
+  through the Scheduler against one `diffeqsolve` over the combined RHS at the
+  tolerance the stiff group needs, both warm, same machine, reporting wall
+  clock and step counts. Then the same for a coupled pair under `frozen` and
+  `interpolated`. If the Scheduler wins, the architecture has its first
+  supporting measurement and it belongs in the README. If it loses there too,
+  that is a larger finding than P0.35 and the design needs revisiting rather
+  than the implementation. Either way `docs/benchmarks.md` should carry it, so
+  the claim stops being prose.
+
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.

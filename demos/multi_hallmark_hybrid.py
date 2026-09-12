@@ -4,16 +4,20 @@ The §3.3 demonstration. Replace the mechanistic Geva-Zatorsky 2006 p53–Mdm2
 oscillator in the multi-hallmark demo with a NeuralODE block trained to
 reproduce it, then compose and differentiate as if it were the original.
 
-The block is conditioned on two inputs — the production gain ψ and the Mdm2
-degradation rate α_y — so the *single* learned vector field represents GZ06's
-whole two-parameter family. That is what lets it reproduce GZ06's two
-bifurcations (α_y-Hopf and ψ-onset, both oscillation↔fixed point), and it keeps
-α_y a live, differentiable parameter of the hybrid instead of freezing one
-operating point into the weights.
+The block is conditioned on the two parameters the composite varies — the
+damage-driven p53 degradation rate α_x and the Mdm2 degradation rate α_y — so
+the *single* learned vector field represents that whole two-parameter family.
+That is what lets it reproduce GZ06's bifurcations on both axes (one α_x Hopf,
+two α_y Hopfs, all oscillation↔fixed point), and it keeps both a live,
+differentiable parameter of the hybrid instead of freezing one operating point
+into the weights.
 
-ψ is a bifurcation axis here, not a damage variable: it is the paper's ξ, a
-noise gain on protein production. The composite drives damage through
-``alpha_x`` instead (see ``demos/models/multi_hallmark.py``).
+α_x is the axis the composite drives: DP14's accumulated DNA damage pulls it
+down from a quiescent control toward the deposit's own α_x = 0, and crossing
+the Hopf is what starts the p53 pulses (see ``demos/models/multi_hallmark.py``).
+Conditioning on it is what lets the swapped-in block read the same damage
+signal the mechanistic process did. ψ — the paper's ξ, a noise gain on protein
+production — stays at its published 1.0 and is not an axis here.
 
 Training is two-stage: derivative matching regresses the vector field, then a
 shooting fine-tune integrates the learned field and matches trajectories.
@@ -23,10 +27,10 @@ shooting stage penalizes trajectory amplitude directly and corrects it. Both
 stages are plotted against the mechanistic model so the correction is visible.
 
 Writes to ``outputs/multi_hallmark_hybrid/``:
-- ``bifurcation_recovery.png/.pdf`` — p53 amplitude across α_y and ψ:
+- ``bifurcation_recovery.png/.pdf`` — p53 amplitude across α_y and α_x:
   mechanistic vs derivative-only vs shooting-refined.
 - ``ddb2_severity.png/.pdf`` — DDB2 vs genomic-instability severity,
-  mechanistic vs hybrid, in the pulsatile and calibrated-sustained regimes.
+  mechanistic vs hybrid, at the α_y the composite holds.
 - ``provenance.json`` / ``provenance.md`` — the full run record: config, both
   stages' recovery numbers, DDB2 tables, gradients, and motivation.
 - ``gz06_neural_block.eqx`` — the trained block.
@@ -56,14 +60,12 @@ from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS  # noqa: E402
 from demos.models.multi_hallmark import (  # noqa: E402
     GZ06_SBML_PATH,
     CANONICAL_TIME_SECONDS,
+    GZ06_ALPHA_X_CONTROL,
+    GZ06_ALPHA_X_DAMAGED,
+    MULTI_HALLMARK_GRID as GRID,
     build_multi_hallmark_composite,
 )
 
-# The psi axis this demo sweeps. Local, because the composite no longer drives
-# psi — it is a bifurcation parameter here, not a coupling edge.
-GZ06_PSI_FULL = 1.0
-GZ06_PSI_DRIVE_K = 10.79
-GZ06_PSI_DRIVE_N = 2.0
 from hallsim.models.neuralode import (  # noqa: E402
     NeuralODEProcess,
     simulate_conditioned,
@@ -77,17 +79,39 @@ OUT = ROOT / "outputs" / "multi_hallmark_hybrid"
 
 FIELDS = ("x", "y0", "y")
 IC = (0.0, 0.1, 0.8)  # GZ06 published initial x, y0, y
-# A representative α_y above the upper Hopf (~1.02): the sustained,
-# non-oscillatory p53 regime, paired with α_y=0.8 (pulsatile) to compare the
-# surrogate across the bifurcation. A chosen comparison point — NOT fitted; the
-# calibration freezes α_y (see multi_hallmark_calibrate.py).
-ALPHA_Y_SUSTAINED = 1.5
+# GZ06's deposited α_y, and the value the composite holds it at. The DDB2 swap
+# is reported here and nowhere else: a second α_y panel would be a comparison
+# point this demo picked, not one the model is ever run at.
+ALPHA_Y_HELD = 0.8
+CONDITIONING = ("alpha_x", "alpha_y")
 TRAIN = dict(
     width=192,
     depth=3,
     deriv_steps=9000,
     shooting_steps=250,
-    psi_grid=[0.15, 0.3, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.05, 1.2, 1.3],
+    # α_x is the axis the composite actually drives (damage ⊣ p53 degradation,
+    # see demos/models/multi_hallmark.py), running from the deposit's damaged
+    # α_x = 0 up to the manufactured quiescent control at 4× the Hopf. Dense
+    # either side of the Hopf at 0.16617 for the same reason the α_y grid is:
+    # limit-cycle amplitude ~ sqrt(distance past the bifurcation), so the
+    # field has to be accurate right there or the peak clips and a smooth MLP
+    # bleeds a cycle across into the fixed-point side.
+    alpha_x_grid=[
+        0.0,
+        0.03,
+        0.07,
+        0.11,
+        0.14,
+        0.157,
+        0.166,
+        0.177,
+        0.19,
+        0.22,
+        0.28,
+        0.38,
+        0.50,
+        0.6648,
+    ],
     # spans both α_y-Hopfs (eigenvalue-located at ~0.02 and ~1.02) —
     # from the stable fixed point below onset up past the offset — so
     # the surrogate learns the full two-Hopf bifurcation. Dense at
@@ -128,18 +152,28 @@ TRAIN = dict(
     t_data=2.0,
     n_data=200,
 )
-DDB2 = next(r for r in MULTI_HALLMARK_REPORTERS if r.gene_symbol == "DDB2")
+# Keyed on the observable as well as the symbol: the registry carries more
+# than one DDB2 entry, and the p53-amplitude one is the reporter this demo
+# needs — GZ06's mean p53 is damage-blind, so a mean-like summary cannot see
+# the pulsing that the damage produces.
+DDB2 = next(
+    r
+    for r in MULTI_HALLMARK_REPORTERS
+    if r.gene_symbol == "DDB2" and r.observable == "gz06/x"
+)
 
 _gz = process_from_sbml(str(GZ06_SBML_PATH), name="gz06").reconciled_to(
     CANONICAL_TIME_SECONDS
 )
 
 
-def _gz_with(psi, alpha_y):
+def _gz_with(alpha_x, alpha_y):
+    """GZ06 at one point of the conditioning plane. ψ stays at its published
+    1.0 throughout — it is not an axis of this demo."""
     return eqx.tree_at(
-        lambda p: (p.parameters["psi"], p.parameters["alpha_y"]),
+        lambda p: (p.parameters["alpha_x"], p.parameters["alpha_y"]),
         _gz,
-        (jnp.asarray(psi), jnp.asarray(alpha_y)),
+        (jnp.asarray(alpha_x), jnp.asarray(alpha_y)),
     )
 
 
@@ -153,30 +187,41 @@ def gz_rhs(u):
     return rhs
 
 
-def hopf_analysis(psi=1.0):
-    """The α_y bifurcations of GZ06 as ``Bifurcation`` objects (kind,
-    location, frequency, normal-form coefficient) via
-    :mod:`hallsim.bifurcation`. Two supercritical Hopfs bound the oscillatory
-    window: the p53 pulse exists only between them."""
+def hopf_analysis(
+    axis="alpha_y", *, alpha_x=GZ06_ALPHA_X_DAMAGED, alpha_y=ALPHA_Y_HELD
+):
+    """GZ06's bifurcations along one conditioning axis as ``Bifurcation``
+    objects (kind, location, frequency, normal-form coefficient) via
+    :mod:`hallsim.bifurcation`.
+
+    ``alpha_y`` carries two supercritical Hopfs bounding the oscillatory
+    window — the p53 pulse exists only between them. ``alpha_x``, the axis the
+    composite drives, carries one, and crossing it is what starts the pulses.
+    Both are located from eigenvalues at the other axis's held value, so the
+    figure never plots a literal.
+    """
     import numpy as np
     from hallsim.bifurcation import codim1_scan
 
-    field_of = lambda ay: (lambda y: gz_rhs((psi, ay))(0.0, y))  # noqa: E731
-    return codim1_scan(
-        field_of, np.linspace(0.005, 2.0, 140), x0_guess=[0.4, 0.4, 0.4]
-    )
+    if axis == "alpha_y":
+        field_of = lambda v: (lambda y: gz_rhs((alpha_x, v))(0.0, y))  # noqa
+        grid = np.linspace(0.005, 2.0, 140)
+    else:
+        field_of = lambda v: (lambda y: gz_rhs((v, alpha_y))(0.0, y))  # noqa
+        grid = np.linspace(0.0, 0.70, 200)
+    return codim1_scan(field_of, grid, x0_guess=[0.4, 0.4, 0.4])
 
 
-def hopf_points(psi=1.0):
-    """The α_y Hopf-bifurcation locations (floats)."""
-    return [h.param for h in hopf_analysis(psi) if h.kind == "hopf"]
+def hopf_points(axis="alpha_y", **kw):
+    """The Hopf-bifurcation locations along ``axis`` (floats)."""
+    return [h.param for h in hopf_analysis(axis, **kw) if h.kind == "hopf"]
 
 
 def train_stages():
     """Return (derivative-only block, shooting-refined block, (ts, ys, us))."""
     inputs = jnp.stack(
         jnp.meshgrid(
-            jnp.array(TRAIN["psi_grid"]),
+            jnp.array(TRAIN["alpha_x_grid"]),
             jnp.array(TRAIN["ay_grid"]),
             indexing="ij",
         ),
@@ -191,12 +236,16 @@ def train_stages():
         n_ics=TRAIN["n_ics"],
         y0_range=(0.0, TRAIN["y0_hi"]),
         key=jax.random.PRNGKey(0),
+        # Names the model the trajectories came from; the grid is hashed in
+        # separately, so widening a grid regenerates rather than hitting a
+        # stale file.
+        cache_key=f"gz06:{Path(GZ06_SBML_PATH).name}:{CONDITIONING}",
     )
     log.info("training data %s in %.1fs", tuple(ys.shape), time.time() - t0)
 
     init = NeuralODEProcess(
         fields=FIELDS,
-        input_fields=("psi", "alpha_y"),
+        input_fields=CONDITIONING,
         field_defaults=IC,
         width=TRAIN["width"],
         depth=TRAIN["depth"],
@@ -209,7 +258,7 @@ def train_stages():
         ys,
         us,
         fields=FIELDS,
-        input_fields=("psi", "alpha_y"),
+        input_fields=CONDITIONING,
         init=init,
         steps=TRAIN["deriv_steps"],
         lr=3e-3,
@@ -226,7 +275,7 @@ def train_stages():
         ys,
         us,
         fields=FIELDS,
-        input_fields=("psi", "alpha_y"),
+        input_fields=CONDITIONING,
         init=deriv,
         segments=8,
         physics_weight=10.0,
@@ -250,8 +299,8 @@ def _solo(proc):
     )
 
 
-def neural_solo(block, psi, alpha_y):
-    b = block.with_control_param("psi", float(psi)).with_control_param(
+def neural_solo(block, alpha_x, alpha_y):
+    b = block.with_control_param("alpha_x", float(alpha_x)).with_control_param(
         "alpha_y", float(alpha_y)
     )
     return _solo(b)
@@ -284,21 +333,23 @@ def time_domain_figure(block):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    # Top row walks α_x across its Hopf at the held α_y — the crossing the
+    # composite drives. Bottom row walks α_y at the deposit's damaged α_x.
     cases = [
-        (1.0, 0.01, "before lower Hopf (fixed point)"),
-        (1.0, 0.1, "onset"),
-        (1.0, 0.4, "oscillation"),
-        (1.0, 0.8, "strong oscillation"),
-        (1.0, 1.0, "near upper Hopf (peak)"),
-        (1.0, 1.2, "past upper Hopf (damped)"),
+        (GZ06_ALPHA_X_CONTROL, ALPHA_Y_HELD, "quiescent control, fixed point"),
+        (0.20, ALPHA_Y_HELD, "just above α_x Hopf"),
+        (0.12, ALPHA_Y_HELD, "just below α_x Hopf, pulsing"),
+        (GZ06_ALPHA_X_DAMAGED, 0.01, "damaged, below lower α_y Hopf"),
+        (GZ06_ALPHA_X_DAMAGED, ALPHA_Y_HELD, "damaged, deposited α_y"),
+        (GZ06_ALPHA_X_DAMAGED, 1.2, "damaged, past upper α_y Hopf"),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(15, 6.6), sharex=True)
-    for ax, (psi, ay, tag) in zip(axes.flat, cases):
-        tm, xm = _run_traj(_solo(_gz_with(psi, ay)))
-        tn, xn = _run_traj(neural_solo(block, psi, ay))
+    for ax, (axv, ay, tag) in zip(axes.flat, cases):
+        tm, xm = _run_traj(_solo(_gz_with(axv, ay)))
+        tn, xn = _run_traj(neural_solo(block, axv, ay))
         ax.plot(tm, xm, color="#333", lw=1.8, label="mechanistic GZ06")
         ax.plot(tn, xn, color="#d97706", lw=1.6, ls="--", label="NeuralODE")
-        ax.set_title(f"ψ={psi}, α_y={ay}  ({tag})", fontsize=10)
+        ax.set_title(f"α_x={axv:.4g}, α_y={ay:g}  ({tag})", fontsize=10)
         ax.set_ylabel("p53 (x)")
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
@@ -322,53 +373,78 @@ def time_domain_figure(block):
 
 
 AY_SWEEP = [0.01, 0.05, 0.15, 0.3, 0.5, 0.7, 0.9, 1.0, 1.05, 1.2, 1.5, 2.0]
-PSI_SWEEP = [0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0, 1.2]
+# Spans the damaged end the deposit sits at, through the Hopf, up to the
+# quiescent control the damage edge runs down from.
+AX_SWEEP = [
+    0.0,
+    0.02,
+    0.05,
+    0.08,
+    0.11,
+    0.14,
+    0.155,
+    0.1662,
+    0.18,
+    0.20,
+    0.24,
+    0.30,
+    0.40,
+    0.55,
+    GZ06_ALPHA_X_CONTROL,
+]
 
 
 def bifurcation_curves(block=None):
-    """p53 amplitude across the two bifurcation axes. block=None → mech."""
+    """p53 amplitude across both conditioning axes. block=None → mech.
 
-    def amp_at(psi, ay):
+    α_y sweeps at the deposit's damaged α_x; α_x sweeps at the published α_y
+    the composite holds it at.
+    """
+
+    def amp_at(alpha_x, alpha_y):
         comp = (
-            _solo(_gz_with(psi, ay))
+            _solo(_gz_with(alpha_x, alpha_y))
             if block is None
-            else neural_solo(block, psi, ay)
+            else neural_solo(block, alpha_x, alpha_y)
         )
         return _amp(_run_x(comp))
 
     return {
-        "ay": [amp_at(1.0, a) for a in AY_SWEEP],
-        "psi": [amp_at(p, 0.8) for p in PSI_SWEEP],
+        "ay": [amp_at(GZ06_ALPHA_X_DAMAGED, a) for a in AY_SWEEP],
+        "ax": [amp_at(x, ALPHA_Y_HELD) for x in AX_SWEEP],
     }
 
 
-# Held-out generalization grid: every (ψ, α_y) here is ABSENT from the training
-# psi_grid × ay_grid, so amplitude error on it is a true generalization number,
-# not memorization. The grid spans both Hopf approaches and the oscillatory
-# interior. The guard below fails loudly if a value ever leaks onto training.
-HELD_OUT_PSI = [0.52, 0.68, 0.9, 1.1]
+# Held-out generalization grid: every (α_x, α_y) here is ABSENT from the
+# training alpha_x_grid × ay_grid, so amplitude error on it is a true
+# generalization number, not memorization. The α_x points interleave the
+# training grid and straddle the Hopf — 0.15 below it, 0.172 above — so the
+# number covers the crossing the composite actually drives through, not just
+# the easy interior. The guards fail loudly if a value ever leaks onto
+# training.
+HELD_OUT_AX = [0.015, 0.09, 0.125, 0.15, 0.172, 0.205, 0.33, 0.58]
 HELD_OUT_AY = [0.08, 0.5, 0.78, 0.98, 1.25, 1.5]
 assert not (
-    set(HELD_OUT_PSI) & set(TRAIN["psi_grid"])
-), "held-out ψ in training"
+    set(HELD_OUT_AX) & set(TRAIN["alpha_x_grid"])
+), "held-out α_x in training"
 assert not (
     set(HELD_OUT_AY) & set(TRAIN["ay_grid"])
 ), "held-out α_y in training"
 
 
 def held_out_recovery(block):
-    """Amplitude error on (ψ, α_y) points none of which appear in training —
+    """Amplitude error on (α_x, α_y) points none of which appear in training —
     the generalization number. Returns the aggregate plus per-point rows."""
     rows, errs = [], []
-    for psi in HELD_OUT_PSI:
+    for ax in HELD_OUT_AX:
         for ay in HELD_OUT_AY:
-            xn = _run_x(neural_solo(block, psi, ay))
-            xm = _run_x(_solo(_gz_with(psi, ay)))
+            xn = _run_x(neural_solo(block, ax, ay))
+            xm = _run_x(_solo(_gz_with(ax, ay)))
             an, am = _amp(xn), _amp(xm)
             errs.append(abs(an - am))
             rows.append(
                 dict(
-                    psi=psi,
+                    alpha_x=ax,
                     alpha_y=ay,
                     amp_neural=an,
                     amp_mech=am,
@@ -388,7 +464,7 @@ def bifurcation_figure(mech, deriv, shoot):
     import matplotlib.pyplot as plt
 
     C_M, C_D, C_S = "#333", "#93c5fd", "#d97706"
-    hopfs = sorted(hopf_points(psi=1.0))
+    hopfs = sorted(hopf_points("alpha_y"))
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.4))
     a1.plot(AY_SWEEP, mech["ay"], "o-", color=C_M, label="mechanistic GZ06")
     a1.plot(AY_SWEEP, deriv["ay"], "^:", color=C_D, label="NeuralODE (deriv)")
@@ -413,20 +489,37 @@ def bifurcation_figure(mech, deriv, shoot):
     a1.set_ylabel("p53 pulse amplitude")
     a1.set_title(r"$\alpha_y$: two Hopfs bound the oscillatory window")
     a1.legend(frameon=False, fontsize=8)
-    a2.plot(PSI_SWEEP, mech["psi"], "o-", color=C_M, label="mechanistic GZ06")
+    a2.plot(AX_SWEEP, mech["ax"], "o-", color=C_M, label="mechanistic GZ06")
+    a2.plot(AX_SWEEP, deriv["ax"], "^:", color=C_D, label="NeuralODE (deriv)")
     a2.plot(
-        PSI_SWEEP, deriv["psi"], "^:", color=C_D, label="NeuralODE (deriv)"
-    )
-    a2.plot(
-        PSI_SWEEP,
-        shoot["psi"],
+        AX_SWEEP,
+        shoot["ax"],
         "s--",
         color=C_S,
         label="NeuralODE (+shooting)",
     )
-    a2.set_xlabel(r"ψ (damage input)")
+    # The axis the composite drives: damage pulls alpha_x down from the
+    # quiescent control, and pulsing starts where it crosses this Hopf.
+    ax_hopfs = [h for h in hopf_points("alpha_x") if h is not None]
+    for h in ax_hopfs:
+        a2.axvline(h, color="#94a3b8", lw=1.1, ls="--")
+        a2.text(
+            h,
+            a2.get_ylim()[1],
+            f" Hopf\n α_x={h:.4f}",
+            fontsize=7,
+            color="#64748b",
+            va="top",
+            ha="left",
+        )
+    if ax_hopfs:
+        a2.axvspan(min(AX_SWEEP), min(ax_hopfs), color="#f1f5f9", zorder=0)
+    a2.set_xlabel(r"$\alpha_x$ (damage ⊣ p53 degradation)")
     a2.set_ylabel("p53 pulse amplitude")
-    a2.set_title(r"ψ-onset (α_y=0.8): damage turns pulsing on")
+    a2.set_title(
+        rf"$\alpha_x$ at held $\alpha_y$={ALPHA_Y_HELD:g}: "
+        "damage turns pulsing on"
+    )
     a2.legend(frameon=False, fontsize=8)
     for ax in (a1, a2):
         for s in ("top", "right"):
@@ -451,31 +544,18 @@ def bifurcation_figure(mech, deriv, shoot):
 
 TOPOLOGY = build_multi_hallmark_composite(validate=False).topology
 
-# dp14 knobs from the calibration fit (outputs/multi_hallmark_calibrate);
-# with default dp14 the etoposide dose saturates ψ→1 and DDB2 goes flat, so
-# the swap must be tested in the fitted regime where DNA_damage stays in the
-# damage→ψ Hill's responsive band.
-_FIT_KEYS = {
-    "etoposide_potency": "DNA_damaged_by_irradiation",
-    "ROS_turnover": "ROS_turnover",
-    "CDKN1A_transcr": "CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
-    "mitophagy_inactiv": "mitophagy_inactiv_by_mTORC1_pS2448",
-}
+# Both arms of the swap run the identical dp14, so the comparison is of the
+# p53 block and nothing else; the dp14 operating point sets how far the
+# severity sweep moves the readout, not whether the two agree.
 SEVERITIES = [0.0, 0.25, 0.5, 0.75, 1.0]
 
-
-def _load_fitted_dp14():
-    p = ROOT / "outputs" / "multi_hallmark_calibrate" / "summary.json"
-    fitted = json.loads(p.read_text())["fitted_params"]
-    return {_FIT_KEYS[k]: v for k, v in fitted.items() if k in _FIT_KEYS}
-
-
-def _apply_dp14(dp14, fitted):
-    for name, val in fitted.items():
-        dp14 = eqx.tree_at(
-            lambda p, n=name: p.parameters[n], dp14, jnp.asarray(val)
-        )
-    return dp14
+# When the swap is read, which is not the same decision as how long it runs.
+# The etoposide pulse drives alpha_x under the Hopf from ~day 0.7 to ~day 6.9;
+# p53 pulses through that window and then damps, because nothing here sustains
+# it — there is no SASP in this composite. Reading at the horizon would sample
+# the readout after it has decayed, where a damaged arm and a control arm are
+# indistinguishable. Day 3 is inside the window, near the amplitude peak.
+DDB2_READ_DAY = 3.0
 
 
 def _ddb2_for_severity(comp_processes, severity):
@@ -485,46 +565,63 @@ def _ddb2_for_severity(comp_processes, severity):
     )
     comp = Composite(
         procs,
-        TOPOLOGY,
+        _topology_for(procs),
         validate=False,
         semantic_validation={"check_semantics": False},
     )
     r = Scheduler(auto_stiffness=True).run(
         comp,
-        t_span=(0.0, 14.0),
+        t_span=(0.0, GRID.t_end),
         y0=comp.initial_state_vec(),
-        macro_dt=3.5,
-        save_dt=1.0,
+        macro_dt=GRID.macro_dt,
+        save_dt=GRID.save_dt,
     )
-    return DDB2.summary(r.ts, r.get("gz06/x2_integral"), jnp.array([14.0]))[0]
+    # Read the path the reporter itself declares, so the demo cannot drift
+    # from the registry. Both blocks expose p53 there.
+    return DDB2.summary(
+        r.ts, r.get(DDB2.observable), jnp.array([DDB2_READ_DAY])
+    )[0]
 
 
-def _procs_at(alpha_y, block, fitted):
-    """Mechanistic and hybrid process dicts at one α_y setting."""
+def _procs_at(alpha_y, block):
+    """Mechanistic and hybrid process dicts at one α_y setting.
+
+    The hybrid reads α_x from the same store path the mechanistic GZ06 does —
+    the damage bridge's ``gz06/alpha_x_signal`` — so the swap changes the
+    p53 block and nothing else about the wiring. ``alpha_x`` is left off
+    ``parameters`` and out of the Hill drivers, which is what makes the block
+    expose it as a plain INPUT port for the topology to connect.
+    """
     mech = build_multi_hallmark_composite(validate=False).processes
     mech = {
         **mech,
-        "dp14": _apply_dp14(mech["dp14"], fitted),
         "gz06": eqx.tree_at(
             lambda p: p.parameters["alpha_y"], mech["gz06"], float(alpha_y)
         ),
     }
-    neural_gz = block.with_input_driver(
-        "psi",
-        port="psi_source",
-        basal_param="psi_basal",
-        hi=GZ06_PSI_FULL,
-        K=GZ06_PSI_DRIVE_K,
-        n=GZ06_PSI_DRIVE_N,
-        basal=0.3,
-    ).with_control_param("alpha_y", float(alpha_y))
+    neural_gz = block.with_control_param("alpha_y", float(alpha_y))
     return mech, {**mech, "gz06": neural_gz}
 
 
-def ddb2_results(block, fitted):
+def _topology_for(procs):
+    """The demo topology, with GZ06's α_x port named for whichever block is
+    in place: the SBML process exposes ``alpha_x_in``, the learned block
+    exposes the control field itself."""
+    topo = {k: dict(v) for k, v in TOPOLOGY.items()}
+    if isinstance(procs["gz06"], NeuralODEProcess):
+        topo["gz06"] = {"alpha_x": "gz06/alpha_x_signal"}
+    return topo
+
+
+def ddb2_results(block):
+    """DDB2 vs severity at the α_y the composite holds, mechanistic vs hybrid.
+
+    One α_y only: the calibration freezes it, so a second panel would report
+    an operating point the model is never run at.
+    """
     out = {}
-    for alpha_y in (0.8, ALPHA_Y_SUSTAINED):
-        mech_p, hyb_p = _procs_at(alpha_y, block, fitted)
+    for alpha_y in (ALPHA_Y_HELD,):
+        mech_p, hyb_p = _procs_at(alpha_y, block)
         mech = [float(_ddb2_for_severity(mech_p, s)) for s in SEVERITIES]
         hyb = [float(_ddb2_for_severity(hyb_p, s)) for s in SEVERITIES]
         g = float(jax.grad(lambda s: _ddb2_for_severity(hyb_p, s))(1.0))
@@ -636,7 +733,7 @@ def write_provenance(prov):
         "## Training config\n",
         "```\n" + json.dumps(prov["config"], indent=2) + "\n```\n",
         "## Bifurcation recovery (p53 amplitude)\n",
-        "α_y-Hopf (ψ=1.0):\n",
+        f"α_y-Hopfs (at the deposit's α_x={GZ06_ALPHA_X_DAMAGED:g}):\n",
         "| α_y | mech | deriv | +shooting |",
         "|---|---|---|---|",
     ]
@@ -647,15 +744,16 @@ def write_provenance(prov):
             f"{prov['bifurcation']['shoot']['ay'][i]:.3f} |"
         )
     md += [
-        "\nψ-onset (α_y=0.8):\n",
-        "| ψ | mech | deriv | +shooting |",
+        f"\nα_x-Hopf (at the held α_y={ALPHA_Y_HELD:g}) — the axis the "
+        "composite drives:\n",
+        "| α_x | mech | deriv | +shooting |",
         "|---|---|---|---|",
     ]
-    for i, p in enumerate(PSI_SWEEP):
+    for i, x in enumerate(AX_SWEEP):
         md.append(
-            f"| {p} | {prov['bifurcation']['mech']['psi'][i]:.3f} | "
-            f"{prov['bifurcation']['deriv']['psi'][i]:.3f} | "
-            f"{prov['bifurcation']['shoot']['psi'][i]:.3f} |"
+            f"| {x:.4g} | {prov['bifurcation']['mech']['ax'][i]:.3f} | "
+            f"{prov['bifurcation']['deriv']['ax'][i]:.3f} | "
+            f"{prov['bifurcation']['shoot']['ax'][i]:.3f} |"
         )
     md.append("\n## Multi-hallmark DDB2 vs severity (shooting block)\n")
     for k, fr in prov["ddb2"].items():
@@ -676,7 +774,7 @@ def _load_block():
     """Deserialise the trained block from disk into a matching skeleton."""
     skeleton = NeuralODEProcess(
         fields=FIELDS,
-        input_fields=("psi", "alpha_y"),
+        input_fields=CONDITIONING,
         field_defaults=IC,
         width=TRAIN["width"],
         depth=TRAIN["depth"],
@@ -693,11 +791,12 @@ def _load_flag():
         return json.load(f)["ddb2"]
 
 
-# ψ=1.0 (held out); α_y picks one regime on each side of the two Hopfs.
+# At the deposit's damaged α_x, α_y picks one regime on each side of the two
+# Hopfs; the last case crosses the α_x Hopf instead, at the held α_y.
 COMBINED_TOP_CASES = [
-    (1.0, 0.011, "fixed point", "below lower Hopf"),
-    (1.0, 0.8, "limit cycle", ""),
-    (1.0, 1.2, "damped", "above upper Hopf"),
+    (GZ06_ALPHA_X_DAMAGED, 0.011, "fixed point", "below lower α_y Hopf"),
+    (GZ06_ALPHA_X_DAMAGED, ALPHA_Y_HELD, "limit cycle", "deposited α_y"),
+    (GZ06_ALPHA_X_CONTROL, ALPHA_Y_HELD, "fixed point", "above α_x Hopf"),
 ]
 
 
@@ -718,16 +817,16 @@ def combined_figure(block, flag):
     gs = fig.add_gridspec(2, 6, hspace=0.5, wspace=0.55)
 
     top = [fig.add_subplot(gs[0, 2 * i : 2 * i + 2]) for i in range(3)]
-    for i, (ax, (psi, ay, regime, note)) in enumerate(
+    for i, (ax, (axv, ay, regime, note)) in enumerate(
         zip(top, COMBINED_TOP_CASES)
     ):
-        tm, xm = _run_traj(_solo(_gz_with(psi, ay)))
-        tn, xn = _run_traj(neural_solo(block, psi, ay))
+        tm, xm = _run_traj(_solo(_gz_with(axv, ay)))
+        tn, xn = _run_traj(neural_solo(block, axv, ay))
         ax.plot(tm, xm, color=C_M, lw=1.9, label="mechanistic GZ06")
         ax.plot(
             tn, xn, color=C_N, lw=1.7, ls="--", label="NeuralODE surrogate"
         )
-        title = rf"$\alpha_y$ = {ay:g}   {regime}"
+        title = rf"$\alpha_x$ = {axv:.4g}, $\alpha_y$ = {ay:g}   {regime}"
         if note:
             title += f"\n({note})"
         ax.set_title(title, fontsize=10.5)
@@ -756,7 +855,7 @@ def combined_figure(block, flag):
             ax.set_ylim(lo - 0.25 * span, hi + 0.12 * span)
         ax.set_xlabel("Genomic Instability severity")
         if i == 0:
-            ax.set_ylabel("DDB2 readout (day 14)")
+            ax.set_ylabel(f"DDB2 readout (day {DDB2_READ_DAY:g})")
         ax.set_title(rf"$\alpha_y$ = {float(k):g}", fontsize=10.5)
         ax.legend(frameon=False, fontsize=8.5)
         for s in ("top", "right"):
@@ -832,8 +931,7 @@ def main():
     )
     time_domain_figure(best)
 
-    fitted = _load_fitted_dp14()
-    flag = ddb2_results(best, fitted)
+    flag = ddb2_results(best)
     ddb2_figure(flag)
     combined_figure(best, flag)
 

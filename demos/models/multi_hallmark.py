@@ -58,6 +58,8 @@ Table I defines as the transcript, not the protein ``y``. HSPA1A →
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from hallsim.composite import Composite
 from hallsim.models.forcing import drive_pulse, drive_step
 from hallsim.models.gain_edge import (
@@ -121,6 +123,32 @@ PROCTOR07_SYNTHESIS_MTOR_FRACTION = 0.5
 # same constants. DallePezze 2014 supplementary Table S2.
 DP14_MTOR_PHOS_RATE_DEFAULT = 162.471039450073
 DP14_MTOR_PHOS_RATE_NAME = "mTORC1_S2448_phos_by_AA_n_Akt_pS473"
+
+
+# How this composite is run, for every consumer of it. The oscillating
+# reporters (DDB2/MDM2) read raw p53 / Mdm2 / IκBα-transcript and take a
+# zero-phase RMS or mean post-hoc, so the save grid has to resolve the pulse:
+# save_dt = 14/149 ≈ 0.094 d sits under the ~0.145 d Nyquist for the ~0.29 d
+# p53 period. Cost is memory (more save points), not solve time. Mirror-padded
+# edges (odd=False) keep the endpoint query artifact-free — no margin needed.
+#
+# One definition rather than one per demo: a consumer that picks its own grid
+# reads the same model through a different instrument, and the two answers
+# diverge with nothing to flag it.
+@dataclass(frozen=True)
+class RunGrid:
+    """The save/step grid a multi-hallmark run is read on."""
+
+    t_end: float
+    macro_dt: float
+    n_save: int
+
+    @property
+    def save_dt(self) -> float:
+        return self.t_end / (self.n_save - 1)
+
+
+MULTI_HALLMARK_GRID = RunGrid(t_end=14.0, macro_dt=0.5, n_save=150)
 
 # GSE248823: etoposide 20µM for 2 days, then washout — a dose pulse, not a
 # sustained 14-day exposure. Days count from experiment start; if the source
@@ -253,7 +281,7 @@ def build_multi_hallmark_composite(
             hi=10.0,
             K=(0.3,),
             n=(1.8,),
-            target_ontology={"go": "GO:0006357"},
+            target_ontology={"uniprot": "P38936"},
             target_description="p53-driven transcription summed into CDKN1A",
             source_ontology=({"go": "GO:0006977"},),
             source_descriptions=("GZ06 p53 level",),

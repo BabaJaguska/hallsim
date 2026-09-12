@@ -330,20 +330,51 @@ class SemanticChecker:
                     if shared_ns:
                         pass  # a shared namespace was compared above
                     elif ont1 and ont2:
-                        # Both annotated, but in disjoint ID namespaces (e.g. a
-                        # UniProt protein ID vs a GO activity term): no shared
-                        # namespace to compare in, so identity is *unverifiable*,
-                        # not missing. Verifying it needs an ontology cross-walk.
-                        results.append(
-                            ValidationResult(
-                                Severity.INFO,
-                                "semantics",
-                                f"Non-comparable annotations at {store_path!r}: "
-                                f"{e1.proc_name}.{e1.port_name} has {ont1}, "
-                                f"{e2.proc_name}.{e2.port_name} has {ont2} — no "
-                                f"shared ID namespace, cannot verify same entity.",
-                            )
+                        # Both annotated in disjoint ID namespaces. Two very
+                        # different findings hide here, so separate them by
+                        # what the annotations *are*: a protein against a
+                        # biological process is not awaiting a cross-walk, it
+                        # is one of the two describing the mechanism where the
+                        # store path holds the entity. Same kind in different
+                        # namespaces is genuinely unverifiable.
+                        from hallsim.reporter_wiring import (
+                            ObservableKind,
+                            classify_ontology,
                         )
+
+                        k1 = classify_ontology(ont1)
+                        k2 = classify_ontology(ont2)
+                        known = ObservableKind.UNKNOWN not in (k1, k2)
+                        if known and k1 is not k2:
+                            results.append(
+                                ValidationResult(
+                                    Severity.WARNING,
+                                    "semantics",
+                                    f"Annotation kind mismatch at "
+                                    f"{store_path!r}: "
+                                    f"{e1.proc_name}.{e1.port_name} is a "
+                                    f"{k1.value} ({ont1}), "
+                                    f"{e2.proc_name}.{e2.port_name} is a "
+                                    f"{k2.value} ({ont2}). No cross-walk "
+                                    f"relates these — one of them names the "
+                                    f"mechanism where the path holds the "
+                                    f"entity.",
+                                )
+                            )
+                        else:
+                            results.append(
+                                ValidationResult(
+                                    Severity.INFO,
+                                    "semantics",
+                                    f"Non-comparable annotations at "
+                                    f"{store_path!r}: "
+                                    f"{e1.proc_name}.{e1.port_name} has "
+                                    f"{ont1}, "
+                                    f"{e2.proc_name}.{e2.port_name} has "
+                                    f"{ont2} — no shared ID namespace, cannot "
+                                    f"verify same entity.",
+                                )
+                            )
                     elif ont1 or ont2:
                         annotated = e1 if ont1 else e2
                         bare = e2 if ont1 else e1
@@ -562,12 +593,19 @@ class GraphAnalyzer:
         for scc in nx.strongly_connected_components(G):
             if len(scc) < 2:
                 continue
-            members = " -> ".join(sorted(scc))
+            # An actual cycle through the component, not its membership in
+            # alphabetical order: the arrows have to name edges that exist, or
+            # whoever checks the loop goes looking for wiring that does not.
+            try:
+                edges = nx.find_cycle(G.subgraph(scc))
+                path = " -> ".join([u for u, _ in edges] + [edges[0][0]])
+            except nx.NetworkXNoCycle:  # pragma: no cover - SCC implies one
+                path = "{" + ", ".join(sorted(scc)) + "}"
             results.append(
                 ValidationResult(
                     Severity.WARNING,
                     "graph",
-                    f"Feedback loop among {len(scc)} processes: {members}. "
+                    f"Feedback loop among {len(scc)} processes: {path}. "
                     f"Verify this is intentional and numerically stable.",
                 )
             )
