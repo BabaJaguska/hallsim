@@ -1119,9 +1119,8 @@ class TestUndeclaredPortsRaise:
             topology={"p": {"a": "a", "src": "s"}},
             validate=False,
         )
-        rhs, keys = comp.build_rhs()
         with pytest.raises(ValueError, match=r"typo_port"):
-            rhs(0.0, comp.initial_state_vec(keys))
+            comp.build_rhs()
 
     def test_the_message_names_the_process_and_what_is_declared(self):
         comp = Composite(

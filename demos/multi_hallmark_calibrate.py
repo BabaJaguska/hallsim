@@ -22,6 +22,7 @@ SBML models download from BioModels on first import and cache locally.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from hallsim.calibration import (  # noqa: E402
     CalibrationProblem,
     Condition,
     ParameterRef,
+    load_checkpoint,
 )
 from hallsim.calibration_report import (  # noqa: E402
     format_table,
@@ -48,7 +50,11 @@ from hallsim.calibration_report import (  # noqa: E402
     save_outputs,
 )
 from hallsim.io import make_run_dir  # noqa: E402
-from hallsim.hallmarks import with_hallmarks  # noqa: E402
+from dataclasses import replace as dc_replace  # noqa: E402
+from hallsim.hallmarks import (  # noqa: E402
+    HALLMARK_REGISTRY,
+    with_hallmarks,
+)
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.gene_reporters import (  # noqa: E402
     MULTI_HALLMARK_REPORTERS,
@@ -196,12 +202,40 @@ def _default_fit_params(composite, published) -> dict:
     return params
 
 
+# How hard rapamycin hits DallePezze's mTORC1 S2448 phosphorylation rate:
+# severity -1 puts the rate at (1 - intensity) x published from day 2 on.
+# This is a property of the drug at the dose GSE248823 used, not of the
+# biology the composite predicts, and the etoposide arm cannot see it at all
+# (severity 0 multiplies it by zero), so it can only come from the rapamycin
+# arm or from a dose-response the deposits do not carry.
+RAPA_INTENSITY = 0.7
+
+
+def _registry_with_intensity(intensity: float) -> dict:
+    """The hallmark registry with the rapamycin intensity set. Everything
+    else is :data:`hallsim.hallmarks.HALLMARK_REGISTRY` unchanged."""
+    handle = HALLMARK_REGISTRY["Deregulated Nutrient Sensing"]
+    mappings = [
+        (
+            dc_replace(m, slope=dc_replace(m.slope, init=float(intensity)))
+            if m.process_name == "rapamycin_drive"
+            else m
+        )
+        for m in handle.mappings
+    ]
+    return {
+        **HALLMARK_REGISTRY,
+        "Deregulated Nutrient Sensing": dc_replace(handle, mappings=mappings),
+    }
+
+
 def build_problem(
     composite=None,
     reporters=None,
     equilibrate: bool = False,
     parameters=None,
     fitted: tuple | None = None,
+    rapa_intensity: float | None = None,
 ) -> CalibrationProblem:
     """The calibration problem. ``parameters`` overrides the fitted set,
     which is what an identifiability screen varies. ``fitted`` names exactly
@@ -308,6 +342,9 @@ def build_problem(
         params=params,
         fit_arms=["DDIS_vs_ctrl"],
         held_out_arms=["RAPA_vs_ctrl"],
+        hallmark_registry=_registry_with_intensity(
+            RAPA_INTENSITY if rapa_intensity is None else rapa_intensity
+        ),
         prior_weight=0.03,
         t_end=GRID.t_end,
         t_start=-PREROLL_DAYS,
@@ -877,10 +914,13 @@ def cmd_run(args) -> None:
         logging.getLogger("hallsim").setLevel(logging.INFO)
     equilibrate = getattr(args, "equilibrate", False)
     fitted = tuple(getattr(args, "fit", ()) or ()) or DEFAULT_FIT
+    intensity = getattr(args, "rapa_intensity", None)
     if not SERIES_MATRIX.exists():
         print(_missing_data_notice(), flush=True)
         return run_unscored(equilibrate, make_run_dir(RUN_NAME))
-    problem = build_problem(equilibrate=equilibrate, fitted=fitted)
+    problem = build_problem(
+        equilibrate=equilibrate, fitted=fitted, rapa_intensity=intensity
+    )
     print(
         f"[run] equilibrate={equilibrate} fit={sorted(problem.param_refs)}",
         flush=True,
@@ -980,6 +1020,82 @@ def _run_arms(base, gi, dns, t_end=50.0, macro_dt=5.0):
     )
 
 
+def cmd_score(args) -> None:
+    """Re-score a saved fit under changed conditions, without refitting.
+
+    The fitted parameters are a property of the fit arm; the rapamycin
+    intensity, the reporters and the figures are not. Refitting to change one
+    of those spends ten minutes to recompute a vector that cannot move — the
+    etoposide arm's severity multiplies the intensity by zero, so the loss is
+    blind to it. This loads ``--run``'s checkpoint, scores both arms at the
+    conditions given, and writes the tables and figures beside it.
+    """
+    from demos.multi_hallmark_figures import (
+        fig_concordance,
+        fig_temporal,
+        fig_temporal_compare,
+        use_run,
+    )
+
+    default = ROOT / "outputs" / RUN_NAME / "latest"
+    run_dir = Path(getattr(args, "run", None) or default).resolve()
+    ckpt = run_dir / "checkpoint.npz"
+    if not ckpt.exists():
+        raise SystemExit(
+            f"no checkpoint at {ckpt}. Point --run at a calibrate run, or "
+            f"run `simulate multi-hallmark calibrate` first."
+        )
+    saved = json.loads((run_dir / "summary.json").read_text())
+    fitted = tuple(saved["params"])
+    intensity = getattr(args, "rapa_intensity", None)
+    problem = build_problem(
+        equilibrate=getattr(args, "equilibrate", False),
+        fitted=fitted,
+        rapa_intensity=intensity,
+    )
+    params, meta = load_checkpoint(ckpt)
+    params = {k: jnp.asarray(v) for k, v in params.items()}
+    print(
+        f"[score] {run_dir.name}: {sorted(fitted)} at "
+        f"rapamycin intensity "
+        f"{RAPA_INTENSITY if intensity is None else intensity}",
+        flush=True,
+    )
+    # A rescore never overwrites the run it reads: it gets a directory
+    # named for its conditions, with the checkpoint and summary copied in
+    # so the figure script finds the fit there.
+    import shutil
+
+    tag = "default" if intensity is None else f"{intensity:g}"
+    out_dir = run_dir / f"score_rapa{tag}"
+    out_dir.mkdir(exist_ok=True)
+    for name in ("checkpoint.npz", "summary.json"):
+        shutil.copy2(run_dir / name, out_dir / name)
+    pre = run_oob(problem, problem.initial_params(), out_dir)
+    post = problem.evaluate(params)
+    print(format_table(pre, post, fit_arms=problem.fit_arms))
+    write_concordance_table(pre, post, out_dir)
+    write_reporter_table(pre, post, out_dir)
+    (out_dir / "score_conditions.json").write_text(
+        json.dumps(
+            {
+                "checkpoint": ckpt.name,
+                "fitted": list(fitted),
+                "rapa_intensity": (
+                    RAPA_INTENSITY if intensity is None else intensity
+                ),
+                "equilibrate": bool(getattr(args, "equilibrate", False)),
+            },
+            indent=1,
+        )
+    )
+    use_run(out_dir)
+    fig_temporal(args)
+    fig_temporal_compare(args)
+    fig_concordance(args)
+    print(f"\nre-scored → {out_dir.relative_to(ROOT)}/", flush=True)
+
+
 def cmd_sweep(args) -> None:
     """Two-hallmark severity sweep — readouts gene-reporter validation uses."""
     base = build_multi_hallmark_composite()
@@ -1011,6 +1127,7 @@ def cmd_sweep(args) -> None:
 
 _COMMANDS = {
     "run": cmd_run,
+    "score": cmd_score,
     "sweep": cmd_sweep,
 }
 

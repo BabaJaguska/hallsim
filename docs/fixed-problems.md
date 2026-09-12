@@ -1588,3 +1588,65 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   estimate when routing is unavailable), and measure the launch rejections
   before and after on the multi-hallmark and the 1024-member population. **Fixed 2026-09-12:** `DEFAULT_DT0` is `None`; the Scheduler estimates each group's first step from its field at the launch state (Hairer's rule, diffrax's own for `dt0=None`, in `Scheduler._initial_step`), carries it into the compiled lanes as the group's first hint, and passes `dt0=None` through on the eager lane and the fast path; a float still pins it. Measured on the multi-hallmark control arm the gain is small — 44 rejected launch-group steps against 46, 402 against 408 in the other group, trajectories within 1e-4 relative — so the 31–153 launch rejections are the controller working through the transient, not the first step; the claim above overstated the step's share. On a stiff cubic launch (`test_initial_step.py`) the pinned step rejects and the estimated one does not, and the ten-iteration chord divergence of P0.78 no longer has a step to happen in.
 - [x] **P0.79 — With the guarded chord's growth limit at 10, a batched run and the same member run alone diverged to 1e-4 relative, with different step counts, where every earlier root finder agreed to 1e-9.** Found 2026-09-12 by the GPU session's batched-versus-single check, which guessed the first-step estimate. Bisected here on the DallePezze fast path, six jittered members, first step pinned: 506afe6 6.7e-10, 8207ee7 2.2e-9, ad29af8 1.5e-4; on ad29af8 optimistix's chord 2.2e-9, Newton 8.1e-10, the guarded chord 1.5e-4; identical members 1e-9; a growth limit that never refuses 1.05e-9 with the single runs' exact step counts. So the guard at 10 fired in the batched run for two members whose single runs never met it: a threshold near the residual growth a converging chord shows on a curved residual is one the rounding of batched kernels can flip, and each flip is a refused update, a rejected step and a different path. The bare root find is bit-identical under `vmap`; the sensitivity is the threshold's placement. **Fixed 2026-09-12:** `growth_limit` defaults to 100 — two orders above legitimate transient growth, six below a diverging chord's 1e8 per iteration — and a residual within `atol` is never refused as growth (an exactly-zero residual at the predictor made any roundoff look like growth). At 100 and 1 000 batched and single agree to 1.05e-9 with identical steps; the three-parameter gradient is unchanged; the multi-hallmark step count was already the unguarded chord's at 10 and above.
+
+- [x] **P0.82 — Routing crashed on a group too large for a dense Jacobian: the matrix-free spectrum estimate never converged on a clustered extreme.** Groups above `DENSE_JACOBIAN_MAX_DIM` (512 states) are classified from ARPACK's 32 largest-magnitude eigenvalues of the restricted Jacobian, at machine-precision tolerance in scipy's default 65-vector Krylov space. First contact with that path, 2026-09-11, `scripts/bench_scheduler.py chain:1024` (1 032 states): a chain's top eigenvalues are a gapless cluster (a 1024-ring's |λ| = 2|sin(πk/n)|/τ, the top 32 differ in the fourth digit), ARPACK raised `ArpackNoConvergence` after 99 000 products, `_resolve_integrators` caught only `StiffnessNotConcrete` and `LinAlgError`, and the run died in a scipy traceback. The bare solves in the same case ran (Kvaerno5 15.7 s, Tsit5 5.1 s), so the one lane that could not solve a 1 032-state composite was the one built for large composites. No test covered the path. Measured on the ring operator: the tolerance is not the lever (1e-3 and 1e-2 still fail at 65 and 128 vectors, k = 1 included); the subspace is — 256 vectors converge k = 32 in 1 597 products, 0.6 s. Dense `eigvals` is 1.5 s at 1 024 states and 21 s at 4 096. **Fixed 2026-09-11:** `ITERATIVE_EIGS_NCV = 256` and `ITERATIVE_EIGS_TOL = 1e-3`; on non-convergence the converged subset is the verdict's input, failing that the Jacobian is formed densely up to `DENSE_FALLBACK_MAX_DIM = 4096`, beyond that `StiffnessInconclusive`, which the Scheduler routes implicit with a warning. The neighbouring `LinAlgError` branch routed *explicit*, against the comment ten lines below it that argues for implicit; it routes implicit now. `tests/unit/test_stiffness_large_group.py`: a 1 024-ring's spectral abscissa comes out at 2/τ (73 s and a traceback before, 18 s and a verdict after).
+
+- [x] **P0.81 — The Scheduler has never been measured against a bare solve on
+  a problem it is *for*. Every measurement on record has it losing.** The
+  orchestration is justified in the docs by multi-rate groups, events,
+  coupling and operator splitting. Searching the registries and the diary for
+  a measurement where the Scheduler is faster, cheaper, or otherwise pays for
+  itself against doing the same maths directly returns nothing. What does
+  exist:
+
+  | case | Scheduler vs one `diffeqsolve`, same maths | source |
+  |---|---|---|
+  | event composite, 8 species, 1 event | **2395× slower** | P0.35 |
+  | single-process stiff ODE, 3 species, 754 steps | **57× slower** | this entry |
+  | multi-rate groups | never measured | — |
+  | coupling (frozen / interpolated) | never measured | — |
+  | Lie / Strang splitting | never measured against a bare solve | P0.2 compares the two schemes' accuracy to each other |
+
+  The 57× is from 2026-09-11 on a T4: GZ06 at the stiffest conditioning point
+  of the hybrid demo's grid (α_x=0, α_y=0.005), warm on both sides, same
+  tolerances, `auto_stiffness` on and off within noise of each other (77.76 s
+  and 77.14 s) against 1.35 s for `dfx.diffeqsolve` over the same RHS at 754
+  steps. Note the event case is the feature most often named as the
+  justification, and it is the worst number on record.
+
+  **This is not a claim that the orchestration never pays.** Multi-rate and
+  coupled composites are exactly the shapes it was built for and exactly the
+  shapes nobody has measured, so the honest position is that the central
+  architectural claim of the repo is untested, not that it is false. The
+  danger is that it reads as established — it is repeated in prose as though
+  it had a number behind it, which is how it ended up asserted in a review
+  this entry exists to correct.
+
+  *Fix:* measure it. A composite with genuinely separated timescales — two
+  groups whose `timescale` differ by the `auto_groups` ratio or more — run
+  through the Scheduler against one `diffeqsolve` over the combined RHS at the
+  tolerance the stiff group needs, both warm, same machine, reporting wall
+  clock and step counts. Then the same for a coupled pair under `frozen` and
+  `interpolated`. If the Scheduler wins, the architecture has its first
+  supporting measurement and it belongs in the README. If it loses there too,
+  that is a larger finding than P0.35 and the design needs revisiting rather
+  than the implementation. Either way `docs/benchmarks.md` should carry it, so
+  the claim stops being prose.
+
+  **Measured 2026-09-11** (`scripts/bench_scheduler.py`; tables in
+  `docs/benchmarks.md` §7). Same reduced field, same Kvaerno5 + chord, same
+  controller, `dt0=None`, reference at 1e-10/1e-13. The wrapper: +8 % at 72
+  states, +5–16 % at 264, 0 % at 1 032 and on the multi-hallmark composite,
+  +28 % on a 7 ms gz06 solve — a fixed few milliseconds per call, not a
+  scaling cost. The split: at 1 032 states 20× faster than the best bare
+  solve at an error of 5.6e-4 (two sweeps) and 37× at 0.13 (default), where
+  the bare implicit solve factorises a 1 032² Jacobian per stage; on the
+  multi-hallmark composite 2.6× and 2.1× faster than bare Kvaerno5 at 1.2e-3
+  and 2.2e-4 (macro 0.5 and 0.1), with the default coupling the best point
+  measured; at 72 states it never pays, the bare solve being 75 ms. Found on
+  the way: routing crashed above 512 states (P0.82, fixed), a feedback loop
+  under one sweep is silently first order in the macro step (P1.28, now
+  warned), interpolated coupling returns its own save grid (P1.27). The 57×
+  and 2395× on record were a 3-species ODE and an event composite, the
+  shapes the orchestration is not for; the gz06 case re-measured here at
+  1.3×. The README line is the user's.

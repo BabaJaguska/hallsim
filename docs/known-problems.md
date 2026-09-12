@@ -1239,48 +1239,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `atol` comparison per iteration, which is a few more kernels on exactly the
   path that cannot afford them.
 
-- [ ] **P0.81 — The Scheduler has never been measured against a bare solve on
-  a problem it is *for*. Every measurement on record has it losing.** The
-  orchestration is justified in the docs by multi-rate groups, events,
-  coupling and operator splitting. Searching the registries and the diary for
-  a measurement where the Scheduler is faster, cheaper, or otherwise pays for
-  itself against doing the same maths directly returns nothing. What does
-  exist:
-
-  | case | Scheduler vs one `diffeqsolve`, same maths | source |
-  |---|---|---|
-  | event composite, 8 species, 1 event | **2395× slower** | P0.35 |
-  | single-process stiff ODE, 3 species, 754 steps | **57× slower** | this entry |
-  | multi-rate groups | never measured | — |
-  | coupling (frozen / interpolated) | never measured | — |
-  | Lie / Strang splitting | never measured against a bare solve | P0.2 compares the two schemes' accuracy to each other |
-
-  The 57× is from 2026-09-11 on a T4: GZ06 at the stiffest conditioning point
-  of the hybrid demo's grid (α_x=0, α_y=0.005), warm on both sides, same
-  tolerances, `auto_stiffness` on and off within noise of each other (77.76 s
-  and 77.14 s) against 1.35 s for `dfx.diffeqsolve` over the same RHS at 754
-  steps. Note the event case is the feature most often named as the
-  justification, and it is the worst number on record.
-
-  **This is not a claim that the orchestration never pays.** Multi-rate and
-  coupled composites are exactly the shapes it was built for and exactly the
-  shapes nobody has measured, so the honest position is that the central
-  architectural claim of the repo is untested, not that it is false. The
-  danger is that it reads as established — it is repeated in prose as though
-  it had a number behind it, which is how it ended up asserted in a review
-  this entry exists to correct.
-
-  *Fix:* measure it. A composite with genuinely separated timescales — two
-  groups whose `timescale` differ by the `auto_groups` ratio or more — run
-  through the Scheduler against one `diffeqsolve` over the combined RHS at the
-  tolerance the stiff group needs, both warm, same machine, reporting wall
-  clock and step counts. Then the same for a coupled pair under `frozen` and
-  `interpolated`. If the Scheduler wins, the architecture has its first
-  supporting measurement and it belongs in the README. If it loses there too,
-  that is a larger finding than P0.35 and the design needs revisiting rather
-  than the implementation. Either way `docs/benchmarks.md` should carry it, so
-  the claim stops being prose.
-
 ## P1 — cannot tell whether a result is trustworthy
 
 The check that would catch a mistake does not exist, does not run, or fails open.
@@ -1582,6 +1540,30 @@ The check that would catch a mistake does not exist, does not run, or fails open
   and writes. And when a cycle does cross groups, put a splitting-error
   estimate (one macro step re-run at half size) on the result.
 
+- [ ] **P1.27 — Under interpolated coupling the Scheduler returns a
+  trajectory on a grid it chose, not the one asked for, and under Strang
+  only window ends; the requested times are not in the result and nothing
+  says so.** Found 2026-09-12 benchmarking the Scheduler against a bare
+  solve. The compiled lane reuses its saved sample as the interpolant it
+  hands the next group, so with `coupling_mode="interpolated"` it raises the
+  per-window save count to `coupling_interp_points` (16) and that grid
+  replaces `save_dt`: ask for 0.5 on a 1.0 window and the returned `ts` are
+  multiples of 1/15, which do not include 0.5. Strang saves one point per
+  window whatever `save_dt` says. `RunPlan` records `requested_save_dt`
+  beside the `save_dt` it used, but the result carries no flag and no
+  warning is logged. Any consumer that assumes the times it asked for —
+  a reporter summary at day 7, a comparison against another solve — reads
+  the wrong rows silently. *Fix:* the interpolant's sample is the lane's
+  business and the output grid is the caller's: sample for coupling at
+  whatever resolution the lane needs and return `ys` at the requested
+  times (the union grid, subset on return), and give Strang the same
+  contract. Until then, at least warn when the returned grid is not the
+  requested one.
+
+- [ ] **P1.28 — On a feedback loop the default coupling is frozen in effect, the split is first order in the macro step, and nothing says so.** Measured 2026-09-11 with `scripts/bench_scheduler.py` on a diffusion chain (τ = 1) closed through an 8-state stiff block (`chain:64`, `chain:256`; the loop is x0 → x1 → z → x0). With the default single sweep, `interpolated` equals `frozen` to three digits — 0.501 against 0.502 of the signal range at macro_dt 1.0, 0.133 against 0.133 at 0.25, 0.0537 against 0.0535 at 0.1 — because the stiff block is solved first and sees the chain frozen; an interpolant only ever helps a forward edge, which `_effective_coupling` says in its docstring and the plan never checks. The error falls linearly with the macro step (0.50 → 0.13 → 0.054): Lie splitting on a loop with one sweep is O(macro_dt) whatever the coupling mode, and at a macro step equal to the chain's time constant the default loses half the signal without a warning. `waveform_sweeps=2` costs 2× and takes the error to 0.021 / 5.6e-4 / 1.9e-4; Strang costs 5 % for 0.078 / 0.018 / 0.0069. On the multi-hallmark composite, where forward edges dominate, the ordering reverses: the default is the best point measured (1.2e-3 at macro 0.5 and 2.2e-4 at 0.1, at 2.6× and 2.1× the bare implicit speed), a second sweep buys nothing at 2× the cost, and Strang is 20× worse because it forbids the interpolant. So no single default wins both, and the missing piece is the check: a plan whose coupling graph has a cycle, run with one sweep, is silently first-order. *Proposal:* detect the cycle at plan time (the cross-group edges are already known to the coupling chooser) and warn naming `waveform_sweeps=2`; taking the second sweep automatically is a 2× cost on every looped composite and is a decision, not a fix. Full tables in `docs/benchmarks.md`.
+
+- [ ] **P1.29 — `symbolic_field` folds a boundary species' time-dependent rule into a constant.** Found 2026-09-11 by `scripts/bench_field.py`: the DallePezze field re-emitted from `hallsim.structure.symbolic_field` agrees with the member's program at t = 0 to 6e-16 and disagrees at every later time by up to 6e4 relative on `DNA_damage`. `Irradiation` is a boundary species whose rule is a piecewise in time (a pulse for 0 ≤ t < 0.003472 days); the symbolic form lists it under `field.parameters` at its initial value 1.0, so the generated field irradiates forever (663 steps against 1 140, day-14 state off by 3.4e3 relative). The compiled program and the composite RHS are right — they refresh boundary rules through `boundaryfunc` — so no solve is affected; what is affected is everything built from the symbolic form: `identifiability.structural_redundancy` (which now lists `Irradiation` as a parameter) and any exported single function. The "68 ms for the identical field as one generated function" behind P3.21's factor of two was this field, a different and harder problem; the like-for-like numbers are in P3.21 now. *Fix:* a boundary species with a rule is a rule in the symbolic form, not a parameter — emit it as a `TIME`-dependent expression in the derivatives and keep `parameters` to declared constants.
+
 ## P2 — cannot see what was built
 
   *Progress 2026-09-11.* `Composite.to_sbml()` (`hallsim.sbml_export`)
@@ -1687,6 +1669,45 @@ The check that would catch a mistake does not exist, does not run, or fails open
   member instead of recomputing them per call where the member's own
   program already has them.
 
+  **Measured like for like 2026-09-11** (`scripts/bench_field.py`;
+  `docs/benchmarks.md` §8). The "one generated function" above was the
+  `symbolic_field` export, which holds DallePezze's irradiation pulse on for
+  ever (P1.29) — a different, harder problem, so the factor of two was never
+  the same field. Same solver stack, same 663 steps: the member's program
+  called bare 103 ms, the composite's flat RHS 115.5 ms, the flat RHS
+  without its assignment pass 78.2 ms, `Scheduler.run` 117.2 ms. The
+  assignment pass — every member's whole program re-run before each
+  derivative to fill ASSIGNED slots the derivative never reads — was 32 %
+  of the solve and 43 % of the compile. **Fixed 2026-09-11 for that item:**
+  `build_rhs` keeps an assignment only when a derivative in the loop reads
+  it, found by tracing each derivative once on an abstract state; the saved
+  trajectory still gets every assigned value through `materialize_assigned`,
+  and an undeclared assigned port is now rejected at build. DallePezze
+  through the Scheduler: 117.2 → 80.2 ms at 1e-10/1e-12, 20.3 → 14.1 ms at
+  defaults, cold 5.1 → 2.9 s, results identical to 6e-15. What remains open
+  is per-call cost: the composite's form costs 4× the standalone generated
+  function at batch 256 (65 µs against 15 µs; 610 jaxpr equations against
+  204) — element reads of `y`, `w`, `c` and a dense stoichiometry product
+  the generated form folds into its expressions — bounded in the solve by
+  the implicit step's share of RHS work.
+
+  **Second item fixed the same night.** The program's ``dy`` was
+  ``N @ stack(velocities)``: a dense species × reaction product per call,
+  a scaling bug for a model with hundreds of reactions. The program now
+  emits one expression per species — the velocities that touch it with
+  their coefficients, plus its rate rule — and the product is gone.
+  DallePezze, `scripts/bench_field.py`: batched call 72 → 31 µs for the
+  bare program and 65 → 39 µs for the composite's form (the standalone
+  floor is 16); through the Scheduler 80.2 → 58.6 ms at 1e-10/1e-12 and
+  14.1 → 10.1 ms at defaults. Summation order changed, so results move at
+  rounding level (1e-9 at day 14 at the tight tolerance, 672 steps against
+  663); all 327 SBML-facing unit tests pass. Over the night, DallePezze
+  through the Scheduler went 117 → 59 ms at matched tolerance and
+  20 → 10 ms at defaults, compile 5.1 → 3.0 s. What is left is the element
+  reads and the port view's gather-slice-restack: 2.4× the standalone
+  floor per call, bounded in the solve. On the multi-hallmark composite the two changes
+  together measured 2.65× on the Scheduler's default lane in an
+  interleaved A/B against 98c3665 (`docs/benchmarks.md` §7).
 - [ ] **P3.1 — Severity cannot be a state.** A hallmark dial is a constant set
   before the run, so aging is imposed as an initial condition. For an attractor
   to change, severity must evolve — a depleting repair capacity, a ratchet.

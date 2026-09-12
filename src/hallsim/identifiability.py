@@ -75,6 +75,41 @@ def sensitivity_jacobian(problem, params: dict | None = None):
     return np.asarray(jac, dtype=float), names
 
 
+def residual_scale(problem, params: dict, n_fitted: int | None = None):
+    """The size of a miss, in the reporters' own units, estimated from the
+    fit's own leftovers: ``sqrt(SSR / (n_residuals - n_fitted))``.
+
+    The Fisher information is ``JᵀJ / σ²``, so every uncertainty it yields
+    scales with this number and a report that omits it has silently asserted
+    ``σ = 1``. On a log2 fold-change readout that claims each measurement is
+    good to a factor of two, which is far looser than a replicated assay, and
+    it makes parameters the data does constrain look unconstrained. Estimated
+    rather than declared so the verdicts need no input: this is the residual
+    standard error every regression reports, and on a misspecified model it
+    measures the model's own error, which is the honest scale to judge a
+    parameter against.
+
+    ``n_fitted`` defaults to the number of fitted references.
+    """
+    if n_fitted is None:
+        n_fitted = len(problem.param_refs)
+    res = []
+    for arm in problem.fit_arms:
+        times = sorted(problem.data[arm])
+        sim = np.asarray(
+            problem.model_lfc(params, arm, jnp.asarray(times, dtype=float))
+        )
+        for i, rep in enumerate(problem.reporters):
+            for j, t in enumerate(times):
+                res.append(
+                    float(sim[i, j])
+                    - float(problem.data[arm][t][rep.gene_symbol])
+                )
+    res = np.asarray(res, dtype=float)
+    dof = max(res.size - int(n_fitted), 1)
+    return float(np.sqrt(float(res @ res) / dof))
+
+
 @dataclasses.dataclass
 class IdentifiabilityReport:
     """Local identifiability of a fit, from the Fisher information ``JᵀJ``.
@@ -94,6 +129,7 @@ class IdentifiabilityReport:
     confounded: list[tuple[str, str, float]]  # (a, b, corr) with |corr|≥tol
     recommended_freeze: list[str]
     fisher_diag: dict[str, float] = dataclasses.field(default_factory=dict)
+    sigma: float = 1.0  # residual scale the uncertainties are in
 
     @property
     def condition_number(self) -> float:
@@ -106,7 +142,8 @@ class IdentifiabilityReport:
         rows = sorted(self.names, key=lambda n: (order[self.verdict[n]], n))
         w = max(len(n) for n in self.names)
         lines = [
-            "Identifiability (Fisher information JᵀJ, log10-param space)",
+            "Identifiability (Fisher information JᵀJ/σ², log10-param "
+            f"space, σ = {self.sigma:.3g} in reporter units)",
             f"{'parameter':<{w}}  {'verdict':<12}{'rel.sens':>10}"
             f"{'σ (dec)':>10}",
             "-" * (w + 34),
@@ -151,6 +188,7 @@ def identifiability_report(
     struct_tol: float = 1e-6,
     corr_tol: float = 0.95,
     std_tol: float = 1.0,
+    sigma: float | None = None,
 ) -> IdentifiabilityReport:
     """Fisher-information identifiability of ``problem`` at ``params``.
 
@@ -164,14 +202,23 @@ def identifiability_report(
 
     ``recommended_freeze`` lists the structural parameters plus, for each
     confounded pair, the less-sensitive member — the set to fix before
-    refitting (the Dalle Pezze 2014 reduction step)."""
+    refitting (the Dalle Pezze 2014 reduction step).
+
+    ``sigma`` is the size of a miss in the reporters' units; every
+    uncertainty here scales with it. It defaults to
+    :func:`residual_scale`, measured from this fit's own leftovers, so a
+    verdict never rests on an undeclared assumption about the data."""
+    params = dict(params if params is not None else problem.initial_params())
     jac, names = sensitivity_jacobian(problem, params)
+    if sigma is None:
+        sigma = residual_scale(problem, params, n_fitted=len(names))
     return report_from_jacobian(
         jac,
         names,
         struct_tol=struct_tol,
         corr_tol=corr_tol,
         std_tol=std_tol,
+        sigma=sigma,
     )
 
 
@@ -182,6 +229,7 @@ def report_from_jacobian(
     struct_tol: float = 1e-6,
     corr_tol: float = 0.95,
     std_tol: float = 1.0,
+    sigma: float = 1.0,
 ) -> IdentifiabilityReport:
     """Identifiability verdicts from a sensitivity Jacobian ``∂preds/∂θ``
     (shape ``(n_residuals, n_params)``) and its parameter names — the pure
@@ -192,7 +240,7 @@ def report_from_jacobian(
     col = np.linalg.norm(jac, axis=0)
     rel = col / max(col.max(), 1e-300)
 
-    fim = jac.T @ jac
+    fim = (jac.T @ jac) / float(sigma) ** 2
     eigval = np.linalg.eigvalsh(fim)
     cov = np.linalg.pinv(fim, rcond=1e-12)
     var = np.clip(np.diag(cov), 0.0, None)
@@ -242,6 +290,114 @@ def report_from_jacobian(
         confounded=confounded,
         recommended_freeze=freeze,
         fisher_diag={names[i]: float(fim[i, i]) for i in range(n)},
+        sigma=float(sigma),
+    )
+
+
+@dataclasses.dataclass
+class FitSetChoice:
+    """The largest subset of a candidate pool that can be fitted together,
+    from :func:`choose_fit_set`.
+
+    ``keep`` is the chosen set in the order it was admitted; ``drop`` maps
+    each rejected candidate to the reason, naming the parameter it
+    duplicates where that is the reason. ``std_decades`` is each kept
+    parameter's 1σ *within the kept set*, which is the number that will hold
+    after the refit — a parameter's uncertainty depends on what else is
+    being fitted, so a per-parameter screen cannot report it.
+    """
+
+    keep: list[str]
+    drop: dict[str, str]
+    std_decades: dict[str, float]
+    rel_sensitivity: dict[str, float]
+    sigma: float
+
+    def __str__(self) -> str:
+        w = max((len(n) for n in list(self.keep) + list(self.drop)), default=1)
+        lines = [
+            f"Fit set: {len(self.keep)} of {len(self.keep) + len(self.drop)} "
+            f"candidates (σ = {self.sigma:.3g} in reporter units)",
+            f"{'parameter':<{w}}  {'σ (dec)':>9}  reason",
+            "-" * (w + 30),
+        ]
+        for n in self.keep:
+            lines.append(f"{n:<{w}}  {self.std_decades[n]:>9.2f}  keep")
+        for n, why in self.drop.items():
+            lines.append(f"{n:<{w}}  {'—':>9}  drop: {why}")
+        return "\n".join(lines)
+
+
+def choose_fit_set(
+    problem,
+    params: dict | None = None,
+    *,
+    struct_tol: float = 1e-6,
+    corr_tol: float = 0.95,
+    std_tol: float = 1.0,
+    sigma: float | None = None,
+) -> FitSetChoice:
+    """The largest subset of the candidate pool the data can fit together.
+
+    Answers "which parameters should I fit?", which a list of per-parameter
+    verdicts cannot: whether a parameter is identifiable depends on what else
+    is in the fit, so the verdicts have to be recomputed as the set grows.
+    Candidates are admitted in order of how much they move the reporters, and
+    one is rejected when it moves no reporter, when it duplicates a parameter
+    already admitted (``|correlation| ≥ corr_tol`` *within the admitted set*),
+    or when admitting it would leave its own 1σ above ``std_tol`` decades.
+
+    The pool is the problem's own fitted references, so a wider screen is a
+    problem built with the wider pool (``build_problem(parameters=...)``).
+    ``sigma`` defaults to :func:`residual_scale`.
+    """
+    params = dict(params if params is not None else problem.initial_params())
+    jac, names = sensitivity_jacobian(problem, params)
+    if sigma is None:
+        sigma = residual_scale(problem, params, n_fitted=len(names))
+    jac = np.asarray(jac, dtype=float) / float(sigma)
+
+    col = np.linalg.norm(jac, axis=0)
+    rel = col / max(col.max(), 1e-300)
+    order = sorted(range(len(names)), key=lambda i: -col[i])
+
+    keep: list[int] = []
+    drop: dict[str, str] = {}
+    std: dict[str, float] = {}
+    for i in order:
+        if rel[i] < struct_tol:
+            drop[names[i]] = "moves no reporter"
+            continue
+        trial = keep + [i]
+        sub = jac[:, trial]
+        cov = np.linalg.pinv(sub.T @ sub, rcond=1e-12)
+        sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        denom = np.outer(sd, sd)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            corr = np.where(denom > 0, cov / denom, 0.0)
+        worst_j, worst_c = None, 0.0
+        for k in range(len(keep)):
+            c = abs(float(corr[-1, k]))
+            if c > worst_c:
+                worst_j, worst_c = keep[k], c
+        if worst_c >= corr_tol:
+            signed = float(corr[-1, keep.index(worst_j)])
+            drop[names[i]] = (
+                f"duplicates {names[worst_j]} (corr {signed:+.2f})"
+            )
+            continue
+        if sd[-1] > std_tol:
+            drop[names[i]] = f"1σ = {sd[-1]:.2f} decades, above {std_tol:g}"
+            continue
+        keep = trial
+        for k, idx in enumerate(keep):
+            std[names[idx]] = float(sd[k])
+    return FitSetChoice(
+        keep=[names[i] for i in keep],
+        drop=drop,
+        std_decades=std,
+        rel_sensitivity={names[i]: float(rel[i]) for i in range(len(names))},
+        sigma=float(sigma),
     )
 
 

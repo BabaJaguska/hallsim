@@ -27,6 +27,7 @@ import re
 from typing import Any
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -319,6 +320,105 @@ def _apply_assignments(assign_pre, t, y_vec):
             value = value[..., None] if w is None else value
             y_vec = y_vec.at[..., cols].set(value * facs)
     return y_vec
+
+
+class _RecordingView(dict):
+    """A port view that remembers which ports were read. Iterating it, or
+    listing its keys, values or items, counts as reading every port."""
+
+    def __init__(self, view):
+        super().__init__(view)
+        self.read: set = set()
+        self.everything = False
+
+    def __getitem__(self, port):
+        self.read.add(port)
+        return super().__getitem__(port)
+
+    def get(self, port, default=None):
+        self.read.add(port)
+        return super().get(port, default)
+
+    def __iter__(self):
+        self.everything = True
+        return super().__iter__()
+
+    def keys(self):
+        self.everything = True
+        return super().keys()
+
+    def values(self):
+        self.everything = True
+        return super().values()
+
+    def items(self):
+        self.everything = True
+        return super().items()
+
+
+def _columns_read(pre, n_slots: int) -> set[int]:
+    """Store columns the derivative pass reads, found by tracing each
+    process once on an abstract state. A wired port the derivative never
+    touches — a process's own algebraic outputs, typically — is not a read.
+    A derivative the probe cannot trace is taken to read every wired port.
+    """
+    needed: set[int] = set()
+    spec = jax.ShapeDtypeStruct((n_slots,), jnp.result_type(1.0))
+    for proc, read_map, _ in pre:
+        holder: dict = {}
+
+        def probe(y, proc=proc, read_map=read_map, holder=holder):
+            holder["view"] = view = _RecordingView(_port_view(y, read_map))
+            return proc.derivative(0.0, view)
+
+        try:
+            jax.eval_shape(probe, spec)
+            view = holder["view"]
+            ports = None if view.everything else view.read
+        except Exception as exc:  # noqa: BLE001 - the real trace reports it
+            log.debug("read probe of %s failed (%s); keeping all", proc, exc)
+            ports = None
+        for i, port in enumerate(read_map.ports):
+            if ports is not None and port not in ports:
+                continue
+            a, w = read_map.starts[i], read_map.widths[i]
+            b = a + (1 if w is None else w)
+            needed.update(int(c) for c in read_map.idx[a:b])
+    return needed
+
+
+def _check_assignments(assign_pre, n_slots: int) -> None:
+    """Every assignment names only declared ports — checked once at build,
+    on an abstract state, because an assignment nothing reads never runs
+    inside the RHS and would otherwise fail only when the trajectory is
+    materialized."""
+    spec = jax.ShapeDtypeStruct((n_slots,), jnp.result_type(1.0))
+    for proc, read_map, assign_map in assign_pre:
+        raw = jax.eval_shape(
+            lambda y, p=proc, r=read_map: p.assign(0.0, _port_view(y, r)),
+            spec,
+        )
+        _reject_undeclared(raw, assign_map, "assign")
+
+
+def _assignments_read_by(assign_pre, pre, n_slots: int):
+    """The dependency-ordered subset of ``assign_pre`` whose values reach
+    the derivative pass, directly or through another assignment.
+
+    The rest are not integrated and nothing in the loop reads them: they
+    belong to the saved trajectory (:meth:`Composite.materialize_assigned`),
+    not to every RHS call. An SBML member recomputes its own assignment
+    rules inside its program, so on its own it keeps none of them here.
+    """
+    needed = _columns_read(pre, n_slots)
+    keep = []
+    for entry in reversed(assign_pre):  # consumers before producers
+        _, read_map, assign_map = entry
+        if needed.intersection(int(c) for c in assign_map.idx):
+            keep.append(entry)
+            needed.update(int(c) for c in read_map.idx)
+    keep.reverse()
+    return keep
 
 
 class _FlatRHS(eqx.Module):
@@ -729,6 +829,8 @@ class Composite(eqx.Module):
             if write_pairs.ports:
                 pre.append((proc, read_pairs, write_pairs))
         assign_pre = self._assignment_pre(proc_names, keys, key_to_idx, canon)
+        _check_assignments(assign_pre, len(keys))
+        assign_pre = _assignments_read_by(assign_pre, pre, len(keys))
 
         return (
             _FlatRHS(

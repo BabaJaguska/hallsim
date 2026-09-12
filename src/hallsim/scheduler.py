@@ -52,6 +52,7 @@ from hallsim.process import PortRole
 from hallsim.root_finders import Chord
 from hallsim.stiffness import (
     GroupStiffness,
+    StiffnessInconclusive,
     StiffnessNotConcrete,
     analyze_groups,
 )
@@ -200,6 +201,53 @@ class RunPlan:
             f"coupling={self.coupling!r}, solvers={solvers}, "
             f"save_dt={self.save_dt:g}, t_span={self.t_span})"
         )
+
+
+def _group_edges(composite, groups, keys) -> tuple[bool, bool]:
+    """``(forward, cycle)`` over the groups in solve order: whether an
+    earlier group's variable is read by a later one, and whether the groups
+    read each other around a loop. Static structure only, so it stays
+    concrete when ``run()`` is traced."""
+    key_to_idx = {k: i for i, k in enumerate(keys)}
+    writes: list[set[int]] = []
+    reads: list[set[int]] = []
+    for procs in groups.values():
+        w: set[int] = set()
+        r: set[int] = set()
+        for pname in procs:
+            topo_p = composite.topology[pname]
+            schema = composite.processes[pname].ports_schema()
+            for port, entry in topo_p.items():
+                for path in as_paths(entry):
+                    if path not in key_to_idx:
+                        raise KeyError(
+                            f"{pname}.{port} wired to unknown path {path!r}"
+                        )
+            p_reads, p_writes = read_write_paths(schema, topo_p)
+            r |= {key_to_idx[p] for p in p_reads}
+            w |= {key_to_idx[p] for p in p_writes}
+        writes.append(w)
+        reads.append(r)
+    n = len(writes)
+    edges = {
+        a: {b for b in range(n) if b != a and writes[a] & reads[b]}
+        for a in range(n)
+    }
+    forward = any(b > a for a, bs in edges.items() for b in bs)
+
+    def reaches_itself(start: int) -> bool:
+        seen: set[int] = set()
+        stack = [start]
+        while stack:
+            for nxt in edges[stack.pop()]:
+                if nxt == start:
+                    return True
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return False
+
+    return forward, any(reaches_itself(a) for a in range(n))
 
 
 @dataclass
@@ -452,10 +500,10 @@ class Scheduler:
         Per-group solver routing, on by default. Each group's local Jacobian
         spectrum is measured once eagerly via
         :func:`hallsim.stiffness.analyze_groups`; stiff groups get
-        ``implicit_solver`` with a magnitude-scaled vector ``atol``, the rest
-        keep ``explicit_solver`` and the scalar controller. Routing needs a
-        concrete Jacobian — under grad/jvp/vmap with a cold cache it warns and
-        falls back to ``explicit_solver``, so call :meth:`warm_up` once
+        ``implicit_solver``, the rest keep ``explicit_solver``; both run
+        under the same scalar controller. Routing needs a concrete Jacobian —
+        under grad/jvp/vmap with a cold cache it warns and uses
+        ``implicit_solver`` for every group, so call :meth:`warm_up` once
         eagerly first (``CalibrationProblem`` does this for you).
     explicit_solver, implicit_solver:
         The two solvers routing chooses between. Default ``Tsit5()`` and
@@ -589,8 +637,7 @@ class Scheduler:
             log.warning(
                 "solver=%s is pinned, so per-group stiffness routing is off "
                 "and every group uses it. Drop solver= to let the Scheduler "
-                "route stiff groups to %s with a magnitude-scaled vector "
-                "atol.",
+                "route stiff groups to %s.",
                 type(solver).__name__,
                 type(implicit_solver or dfx.Kvaerno5()).__name__,
             )
@@ -1702,9 +1749,23 @@ class Scheduler:
         Interpolated only improves accuracy on a *forward* cross-group edge —
         an earlier group's variables read by a later one. Without such an edge
         it does identical work at higher cost, so auto picks frozen (as do
-        Strang and single-group runs). Explicit modes pass through.
+        Strang and single-group runs). Explicit modes pass through. A cycle
+        between groups run with one sweep is warned about in every mode: the
+        group solved first sees the other frozen for the whole window, so the
+        split is first order in ``macro_dt`` whatever the coupling.
         """
         multi = len(groups) > 1
+        forward, cycle = (
+            _group_edges(composite, groups, keys) if multi else (False, False)
+        )
+        if cycle and self.waveform_sweeps == 1:
+            log.warning(
+                "the coupling graph has a cycle between groups; with one "
+                "sweep the group solved first sees the other frozen for the "
+                "whole window, so the split is first order in macro_dt "
+                "whatever the coupling mode. waveform_sweeps=2 converges the "
+                "loop at twice the cost; a smaller macro_dt shrinks it."
+            )
         if self.coupling_mode != "auto":
             if (
                 self.waveform_sweeps > 1
@@ -1722,37 +1783,9 @@ class Scheduler:
             return self.coupling_mode
         if self.waveform_sweeps > 1 and multi:
             return "interpolated"
-        if self.splitting == "strang" or len(groups) < 2:
+        if self.splitting == "strang" or not forward:
             return "frozen"
-        # Static structure only (no jnp), so this stays concrete when run()
-        # is traced.
-        key_to_idx = {k: i for i, k in enumerate(keys)}
-        items = list(groups.items())
-        writes: list[set[int]] = []
-        reads: list[set[int]] = []
-        for _, procs in items:
-            w: set[int] = set()
-            r: set[int] = set()
-            for pname in procs:
-                topo_p = composite.topology[pname]
-                schema = composite.processes[pname].ports_schema()
-                for port, entry in topo_p.items():
-                    for path in as_paths(entry):
-                        if path not in key_to_idx:
-                            raise KeyError(
-                                f"{pname}.{port} wired to unknown path "
-                                f"{path!r}"
-                            )
-                p_reads, p_writes = read_write_paths(schema, topo_p)
-                r |= {key_to_idx[p] for p in p_reads}
-                w |= {key_to_idx[p] for p in p_writes}
-            writes.append(w)
-            reads.append(r)
-        for a in range(len(items)):
-            for b in range(a + 1, len(items)):
-                if writes[a] & reads[b]:
-                    return "interpolated"
-        return "frozen"
+        return "interpolated"
 
     def _run_scan_hybrid(
         self,
@@ -2601,14 +2634,18 @@ class Scheduler:
             )
         except StiffnessNotConcrete:
             report = None  # tracers in the RHS — same cold-trace situation
-        except np.linalg.LinAlgError:
+        except (np.linalg.LinAlgError, StiffnessInconclusive) as exc:
             # A deterministic property of the composite, not a trace artifact,
-            # so this verdict is safe to cache.
+            # so this verdict is safe to cache. Degrade toward correctness:
+            # an implicit solve of a non-stiff group is slow, an explicit
+            # solve of a stiff one is wrong.
             log.warning(
-                "stiffness analysis failed to converge; using the explicit "
-                "solver for all groups"
+                "stiffness analysis was inconclusive (%s); using the implicit "
+                "solver %s for all groups",
+                exc,
+                type(self.implicit_solver).__name__,
             )
-            integ = _all_explicit()
+            integ = _all_implicit()
             self._remember_verdict(sig, base, digest, integ)
             return integ
 

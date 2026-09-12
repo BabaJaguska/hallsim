@@ -196,7 +196,9 @@ class SBMLCore(eqx.Module):
     #: One compiled program for every rule and law, common subexpressions
     #: factored once across all of them: its outputs are the assignment
     #: targets in ``w`` order, then the reaction velocities, then one rate
-    #: per ``y`` entry from the rate rules. Every non-boundary assignment is
+    #: per ``y`` entry — the stoichiometric sum of the velocities that touch
+    #: it plus its rate rule, written out per species so no dense product
+    #: over every reaction runs per call. Every non-boundary assignment is
     #: substituted into what reads it; a boundary species' rule stays a read
     #: of ``w``, which is where a driver overrides it.
     _program: object = eqx.field(static=True)
@@ -225,7 +227,7 @@ class SBMLCore(eqx.Module):
         return dict(self._species_compartment)
 
     def _run(self, y, w, c, t):
-        """``(assignments, velocities, rates)`` from the one program."""
+        """``(assignments, velocities, dy)`` from the one program."""
         n_w, n_r = len(self._w_names), len(self.reaction_ids)
         vals = self._program(y, w, c, t)
         return vals[:n_w], vals[n_w : n_w + n_r], vals[n_w + n_r :]
@@ -237,18 +239,14 @@ class SBMLCore(eqx.Module):
         return jnp.stack(self._run(y, w, c, t)[1])
 
     def ratefunc(self, y, t, w, c):
-        """``dy/dt = N·v + rate rules``."""
+        """``dy/dt = N·v + rate rules``, one expression per species."""
         dtype = jnp.asarray(y).dtype
         if self._program is None:
             return jnp.zeros((len(self._y_names),), dtype=dtype)
-        _, velocities, rates = self._run(y, w, c, t)
-        if self.reaction_ids:
-            dy = jnp.asarray(self.stoichiometry) @ jnp.stack(velocities)
-        else:
-            dy = jnp.zeros((len(self._y_names),), dtype=dtype)
-        if self._has_rate_rules:
-            dy = dy + jnp.stack(rates)
-        return dy
+        _, _, dy = self._run(y, w, c, t)
+        if not dy:  # rules only: nothing integrates
+            return jnp.zeros((len(self._y_names),), dtype=dtype)
+        return jnp.stack([jnp.asarray(d, dtype=dtype) for d in dy])
 
     def assignmentfunc(self, y, w, c, t):
         """``w`` with every assignment rule recomputed, in dependency order."""
@@ -530,10 +528,28 @@ def _compile(path: str) -> SBMLCore:
     if inline:
         bound_laws = [law.xreplace(inline) for law in bound_laws]
         rate_rule_exprs = [e.xreplace(inline) for e in rate_rule_exprs]
+    # dy per species: the velocities that touch it, with their coefficients,
+    # plus its rate rule. Written out, so a species touched by three of two
+    # hundred reactions costs three terms, not a row of a dense product.
+    dy_exprs = []
+    for i in range(len(y_names)):
+        terms = []
+        for j, coeff in enumerate(stoichiometry[i]):
+            if coeff == 0:
+                continue
+            if coeff == 1:
+                terms.append(bound_laws[j])
+            elif coeff == -1:
+                terms.append(-bound_laws[j])
+            else:
+                terms.append(sympy.Float(coeff) * bound_laws[j])
+        if rate_rule_exprs[i] != 0:
+            terms.append(rate_rule_exprs[i])
+        dy_exprs.append(sympy.Add(*terms) if terms else sympy.Integer(0))
     program_exprs = (
         [resolved[name] for name in w_names]
         + bound_laws
-        + (rate_rule_exprs if rate_ruled else [])
+        + (dy_exprs if (reactions or rate_ruled) else [])
     )
     program = (
         to_jax(sympy.Tuple(*program_exprs), _ARGS, cse=True)

@@ -32,6 +32,12 @@ if TYPE_CHECKING:
     from hallsim.composite import Composite
 
 
+class StiffnessInconclusive(RuntimeError):
+    """The matrix-free spectrum estimate did not converge, even to the single
+    dominant eigenvalue. A property of the group at this state, not of the
+    trace; the caller routes the group by a safe default."""
+
+
 class StiffnessNotConcrete(RuntimeError):
     """Reached under a trace, so there is no spectrum to analyse.
 
@@ -55,6 +61,22 @@ DENSE_JACOBIAN_MAX_DIM = 512
 
 #: Extremal eigenvalues requested from the iterative solver.
 ITERATIVE_EIGS_K = 32
+
+#: Relative accuracy asked of the iterative solver. The verdict reads the
+#: spectral abscissa to a factor; at machine precision a clustered extreme (a
+#: diffusion chain's top eigenvalues differ in the fourth digit) never
+#: converges.
+ITERATIVE_EIGS_TOL = 1e-3
+
+#: Krylov subspace the iterative solver works in. The spectrum's extreme
+#: converges with the subspace, not the tolerance: a 1024-ring's top 32
+#: eigenvalues (a gapless cluster) take 1 600 products at 256 vectors and
+#: never converge at ARPACK's default of 65.
+ITERATIVE_EIGS_NCV = 256
+
+#: When the iterative estimate does not converge, the Jacobian is formed
+#: densely up to this size (about 20 s at 4096, once per plan, cached).
+DENSE_FALLBACK_MAX_DIM = 4096
 
 
 @dataclass
@@ -159,12 +181,12 @@ def _extremal_eigenvalues(
 
     Arnoldi over a JVP operator: each matrix-vector product costs one
     directional derivative of the RHS, so the spectrum's extremes come out in
-    tens of RHS evaluations and O(k·n) memory instead of n forward passes and
+    a few thousand RHS evaluations and O(ncv·n) memory instead of n forward passes and
     an n×n matrix. The stiffness verdict reads only the spectral abscissa, and
     the fastest-decaying mode of a dissipative system is a largest-magnitude
     eigenvalue.
     """
-    from scipy.sparse.linalg import LinearOperator, eigs
+    from scipy.sparse.linalg import ArpackNoConvergence, LinearOperator, eigs
 
     g = _restricted_fn(rhs, y0, idxs, t0)
     v0 = y0[idxs]
@@ -177,14 +199,30 @@ def _extremal_eigenvalues(
         return np.asarray(jvp(jnp.asarray(v, dtype=v0.dtype)))
 
     op = LinearOperator((n, n), matvec=matvec, dtype=np.asarray(v0).dtype)
-    return np.asarray(
-        eigs(
-            op,
-            k=max(1, min(k, n - 2)),
-            which="LM",
-            return_eigenvectors=False,
+    k = max(1, min(k, n - 2))
+    try:
+        return np.asarray(
+            eigs(
+                op,
+                k=k,
+                which="LM",
+                tol=ITERATIVE_EIGS_TOL,
+                ncv=min(n, max(ITERATIVE_EIGS_NCV, 2 * k + 1)),
+                return_eigenvectors=False,
+            )
         )
-    )
+    except ArpackNoConvergence as exc:
+        found = np.asarray(exc.eigenvalues)
+        if found.size:
+            # What converged is the extreme, which is all the verdict reads.
+            return found
+        if n <= DENSE_FALLBACK_MAX_DIM:
+            return np.linalg.eigvals(_restricted_jacobian(rhs, y0, idxs, t0))
+        raise StiffnessInconclusive(
+            f"the extremal spectrum of a {n}-state group did not converge "
+            f"in a {ITERATIVE_EIGS_NCV}-vector Krylov space, and the group "
+            "is too large to form its Jacobian densely"
+        ) from exc
 
 
 def classify_spectrum(

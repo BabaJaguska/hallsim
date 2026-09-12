@@ -662,7 +662,7 @@ def gz06_damage_scan():
 @simulate.command("multi-hallmark")
 @click.argument(
     "command",
-    type=click.Choice(["run", "calibrate", "sweep"]),
+    type=click.Choice(["run", "calibrate", "score", "sweep"]),
     default="run",
 )
 @click.option(
@@ -700,6 +700,21 @@ def gz06_damage_scan():
     "t=0 (off by default: DP14 senescence is progressive and has none)",
 )
 @click.option(
+    "--run",
+    type=click.Path(),
+    default=None,
+    help="score: the calibrate run directory to re-score (default: latest)",
+)
+@click.option(
+    "--rapa-intensity",
+    type=float,
+    default=None,
+    help="how hard rapamycin hits mTORC1 S2448 phosphorylation: severity -1 "
+    "holds the rate at (1 - this) x published. A property of the dose, "
+    "invisible to the etoposide arm, so it comes from the rapamycin arm "
+    "(default: the demo's declared value)",
+)
+@click.option(
     "--fit",
     multiple=True,
     metavar="PARAM",
@@ -717,6 +732,8 @@ def multi_hallmark(
     no_plateau,
     equilibrate,
     fit,
+    rapa_intensity,
+    run,
 ):
     """The multi-hallmark composite (DallePezze 2014 + Geva-Zatorsky 2006 +
     Proctor 2007) scored against GSE248823.
@@ -724,6 +741,7 @@ def multi_hallmark(
     \b
       run        score the composite out of the box, no fitting (default)
       calibrate  fit the mechanism parameters, evaluate on held-out arms
+      score      re-score a saved fit under changed conditions, no refit
       sweep      two-hallmark severity sweep
     """
     from types import SimpleNamespace
@@ -742,8 +760,13 @@ def multi_hallmark(
         no_plateau=no_plateau,
         equilibrate=equilibrate,
         fit=fit,
+        rapa_intensity=rapa_intensity,
+        run=run,
     )
-    (cmd_sweep if command == "sweep" else cmd_run)(args)
+    from demos.multi_hallmark_calibrate import cmd_score
+
+    dispatch = {"sweep": cmd_sweep, "score": cmd_score}
+    dispatch.get(command, cmd_run)(args)
 
 
 @simulate.command("proctor2007-ssa")

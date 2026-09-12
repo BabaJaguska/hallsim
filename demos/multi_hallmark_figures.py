@@ -55,6 +55,16 @@ OUT_CAL = ROOT / "outputs" / "multi_hallmark_calibrate" / "latest"
 _CKPT = OUT_CAL / "checkpoint.npz"
 
 
+def use_run(run_dir) -> Path:
+    """Bind the figures to one calibration run directory: its checkpoint is
+    the fit they draw and the directory is where they write. The module
+    defaults to the latest run; a rescore or a ``--run`` points elsewhere."""
+    global OUT_CAL, _CKPT
+    OUT_CAL = Path(run_dir).resolve()
+    _CKPT = OUT_CAL / "checkpoint.npz"
+    return OUT_CAL
+
+
 def load_fit() -> dict:
     """Fitted parameters, read live from the calibration checkpoint.
 
@@ -94,6 +104,7 @@ def _problem(args):
         fitted = list(load_fit())
     return build_problem(
         fitted=tuple(fitted) if fitted is not None else None,
+        rapa_intensity=getattr(args, "rapa_intensity", None),
     )
 
 
@@ -1689,11 +1700,16 @@ def main():
         help="cells in the proteostasis-population figure.",
     )
     ap.add_argument("--seed", type=int, default=0, help="population seed.")
+    ap.add_argument(
+        "--rapa-intensity",
+        type=float,
+        default=None,
+        help="rapamycin's hit on mTORC1 S2448 phosphorylation; the "
+        "rapamycin arm's own scalar (default: the demo's declared value).",
+    )
     args = ap.parse_args()
     if args.run:
-        global OUT_CAL, _CKPT
-        OUT_CAL = Path(args.run).resolve()
-        _CKPT = OUT_CAL / "checkpoint.npz"
+        use_run(args.run)
     todo = FIGURES.values() if args.figure == "all" else [FIGURES[args.figure]]
     for fn in todo:
         fn(args)
