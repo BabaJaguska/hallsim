@@ -28,8 +28,10 @@ DEFAULT_NEWTON_ATOL = 1e-6
 # healthy integration, it only fires on genuinely runaway dynamics.
 DEFAULT_MAX_STEPS = 4_000_000
 
-# Initial step size handed to the adaptive controller.
-DEFAULT_DT0 = 1e-3
+# First step of the adaptive controller. None: each group's first step is
+# estimated from its field at the launch state (Hairer's rule, what diffrax
+# does for dt0=None); a float pins it for every group.
+DEFAULT_DT0 = None
 
 # Where XLA caches compiled executables between processes. Set
 # HALLSIM_COMPILATION_CACHE_DIR to relocate it, or to "" / "0" / "off" to

@@ -36,7 +36,6 @@ import jax
 import jax.numpy as jnp
 from jax.interpreters import ad
 import numpy as np
-import optimistix as optx
 
 from hallsim.composite import Composite
 from hallsim.store import as_paths, read_write_paths
@@ -50,6 +49,7 @@ from hallsim.config import (
     DEFAULT_RTOL,
 )
 from hallsim.process import PortRole
+from hallsim.root_finders import Chord
 from hallsim.stiffness import (
     GroupStiffness,
     StiffnessNotConcrete,
@@ -459,10 +459,15 @@ class Scheduler:
         eagerly first (``CalibrationProblem`` does this for you).
     explicit_solver, implicit_solver:
         The two solvers routing chooses between. Default ``Tsit5()`` and
-        ``Kvaerno5()`` with an ``optx.Newton`` root finder — diffrax's default
-        ``VeryChord`` needs ~18x more steps on real biochemical RHSs
-        (see docs/benchmarks.md). ``explicit_solver`` is also the fallback
-        whenever routing is unavailable.
+        ``Kvaerno5()`` running the Scheduler's chord
+        (:class:`hallsim.root_finders.Chord`: one Jacobian per nonlinear
+        solve, stops on divergence, never returns a non-finite iterate).
+        An implicit solver passed here gets the same chord unless its root
+        finder was chosen by the caller; diffrax's default copies the step
+        controller's tolerances and needs ~18x more steps on real
+        biochemical RHSs at tight tolerance (see docs/benchmarks.md).
+        ``explicit_solver`` is also the fallback whenever routing is
+        unavailable.
         For large GPU batches, ``Kvaerno5(root_finder=StepChord(...))``
         from :mod:`hallsim.root_finders` can amortize factorization work;
         benchmark it first, as small batches can be slower.
@@ -482,11 +487,18 @@ class Scheduler:
         ``rtol``; ``newton_atol`` defaults to ``1e-6`` and is deliberately not
         ``atol``, which on a model whose smallest state is orders below 1 asks
         every stage to converge far past the state itself and exhausts the
-        step budget. Ignored when ``implicit_solver`` is passed explicitly.
+        step budget. Ignored when the passed ``implicit_solver`` carries a
+        root finder of the caller's own choosing.
     max_steps:
         Safety limit on solver steps per macro step.
     dt0:
-        Initial step size for the adaptive controller.
+        The adaptive controller's first step. ``None`` (default): each group's
+        first step is estimated from its field at the launch state — Hairer's
+        rule, what diffrax does for ``dt0=None`` — so a group whose fastest
+        relaxation is far below any fixed guess does not open with a
+        rejected step and a nonlinear solve that has to diverge first.
+        Later macro steps continue from the last step taken. A float pins
+        the first step for every group.
     fixed_dt:
     Lockstep mode for non-stiff groups. A fixed step (one scalar, or
     ``{group: dt}``) replaces error control there, so every member of a
@@ -595,7 +607,7 @@ class Scheduler:
         # the same steps on DallePezze and runs 14–34% faster, since the
         # Newton refreshes its Jacobian every iteration. A root finder the
         # caller set explicitly is theirs and stays.
-        newton = optx.Chord(
+        newton = Chord(
             rtol=rtol if newton_rtol is None else newton_rtol,
             atol=newton_atol,
         )
@@ -1804,7 +1816,9 @@ class Scheduler:
             ],
             dtype=bool,
         )
-        dt0_init = jnp.full((len(group_rhs),), float(self.dt0))
+        dt0_init = self._initial_steps(
+            group_rhs, write_idxs, integrators, state, t0
+        )
         steps_init = jnp.zeros((len(group_rhs),), dtype=jnp.int64)
         rej_init = jnp.zeros((len(group_rhs),), dtype=jnp.int64)
         res_init = tuple(dfx.RESULTS.successful for _ in range(len(group_rhs)))
@@ -2056,7 +2070,9 @@ class Scheduler:
         n_out = 1 if strang else n_save - 1
         save_frac = jnp.linspace(0.0, 1.0, n_save)
 
-        dt0_init = jnp.full((n_groups,), float(self.dt0))
+        dt0_init = self._initial_steps(
+            group_rhs, write_idxs, integrators, state, t0
+        )
         steps_init = jnp.zeros((n_groups,), jnp.int64)
         rej_init = jnp.zeros((n_groups,), jnp.int64)
         res_init = tuple(dfx.RESULTS.successful for _ in range(n_groups))
@@ -2700,7 +2716,7 @@ class Scheduler:
             integ.solver,
             t0=t0,
             t1=t1,
-            dt0=jnp.minimum(dt0_base, t1 - t0),
+            dt0=None if dt0_base is None else jnp.minimum(dt0_base, t1 - t0),
             y0=state_vec[..., own],
             saveat=saveat,
             stepsize_controller=self._controller_with_jumps(
@@ -2720,6 +2736,54 @@ class Scheduler:
         return sol, self._guard_result(
             saved, sol.result, group_name, integ, keys
         )
+
+    def _initial_step(self, rhs_fn, state_vec, own, t0, integ):
+        """A group's first step at its launch state: Hairer's estimate from
+        the field and its first-order change, scaled by the controller's
+        tolerances — diffrax's own rule for ``dt0=None``, evaluated here so
+        the compiled lanes can carry it as the group's first hint."""
+        if own.size == 0:  # nothing to integrate: the window in one step
+            return jnp.asarray(jnp.inf)
+        term = dfx.ODETerm(
+            _ReducedRHS(base=rhs_fn, own=own, fill=_FrozenFill(state_vec))
+        )
+        y0 = state_vec[..., own]
+        ctrl = integ.controller
+        order = integ.solver.error_order(term)
+        if order is None:
+            order = integ.solver.order(term)
+        scale = ctrl.atol + ctrl.rtol * jnp.abs(y0)
+        f0 = term.vf(t0, y0, None)
+        d0, d1 = ctrl.norm(y0 / scale), ctrl.norm(f0 / scale)
+        small = (d0 < 1e-5) | (d1 < 1e-5)
+        h0 = jnp.where(small, 1e-6, 0.01 * d0 / jnp.where(small, 1.0, d1))
+        f1 = term.vf(t0 + h0, y0 + h0 * f0, None)
+        d2 = ctrl.norm((f1 - f0) / scale) / h0
+        max_d = jnp.maximum(d1, d2)
+        h1 = jnp.where(
+            max_d <= 1e-15,
+            jnp.maximum(1e-6, h0 * 1e-3),
+            (0.01 / max_d) ** (1.0 / order),
+        )
+        return jnp.minimum(100 * h0, h1)
+
+    def _initial_steps(self, group_rhs, write_idxs, integrators, state, t0):
+        """The compiled lanes' first step per group: ``dt0`` when pinned, a
+        lockstep group's fixed step, otherwise :meth:`_initial_step`."""
+        if self.dt0 is not None:
+            return jnp.full((len(group_rhs),), float(self.dt0))
+        if not group_rhs:
+            return jnp.zeros((0,))
+        steps = []
+        for gi, (gname, rhs) in enumerate(group_rhs):
+            integ = integrators[gname]
+            if isinstance(integ.controller, dfx.ConstantStepSize):
+                steps.append(jnp.asarray(self._fixed_step(gname)))
+            else:
+                steps.append(
+                    self._initial_step(rhs, state, write_idxs[gi], t0, integ)
+                )
+        return jnp.stack(steps)
 
     def _fixed_step(self, group_name: str) -> float:
         """The lockstep step for ``group_name``: the scalar ``fixed_dt``, or

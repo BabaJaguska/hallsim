@@ -1539,3 +1539,51 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   (`test_saved_trajectory_carries_the_sampled_path_inside_a_window`). With
   the fix the 64-cell population mean sits within 0.1 log2 of the mean
   field on both Proctor reporters, both arms, both days.
+- [x] **P0.78 — With the chord root finder as the Scheduler's default, every
+  reverse-mode gradient through the multi-hallmark solve raised, and with
+  the error demoted every gradient was NaN; the forward solve was fine and
+  nothing said so.** Found 2026-09-12, four hours after the chord landed
+  as the default, by the first gradient anyone took through it: the
+  September 10 calibration's own three-parameter loss. The same loss with
+  an `optx.Newton` root finder gives 0.27903 and finite gradients. The RHS
+  and its tangents are finite everywhere on the trajectory. Instrumenting
+  the root finder: the very first step, from the published launch state at
+  the Scheduler's fixed `dt0 = 1e-3` days (300 times Proctor 2007's
+  0.265 s relaxation), stage 2 of Kvaerno5 runs optimistix's chord for its
+  full ten iterations growing by 1e8 per iteration to 2.4e143, and stage 3
+  starts from that and returns NaN. The forward solve rejects the step and
+  shrinks; the reverse pass factorises the Jacobian at the returned
+  iterate, and a NaN factor times the rejected branch's zero cotangent is
+  NaN, so one such step poisons every gradient. Optimistix's chord with
+  Cauchy termination has no divergence stop, and the rate-based stop its
+  other mode and diffrax's `VeryChord` use cannot see this case: the
+  relative update size saturates at `1/rtol` while the iterate grows, so
+  the rate is exactly 1. A guard on the finiteness of the iterate does not
+  help either (1e143 is finite). Newton never leaves O(1), which is why
+  the earlier default never showed it. **Fixed 2026-09-12:**
+  `hallsim.root_finders.Chord`, the Scheduler's default, carries the
+  residual of its current iterate, refuses an update whose residual is
+  non-finite or more than `growth_limit` (10) times larger, and so returns
+  only iterates whose residual it evaluated. One extra residual per solve.
+  Gradient equals Newton's to six figures; on the multi-hallmark control
+  arm 1 048 ms against the unguarded chord's 1 002 ms and Newton's
+  1 434 ms, the same step count as the unguarded chord (a limit of 2 cost
+  11 % more steps; 10, 100 and 1 000 the same steps). Conformance: 0 failing on every case. The launch step
+  itself is P1.26. `test_the_scheduler_chord_stops_diverging_with_a_finite_iterate`.
+
+- [x] **P1.26 — Every group starts its first step at the Scheduler's fixed
+  `dt0 = 1e-3`, whatever the group's fastest rate, so a stiff launch begins
+  with a guaranteed rejection and a nonlinear solve that has to diverge
+  first.** Found 2026-09-12 tracing P0.78. On the multi-hallmark composite
+  the Proctor 2007 group's fastest relaxation is 0.265 s and the first
+  attempted step is 86 s; the chord inside it grows to 1e143 before the
+  controller ever sees an error estimate, and the diary's population runs
+  record 31–153 rejected steps per member at launch for the same reason.
+  jaxkineticmodel never meets this: it starts every solve at `dt0 = 1e-12`
+  and lets the controller grow the step. The Scheduler already measures
+  each group's spectral abscissa for stiffness routing and carries a
+  per-group `dt0_hint` across macro steps; only the first macro step
+  ignores what it knows. *Fix:* start each routed group at
+  `min(dt0, c / spectral_abscissa)` (or diffrax's own initial-step
+  estimate when routing is unavailable), and measure the launch rejections
+  before and after on the multi-hallmark and the 1024-member population. **Fixed 2026-09-12:** `DEFAULT_DT0` is `None`; the Scheduler estimates each group's first step from its field at the launch state (Hairer's rule, diffrax's own for `dt0=None`, in `Scheduler._initial_step`), carries it into the compiled lanes as the group's first hint, and passes `dt0=None` through on the eager lane and the fast path; a float still pins it. Measured on the multi-hallmark control arm the gain is small — 44 rejected launch-group steps against 46, 402 against 408 in the other group, trajectories within 1e-4 relative — so the 31–153 launch rejections are the controller working through the transient, not the first step; the claim above overstated the step's share. On a stiff cubic launch (`test_initial_step.py`) the pinned step rejects and the estimated one does not, and the ten-iteration chord divergence of P0.78 no longer has a step to happen in.

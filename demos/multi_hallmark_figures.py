@@ -800,6 +800,73 @@ def fig_temporal(args):
 
 
 # ── temporal DDIS vs RAPA overlay (the rapamycin divergence) ─────────────
+# Constituents the figures draw from a reaction-level population rather than
+# their mean field. The calibration goes through the mean field; these
+# members are reported as cells, since that is how they are run.
+REACTION_LEVEL = ("p07",)
+
+# Row headings for reporter grids laid out one row per constituent.
+CONSTITUENT_LABELS = {
+    "dp14": "Dalle Pezze 2014 (dp14)",
+    "gz06": "Geva-Zatorsky 2006 (gz06)",
+    "p07": "Proctor 2007 (p07)",
+}
+
+
+def _reaction_level_reporters(problem):
+    """Indices of the reporters whose observable a reaction-level member
+    owns, in ``problem.reporters`` order."""
+    return [
+        i
+        for i, r in enumerate(problem.reporters)
+        if r.observable.split("/")[0] in REACTION_LEVEL
+    ]
+
+
+def _population_lfc(problem, params, arm, qt, n_cells, seed):
+    """Reaction-level members as ``n_cells`` cells on the trajectory of
+    ``arm`` at ``params``: per-cell and pooled sign-aligned log2
+    fold-changes at ``qt`` for the reporters those members own. Each
+    cell's fold-change uses its own day-0 reference, as the loss does; the
+    pooled one divides pooled readouts, as a bulk assay does. Returns
+    ``(cells, pooled)`` shaped ``(n_rep, n_t, n_cells)`` and
+    ``(n_rep, n_t)`` over :func:`_reaction_level_reporters`."""
+    import numpy as np
+
+    from hallsim.scheduler import Scheduler
+
+    rep_idx = _reaction_level_reporters(problem)
+    procs = dict(problem._substitute(problem.composite.processes, params))
+    for name in REACTION_LEVEL:
+        procs[name] = procs[name].as_stochastic()
+    registry = problem._registry(params)
+    cond = problem.conditions[problem.arm_pairs[arm][0]]
+    comp = problem._condition_composite(procs, cond, registry=registry)
+    y0 = comp.initial_state_vec()
+    span = problem.t_end - problem.t_start
+    res = Scheduler(**problem.scheduler_kwargs).run(
+        comp,
+        t_span=(problem.t_start, problem.t_end),
+        macro_dt=problem.macro_dt,
+        y0=jnp.tile(y0[None], (n_cells, 1)),
+        save_dt=max(1e-6, span / max(1, problem.n_save - 1)),
+        seed=seed,
+    )
+    trajs = jnp.stack(
+        [res.ys[..., idx] for idx in problem._reporter_indices]
+    )  # (n_rep, n_save, n_cells)
+    qt = jnp.asarray(qt)
+
+    def lfc_of(tr):
+        readout = problem._reporter_summaries(res.ts, tr, qt)
+        ref = problem._reporter_summaries(res.ts, tr, jnp.zeros_like(qt))
+        return problem._log2_fold_change(readout, ref)
+
+    cells = np.asarray(jax.vmap(lfc_of, in_axes=2, out_axes=2)(trajs))
+    pooled = np.asarray(lfc_of(trajs.mean(axis=2)))
+    return cells[rep_idx], pooled[rep_idx]
+
+
 def fig_temporal_compare(args):
     """One panel per reporter overlaying the calibrated DDIS (etoposide) and
     RAPA (etoposide + rapamycin @ day 2) trajectories, with each arm's measured
@@ -828,69 +895,136 @@ def fig_temporal_compare(args):
         arm: np.asarray(problem.model_lfc(init, arm, jnp.asarray(qt)))
         for arm in arms
     }
+    # Reporters of reaction-level members come from a population on the
+    # same trajectory: pooled mean for both parameter sets, and the spread
+    # across cells at the calibrated one.
+    pop_idx = _reaction_level_reporters(problem)
+    n_cells = int(getattr(args, "n_cells", 64))
+    seed = int(getattr(args, "seed", 0))
+    pop = {}
+    for arm in arms if pop_idx else []:
+        cells_fit, pooled_fit = _population_lfc(
+            problem, fit, arm, qt, n_cells, seed
+        )
+        _, pooled_oob = _population_lfc(problem, init, arm, qt, n_cells, seed)
+        pop[arm] = (cells_fit, pooled_fit, pooled_oob)
 
-    n = len(genes)
-    ncol = 3
-    nrow = -(-n // ncol)
+    def series(arm, i):
+        """``(out-of-the-box, calibrated, band)`` curves for reporter ``i``:
+        the mean field's, or the population's with its 10–90 % band."""
+        if i not in pop_idx:
+            return lfc_oob[arm][i], lfc_fit[arm][i], None
+        cells_fit, pooled_fit, pooled_oob = pop[arm]
+        k = pop_idx.index(i)
+        band = np.percentile(cells_fit[k], [10, 90], axis=1)
+        return pooled_oob[k], pooled_fit[k], band
+
+    # One row per constituent, in reporter order: the ragged right edge is
+    # the composite's structure, and the spare cells hold the legend and
+    # the population note.
+    rows = []
+    for i, r in enumerate(problem.reporters):
+        ns = r.observable.split("/")[0]
+        if not rows or rows[-1][0] != ns:
+            rows.append((ns, []))
+        rows[-1][1].append(i)
+    nrow, ncol = len(rows), max(len(idxs) for _, idxs in rows)
     fig, axes = plt.subplots(
         nrow, ncol, figsize=(11, 3.2 * nrow), sharex=True, squeeze=False
     )
-    axf = axes.ravel()
-    for i, ax in enumerate(axf):
-        if i >= n:
-            ax.axis("off")
-            continue
-        gene = genes[i]
-        ax.axhline(0, color=grid_c, lw=1.2, zorder=0)
-        for arm, (label, color) in arms.items():
-            ax.plot(
-                qt,
-                lfc_oob[arm][i],
-                color=color,
-                lw=1.5,
-                ls=(0, (4, 2)),
-                alpha=0.85,
-                zorder=2,
-                label=f"{label} — out-of-the-box",
+    spare = []
+    for r, (ns, idxs) in enumerate(rows):
+        for c in range(ncol):
+            ax = axes[r, c]
+            if c >= len(idxs):
+                ax.axis("off")
+                spare.append(ax)
+                continue
+            i = idxs[c]
+            gene = genes[i]
+            ax.axhline(0, color=grid_c, lw=1.2, zorder=0)
+            for arm, (label, color) in arms.items():
+                oob_curve, fit_curve, band = series(arm, i)
+                if band is not None:
+                    ax.fill_between(
+                        qt, band[0], band[1], color=color, alpha=0.15, lw=0
+                    )
+                ax.plot(
+                    qt,
+                    oob_curve,
+                    color=color,
+                    lw=1.5,
+                    ls=(0, (4, 2)),
+                    alpha=0.85,
+                    zorder=2,
+                    label=f"{label} — out-of-the-box",
+                )
+                ax.plot(
+                    qt,
+                    fit_curve,
+                    color=color,
+                    lw=2.2,
+                    zorder=3,
+                    label=f"{label} — calibrated",
+                )
+                dt = sorted(problem.data[arm])
+                dx = [0.0] + list(dt)
+                dy = [0.0] + [float(problem.data[arm][t][gene]) for t in dt]
+                ax.plot(
+                    dx,
+                    dy,
+                    "o",
+                    color=color,
+                    ms=6,
+                    mfc="white",
+                    mew=1.6,
+                    zorder=4,
+                )
+            # Both arms are overlaid; annotate the one carrying the most
+            # interventions so the shading is drawn once.
+            _annotate_interventions(
+                ax, max(arms, key=lambda a: ("rapa" in a.lower(), a))
             )
-            ax.plot(
-                qt,
-                lfc_fit[arm][i],
-                color=color,
-                lw=2.2,
-                zorder=3,
-                label=f"{label} — calibrated",
-            )
-            dt = sorted(problem.data[arm])
-            dx = [0.0] + list(dt)
-            dy = [0.0] + [float(problem.data[arm][t][gene]) for t in dt]
-            ax.plot(
-                dx, dy, "o", color=color, ms=6, mfc="white", mew=1.6, zorder=4
-            )
-        # Both arms are overlaid; annotate the one carrying the most
-        # interventions so the shading is drawn once.
-        _annotate_interventions(
-            ax, max(arms, key=lambda a: ("rapa" in a.lower(), a))
+            ax.set_title(gene, fontsize=11, fontweight="bold", loc="left")
+            ax.grid(True, color=grid_c, lw=0.6, alpha=0.7)
+            ax.set_axisbelow(True)
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+            if c == 0:
+                ax.set_ylabel("log2 fold-change")
+                ax.annotate(
+                    CONSTITUENT_LABELS.get(ns, ns),
+                    xy=(0, 1.2),
+                    xycoords="axes fraction",
+                    fontsize=9.5,
+                    color="#555",
+                    ha="left",
+                )
+            below = r + 1 < nrow and c < len(rows[r + 1][1])
+            if not below:
+                ax.set_xlabel("day")
+                ax.tick_params(labelbottom=True)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if pop_idx:
+        from matplotlib.patches import Patch
+
+        handles.append(Patch(color="#888", alpha=0.3))
+        labels.append(f"calibrated — 10–90 % of {n_cells} cells")
+    legend_ax = spare[0] if spare else None
+    if legend_ax is not None:
+        legend_ax.legend(
+            handles, labels, loc="center", frameon=False, fontsize=9.0
         )
-        ax.set_title(gene, fontsize=11, fontweight="bold", loc="left")
-        ax.grid(True, color=grid_c, lw=0.6, alpha=0.7)
-        ax.set_axisbelow(True)
-        for s in ("top", "right"):
-            ax.spines[s].set_visible(False)
-        if i % ncol == 0:
-            ax.set_ylabel("log2 fold-change")
-        if i >= n - ncol:
-            ax.set_xlabel("day")
-    handles, labels = axf[0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        loc="lower center",
-        ncol=3,
-        frameon=False,
-        fontsize=9.0,
-        bbox_to_anchor=(0.5, -0.01),
-    )
+    else:
+        fig.legend(
+            handles,
+            labels,
+            loc="lower center",
+            ncol=3,
+            frameon=False,
+            fontsize=9.0,
+            bbox_to_anchor=(0.5, -0.01),
+        )
     fig.suptitle(
         "Reporter trajectories — DDIS (fit) vs rapamycin (held-out), "
         "out-of-the-box vs calibrated",
@@ -899,7 +1033,22 @@ def fig_temporal_compare(args):
         ha="left",
         fontweight="bold",
     )
-    fig.tight_layout(rect=(0, 0.05, 1, 0.97))
+    if pop_idx:
+        pop_genes = ", ".join(genes[i] for i in pop_idx)
+        note = (
+            f"{pop_genes}: {', '.join(REACTION_LEVEL)} at reaction level,\n"
+            f"{n_cells} cells (seed {seed}), pooled mean;\n"
+            "other reporters from the mean field"
+        )
+        if len(spare) > 1:
+            spare[1].text(
+                0.0, 0.5, note, fontsize=9, color="#555", va="center"
+            )
+        else:
+            fig.text(
+                0.02, 0.94, note.replace("\n", " "), fontsize=9, color="#555"
+            )
+    fig.tight_layout(rect=(0, 0.0 if spare else 0.05, 1, 0.96))
     OUT_CAL.mkdir(parents=True, exist_ok=True)
     for ext in ("png", "pdf"):
         fig.savefig(
@@ -1340,65 +1489,30 @@ def fig_proteostasis_population(args):
     """
     import numpy as np
 
-    from hallsim.scheduler import Scheduler
-
     problem = _problem(args)
     params = {k: jnp.asarray(v) for k, v in load_fit().items()}
     n_cells = int(getattr(args, "n_cells", 64))
     seed = int(getattr(args, "seed", 0))
     arms = list(problem.arm_pairs)
-    rep_idx = [
-        i
-        for i, r in enumerate(problem.reporters)
-        if r.observable.startswith("p07/")
-    ]
+    rep_idx = _reaction_level_reporters(problem)
     genes = [problem.reporters[i].gene_symbol for i in rep_idx]
-
-    substituted = problem._substitute(problem.composite.processes, params)
-    registry = problem._registry(params)
-    procs = dict(substituted)
-    procs["p07"] = procs["p07"].as_stochastic()
-    span = problem.t_end - problem.t_start
-    save_dt = max(1e-6, span / max(1, problem.n_save - 1))
-    sched = Scheduler(**problem.scheduler_kwargs)
 
     rows = {}
     for arm in arms:
         days = sorted(float(t) for t in problem.data[arm])
-        qt = jnp.asarray(days)
-        mean_field = np.asarray(problem.model_lfc(params, arm, qt))[rep_idx]
-        cond = problem.conditions[problem.arm_pairs[arm][0]]
-        comp = problem._condition_composite(procs, cond, registry=registry)
-        y0 = comp.initial_state_vec()
-        res = sched.run(
-            comp,
-            t_span=(problem.t_start, problem.t_end),
-            macro_dt=problem.macro_dt,
-            y0=jnp.tile(y0[None], (n_cells, 1)),
-            save_dt=save_dt,
-            seed=seed,
+        mean_field = np.asarray(
+            problem.model_lfc(params, arm, jnp.asarray(days))
+        )[rep_idx]
+        cells, pooled = _population_lfc(
+            problem, params, arm, days, n_cells, seed
         )
-        trajs = jnp.stack(
-            [res.ys[..., idx] for idx in problem._reporter_indices]
-        )  # (n_rep, n_save, n_cells)
-
-        def lfc_of(tr):  # one cell's sign-aligned fold-change, as the loss
-            arm_readout = problem._reporter_summaries(res.ts, tr, qt)
-            ref = problem._reporter_summaries(res.ts, tr, jnp.zeros_like(qt))
-            return problem._log2_fold_change(arm_readout, ref)
-
-        per_cell = np.asarray(
-            jax.vmap(lfc_of, in_axes=2, out_axes=2)(trajs)
-        )  # (n_rep, n_t, n_cells)
-        pooled_traj = trajs.mean(axis=2)
-        pooled = np.asarray(lfc_of(pooled_traj))
         measured = np.asarray(
             [[float(problem.data[arm][t][g]) for t in days] for g in genes]
         )
         rows[arm] = dict(
             days=days,
-            cells=per_cell[rep_idx],
-            pooled=pooled[rep_idx],
+            cells=cells,
+            pooled=pooled,
             mean_field=mean_field,
             measured=measured,
         )

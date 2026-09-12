@@ -1,15 +1,38 @@
-"""Accuracy and differentiation of the optional per-step chord solver."""
+"""The Scheduler's chord, and the optional per-step chord solver."""
 
 import diffrax as dfx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import optimistix as optx
 import pytest
 
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process
-from hallsim.root_finders import StepChord
+from hallsim.root_finders import Chord, StepChord
 from hallsim.scheduler import Scheduler
+
+
+def test_the_scheduler_chord_stops_diverging_with_a_finite_iterate():
+    """y² − 4 from 0.1: the chord's Jacobian at the start is 0.2, so each
+    update squares the iterate and it overflows well inside ten steps.
+    optimistix's chord hands the overflow back; the Scheduler's refuses the
+    first update that grows the residual, returns the start, and says so."""
+
+    def fn(y, args):
+        return y**2 - 4.0
+
+    y0 = jnp.asarray(0.1)
+    theirs = optx.root_find(
+        fn, optx.Chord(rtol=1e-6, atol=1e-6), y0, throw=False, max_steps=10
+    )
+    ours = optx.root_find(
+        fn, Chord(rtol=1e-6, atol=1e-6), y0, throw=False, max_steps=10
+    )
+    assert not jnp.isfinite(theirs.value)
+    assert jnp.isfinite(ours.value)
+    assert ours.result == optx.RESULTS.nonlinear_divergence
+    assert isinstance(Scheduler().implicit_solver.root_finder, Chord)
 
 
 class NonlinearDecay(Process):
