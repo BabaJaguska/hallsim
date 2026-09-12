@@ -34,7 +34,8 @@ class _ChordState(eqx.Module):
 class Chord(optx.Chord):
     """optimistix's chord — one Jacobian per nonlinear solve, Cauchy
     termination — that keeps the residual of its current iterate and
-    refuses an update that makes it non-finite or more than twice as large.
+    refuses an update that makes it non-finite or grows it past
+    ``growth_limit``.
 
     A chord at a stale Jacobian on a stiff step can grow geometrically
     for its whole iteration budget: on the multi-hallmark launch it reaches
@@ -49,14 +50,19 @@ class Chord(optx.Chord):
     grow it. That costs one residual evaluation per solve, at the start.
 
     ``growth_limit`` is how much the residual norm may grow in one update
-    before the update is refused. A diverging chord grows it by orders of
-    magnitude per iteration; a converging one on a curved residual can grow
-    it once before it falls, and refusing that costs steps (a limit of 2
-    took 11% more steps on the multi-hallmark composite, 10 and above the
-    same steps as the unguarded chord).
+    before the update is refused; a residual within ``atol`` is converged
+    and never refused as growth. A diverging chord grows it by orders of
+    magnitude per iteration; a converging one on a curved residual can
+    grow it once before it falls, and refusing that costs steps (a limit
+    of 2 took 11% more steps on the multi-hallmark composite, 10 and
+    above the same steps as the unguarded chord). A limit near that
+    growth is also a threshold the rounding of batched kernels can
+    flip, and at 10 a batched run and the same member alone diverged
+    to 1e-4; at 100 they agree to 1e-9, and a diverging chord's tenfold
+    growth per iteration is still refused at once.
     """
 
-    growth_limit: float = 10.0
+    growth_limit: float = 100.0
 
     def init(self, fn, y, args, options, f_struct, aux_struct, tags):
         del options, f_struct, aux_struct
@@ -106,7 +112,7 @@ class Chord(optx.Chord):
         accept = (
             _all_finite(new_y)
             & _all_finite(f_new)
-            & (f_norm_new <= self.growth_limit * state.f_norm)
+            & (f_norm_new <= self.growth_limit * state.f_norm + self.atol)
         )
         scale = jtu.tree_map(
             lambda leaf: self.atol + self.rtol * jnp.abs(leaf), new_y

@@ -991,12 +991,17 @@ def fig_temporal_compare(args):
             for sp in ("top", "right"):
                 ax.spines[sp].set_visible(False)
             if c == 0:
-                ax.set_ylabel("log2 fold-change")
+                ax.set_ylabel("log2FC")
                 ax.annotate(
-                    CONSTITUENT_LABELS.get(ns, ns),
+                    CONSTITUENT_LABELS.get(ns, ns)
+                    + (
+                        f" — {n_cells}-cell population"
+                        if pop_idx and ns in REACTION_LEVEL
+                        else ""
+                    ),
                     xy=(0, 1.2),
                     xycoords="axes fraction",
-                    fontsize=9.5,
+                    fontsize=11,
                     color="#555",
                     ha="left",
                 )
@@ -1004,21 +1009,70 @@ def fig_temporal_compare(args):
             if not below:
                 ax.set_xlabel("day")
                 ax.tick_params(labelbottom=True)
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    if pop_idx:
-        from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
 
-        handles.append(Patch(color="#888", alpha=0.3))
-        labels.append(f"calibrated — 10–90 % of {n_cells} cells")
-    legend_ax = spare[0] if spare else None
-    if legend_ax is not None:
-        legend_ax.legend(
-            handles, labels, loc="center", frameon=False, fontsize=9.0
+    fit_arms = set(getattr(problem, "fit_arms", None) or [])
+    held_arms = set(getattr(problem, "held_out_arms", None) or [])
+    grey = "#555"
+    arm_entries = []
+    for arm, (label, color) in arms.items():
+        role = (
+            " (fit)"
+            if arm in fit_arms
+            else " (held out)" if arm in held_arms else ""
         )
+        arm_entries.append((Line2D([], [], color=color, lw=2.2), label + role))
+    style_entries = [
+        (Line2D([], [], color=grey, lw=1.5, ls=(0, (4, 2))), "published"),
+        (Line2D([], [], color=grey, lw=2.2), "calibrated"),
+    ]
+    other_entries = [
+        (
+            Line2D(
+                [], [], color=grey, marker="o", mfc="white", mew=1.6, ls="none"
+            ),
+            "measured",
+        )
+    ]
+    for h, lab in zip(*axes[0, 0].get_legend_handles_labels()):
+        if lab in ("etoposide", "rapamycin"):
+            other_entries.append((h, lab))
+    if pop_idx:
+        other_entries.append(
+            (Patch(color="#888", alpha=0.3), "cell-to-cell spread")
+        )
+    groups = [
+        ("arm", arm_entries),
+        ("parameters", style_entries),
+        (None, other_entries),
+    ]
+    if spare:
+        # one legend, the groups separated by a blank row, headed in bold
+        blank = Patch(alpha=0)
+        rows, headers = [], []
+        for gi, (title, entries) in enumerate(groups):
+            if gi:
+                rows.append((blank, ""))
+            if title:
+                headers.append(len(rows))
+                rows.append((blank, title))
+            rows.extend(entries)
+        leg = spare[0].legend(
+            [h for h, _ in rows],
+            [lab for _, lab in rows],
+            loc="upper left",
+            bbox_to_anchor=(0.0, 1.0),
+            frameon=False,
+            fontsize=10.5,
+        )
+        for i in headers:
+            leg.get_texts()[i].set_fontweight("bold")
     else:
+        entries = [e for _, es in groups for e in es]
         fig.legend(
-            handles,
-            labels,
+            [h for h, _ in entries],
+            [lab for _, lab in entries],
             loc="lower center",
             ncol=3,
             frameon=False,
@@ -1026,28 +1080,12 @@ def fig_temporal_compare(args):
             bbox_to_anchor=(0.5, -0.01),
         )
     fig.suptitle(
-        "Reporter trajectories — DDIS (fit) vs rapamycin (held-out), "
-        "out-of-the-box vs calibrated",
-        fontsize=12.5,
-        x=0.02,
-        ha="left",
+        "Gene reporter trajectories in treated and untreated arms",
+        fontsize=13,
+        x=0.5,
+        ha="center",
         fontweight="bold",
     )
-    if pop_idx:
-        pop_genes = ", ".join(genes[i] for i in pop_idx)
-        note = (
-            f"{pop_genes}: {', '.join(REACTION_LEVEL)} at reaction level,\n"
-            f"{n_cells} cells (seed {seed}), pooled mean;\n"
-            "other reporters from the mean field"
-        )
-        if len(spare) > 1:
-            spare[1].text(
-                0.0, 0.5, note, fontsize=9, color="#555", va="center"
-            )
-        else:
-            fig.text(
-                0.02, 0.94, note.replace("\n", " "), fontsize=9, color="#555"
-            )
     fig.tight_layout(rect=(0, 0.0 if spare else 0.05, 1, 0.96))
     OUT_CAL.mkdir(parents=True, exist_ok=True)
     for ext in ("png", "pdf"):

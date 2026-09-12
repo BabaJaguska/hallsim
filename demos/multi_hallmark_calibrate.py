@@ -137,6 +137,15 @@ ARM_PAIRS = {
 ARM_CONDITIONS = {arm: cond for arm, (cond, _) in ARM_PAIRS.items()}
 
 
+# What `calibrate` fits unless `--fit` names otherwise: one DallePezze
+# parameter per senescence reporter axis and the mTORC1→synthesis gain.
+# Geva-Zatorsky's two (Mdm2 degradation, the gate's control end) stay at
+# their placed values: freed, the fit moves Mdm2 degradation over the Hopf
+# the gate was placed against and the composite stops pulsing in either
+# arm, for 2.6 % of loss the data cannot resolve (docs/known-problems.md).
+DEFAULT_FIT = ("sa_beta_gal_decay", "CDKN1A_transcr", "mtor_synthesis_gain")
+
+
 def _default_fit_params(composite, published) -> dict:
     """The fitted set: one parameter per reporter axis the data constrains,
     each with a log-normal MAP prior at its published or placed value, plus
@@ -872,7 +881,7 @@ def cmd_run(args) -> None:
         )
         logging.getLogger("hallsim").setLevel(logging.INFO)
     equilibrate = getattr(args, "equilibrate", False)
-    fitted = tuple(getattr(args, "fit", ()) or ()) or None
+    fitted = tuple(getattr(args, "fit", ()) or ()) or DEFAULT_FIT
     if not SERIES_MATRIX.exists():
         print(_missing_data_notice(), flush=True)
         return run_unscored(equilibrate, make_run_dir(RUN_NAME))

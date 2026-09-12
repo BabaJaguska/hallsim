@@ -704,7 +704,9 @@ def gz06_damage_scan():
     multiple=True,
     metavar="PARAM",
     help="fit exactly these parameters (repeatable); the rest stay at "
-    "their placed values. Default: the demo's declared set",
+    "their placed values. Default: the demo's declared fit (DallePezze's "
+    "SA-β-gal decay and CDKN1A transcription, the mTORC1→synthesis gain); "
+    "Geva-Zatorsky's two parameters stay placed",
 )
 def multi_hallmark(
     command,
