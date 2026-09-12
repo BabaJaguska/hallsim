@@ -68,6 +68,7 @@ from demos.models.multi_hallmark import (  # noqa: E402
 
 from hallsim.models.neuralode import (  # noqa: E402
     NeuralODEProcess,
+    STATE_PORT,
     simulate_conditioned,
     fit_neuralode_derivative,
     fit_neuralode_shooting,
@@ -217,8 +218,13 @@ def hopf_points(axis="alpha_y", **kw):
     return [h.param for h in hopf_analysis(axis, **kw) if h.kind == "hopf"]
 
 
-def train_stages():
-    """Return (derivative-only block, shooting-refined block, (ts, ys, us))."""
+def train_stages(checkpoint=None):
+    """Return (derivative-only block, shooting-refined block, (ts, ys, us)).
+
+    ``checkpoint(name, block)``, when given, is called the moment each stage
+    finishes, so a failure in whatever runs next costs the run rather than the
+    fit.
+    """
     inputs = jnp.stack(
         jnp.meshgrid(
             jnp.array(TRAIN["alpha_x_grid"]),
@@ -265,6 +271,8 @@ def train_stages():
         batch_size=512,
     )
     log.info("derivative fit in %.1fs", time.time() - t0)
+    if checkpoint is not None:
+        checkpoint("deriv", deriv)
     t0 = time.time()
     # Physics-regularized multiple shooting: plain single shooting over ~7 p53
     # periods collapses the oscillator to a fixed point (phase drift makes a
@@ -284,6 +292,8 @@ def train_stages():
         batch_size=32,
     )
     log.info("shooting fine-tune in %.1fs", time.time() - t0)
+    if checkpoint is not None:
+        checkpoint("shoot", shoot)
     return deriv, shoot, (ts, ys, us)
 
 
@@ -306,6 +316,20 @@ def neural_solo(block, alpha_x, alpha_y):
     return _solo(b)
 
 
+def _x_key(comp):
+    """Where p53 sits in this composite's store.
+
+    The SBML process gives each species its own port, so p53 is ``gz06/x``.
+    The learned block gives its fields one stacked state port, whose elements
+    expand to ``gz06/state/x``. Both are the p53 trace to every caller here.
+    """
+    keys = comp.store_keys()
+    for k in ("gz06/x", f"gz06/{STATE_PORT}/x"):
+        if k in keys:
+            return k
+    raise KeyError(f"no p53 path among {list(keys)}")
+
+
 def _run_traj(comp, t_end=4.0):
     r = Scheduler(auto_stiffness=True).run(
         comp,
@@ -314,7 +338,7 @@ def _run_traj(comp, t_end=4.0):
         macro_dt=0.05,
         save_dt=0.01,
     )
-    return r.ts, r.get("gz06/x")
+    return r.ts, r.get(_x_key(comp))
 
 
 def _run_x(comp, t_end=4.0):

@@ -878,14 +878,27 @@ def fit_neuralode_shooting(
         y0f = _base.at[_sidx].set(y0)
         if _iidx is not None:
             y0f = y0f.at[_iidx].set(u)
-        t1 = t0 + dt * (n_pts - 1)
+        span = dt * (n_pts - 1)
         res = _sched.run(
-            c, t_span=(t0, t1), y0=y0f, macro_dt=t1 - t0, save_dt=dt
+            c, t_span=(t0, t0 + span), y0=y0f, macro_dt=span, save_dt=dt
         )
         return jnp.stack([res.get(f"m/{f}") for f in fld], axis=-1)
 
     def make_loss(match_len, starts, seg_len):
         t0s = [float(ts[s]) for s in starts]
+        # The verdict is cached per macro_dt, and every step below
+        # differentiates through _sched.run, where the eigenvalues it would
+        # need are tracers. Resolve it here instead, at the widths this stage
+        # integrates over: the match window, plus the segment window when the
+        # continuity term also integrates.
+        widths = {match_len}
+        if continuity_weight and segments > 1:
+            widths.add(seg_len)
+        for w in widths:
+            span = dt * (w - 1)
+            _sched.warm_up(
+                comp0, (t0s[0], t0s[0] + span), macro_dt=span, y0=_base
+            )
 
         @eqx.filter_value_and_grad
         def loss_fn(train, yb, ub, xb, tb):

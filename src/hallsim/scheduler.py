@@ -2361,7 +2361,12 @@ class Scheduler:
             composite.structural_fingerprint(),
             gstruct,
             int(state.shape[-1]),
-            float(macro_dt),
+            # Rounded, because callers derive macro_dt by subtracting window
+            # bounds: `(t0 + span) - t0` differs from `span` by an ULP that
+            # varies with t0, and an exact float compare turns one warmed
+            # verdict into a miss on every window but one. No two macro_dt a
+            # stiffness verdict can tell apart are this close.
+            float(f"{float(macro_dt):.12g}"),
         )
 
     @staticmethod
