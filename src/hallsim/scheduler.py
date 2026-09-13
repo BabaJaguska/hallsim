@@ -1938,26 +1938,27 @@ class Scheduler:
             composite.evolved_indices(names, keys)
             for _, names in groups.items()
         ]
-        discrete_info = [
-            (
-                name,
-                proc,
-                *_build_proc_index_maps(
-                    proc, composite.topology[name], key_to_idx
-                ),
-            )
-            for name, proc in discrete_procs.items()
-        ]
-        event_info = [
-            (
-                name,
-                proc,
-                *_build_proc_index_maps(
-                    proc, composite.topology[name], key_to_idx
-                ),
-            )
-            for name, proc in event_procs.items()
-        ]
+
+        def _bound(names):
+            """Each process as this call passes it, not as the core was
+            built with it: a core is cached per structure and reused across
+            parameter values, so a process read from the closure runs every
+            arm of a sweep at the first arm's parameters."""
+            return [
+                (
+                    name,
+                    composite.processes[name],
+                    *_build_proc_index_maps(
+                        composite.processes[name],
+                        composite.topology[name],
+                        key_to_idx,
+                    ),
+                )
+                for name in names
+            ]
+
+        discrete_info = _bound(discrete_procs)
+        event_info = _bound(event_procs)
         n_macro = max(1, int(math.ceil((t1 - t0) / macro_dt - 1e-12)))
         t_starts = t0 + macro_dt * jnp.arange(n_macro)
         due = jnp.asarray(
@@ -2159,7 +2160,13 @@ class Scheduler:
         stochastic_info = None
         stochastic_event_count = jnp.asarray(0, dtype=jnp.int32)
         if stochastic_procs:
-            proc_name, proc = next(iter(stochastic_procs.items()))
+            # The process this call passed, not the one the core was built
+            # with. A core is cached per structure and reused across
+            # parameter values, and the reaction rates live in the process:
+            # read from the closure, a sweep runs every arm at the first
+            # arm's rates while the continuous groups follow the composite.
+            proc_name = next(iter(stochastic_procs))
+            proc = composite.processes[proc_name]
             key_to_idx = {key: i for i, key in enumerate(keys)}
             topo = composite.topology[proc_name]
 

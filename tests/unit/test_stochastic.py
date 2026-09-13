@@ -479,3 +479,45 @@ def test_auto_keeps_an_accelerator_batch_vectorized(tmp_path, monkeypatch):
     monkeypatch.setattr(Scheduler, "_platform", staticmethod(lambda _: "cpu"))
     assert Scheduler()._threaded_batch(True, y0) is True
     assert Scheduler()._threaded_batch(False, y0) is False
+
+
+def test_a_reused_scheduler_reads_reaction_rates_from_each_composite(
+    tmp_path,
+):
+    """A compiled core is cached per structure and reused across parameter
+    values, so the reaction network has to come from the composite handed to
+    each call. Taken from the closure the core was built with, every arm of a
+    sweep runs at the first arm's rates while the continuous groups follow
+    the composite — a lever that moves the mean field and leaves the
+    population flat.
+
+    Discrimination: with the process bound at build time the second run
+    reuses the first run's rate and fires events at k=0.
+    """
+    from hallsim.process import write_param
+
+    path = tmp_path / "decay.xml"
+    path.write_text(textwrap.dedent(MODEL))
+    process = process_from_sbml(str(path), name="decay").as_stochastic()
+
+    def composite_at(k):
+        proc = write_param(process, "parameters.k", k)
+        return Composite(
+            processes={"decay": proc},
+            topology={"decay": {n: f"decay/{n}" for n in proc._species_names}},
+            validate=False,
+            semantic_validation=False,
+        )
+
+    run = dict(t_span=(0.0, 1.0), macro_dt=0.25, save_dt=0.25, seed=3)
+    shared = Scheduler()
+    decaying = shared.run(composite_at(8.0), **run)
+    halted = shared.run(composite_at(0.0), **run)
+    assert int(decaying.stats["decay"]["num_events"]) > 0
+    assert int(halted.stats["decay"]["num_events"]) == 0
+
+    order_independent = Scheduler()
+    first = order_independent.run(composite_at(0.0), **run)
+    second = order_independent.run(composite_at(8.0), **run)
+    assert int(first.stats["decay"]["num_events"]) == 0
+    assert int(second.stats["decay"]["num_events"]) > 0
