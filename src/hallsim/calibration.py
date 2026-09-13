@@ -86,6 +86,9 @@ class CalibrationHistory:
     # Post-fit local identifiability at best_params (None if not requested or
     # if the analysis failed); see hallsim.identifiability.
     identifiability: Any = None
+    #: What produced this history — steps, autodiff mode, optimizer and its
+    #: settings — so a run folder can say how its numbers were made.
+    settings: dict = field(default_factory=dict)
 
     def __str__(self) -> str:
         if not self.losses:
@@ -709,6 +712,35 @@ def _placement_advice(sug) -> str:
     return f"K={sug.K:.4g} would open it, but {sug.note}"
 
 
+def _jsonable(value):
+    """``value`` as something ``json.dump`` accepts: arrays and scalars to
+    numbers, series and mappings to dicts, dataclasses to their fields,
+    callables to their names, anything else to its ``repr``."""
+    import dataclasses
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (np.generic,)):
+        return value.item()
+    if isinstance(value, (np.ndarray, jnp.ndarray)):
+        arr = np.asarray(value)
+        return arr.item() if arr.ndim == 0 else arr.tolist()
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_jsonable(v) for v in value]
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        return _jsonable(value.to_dict())
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            f.name: _jsonable(getattr(value, f.name))
+            for f in dataclasses.fields(value)
+        }
+    if callable(value):
+        return getattr(value, "__name__", type(value).__name__)
+    return repr(value)
+
+
 def _validate_parameter_ref(pname: str, pref, proc) -> None:
     """The field a :class:`ParameterRef` names must exist on the process,
     must not be static, and must hold a scalar — checked once when the
@@ -735,6 +767,20 @@ def _validate_parameter_ref(pname: str, pref, proc) -> None:
             f"params[{pname!r}] fits {address}, which {type(proc).__name__} "
             f"does not have ({exc})."
         ) from exc
+    # A process that declares a fittable surface is the authority on it: a
+    # field outside that surface is not a mechanism parameter, whatever its
+    # value looks like. A compartment size is the case everyone meets.
+    declared = {item.field for item in proc.calibratable_params()}
+    if declared and pref.field not in declared:
+        key = pref.field.partition(".")[2] or pref.field
+        if key in getattr(proc, "_compartment_names", ()):
+            why = "a compartment size: geometry that scales every concentration in the model, not a rate"
+        else:
+            why = f"not among the parameters {type(proc).__name__} declares fittable"
+        raise ValueError(
+            f"params[{pname!r}] fits {address}, which is {why}. "
+            "The fittable surface is proc.calibratable_params()."
+        )
     if jnp.ndim(value) != 0:
         raise ValueError(
             f"params[{pname!r}] fits {address}, which holds a "
@@ -871,7 +917,11 @@ class CalibrationProblem:
         weights: dict | None = None,
         scheduler_kwargs: dict | None = None,
         hallmark_registry: dict | None = None,
+        notes: dict | None = None,
     ) -> None:
+        self._ctor_kwargs = {
+            k: v for k, v in locals().items() if k not in ("self", "__class__")
+        }
         from hallsim.composite import Composite  # local import — avoid cycle
         from hallsim.hallmarks import HALLMARK_REGISTRY
 
@@ -1185,6 +1235,123 @@ class CalibrationProblem:
             )
             for k in self._all_refs
         }
+
+    def describe(self) -> dict:
+        """Everything that defines this problem, as plain JSON: the composite
+        and its processes, the reporters, the conditions and arms, the data
+        being fitted, every fittable with its prior and clamp, the loss and
+        solver settings, the hallmark mappings the conditions exercise, the
+        library versions, and any ``notes`` the caller attached (a dataset
+        accession, a declared scalar). Written beside every run's summary
+        so the numbers in a folder can be traced to what produced them."""
+        import importlib.metadata as md
+        import subprocess
+
+        kw = self._ctor_kwargs
+        comp = self.composite
+        registry = kw.get("hallmark_registry")
+        if registry is None:
+            from hallsim.hallmarks import HALLMARK_REGISTRY
+
+            registry = HALLMARK_REGISTRY
+        used = {h for c in kw["conditions"].values() for h in c.hallmarks}
+        hallmarks = {
+            name: [
+                _jsonable(m) for m in getattr(registry[name], "mappings", ())
+            ]
+            for name in sorted(used)
+            if name in registry
+        }
+        params = {}
+        for name, ref in self._all_refs.items():
+            entry = _jsonable(ref)
+            try:
+                entry["initial"] = float(self.initial_params()[name])
+            except Exception:  # noqa: BLE001 - a traced or absent start
+                entry["initial"] = None
+            params[name] = entry
+        versions = {}
+        for dist in ("jax", "diffrax", "equinox", "optax", "hallsim"):
+            try:
+                versions[dist] = md.version(dist)
+            except md.PackageNotFoundError:
+                versions[dist] = None
+        try:
+            root = Path(__file__).resolve().parents[2]
+            versions["hallsim_commit"] = (
+                subprocess.run(
+                    ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                ).stdout.strip()
+                or None
+            )
+        except Exception:  # noqa: BLE001 - no git, no commit
+            versions["hallsim_commit"] = None
+        return _jsonable(
+            {
+                "composite": {
+                    "processes": {
+                        n: type(pr).__name__
+                        for n, pr in comp.processes.items()
+                    },
+                    "fingerprint": comp.structural_fingerprint(),
+                },
+                "reporters": [
+                    {
+                        "gene_symbol": r.gene_symbol,
+                        "observable": r.observable,
+                        "sign": r.sign,
+                        "summary": getattr(
+                            r.summary, "__name__", type(r.summary).__name__
+                        ),
+                        "reference": r.reference,
+                    }
+                    for r in kw["reporters"]
+                ],
+                "conditions": {
+                    n: {
+                        "hallmarks": dict(c.hallmarks),
+                        "interventions": c.interventions,
+                        "description": c.description,
+                    }
+                    for n, c in kw["conditions"].items()
+                },
+                "arm_pairs": kw["arm_pairs"],
+                "fit_arms": kw["fit_arms"],
+                "held_out_arms": kw.get("held_out_arms") or [],
+                "data": kw["data"],
+                "params": params,
+                "loss": {
+                    "likelihood": getattr(
+                        kw.get("likelihood"), "__name__", None
+                    )
+                    or "gaussian_nll",
+                    "weights": kw.get("weights"),
+                    "prior_weight": kw["prior_weight"],
+                    "normalization": kw["normalization"],
+                    "equilibrate": kw["equilibrate"],
+                    "equilibration_condition": kw.get(
+                        "equilibration_condition"
+                    ),
+                    "t_start": kw["t_start"],
+                    "t_end": kw["t_end"],
+                    "macro_dt": kw["macro_dt"],
+                    "n_save": kw["n_save"],
+                },
+                "scheduler_kwargs": kw.get("scheduler_kwargs") or {},
+                "hallmarks": hallmarks,
+                "versions": versions,
+                "notes": kw.get("notes") or {},
+            }
+        )
+
+    def with_params(self, params: dict) -> "CalibrationProblem":
+        """The same problem over a different fitted set — same composite,
+        reporters, arms, data and settings — for a screen that asks which
+        of a wider pool the data can fit, or a fit that then fits them."""
+        return CalibrationProblem(**{**self._ctor_kwargs, "params": params})
 
     def with_overrides(self, overrides: dict) -> "CalibrationProblem":
         """A copy of this problem with parameters pinned to given values.
@@ -1890,6 +2057,22 @@ class CalibrationProblem:
             **calibrator_kwargs,
         )
         history = cal.fit(steps=steps)
+        history.settings = _jsonable(
+            {
+                "steps": steps,
+                "mode": mode,
+                "method": cal.method,
+                "learning_rate": cal.learning_rate,
+                "early_stop_patience": cal.early_stop_patience,
+                "early_stop_tol": cal.early_stop_tol,
+                "validation_arms": list(validation_arms or []),
+                "identifiability": identifiability,
+                "allow_unidentifiable": allow_unidentifiable,
+                "log_params": True,
+                "clamps": clamps,
+                **calibrator_kwargs,
+            }
+        )
         if identifiability:
             # Post-fit local identifiability at the optimum — a warn-by-default
             # diagnostic (like the composite's validation layer), never blocks.

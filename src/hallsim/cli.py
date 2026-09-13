@@ -662,7 +662,7 @@ def gz06_damage_scan():
 @simulate.command("multi-hallmark")
 @click.argument(
     "command",
-    type=click.Choice(["run", "calibrate", "score", "sweep"]),
+    type=click.Choice(["run", "calibrate", "score", "screen", "sweep"]),
     default="run",
 )
 @click.option(
@@ -719,9 +719,10 @@ def gz06_damage_scan():
     multiple=True,
     metavar="PARAM",
     help="fit exactly these parameters (repeatable); the rest stay at "
-    "their placed values. Default: the demo's declared fit (DallePezze's "
-    "SA-β-gal decay and CDKN1A transcription, the mTORC1→synthesis gain); "
-    "Geva-Zatorsky's two parameters stay placed",
+    "their placed values. A name from the demo's declared set, or any "
+    "parameter as `process.key` the way `screen` names it (e.g. "
+    "dp14.DNA_repair, p07.Source, mtor_synthesis.gain). Default: the "
+    "declared four",
 )
 def multi_hallmark(
     command,
@@ -763,9 +764,9 @@ def multi_hallmark(
         rapa_intensity=rapa_intensity,
         run=run,
     )
-    from demos.multi_hallmark_calibrate import cmd_score
+    from demos.multi_hallmark_calibrate import cmd_score, cmd_screen
 
-    dispatch = {"sweep": cmd_sweep, "score": cmd_score}
+    dispatch = {"sweep": cmd_sweep, "score": cmd_score, "screen": cmd_screen}
     dispatch.get(command, cmd_run)(args)
 
 

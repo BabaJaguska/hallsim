@@ -26,8 +26,15 @@ def make_run_dir(name: str, stamp: str | None = None) -> Path:
     ``<name>/latest``. ``stamp`` overrides the generated timestamp.
     """
     base = outdir(name)
-    run = base / (stamp or datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-    run.mkdir(parents=True, exist_ok=True)
+    base.mkdir(parents=True, exist_ok=True)
+    label = stamp or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run = base / label
+    # Two runs started in the same second must not share a folder.
+    n = 2
+    while run.exists():
+        run = base / f"{label}-{n}"
+        n += 1
+    run.mkdir(parents=True, exist_ok=False)
     latest = base / "latest"
     if latest.is_symlink():
         latest.unlink()

@@ -31,6 +31,8 @@ def save_outputs(
       post-fit (densely sampled, ``n_save_plot`` points).
     - ``summary.json`` — fitted params, init params, loss history, per-arm
       concordance (pre and post), conditions, params.
+    - ``config.json`` — the whole problem definition (``problem.describe()``)
+      and the fit's settings (``history.settings``): what produced the run.
 
     Re-samples each condition at ``n_save_plot`` points so the trajectory
     plots are smooth (the loss path uses ``problem.n_save``, kept low for
@@ -175,6 +177,20 @@ def save_outputs(
     }
     with open(out / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
+    # The convention: every run folder says what produced it — the whole
+    # problem definition and the fit's settings — beside its numbers.
+    from datetime import datetime
+
+    with open(out / "config.json", "w") as f:
+        json.dump(
+            {
+                "written": datetime.now().isoformat(timespec="seconds"),
+                "problem": problem.describe(),
+                "fit": getattr(history, "settings", {}) or {},
+            },
+            f,
+            indent=2,
+        )
 
     return {
         "out_dir": str(out),

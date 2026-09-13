@@ -242,16 +242,19 @@ def report_from_jacobian(
 
     fim = (jac.T @ jac) / float(sigma) ** 2
     eigval = np.linalg.eigvalsh(fim)
-    cov = np.linalg.pinv(fim, rcond=1e-12)
-    var = np.clip(np.diag(cov), 0.0, None)
-    std = np.sqrt(var)
-    # A structurally-flat direction has ~0 sensitivity → pinv drops it →
-    # var≈0, which would masquerade as "tight". Force those to unbounded.
-    std = np.where(rel < struct_tol, np.inf, std)
-
-    denom = np.outer(std, std)
+    # Uncertainty over the directions the data see; a parameter loading on
+    # a direction they do not has no finite uncertainty. (A pseudo-inverse
+    # of the normal matrix reports zero there, which reads as "tight".)
+    cov, undetermined = _covariance(jac / float(sigma))
+    std = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    std = np.where((rel < struct_tol) | undetermined, np.inf, std)
+    # Correlation from the pseudo-inverse, which keeps a collinear pair's
+    # ±1 where the seen-direction covariance would leave it undefined.
+    cov_p = np.linalg.pinv(fim, rcond=1e-12)
+    sd_p = np.sqrt(np.clip(np.diag(cov_p), 0.0, None))
+    denom = np.outer(sd_p, sd_p)
     with np.errstate(invalid="ignore", divide="ignore"):
-        corr = np.where(denom > 0, cov / denom, 0.0)
+        corr = np.where(denom > 0, cov_p / denom, 0.0)
     np.fill_diagonal(corr, 1.0)
 
     confounded: list[tuple[str, str, float]] = []
@@ -328,6 +331,26 @@ class FitSetChoice:
         return "\n".join(lines)
 
 
+def _covariance(columns: np.ndarray, rcond: float = 1e-8):
+    """``(cov, undetermined)`` from scaled sensitivity columns: the
+    parameter covariance over the directions the data see, and which
+    parameters load on a direction they do not (singular value below
+    ``rcond`` of the largest). Those have no finite variance; a
+    pseudo-inverse of the normal matrix would report zero for them, which
+    is the opposite of the truth."""
+    u, sv, vt = np.linalg.svd(columns, full_matrices=False)
+    seen = sv > rcond * sv.max()
+    v = vt.T
+    cov = (v[:, seen] / sv[seen] ** 2) @ v[:, seen].T
+    unseen = v[:, ~seen]
+    undetermined = (
+        np.any(np.abs(unseen) > 1e-8, axis=1)
+        if unseen.shape[1]
+        else np.zeros(columns.shape[1], dtype=bool)
+    )
+    return cov, undetermined
+
+
 def choose_fit_set(
     problem,
     params: dict | None = None,
@@ -336,6 +359,7 @@ def choose_fit_set(
     corr_tol: float = 0.95,
     std_tol: float = 1.0,
     sigma: float | None = None,
+    must_keep: tuple = (),
 ) -> FitSetChoice:
     """The largest subset of the candidate pool the data can fit together.
 
@@ -349,7 +373,10 @@ def choose_fit_set(
 
     The pool is the problem's own fitted references, so a wider screen is a
     problem built with the wider pool (``build_problem(parameters=...)``).
-    ``sigma`` defaults to :func:`residual_scale`.
+    ``sigma`` defaults to :func:`residual_scale`. ``must_keep`` names
+    candidates admitted first and never removed — a fit set chosen on other
+    grounds, extended by whatever the data can still determine beside it;
+    their own 1σ within the final set is reported like the others'.
     """
     params = dict(params if params is not None else problem.initial_params())
     jac, names = sensitivity_jacobian(problem, params)
@@ -359,19 +386,33 @@ def choose_fit_set(
 
     col = np.linalg.norm(jac, axis=0)
     rel = col / max(col.max(), 1e-300)
-    order = sorted(range(len(names)), key=lambda i: -col[i])
+    forced = [names.index(n) for n in must_keep if n in names]
+    missing = sorted(set(must_keep) - set(names))
+    if missing:
+        raise KeyError(f"must_keep names not in the pool: {missing}")
+    order = forced + sorted(
+        (i for i in range(len(names)) if i not in forced),
+        key=lambda i: -col[i],
+    )
 
     keep: list[int] = []
     drop: dict[str, str] = {}
     std: dict[str, float] = {}
     for i in order:
+        if i in forced:
+            keep = keep + [i]
+            continue
         if rel[i] < struct_tol:
             drop[names[i]] = "moves no reporter"
             continue
         trial = keep + [i]
         sub = jac[:, trial]
-        cov = np.linalg.pinv(sub.T @ sub, rcond=1e-12)
+        cov, undetermined = _covariance(sub)
+        if undetermined[-1]:
+            drop[names[i]] = "undetermined: no finite 1σ within the set"
+            continue
         sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        sd[undetermined] = np.inf
         denom = np.outer(sd, sd)
         with np.errstate(invalid="ignore", divide="ignore"):
             corr = np.where(denom > 0, cov / denom, 0.0)
@@ -390,14 +431,85 @@ def choose_fit_set(
             drop[names[i]] = f"1σ = {sd[-1]:.2f} decades, above {std_tol:g}"
             continue
         keep = trial
-        for k, idx in enumerate(keep):
-            std[names[idx]] = float(sd[k])
+    # A later admission widens an earlier member's uncertainty, so the set
+    # the forward pass ends with can violate its own rule. Remove the widest
+    # member until every kept 1σ is within the tolerance.
+    while keep:
+        sub = jac[:, keep]
+        cov, undetermined = _covariance(sub)
+        sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        sd[undetermined] = np.inf
+        removable = np.array([idx not in forced for idx in keep])
+        if not removable.any():
+            break
+        widest = int(np.argmax(np.where(removable, sd, -np.inf)))
+        if sd[widest] <= std_tol:
+            break
+        drop[names[keep[widest]]] = (
+            f"1σ = {sd[widest]:.2f} decades within the set, above {std_tol:g}"
+        )
+        keep.pop(widest)
+    for k, idx in enumerate(keep):
+        std[names[idx]] = float(sd[k]) if keep else 0.0
     return FitSetChoice(
         keep=[names[i] for i in keep],
         drop=drop,
         std_decades=std,
         rel_sensitivity={names[i]: float(rel[i]) for i in range(len(names))},
         sigma=float(sigma),
+    )
+
+
+def screen_fittable(
+    problem,
+    candidates=None,
+    *,
+    sigma: float | None = None,
+    struct_tol: float = 1e-6,
+    corr_tol: float = 0.95,
+    std_tol: float = 1.0,
+    must_keep: tuple = (),
+) -> FitSetChoice:
+    """Which parameters of the whole composite should this problem fit?
+
+    The pool defaults to the composite's own fittable surface,
+    :meth:`~hallsim.composite.Composite.calibration_targets` — every
+    parameter a process declares fittable, compartment sizes and hallmark
+    targets excluded — and can be narrowed by passing ``candidates`` (that
+    list, filtered). The problem is rebuilt over the pool and
+    :func:`choose_fit_set` picks the largest subset the fit arms constrain
+    together. ``sigma`` is the noise scale in reporter units; unset, it is
+    measured from this problem's residuals at its starting point, which
+    overstates it before any fit — pass the residual scale of a fit when one
+    exists. ``must_keep`` names pool members (``process.key``) admitted
+    first and never removed, so a set chosen on other grounds is extended
+    by what the data can still determine beside it. The result names the
+    kept set with each member's 1σ in decades and the reason every other
+    candidate was dropped.
+    """
+    from hallsim.calibration import ParameterRef
+
+    pool = (
+        problem.composite.calibration_targets()
+        if candidates is None
+        else list(candidates)
+    )
+    refs = {
+        f"{item.process_name}.{item.field.partition('.')[2] or item.field}": (
+            ParameterRef(item.process_name, item.field)
+        )
+        for item in pool
+    }
+    wide = problem.with_params(refs)
+    if sigma is None:
+        sigma = residual_scale(wide, wide.initial_params(), n_fitted=0)
+    return choose_fit_set(
+        wide,
+        struct_tol=struct_tol,
+        corr_tol=corr_tol,
+        std_tol=std_tol,
+        sigma=sigma,
+        must_keep=must_keep,
     )
 
 

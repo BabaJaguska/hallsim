@@ -60,3 +60,27 @@ def test_a_static_field_is_refused():
 def test_a_missing_field_is_refused():
     with pytest.raises(ValueError, match=r"g\.nope.*does not have"):
         _problem("nope")
+
+
+def test_a_compartment_size_of_an_imported_model_is_refused():
+    from hallsim.composite import single_process_composite
+    from hallsim.sbml_import import process_from_sbml
+
+    sbml = (
+        "demos/models/sbml/dallepezze2014/dallepezze2014_BIOMD0000000582.xml"
+    )
+    comp = single_process_composite(process_from_sbml(sbml, name="dp14"))
+    with pytest.raises(
+        ValueError, match=r"dp14\.parameters\.Cell.*compartment"
+    ):
+        CalibrationProblem(
+            composite=comp,
+            reporters=[
+                GeneReporter(observable="dp14/CDKN1A", gene_symbol="CDKN1A")
+            ],
+            conditions={"a": Condition("a", {}), "b": Condition("b", {})},
+            data={"b_vs_a": pd.Series({"CDKN1A": 0.0})},
+            arm_pairs={"b_vs_a": ("a", "b")},
+            params={"vol": ParameterRef("dp14", "parameters.Cell")},
+            fit_arms=["b_vs_a"],
+        )

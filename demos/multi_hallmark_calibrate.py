@@ -37,6 +37,7 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+from hallsim.process import read_param
 from hallsim.calibration import (  # noqa: E402
     CalibrationProblem,
     Condition,
@@ -281,6 +282,28 @@ def build_problem(
         else _default_fit_params(composite, published)
     )
     if fitted is not None:
+        # A name outside the declared set is an address, ``process.key``, as
+        # the screen names its candidates: any parameter of any member, with
+        # a log-normal prior at its current value like the declared ones.
+        for name in fitted:
+            if name in params:
+                continue
+            proc_name, _, key = name.partition(".")
+            proc = composite.processes.get(proc_name)
+            if proc is None or not key:
+                continue
+            table = getattr(proc, "parameters", None)
+            field = (
+                f"parameters.{key}"
+                if isinstance(table, dict) and key in table
+                else key
+            )
+            params[name] = ParameterRef(
+                proc_name,
+                field,
+                prior=float(read_param(proc, field)),
+                prior_sigma=0.5,
+            )
         unknown = sorted(set(fitted) - set(params))
         if unknown:
             raise KeyError(
@@ -345,6 +368,13 @@ def build_problem(
         equilibration_condition="ctrl",
         arm_pairs=ARM_PAIRS,
         params=params,
+        notes={
+            "dataset": "GSE248823 (bulk microarray, day 0/7/14, two replicates)",
+            "rapa_intensity": (
+                RAPA_INTENSITY if rapa_intensity is None else rapa_intensity
+            ),
+            "fitted": sorted(params),
+        },
         fit_arms=["DDIS_vs_ctrl"],
         held_out_arms=["RAPA_vs_ctrl"],
         hallmark_registry=_registry_with_intensity(
@@ -479,11 +509,11 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
     header = [
         "Arm",
         "Day",
-        "ρ (oob)",
-        "ρ (cal)",
-        "mean|err| (oob)",
-        "mean|err| (cal)",
-        "mean|err| (no change)",
+        "ρ published",
+        "ρ calibrated",
+        "|err| published",
+        "|err| calibrated",
+        "|err| no change",
     ]
     text, colors = [header], [[INK] * 7]
     for arm, day, ro, rc, eo, ec, en in rows:
@@ -498,8 +528,8 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
                 f"{en:.2f}",
             ]
         )
-        # the calibrated error is green only when it beats both the
-        # out-of-the-box model and predicting no change at all
+        # calibrated against published in its own cell; the no-change
+        # floor lights up where it beats the calibrated model
         colors.append(
             [
                 INK,
@@ -507,18 +537,18 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
                 DIM,
                 IMP if rc >= ro else REG,
                 DIM,
-                IMP if ec <= eo and ec <= en else REG,
-                DIM,
+                IMP if ec <= eo else REG,
+                REG if en < ec else DIM,
             ]
         )
 
-    fig, ax = plt.subplots(figsize=(9.6, 0.55 + 0.42 * len(text)))
+    fig, ax = plt.subplots(figsize=(11.5, 0.9 + 0.42 * len(text)))
     ax.axis("off")
     tbl = ax.table(
         cellText=text,
         cellLoc="center",
         loc="center",
-        colWidths=[0.22, 0.08, 0.12, 0.12, 0.15, 0.15, 0.16],
+        colWidths=[0.19, 0.07, 0.13, 0.14, 0.15, 0.16, 0.16],
     )
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(10.5)
@@ -533,8 +563,10 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
             if c == 0:
                 cell.get_text().set_fontweight("bold")
     ax.set_title(
-        "Calibrated vs out-of-the-box concordance",
-        fontsize=12.5,
+        "Calibrated vs published concordance\n"
+        "green: calibration improves on published; "
+        "orange floor: predicting no change beats the calibrated model",
+        fontsize=11,
         fontweight="bold",
         color=INK,
         loc="left",
@@ -1017,8 +1049,12 @@ def cmd_run(args) -> None:
         fig_concordance,
         fig_temporal,
         fig_temporal_compare,
+        use_run,
     )
 
+    # This run's own directory, not `latest`: another run may have moved
+    # the symlink since this one started.
+    use_run(out_dir)
     fig_temporal(args)
     fig_temporal_compare(args)
     fig_concordance(args)
@@ -1096,8 +1132,9 @@ def cmd_score(args) -> None:
     tag = "default" if intensity is None else f"{intensity:g}"
     out_dir = run_dir / f"score_rapa{tag}"
     out_dir.mkdir(exist_ok=True)
-    for name in ("checkpoint.npz", "summary.json"):
-        shutil.copy2(run_dir / name, out_dir / name)
+    for name in ("checkpoint.npz", "summary.json", "config.json"):
+        if (run_dir / name).exists():
+            shutil.copy2(run_dir / name, out_dir / name)
     pre = run_oob(problem, problem.initial_params(), out_dir)
     post = problem.evaluate(params)
     print(format_table(pre, post, fit_arms=problem.fit_arms))
@@ -1152,9 +1189,60 @@ def cmd_sweep(args) -> None:
         )
 
 
+def cmd_screen(args) -> None:
+    """Screen every parameter of the composite for fittability against the
+    fit arm: which ones the data constrain together, at what precision, and
+    why each of the rest is dropped. The pool is every scalar constant of
+    every imported model and every scalar parameter of every coupling edge;
+    the dosing sources define the experiment and are not candidates. The
+    noise scale is measured from the latest fit's residuals when there is
+    one, else from the published point."""
+    from hallsim.identifiability import residual_scale, screen_fittable
+    from hallsim.models.forcing import PulseSource, StepSource
+
+    problem = build_problem(
+        rapa_intensity=getattr(args, "rapa_intensity", None)
+    )
+    base = problem.composite
+    pool = [
+        item
+        for item in base.calibration_targets()
+        if not isinstance(
+            base.processes[item.process_name], (PulseSource, StepSource)
+        )
+    ]
+    sigma = None
+    latest = ROOT / "outputs" / RUN_NAME / "latest"
+    if (latest / "checkpoint.npz").exists():
+        saved = json.loads((latest / "summary.json").read_text())
+        fitted = tuple(saved["params"])
+        params, _ = load_checkpoint(latest / "checkpoint.npz")
+        sigma = residual_scale(
+            build_problem(fitted=fitted),
+            {k: jnp.asarray(v) for k, v in params.items()},
+            len(fitted),
+        )
+    print(
+        f"[screen] {len(pool)} candidates over "
+        f"{', '.join(sorted({item.process_name for item in pool}))}; "
+        f"σ {'measured from the latest fit' if sigma else 'at the published point'}",
+        flush=True,
+    )
+    keep = tuple(getattr(args, "fit", ()) or ())
+    if keep:
+        print(
+            f"[screen] keeping {list(keep)} and adding what the data still determine",
+            flush=True,
+        )
+    print(
+        screen_fittable(problem, pool, sigma=sigma, must_keep=keep), flush=True
+    )
+
+
 _COMMANDS = {
     "run": cmd_run,
     "score": cmd_score,
+    "screen": cmd_screen,
     "sweep": cmd_sweep,
 }
 

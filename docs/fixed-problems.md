@@ -1852,7 +1852,7 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   of those failed and, for a non-`calibratable` field, that fitting it is
   unsupported. The check is cheap and the failure it replaces is unreadable.
 
-  **Fixed 2026-09-12:** every `ParameterRef` is validated when the problem is wired — the field must exist on the process, must not be a static field, and must hold a scalar — and the error names the reference, the address and which of the three failed (a tuple-valued Hill `K`/`n` is named as not fittable). `tests/unit/test_parameter_ref_validation.py`.
+  **Fixed 2026-09-12:** every `ParameterRef` is validated when the problem is wired — the field must exist on the process, must not be a static field, and must hold a scalar — and the error names the reference, the address and which of the three failed (a tuple-valued Hill `K`/`n` is named as not fittable). Extended the same day: a process that declares a fittable surface (`calibratable_params()`) is the authority on it, so a reference outside that surface is refused too — a compartment size of an imported model is named as geometry that scales every concentration, not a rate. `tests/unit/test_parameter_ref_validation.py`.
 
 - [x] **P0.65 — A coupling edge with `timescale=None` gets its own scheduler
   group, so `macro_dt = span` freezes the model it couples.** Filed

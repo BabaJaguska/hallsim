@@ -89,3 +89,97 @@ def test_a_looser_scale_admits_fewer_parameters(monkeypatch):
     loose = choose_fit_set(problem, sigma=20.0)
     assert len(tight.keep) >= len(loose.keep)
     assert "weak" in loose.drop
+
+
+def test_the_kept_set_satisfies_its_own_tolerance(monkeypatch):
+    """Two near-collinear candidates each look fine on admission and widen
+    each other afterwards; the set that comes back keeps only one."""
+    rng = np.random.default_rng(1)
+    base = rng.normal(size=14)
+    near = base + 0.35 * rng.normal(size=14)  # correlated below 0.95
+    strong = 4.0 * rng.normal(size=14)
+    jac = np.stack([strong, base, near], axis=1)
+    names = ["strong", "base", "near"]
+    monkeypatch.setattr(
+        "hallsim.identifiability.sensitivity_jacobian",
+        lambda p, params=None: (jac, names),
+    )
+    choice = choose_fit_set(_Problem(jac, names), sigma=2.5, std_tol=1.0)
+    for n in choice.keep:
+        assert choice.std_decades[n] <= 1.0
+    assert not ({"base", "near"} <= set(choice.keep))
+
+
+def test_screen_fittable_pools_the_composite_s_own_surface():
+    """The screen's pool is what the processes declare fittable, and the
+    problem is rebuilt over it without the caller naming anything."""
+    import pandas as pd
+
+    from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
+    from hallsim.composite import Composite
+    from hallsim.gene_reporters import GeneReporter
+    from hallsim.identifiability import screen_fittable
+    from hallsim.process import Port, PortRole, Process, calibratable
+
+    class Decay(Process):
+        rate: float = calibratable(0.5, description="decay rate")
+        scale: float = 1.0  # not declared fittable
+        timescale: float = 1.0
+
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def derivative(self, t, state):
+            return {"x": -self.rate * state["x"]}
+
+    comp = Composite(
+        processes={"d": Decay()},
+        topology={"d": {"x": "pool/x"}},
+        validate=False,
+        semantic_validation=False,
+    )
+    problem = CalibrationProblem(
+        composite=comp,
+        reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
+        conditions={"a": Condition("a", {}), "b": Condition("b", {})},
+        data={"b_vs_a": pd.Series({"GX": -0.5})},
+        arm_pairs={"b_vs_a": ("a", "b")},
+        params={"r": ParameterRef("d", "rate")},
+        fit_arms=["b_vs_a"],
+        t_end=2.0,
+        n_save=3,
+    )
+    choice = screen_fittable(problem, sigma=0.3)
+    assert set(choice.keep) | set(choice.drop) == {"d.rate"}
+
+
+def test_a_column_the_data_barely_see_is_dropped_not_certified(monkeypatch):
+    """A near-zero sensitivity column makes the normal matrix singular; the
+    pseudo-inverse would report zero variance for it. It must be dropped."""
+    rng = np.random.default_rng(2)
+    strong = rng.normal(size=14)
+    faint = 1e-9 * rng.normal(size=14)
+    jac = np.stack([strong, faint], axis=1)
+    names = ["strong", "faint"]
+    monkeypatch.setattr(
+        "hallsim.identifiability.sensitivity_jacobian",
+        lambda p, params=None: (jac, names),
+    )
+    choice = choose_fit_set(_Problem(jac, names), sigma=0.4, struct_tol=1e-12)
+    assert "faint" in choice.drop
+    assert "strong" in choice.keep
+
+
+def test_must_keep_is_admitted_first_and_never_removed(monkeypatch):
+    """A forced member stays even when a stronger candidate duplicates it;
+    the duplicate is what gets dropped."""
+    jac, names = _jacobian()
+    monkeypatch.setattr(
+        "hallsim.identifiability.sensitivity_jacobian",
+        lambda p, params=None: (jac, names),
+    )
+    choice = choose_fit_set(
+        _Problem(jac, names), sigma=0.4, must_keep=("copy",)
+    )
+    assert "copy" in choice.keep
+    assert "strong" in choice.drop and "copy" in choice.drop["strong"]
