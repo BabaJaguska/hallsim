@@ -14,11 +14,15 @@ pytest.importorskip("dash")
 pytest.importorskip("plotly")
 
 from demos.hallmark_levers import (  # noqa: E402
+    DOSE_WINDOWS,
     LEVERS,
     PANELS,
     POPULATION_MODELS,
     PRESETS,
+    LeverBank,
     LeverModel,
+    build_app,
+    population_badge,
     render,
     render_population,
 )
@@ -46,10 +50,12 @@ def test_etoposide_starts_p53_pulsing(lever_model):
 
 
 def test_render_draws_every_panel(lever_model):
-    """A preset is sampled at construction, so its lever request already
-    draws the population row; an unsampled setting draws its mean field
-    faded and marked, and the badge says so."""
+    """A sampled preset's lever request draws the population row; an
+    unsampled setting draws its mean field faded and marked, and the badge
+    says so. The presets are sampled in the background so the page paints
+    without them, which a test has to wait for."""
     lm = lever_model
+    lm.wait_for_presets()
     n_models, n_levers = len(PANELS), len(LEVERS)
     out = render(lm, lm, *PRESETS["+rapamycin"])
     assert len(out) == n_models + n_levers + 3
@@ -99,6 +105,9 @@ def test_render_draws_every_panel(lever_model):
 
 def test_population_row_carries_the_spread(lever_model):
     lm = lever_model
+    # The page starts a sample and draws it when it lands; a test says when.
+    lm.wait_for_presets()
+    lm.population((0.5, 0.0, 0.0))
     *figures, badge = render_population(lm, 0.5, 0.0, 0.0)
     assert len(figures) == len(POPULATION_MODELS)
     # Per panel: two band edges for control, two for this setting, then the
@@ -130,3 +139,74 @@ def test_moved_reports_the_registry_targets(lever_model):
     assert rapa["now"] < rapa["control"]
     (k69,) = lm.moved(lop, 1.0)
     assert k69["now"] == 0.0
+
+
+def test_a_new_setting_does_not_hold_the_request_open(lever_model):
+    """A sample is seconds of serial event loop. The lever request starts it
+    and returns, so the browser is not held for it; the page's poll draws the
+    rows when the sample lands.
+
+    Discrimination: sampling inside the request returns the rows on the first
+    call, which the second assertion rejects.
+    """
+    import time
+
+    lm = lever_model
+    sev = (0.35, 0.1, 0.0)
+    assert lm.population_cached(sev) is None
+    assert render_population(lm, *sev) is None
+
+    deadline = time.monotonic() + 600
+    while lm.population_cached(sev) is None:
+        assert time.monotonic() < deadline, "the sample never landed"
+        time.sleep(0.5)
+    rows = render_population(lm, *sev)
+    assert rows is not None
+    *figures, _ = rows
+    assert len(figures) == len(POPULATION_MODELS)
+
+
+def test_the_page_says_it_is_working_while_it_is(tmp_path):
+    """Every panel sits under a spinner and the population row carries a
+    pending badge, so a row that has not been drawn yet reads as working
+    rather than as broken. The poll and the store it compares against have
+    to be in the layout or the band never arrives.
+
+    One window: the bank builds the first synchronously and the rest on a
+    thread, and this needs neither the rest nor a sample.
+    """
+    from dash import dcc
+
+    first = next(iter(DOSE_WINDOWS.items()))
+    bank = LeverBank(windows=dict([first]), n_cells=2)
+    app = build_app(bank)
+
+    def children(node):
+        kids = getattr(node, "children", None)
+        if kids is None:
+            return []
+        return list(kids) if isinstance(kids, (list, tuple)) else [kids]
+
+    spinners, ids = {}, set()
+
+    def walk(node):
+        if getattr(node, "id", None) is not None:
+            ids.add(str(node.id))
+        for child in children(node):
+            if isinstance(node, dcc.Loading) and isinstance(child, dcc.Graph):
+                spinners[child.id] = node
+            walk(child)
+
+    walk(app.layout)
+    for model in PANELS:
+        wrap = spinners.get(f"panel-{model}")
+        assert wrap is not None, f"panel-{model} draws with no spinner"
+        # Instant callbacks must not flash it: the population poll answers
+        # once a second and usually with nothing.
+        assert wrap.delay_show > 0
+    assert {"population-poll", "drawn", "window-poll"} <= ids
+
+    lm = bank.get(bank.first)
+    unsampled = population_badge(lm, (0.35, 0.1, 0.0))
+    assert "pending" in unsampled.className
+    assert "pending" in population_badge(None, (0.0,) * len(LEVERS)).className

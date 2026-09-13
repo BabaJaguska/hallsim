@@ -257,6 +257,8 @@ class LeverModel:
         }
         self.n_cells = int(n_cells)
         self.seed = int(seed)
+        self._sampling: set[tuple] = set()
+        self._sample_lock = threading.Lock()
         self._scheduler = Scheduler()
         self._solve = jax.jit(self._trajectory)
         t0 = time.perf_counter()
@@ -277,25 +279,54 @@ class LeverModel:
             # Eager: the Scheduler maps a stochastic batch over host
             # threads, and a jit around this would trace that lane away.
             self._sample = self._population
-            t0 = time.perf_counter()
-            # Serial: each sample already runs one host thread per cell, so
-            # a pool over presets on top of that oversubscribes the box.
-            for preset in PRESETS.values():
-                self.population(preset)
-            self.population_compile_seconds = time.perf_counter() - t0
+            self._presets = threading.Thread(
+                target=self._sample_presets, daemon=True
+            )
+            self._presets.start()
         log.info(
-            "window %s ready: %d states, mean field compiled in %.1f s, "
-            "%d-cell population presets in %.1f s",
+            "window %s ready: %d states, mean field compiled in %.1f s; "
+            "%d-cell presets sampling in the background",
             self.dose_window,
             len(self.keys),
             self.compile_seconds,
             self.n_cells,
+        )
+
+    def _sample_presets(self) -> None:
+        """The presets, taken after the window is handed over. The mean
+        field is what a first paint needs; a sample is seconds of event loop
+        per setting, and the rows carry it the moment it lands.
+
+        Serial: each sample already runs one host thread per cell, so a pool
+        over presets on top of that oversubscribes the box.
+        """
+        t0 = time.perf_counter()
+        for preset in PRESETS.values():
+            self.population(preset)
+        self.population_compile_seconds = time.perf_counter() - t0
+        log.info(
+            "window %s: %d-cell presets sampled in %.1f s",
+            self.dose_window,
+            self.n_cells,
             self.population_compile_seconds,
         )
 
+    def wait_for_presets(self) -> None:
+        """Block until the preset samples exist (tests, not the
+        page: the page draws the rows when they land)."""
+        thread = getattr(self, "_presets", None)
+        if thread is not None:
+            thread.join()
+
+    def presets_ready(self) -> bool:
+        """Whether the control sample the rows draw against exists yet."""
+        return self.control_population is not None
+
     @property
-    def control_population(self) -> np.ndarray:
-        return self._populations[PRESETS["control"]][0]
+    def control_population(self) -> np.ndarray | None:
+        """The control sample, or None while it is still being taken."""
+        cached = self.population_cached(PRESETS["control"])
+        return None if cached is None else cached[0]
 
     def _severities(self, severities) -> dict[str, float]:
         return {
@@ -354,6 +385,30 @@ class LeverModel:
     def population_cached(self, severities):
         """The sample already taken at ``severities``, or ``None``."""
         return self._populations.get(self._key(severities))
+
+    def population_async(self, severities):
+        """The sample at these severities if it is taken, else ``None``,
+        having started it on a host thread. A sample is seconds of serial
+        event loop, so the request that asks for it does not wait on it; the
+        page's poll picks it up when it lands."""
+        key = self._key(severities)
+        cached = self._populations.get(key)
+        if cached is not None:
+            return cached
+        with self._sample_lock:
+            if key in self._sampling:
+                return None
+            self._sampling.add(key)
+
+        def take():
+            try:
+                self.population(key)
+            finally:
+                with self._sample_lock:
+                    self._sampling.discard(key)
+
+        threading.Thread(target=take, daemon=True).start()
+        return None
 
     def population(self, severities):
         """``(ys, events_per_cell)``: ``ys`` is ``(n_time, n_cells, n_vars)``
@@ -437,8 +492,11 @@ class LeverBank:
         return name in self._models
 
     def wait(self):
-        """Block until every window is built (tests, not the page)."""
+        """Block until every window is built and its presets sampled
+        (tests, not the page)."""
         self._thread.join()
+        for model in self._models.values():
+            model.wait_for_presets()
 
 
 # ── page ─────────────────────────────────────────────────────────────────
@@ -697,29 +755,32 @@ def _population_figure(model: str, lm: LeverModel, ys_pop, ys_mf, severities):
     )
     shown = lm.ts >= TIME_RANGE[0]
     t = lm.ts[shown]
+    control = lm.control_population
     for j, cols in enumerate(lm.columns[model]):
-        control_cells = _series(lm.control_population, shown, cols)
         cells = _series(ys_pop, shown, cols)
-        _band(
-            fig,
-            t,
-            control_cells,
-            _rgba(CONTROL_COLOR, 0.18),
-            "control",
-            1,
-            j + 1,
-        )
+        if control is not None:
+            control_cells = _series(control, shown, cols)
+            _band(
+                fig,
+                t,
+                control_cells,
+                _rgba(CONTROL_COLOR, 0.18),
+                "control",
+                1,
+                j + 1,
+            )
         _band(fig, t, cells, _rgba(color, 0.22), "this setting", 1, j + 1)
-        fig.add_trace(
-            go.Scatter(
-                x=t,
-                y=control_cells.mean(axis=1),
-                line=CONTROL_LINE,
-                hoverinfo="skip",
-            ),
-            row=1,
-            col=j + 1,
-        )
+        if control is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=t,
+                    y=control_cells.mean(axis=1),
+                    line=CONTROL_LINE,
+                    hoverinfo="skip",
+                ),
+                row=1,
+                col=j + 1,
+            )
         fig.add_trace(
             go.Scatter(
                 x=t,
@@ -826,13 +887,17 @@ def chip_classes(sev) -> list[str]:
 
 
 def render_population(lm: LeverModel, *severities):
-    """The reaction-level rows for one severity vector, sampled if they
-    have not been: one figure per population publication, then the badge."""
+    """The reaction-level rows for one severity vector, or ``None`` while
+    its sample is still being taken: one figure per population publication,
+    then the badge. Starts the sample it needs and returns rather than
+    waiting on it, so a lever pull is not held open for the event loop."""
     sev = np.asarray(severities, dtype=float)
+    sample = lm.population_async(sev)
+    if sample is None:
+        return None
     _, ys_mf = lm.solve(sev)
-    ys_pop, _ = lm.population(sev)
     figures = [
-        _population_figure(m, lm, ys_pop, ys_mf, sev)
+        _population_figure(m, lm, sample[0], ys_mf, sev)
         for m in POPULATION_MODELS
     ]
     return (*figures, population_badge(lm, sev))
@@ -840,7 +905,17 @@ def render_population(lm: LeverModel, *severities):
 
 def build_app(bank: LeverBank):
     try:
-        from dash import ALL, Dash, Input, Output, ctx, dcc, html, no_update
+        from dash import (
+            ALL,
+            Dash,
+            Input,
+            Output,
+            State,
+            ctx,
+            dcc,
+            html,
+            no_update,
+        )
     except ImportError as e:  # pragma: no cover - install hint
         raise SystemExit(
             'The lever page needs Dash: pip install "hallsim[app]"'
@@ -924,8 +999,17 @@ def build_app(bank: LeverBank):
         ]
         if model in POPULATION_MODELS:
             heading.append(html.Span(id="population-status"))
-        graph = dcc.Graph(
-            id=f"panel-{model}", config={"displayModeBar": False}
+        # A spinner over the panel while its callback runs, so a row that
+        # has not been drawn yet reads as working rather than as broken.
+        # `delay_show` keeps the population poll, which answers instantly
+        # and usually with nothing, from flashing it once a second.
+        graph = dcc.Loading(
+            children=dcc.Graph(
+                id=f"panel-{model}", config={"displayModeBar": False}
+            ),
+            type="circle",
+            color=MODEL_COLORS[model],
+            delay_show=400,
         )
         return html.Div(className="row", children=[html.H2(heading), graph])
 
@@ -956,8 +1040,14 @@ def build_app(bank: LeverBank):
                             ),
                             html.Div(id="window-note", className="seg-note"),
                             dcc.Store(id="window", data=bank.first),
+                            dcc.Store(id="drawn", data=None),
                             dcc.Interval(
                                 id="window-poll", interval=2000, n_intervals=0
+                            ),
+                            dcc.Interval(
+                                id="population-poll",
+                                interval=1000,
+                                n_intervals=0,
                             ),
                         ],
                     ),
@@ -1021,23 +1111,68 @@ def build_app(bank: LeverBank):
         return render(bank.get(window), first, *severities)
 
     if first.n_cells:
-        # Fires alongside the lever request and replaces the marked
-        # mean-field row with the sample once it exists; instant for a
-        # setting already sampled. A window still compiling changes nothing.
-        @app.callback(
-            [
-                Output(f"panel-{m}", "figure", allow_duplicate=True)
-                for m in POPULATION_MODELS
+        population_outputs = [
+            Output(f"panel-{m}", "figure", allow_duplicate=True)
+            for m in POPULATION_MODELS
+        ] + [
+            Output("population-status", "children", allow_duplicate=True),
+            Output("drawn", "data", allow_duplicate=True),
+        ]
+        idle = (no_update,) * (len(POPULATION_MODELS) + 2)
+        lever_states = [
+            State(f"lever-{i}", "value") for i in range(len(LEVERS))
+        ]
+
+        def drawn_key(window, severities):
+            """What a drawn row depends on. The control sample is
+            in it because a setting can be sampled before the control it is
+            drawn against is, and the row gains its grey reference when that
+            lands."""
+            lm = bank.get(window)
+            return [
+                window,
+                lm is not None and lm.control_population is not None,
+                *(round(float(s), 6) for s in severities),
             ]
-            + [Output("population-status", "children", allow_duplicate=True)],
+
+        def population_rows(window, severities):
+            """The rows if their sample is taken, else the marker
+            that nothing is drawn for this setting yet."""
+            lm = bank.get(window)
+            if lm is None:
+                return idle
+            rows = render_population(lm, *severities)
+            if rows is None:
+                return (*(no_update,) * (len(POPULATION_MODELS) + 1), None)
+            return (*rows, drawn_key(window, severities))
+
+        # Fires alongside the lever request. A setting already sampled is
+        # drawn here; one that is not starts its sample and leaves the row
+        # marked, for the poll below to draw when it lands.
+        @app.callback(
+            population_outputs,
             [window_input, *lever_inputs],
             prevent_initial_call=True,
         )
         def on_pull_population(window, *severities):
+            return population_rows(window, severities)
+
+        # A sample is seconds of serial event loop and nothing waits on it:
+        # this asks once a second whether the setting on the sliders has one
+        # yet, and redraws only when what is drawn is not already it.
+        @app.callback(
+            population_outputs,
+            Input("population-poll", "n_intervals"),
+            [State("window", "data"), State("drawn", "data"), *lever_states],
+            prevent_initial_call=True,
+        )
+        def poll_population(_n, window, drawn, *severities):
+            if drawn == drawn_key(window, severities):
+                return idle
             lm = bank.get(window)
-            if lm is None:
-                return (no_update,) * (len(POPULATION_MODELS) + 1)
-            return render_population(lm, *severities)
+            if lm is None or lm.population_cached(severities) is None:
+                return idle
+            return population_rows(window, severities)
 
     return app
 
@@ -1051,8 +1186,10 @@ def main(
 ):
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     log.info(
-        "building the composite and compiling the solves (about a minute; "
-        "the other exposure windows follow in the background)…"
+        "compiling the first exposure window's mean field; the page is "
+        "served as soon as that is done (about half a minute). The "
+        "reaction-level population and the other windows are sampled and "
+        "compiled behind it, and each row fills in as it lands."
     )
     bank = LeverBank(n_cells=cells, seed=seed)
     app = build_app(bank)
