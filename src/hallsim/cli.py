@@ -859,12 +859,12 @@ def multi_hallmark_ssa(t_end, save_dt, seed, max_events):
 @click.option(
     "--cells",
     type=click.IntRange(min=0),
-    default=4,
+    default=16,
     show_default=True,
-    help="cells in the Proctor 2007 population (one Gillespie path each). "
-    "A sample costs about 3 s plus 0.7 s per cell; the presets are "
-    "sampled at startup and each new setting once. 0 draws the mean "
-    "field instead",
+    help="cells in the Proctor 2007 population (one Gillespie path each, "
+    "run one host thread each). The presets are sampled at startup and "
+    "each new setting once; a sample costs one chain per wave of cells "
+    "over available cores. 0 draws the mean field instead",
 )
 @click.option(
     "--seed", type=int, default=0, show_default=True, help="population seed"

@@ -199,11 +199,13 @@ live target rather than a curiosity.
 
 | what | result |
 |---|---|
-| `--xla_cpu_multi_thread_eigen=false` | 2.247 → 2.276 s. Nil — the solve is single-threaded and has no parallelism to exploit |
+| `--xla_cpu_multi_thread_eigen=false` | 2.247 → 2.276 s. Nil — the solve is single-threaded and has no parallelism to exploit. Re-tested 2026-09-12 on the 80-core host against the Gillespie event loop, where an 80-thread Eigen pool per tiny op was the suspect: three interleaved passes, idle box, 10.43/10.22/11.49 s default against 10.31/10.42/10.34 s with the flag. Still nil; a one-shot pair on a *loaded* box read as 1.68x and was pure load drift |
 | `--xla_cpu_enable_fast_math=true` | 2.247 → 2.100 s (6.5%). Not worth FTZ and no-NaN reassociation at `atol=1e-9` with curated oscillators |
 | Lowering `max_steps` to shrink the reverse-mode checkpoint count | 32.1 s vs 27.7 s at the 4M default. `DEFAULT_MAX_STEPS` is not the lever |
 | Sharding the *existing vmapped* batch axis | 0.83× — slower than doing nothing. One vmapped `while_loop` has one trip-count predicate, so SPMD adds a cross-device reduce instead of splitting the loop. Needs `shard_map` (2.4×) — **not reproducible on JAX 0.10.2 (2026-09-10): `shard_map` around `Scheduler.run` fails inside lineax's LU solve; see §6 and P0.70** |
 | Parallelising forward-mode parameter directions | 1.09×. The vmapped JVP already shares one primal solve |
+| Branching the SSA save-grid write — `lax.cond` around the per-event `jnp.where` over the `(save points, species)` block | 3.8–4.0% **slower**, at both ~6 and ~50 save points per macro window (interleaved, idle host, 2026-09-12). The premise was that the select is O(save points) per event; it is not — a 50-point grid costs what a 6-point one does (13.14 against 12.78 µs/event) — so XLA already handles the block, and `jnp.any(fill)` plus the branch costs more than it saves. Deleting the write outright is worth 8.8%, which is the ceiling a branch chases, not what it recovers |
+| Inverse-CDF (`searchsorted(cumsum(rates), u·total)`) in place of `jax.random.choice`, and one fused validity reduction in place of two | +3.9% and +3.3% against a **5% control arm** — the same code measured twice — so neither is separable from noise; together +4.4%, sub-additive. The inverse-CDF also changes the draws (831,663 events against 796,857) |
 
 **A caveat on every absolute number above.** Re-running the same measurement
 hours later on this machine gave warm 3.2 s against 2.25 s and first-call ~14 s
@@ -258,6 +260,71 @@ stack (P0.70). The GPU claim ("near-flat") is unmeasured on this machine.
 | 1024 single runs | 540 s | 528 ms |
 | 16 chunks of 64, sequentially | 418 s | 408 ms |
 | 16 chunks of 64, 3 worker processes | **266 s** | **260 ms** |
+
+**A stochastic batch wants host threads, not lanes.** 2026-09-12, the same
+composite with Proctor 2007 at reaction level (796,857 reaction events per
+chain), 80-core Xeon host at load < 3, CPU backend, `jax_enable_x64`, median
+of two to three timed calls after the compile call. A vmapped batch is one
+`while_loop` stepping every lane per event on one core, so its members
+serialize; one compiled single-member program per host thread does not.
+
+| cells | vectorized | threaded | cores used | threaded vs one chain |
+|---|---|---|---|---|
+| 1 | 10.1 s | — | 1.0 | — |
+| 4 | 18.7 s | **11.9 s** | 4.1 | 1.18x |
+| 8 | 28.9 s | **12.2 s** | 8.2 | 1.21x |
+| 16 | 39.1 s | **12.1 s** | 16.3 | 1.20x |
+| 32 | 58.1 s | **12.8 s** | 32.6 | 1.27x |
+
+The threaded lane is flat where the vectorized one is linear: 32 cells cost
+1.27 chains against the batch's 5.8. `Scheduler(batch_mode=...)` selects it,
+and `auto` (the default) takes it for a batch carrying a stochastic process
+and stays vectorized otherwise. Through `Scheduler.run` rather than a bare
+core, 8 cells: 27.8 s vectorized against 12.9 s auto, 2.16x. A host with
+fewer cores than cells runs them in waves, so the cost there is
+`ceil(cells / cores)` chains, not one.
+
+Through the lever page rather than the Scheduler (`demos/hallmark_levers.py`,
+one exposure window, warm compilation cache, idle host): a slider move costs
+10.5 s at 4 cells, 10.5 s at 16 and 12.3 s at 32, of which the mean field is
+0.6-0.8 s and the rest the sample; startup 87.2 / 91.3 / 93.4 s. Sixteen
+cells now cost what four did, which is why the page's default moved there.
+The earlier 22.1 s move and 132.7 s startup at 4 cells were measured with
+this box at load 65, so the like-for-like comparison is the 18.7 s row above,
+not those.
+
+The two lanes agree to 3.55e-13 on a peak of 1.36e4 — 2.6e-17 relative — and
+every Gillespie count is identical: of Proctor's 35 store paths only
+`p07/ROS` differs, and that is the continuous ROS drive from DallePezze, not
+a molecule count. What moves is the coupled ODE solve, worst at
+`dp14/DNA_damage`, by 6.0e-14 of its own peak.
+
+Forcing the threaded lane on a *deterministic* batch of 4 was also faster
+(0.97 s against 2.07 s), but it moves the answer by 3.3e-6 of peak — the
+mechanism this section already measured: a vmapped batch has one trip count,
+so every member takes the slowest member's steps, while per-member solves
+each take their own. Left out of `auto` pending a measurement across batch
+sizes; the 64-1024 rows above are the vectorized lane's home ground.
+
+**Attributing the event loop's cost by removal does not work.** Taking one
+piece out lets XLA fold away work the other arms also claim: the save select,
+`random.choice`, the validity reductions and the propensity call each measured
+23–66% of the event, summing to 171%. Two of those arms are not even
+well-posed — pinning the reaction channel or freezing the propensities changes
+how many events the chain fires, sending it toward the per-window cap rather
+than isolating a cost. A rebuilt loop body outside the Scheduler ran at 35
+µs/event against the real 12, and the propensity call measured in isolation is
+0.27 µs against the 13 µs event it sits inside. Measure a *replacement* through
+the real `ssa_window_jax` (it is imported at call time, so a module-level swap
+reaches the run), keep a control arm that changes nothing, and trust only
+differences larger than what that control shows.
+
+**A measurement hazard this section's caveat understates.** The same single
+chain measured 10.4 s on the idle host and 17.4 s with the box at load 65 of
+80 cores and 63% system time (another user's ~495 GB job, 667 GB of swap
+resident). That is a 1.7x swing with no code change, larger than most of the
+differences anyone would try to measure here. `uptime` and `vmstat` before
+trusting a level, and interleave the arms of any comparison.
 
 ## 7. What the Scheduler is for, measured against a bare solve
 

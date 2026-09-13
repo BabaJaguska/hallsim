@@ -24,6 +24,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any
@@ -587,6 +590,21 @@ class Scheduler:
     progress:
         tqdm bar over macro steps. Default ``False``: the Python-side update
         is a side effect that interferes with ``vmap`` over batched runs.
+    batch_mode:
+        How a batched ``y0`` maps over its members. ``"vectorized"`` is one
+        program over every member. ``"threaded"`` is one compiled
+        single-member program per host thread. ``"auto"`` (default) picks
+        threaded for a batch carrying a stochastic reaction process **on the
+        CPU** and vectorized otherwise: a Gillespie batch steps every lane
+        per event in one loop on one core, so vectorized members serialize,
+        while an ODE batch shares real work across its lanes. Off the CPU
+        there is one device for every member, so threads there buy launch
+        overhead and nothing else. A traced call is always vectorized,
+        threads being Python; ``"threaded"`` is honored wherever asked.
+    max_batch_workers:
+        Cap on host threads a threaded batch uses. ``None`` (default) uses
+        the cores this process is scheduled on, which on a shared machine is
+        what ``taskset`` was set to.
     """
 
     def __init__(
@@ -612,7 +630,21 @@ class Scheduler:
         throw: bool = True,
         debug: bool = False,
         progress: bool = False,
+        batch_mode: str = "auto",
+        max_batch_workers: int | None = None,
     ) -> None:
+        if batch_mode not in ("auto", "vectorized", "threaded"):
+            raise ValueError(
+                f"batch_mode must be 'auto', 'vectorized' or 'threaded', "
+                f"got {batch_mode!r}"
+            )
+        if max_batch_workers is not None and int(max_batch_workers) < 1:
+            raise ValueError(
+                f"max_batch_workers must be at least 1, got "
+                f"{max_batch_workers!r}"
+            )
+        self.batch_mode = batch_mode
+        self.max_batch_workers = max_batch_workers
         if coupling_mode not in ("auto", "frozen", "interpolated"):
             raise ValueError(
                 f"coupling_mode must be 'auto', 'frozen', or "
@@ -1635,8 +1667,9 @@ class Scheduler:
                 )
 
             if state.ndim > 1:
-                core = self._per_member(core)
-            fn = eqx.filter_jit(core)
+                fn = self._per_member(core, bool(stochastic_procs))
+            else:
+                fn = eqx.filter_jit(core)
             if not any(
                 isinstance(leaf, jax.core.Tracer)
                 for leaf in jax.tree_util.tree_leaves((composite, state))
@@ -1708,8 +1741,9 @@ class Scheduler:
                 )
 
         if state.ndim > 1:
-            core = self._per_member(core)
-        fn = eqx.filter_jit(core)
+            fn = self._per_member(core, bool(stochastic_procs))
+        else:
+            fn = eqx.filter_jit(core)
         # Only cache a core built eagerly. Built under an outer trace it can
         # close over that trace's tracers, which would escape it on reuse.
         if not any(
@@ -1719,8 +1753,46 @@ class Scheduler:
             self._core_cache[sig] = fn
         return fn
 
+    def _batch_workers(self) -> int:
+        """Host threads a threaded batch may use, bounded by the cores this
+        process is actually allowed to run on."""
+        if self.max_batch_workers is not None:
+            return max(1, int(self.max_batch_workers))
+        affinity = getattr(os, "sched_getaffinity", None)
+        if affinity is not None:
+            return max(1, len(affinity(0)))
+        return max(1, os.cpu_count() or 1)
+
     @staticmethod
-    def _per_member(core):
+    def _platform(y0) -> str | None:
+        """Backend the batch lives on, or None if it will not say."""
+        devices = getattr(y0, "devices", None)
+        if devices is None:
+            return None
+        try:
+            return next(iter(devices())).platform
+        except (StopIteration, RuntimeError, AttributeError):
+            return None
+
+    def _threaded_batch(self, stochastic: bool, y0, *values) -> bool:
+        """Which lane this call takes.
+
+        Threads run Python, so a traced call takes the vectorized lane
+        whatever the mode asks for. ``auto`` also stays vectorized off the
+        CPU: host threads win by giving each member its own core, and an
+        accelerator has one device for all of them, so N threads there buy
+        N times the launch overhead and nothing else. ``"threaded"`` is an
+        explicit choice and is honored wherever it is asked for.
+        """
+        if self.batch_mode == "vectorized":
+            return False
+        if is_traced(*jax.tree_util.tree_leaves((y0, values))):
+            return False
+        if self.batch_mode == "threaded":
+            return True
+        return stochastic and self._platform(y0) == "cpu"
+
+    def _per_member(self, core, stochastic: bool = False):
         """Map a single-member ``core`` over the leading batch axis.
 
         Batch members are independent, and the state layout has to say so: as
@@ -1731,17 +1803,63 @@ class Scheduler:
         has. ``ys`` keeps the ``(n_time, batch, n_vars)`` layout; per-group
         stats come back per-member. The key is split per member, so
         stochastic replicates draw independent noise.
-        """
-        mapped = eqx.filter_vmap(
-            core,
-            in_axes=(None, eqx.if_array(0), 0),
-            out_axes=(eqx.if_array(0), eqx.if_array(1), eqx.if_array(0)),
-        )
 
-        def batched(comp, y0, rng_key):
+        Two lanes, chosen per call rather than per build, since a core built
+        eagerly may still be called under a later trace. *Vectorized* is one
+        program over every member, which shares work across lanes and is what
+        a batched ODE wants. *Threaded* is one compiled single-member program
+        per host thread, which a Gillespie batch wants instead: its event
+        loop steps every lane per event on a single core, so vectorized
+        members serialize while threaded ones do not (32 cells, 58.1 s
+        vectorized against 12.8 s threaded; docs/benchmarks.md §6).
+        """
+        mapped = eqx.filter_jit(
+            eqx.filter_vmap(
+                core,
+                in_axes=(None, eqx.if_array(0), 0),
+                out_axes=(eqx.if_array(0), eqx.if_array(1), eqx.if_array(0)),
+            )
+        )
+        single = eqx.filter_jit(core)
+
+        def vectorized(comp, y0, rng_key):
             keys = jax.random.split(rng_key, y0.shape[0])
             ts, ys, stats = mapped(comp, y0, keys)
             return ts[0], ys, stats
+
+        compiled = threading.Event()
+
+        def member(comp, y0, keys, i):
+            return jax.block_until_ready(single(comp, y0[i], keys[i]))
+
+        def threaded(comp, y0, rng_key):
+            keys = jax.random.split(rng_key, y0.shape[0])
+            pending = list(range(len(keys)))
+            out = []
+            if not compiled.is_set():
+                # Entering an uncompiled core from N threads traces and
+                # compiles it N times, so the first call pays one member
+                # alone to populate the cache the rest hit. Once only: doing
+                # it every call costs a whole member of the sample.
+                out.append(member(comp, y0, keys, pending.pop(0)))
+                compiled.set()
+            if pending:
+                workers = min(len(pending), self._batch_workers())
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    out += list(
+                        pool.map(lambda i: member(comp, y0, keys, i), pending)
+                    )
+            ys = jnp.stack([m[1] for m in out], axis=1)
+            stats = jax.tree_util.tree_map(
+                lambda *xs: jnp.stack(xs) if eqx.is_array(xs[0]) else xs[0],
+                *[m[2] for m in out],
+            )
+            return out[0][0], ys, stats
+
+        def batched(comp, y0, rng_key):
+            if self._threaded_batch(stochastic, y0, comp, rng_key):
+                return threaded(comp, y0, rng_key)
+            return vectorized(comp, y0, rng_key)
 
         return batched
 

@@ -391,3 +391,91 @@ def test_an_assignment_only_the_stochastic_member_reads_reaches_it(tmp_path):
     assert float(driven.ys[-1, driven.keys.index("decay/A")]) < 10
     assert run(0.0).stats["decay"]["num_events"] == 0
     assert run(8.0, progress=True).stats["decay"]["num_events"] > 0
+
+
+def _decay_population(tmp_path, members):
+    """A pure-SSA composite and a batched ``y0``: one Gillespie chain per
+    member, counts only, so the two batch lanes have nothing to disagree
+    about except the draw."""
+    path = tmp_path / "decay.xml"
+    path.write_text(textwrap.dedent(MODEL))
+    process = process_from_sbml(str(path), name="decay").as_stochastic()
+    composite = Composite(
+        processes={"decay": process},
+        topology={"decay": {n: f"decay/{n}" for n in process._species_names}},
+        validate=False,
+        semantic_validation=False,
+    )
+    y0 = jnp.tile(composite.initial_state_vec()[None], (members, 1))
+    return composite, y0
+
+
+BATCH_RUN = dict(t_span=(0.0, 1.0), macro_dt=0.25, save_dt=0.25)
+
+
+def test_batch_lanes_draw_the_same_population(tmp_path):
+    """A stochastic batch maps over host threads rather than vmap lanes,
+    because one vmapped event loop steps every member per event on one core.
+    The lane is a scheduling choice, so it must not move a single count:
+    both split the key per member the same way.
+
+    Discrimination: a lane that failed to split per member would make every
+    member identical, which the last assertion rejects.
+    """
+    composite, y0 = _decay_population(tmp_path, 4)
+    key = jax.random.PRNGKey(3)
+    runs = {
+        mode: Scheduler(batch_mode=mode).run(
+            composite, y0=y0, key=key, **BATCH_RUN
+        )
+        for mode in ("vectorized", "threaded", "auto")
+    }
+    reference = np.asarray(runs["vectorized"].ys)
+    assert reference.shape[1] == 4
+    for mode in ("threaded", "auto"):
+        assert np.array_equal(np.asarray(runs[mode].ys), reference)
+    assert not np.array_equal(reference[:, 0], reference[:, 1])
+
+
+def test_a_threaded_batch_falls_back_under_a_trace(tmp_path):
+    """Threads are Python, so a traced call takes the vectorized lane
+    whatever the mode asks for, rather than trying to run a thread pool over
+    tracers."""
+    composite, y0 = _decay_population(tmp_path, 3)
+    sched = Scheduler(batch_mode="threaded")
+
+    @jax.jit
+    def traced(key):
+        return sched.run(composite, y0=y0, key=key, **BATCH_RUN).ys
+
+    key = jax.random.PRNGKey(5)
+    eager = Scheduler(batch_mode="vectorized").run(
+        composite, y0=y0, key=key, **BATCH_RUN
+    )
+    assert np.array_equal(np.asarray(traced(key)), np.asarray(eager.ys))
+
+
+def test_batch_mode_and_worker_count_are_validated():
+    with pytest.raises(ValueError, match="batch_mode must be"):
+        Scheduler(batch_mode="parallel")
+    with pytest.raises(ValueError, match="max_batch_workers must be"):
+        Scheduler(max_batch_workers=0)
+    assert Scheduler(max_batch_workers=2)._batch_workers() == 2
+
+
+def test_auto_keeps_an_accelerator_batch_vectorized(tmp_path, monkeypatch):
+    """Host threads pay off by giving each member its own core. An
+    accelerator has one device for every member, so ``auto`` must not thread
+    there — N threads would buy N launches and nothing else. An explicit
+    ``threaded`` is the caller's choice and still stands.
+
+    Discrimination: without the backend check the first assertion is True,
+    since the batch is stochastic and untraced.
+    """
+    _, y0 = _decay_population(tmp_path, 4)
+    monkeypatch.setattr(Scheduler, "_platform", staticmethod(lambda _: "gpu"))
+    assert Scheduler()._threaded_batch(True, y0) is False
+    assert Scheduler(batch_mode="threaded")._threaded_batch(True, y0) is True
+    monkeypatch.setattr(Scheduler, "_platform", staticmethod(lambda _: "cpu"))
+    assert Scheduler()._threaded_batch(True, y0) is True
+    assert Scheduler()._threaded_batch(False, y0) is False

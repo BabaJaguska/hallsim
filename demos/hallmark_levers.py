@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -168,11 +169,15 @@ def logo_files() -> list[tuple[str, str]]:
     return found
 
 
-# A sample costs about 3 s plus 0.7 s per cell on an M3 Pro (1 cell 3.0 s,
-# 4 cells 5.8 s, 8 cells 8.9 s): Proctor fires ~6.5e5 reactions per cell
-# and the batched event loop evaluates every cell per event. Four is the
-# smallest count whose spread band means something.
-DEFAULT_CELLS = 4
+# A sample is one Gillespie chain per cell and the Scheduler runs a
+# stochastic batch one host thread per member, so the sample costs a chain
+# rather than the sum of them: 4 cells 11.9 s, 8 cells 12.2 s, 16 cells
+# 12.1 s, 32 cells 12.8 s, against 10.1 s for a single chain, on 80 cores
+# (docs/benchmarks.md section 6). Fewer cores than cells runs them in
+# waves, so there the sample costs ceil(cells / cores) chains. Sixteen is
+# what four cost on the vectorised lane, measured through the page: a move
+# is 10.5 s at both 4 and 16 cells, 12.3 s at 32.
+DEFAULT_CELLS = 16
 
 
 def _unfreeze_panel_species(composite):
@@ -269,8 +274,12 @@ class LeverModel:
                 validate=False,
                 semantic_validation=False,
             )
-            self._sample = jax.jit(self._population)
+            # Eager: the Scheduler maps a stochastic batch over host
+            # threads, and a jit around this would trace that lane away.
+            self._sample = self._population
             t0 = time.perf_counter()
+            # Serial: each sample already runs one host thread per cell, so
+            # a pool over presets on top of that oversubscribes the box.
             for preset in PRESETS.values():
                 self.population(preset)
             self.population_compile_seconds = time.perf_counter() - t0
@@ -401,11 +410,25 @@ class LeverBank:
         self._thread.start()
 
     def _build_rest(self):
-        for name, window in self.windows.items():
-            if name not in self._models:
-                self._models[name] = LeverModel(
-                    dose_window=window, **self._kwargs
-                )
+        rest = [
+            (name, window)
+            for name, window in self.windows.items()
+            if name not in self._models
+        ]
+        if not rest:
+            return
+        # Separate composites with separate compiles and separate solves,
+        # so the remaining windows cost the slowest of them rather than
+        # their sum. Each is published the moment it lands.
+        with ThreadPoolExecutor(max_workers=len(rest)) as pool:
+            pending = {
+                pool.submit(
+                    LeverModel, dose_window=window, **self._kwargs
+                ): name
+                for name, window in rest
+            }
+            for future in as_completed(pending):
+                self._models[pending[future]] = future.result()
 
     def get(self, name: str) -> LeverModel | None:
         return self._models.get(name)
