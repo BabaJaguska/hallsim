@@ -94,7 +94,6 @@ Five mechanistic observables ↔ five canonical reporter genes
 | `DDB2` | `gz06/x` |
 | `MDM2` | `gz06/y0` |
 | `HSPA1A` | `p07/MisP` |
-| `UBB` | `p07/Ub` |
 
 <!-- reporters:end -->
 

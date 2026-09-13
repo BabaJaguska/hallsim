@@ -49,8 +49,12 @@ Gene reporters (see :mod:`hallsim.gene_reporters`): CDKN1A → ``dp14/CDKN1A``,
 GLB1 → ``dp14/SA_beta_gal``, BNIP3 → ``dp14/FoxO3a``, DDB2 → ``gz06/x``
 (RMS amplitude), and MDM2 → ``gz06/y0`` — the Mdm2 *precursor*, which GZ06's
 Table I defines as the transcript, not the protein ``y``. HSPA1A →
-``p07/MisP`` and UBB → ``p07/Ub`` read Proctor states, so freezing the two
-``p07/`` edges moves both.
+``p07/MisP`` reads a Proctor state, so freezing the two ``p07/`` edges
+moves it. The aggregate total ``p07/aggregates`` (a :class:`SumObserver`
+over the free, proteasome-bound and sequestered pools) is drawn and
+exposed but not reported: Proctor starts with no aggregates and never
+clears them, so a fold change against day 0 reads the model filling an
+empty pool.
 
 ``test_gene_reporters.py`` checks this list against
 ``MULTI_HALLMARK_REPORTERS``, so it fails rather than drifts.
@@ -62,6 +66,7 @@ from dataclasses import dataclass
 
 from hallsim.composite import Composite
 from hallsim.models.forcing import drive_pulse, drive_step
+from hallsim.models.observer import SumObserver
 from hallsim.models.gain_edge import (
     GainEdge,
     place_gain,
@@ -104,6 +109,7 @@ PROCTOR07_NATIVE_TIME_SECONDS = 1.0
 # DallePezze's phospho-mTORC1 drives k1 through a linear gain.
 PROCTOR07_ROS_NAME = "ROS"
 PROCTOR07_SYNTHESIS_RATE_NAME = "k1"
+PROCTOR07_AGGREGATE_POOLS = ("AggP", "AggP_Proteasome", "SeqAggP")
 DP14_ROS_NAME = "ROS"
 DP14_MTORC1_ACTIVE_NAME = "mTORC1_pS2448"
 # Fraction of protein synthesis that follows mTORC1: complete mTORC1
@@ -424,4 +430,15 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
     topology["mtor_synthesis"] = {
         "source": f"dp14/{DP14_MTORC1_ACTIVE_NAME}",
         "signal": "p07/k1_signal",
+    }
+    # Proctor keeps aggregates as three pools — free, proteasome-bound and
+    # sequestered — and the free one is a flow-through state near zero.
+    # One path for their sum is what an inclusion-body readout means.
+    processes["aggregates"] = SumObserver(
+        elements=PROCTOR07_AGGREGATE_POOLS,
+        what="Proctor 2007 aggregates: free, proteasome-bound, sequestered",
+    )
+    topology["aggregates"] = {
+        "parts": tuple(f"p07/{name}" for name in PROCTOR07_AGGREGATE_POOLS),
+        "total": "p07/aggregates",
     }

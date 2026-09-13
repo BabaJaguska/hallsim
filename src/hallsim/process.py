@@ -178,6 +178,19 @@ class ProcessKind(enum.Enum):
     EVENT = "event"
 
 
+def block_element(schema, name):
+    """``(port, index)`` when ``name`` is ``<block port>_<index>`` — how a
+    symbolic form names one element of a port that binds several paths, in
+    the order the topology lists them. ``None`` for any other name."""
+    port, _, index = name.rpartition("_")
+    if not index.isdigit() or port not in schema:
+        return None
+    elements = getattr(schema[port], "elements", ()) or ()
+    if int(index) >= len(elements):
+        return None
+    return port, int(index)
+
+
 @dataclasses.dataclass(frozen=True)
 class ReactionChannel:
     """One reaction of a process's symbolic form.

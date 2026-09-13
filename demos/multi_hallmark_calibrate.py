@@ -22,6 +22,7 @@ SBML models download from BioModels on first import and cache locally.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import logging
 from pathlib import Path
@@ -66,6 +67,7 @@ from demos.models.multi_hallmark import (  # noqa: E402
     MULTI_HALLMARK_GRID as GRID,
     build_multi_hallmark_composite,
     GZ06_ALPHA_X_CONTROL,
+    GZ06_ALPHA_X_DAMAGED,
     RAPA_INTERVENTION_DAY,
     DDIS_ETOPOSIDE_DOSE_WINDOW,
 )
@@ -145,25 +147,41 @@ ARM_PAIRS = {
 ARM_CONDITIONS = {arm: cond for arm, (cond, _) in ARM_PAIRS.items()}
 
 
-# What `calibrate` fits unless `--fit` names otherwise: one DallePezze
-# parameter per senescence reporter axis and the mTORC1→synthesis gain.
-# Geva-Zatorsky's two (Mdm2 degradation, the gate's control end) stay at
-# their placed values: freed, the fit moves Mdm2 degradation over the Hopf
-# the gate was placed against and the composite stops pulsing in either
-# arm, for 2.6 % of loss the data cannot resolve (docs/known-problems.md).
+# What `calibrate` fits unless `--fit` names otherwise: one parameter on
+# each reporter's path — DallePezze's SA-β-gal decay and CDKN1A
+# transcription, Geva-Zatorsky's Mdm2 degradation — and DallePezze's DNA
+# repair, which the identifiability screen adds. The mTORC1→synthesis gain
+# is declared but not fitted: with HSPA1A the only Proctor reporter the
+# data leave it at 3.3 decades and it never moves.
 DEFAULT_FIT = (
     "sa_beta_gal_decay",
     "CDKN1A_transcr",
     "mdm2_degradation",
-    "mtor_synthesis_gain",
+    "dna_repair",
 )
 
 
-def _default_fit_params(composite, published) -> dict:
+@functools.lru_cache(maxsize=None)
+def oscillatory_window(margin: float = 0.05) -> tuple[float, float]:
+    """The Mdm2-degradation interval in which the treated arm's p53 still
+    pulses: between GZ06's two Hopf points on that axis at the damaged
+    ``alpha_x``, located by the framework's continuation, shrunk by
+    ``margin`` on each side. A fit may move the oscillator inside its
+    regime, not out of it — leaving the window would change what the
+    published model *is*, which is a modelling decision, not a parameter."""
+    from demos.multi_hallmark_hybrid import hopf_points
+
+    lo, hi = sorted(hopf_points("alpha_y", alpha_x=GZ06_ALPHA_X_DAMAGED))
+    return (lo * (1.0 + margin), hi * (1.0 - margin))
+
+
+def _default_fit_params(composite, published, clamp: bool = True) -> dict:
     """The fitted set: one parameter per reporter axis the data constrains,
     each with a log-normal MAP prior at its published or placed value, plus
     the mTORC1→synthesis gain into Proctor 2007. Proteasome activity k69 is
-    excluded by the reporter identifiability check."""
+    excluded by the reporter identifiability check. ``clamp`` boxes Mdm2
+    degradation into :func:`oscillatory_window`; off, the fit may leave
+    the oscillatory regime and the run's ``config.json`` records no clamp."""
     params = {
         "sa_beta_gal_decay": ParameterRef(
             "dp14",
@@ -183,6 +201,16 @@ def _default_fit_params(composite, published) -> dict:
             "gz06",
             "parameters.alpha_y",
             prior=published("gz06", "alpha_y"),
+            prior_sigma=0.5,
+            clamp=oscillatory_window() if clamp else None,
+        ),
+        # DallePezze's DNA repair: how long the etoposide damage, and with
+        # it p53's pulsing, persists. The whole-composite screen added it
+        # to the hypothesis set (2026-09-12).
+        "dna_repair": ParameterRef(
+            "dp14",
+            "parameters.DNA_repair",
+            prior=published("dp14", "DNA_repair"),
             prior_sigma=0.5,
         ),
         "alpha_x_control": ParameterRef(
@@ -214,7 +242,7 @@ def _default_fit_params(composite, published) -> dict:
 # biology the composite predicts, and the etoposide arm cannot see it at all
 # (severity 0 multiplies it by zero), so it can only come from the rapamycin
 # arm or from a dose-response the deposits do not carry.
-RAPA_INTENSITY = 0.7
+RAPA_INTENSITY = 0.5
 
 
 def _registry_with_intensity(intensity: float) -> dict:
@@ -242,12 +270,14 @@ def build_problem(
     parameters=None,
     fitted: tuple | None = None,
     rapa_intensity: float | None = None,
+    clamp: bool = True,
 ) -> CalibrationProblem:
     """The calibration problem. ``parameters`` overrides the fitted set,
     which is what an identifiability screen varies. ``fitted`` names exactly
     which members of the default set to fit — the one list there is: a
     smaller fit declares it, and scoring a saved fit passes the set that fit
-    had. Everything not named stays at its placed value."""
+    had. Everything not named stays at its placed value. ``clamp=False``
+    lifts the box on Mdm2 degradation."""
     ds = (
         GeneExpressionDataset.from_series_matrix(
             SERIES_MATRIX,
@@ -279,7 +309,7 @@ def build_problem(
     params = (
         parameters
         if parameters is not None
-        else _default_fit_params(composite, published)
+        else _default_fit_params(composite, published, clamp=clamp)
     )
     if fitted is not None:
         # A name outside the declared set is an address, ``process.key``, as
@@ -974,11 +1004,15 @@ def cmd_run(args) -> None:
     equilibrate = getattr(args, "equilibrate", False)
     fitted = tuple(getattr(args, "fit", ()) or ()) or DEFAULT_FIT
     intensity = getattr(args, "rapa_intensity", None)
+    clamp = not getattr(args, "no_clamp", False)
     if not SERIES_MATRIX.exists():
         print(_missing_data_notice(), flush=True)
         return run_unscored(equilibrate, make_run_dir(RUN_NAME))
     problem = build_problem(
-        equilibrate=equilibrate, fitted=fitted, rapa_intensity=intensity
+        equilibrate=equilibrate,
+        fitted=fitted,
+        rapa_intensity=intensity,
+        clamp=clamp,
     )
     print(
         f"[run] equilibrate={equilibrate} fit={sorted(problem.param_refs)}",
@@ -986,6 +1020,13 @@ def cmd_run(args) -> None:
     )
     init = problem.initial_params()
     out_dir = make_run_dir(RUN_NAME)
+    # The reporter guard's verdicts, first and unfiltered: a mapping the
+    # guard cannot verify or calls a proxy is a caveat on every number below.
+    print(
+        "[reporters] "
+        + str(problem.reporter_wiring).replace("\n", "\n[reporters] "),
+        flush=True,
+    )
     print(f"[run] writing to {out_dir.relative_to(ROOT)}/", flush=True)
 
     # ── out-of-the-box composite (always) ──
@@ -1211,6 +1252,12 @@ def cmd_screen(args) -> None:
             base.processes[item.process_name], (PulseSource, StepSource)
         )
     ]
+    if getattr(args, "pool", "all") == "declared":
+        # The demo's own candidate set: every parameter it declares on the
+        # routes from the intervention handles to the reporters, screened
+        # with nothing forced, so the fitted set is what survives.
+        declared = {(r.process_name, r.field) for r in problem.params.values()}
+        pool = [i for i in pool if (i.process_name, i.field) in declared]
     sigma = None
     latest = ROOT / "outputs" / RUN_NAME / "latest"
     if (latest / "checkpoint.npz").exists():
@@ -1223,12 +1270,23 @@ def cmd_screen(args) -> None:
             len(fitted),
         )
     print(
-        f"[screen] {len(pool)} candidates over "
+        f"[screen] {len(pool)} {getattr(args, 'pool', 'all')} candidates over "
         f"{', '.join(sorted({item.process_name for item in pool}))}; "
         f"σ {'measured from the latest fit' if sigma else 'at the published point'}",
         flush=True,
     )
-    keep = tuple(getattr(args, "fit", ()) or ())
+    # The pool is addressed ``process.key``; a declared name from the fitted
+    # set is translated to its address so the two ways of naming a
+    # parameter meet.
+    declared = problem.params
+
+    def address(name: str) -> str:
+        ref = declared.get(name)
+        if ref is None:
+            return name
+        return f"{ref.process_name}.{ref.field.removeprefix('parameters.')}"
+
+    keep = tuple(address(n) for n in (getattr(args, "fit", ()) or ()))
     if keep:
         print(
             f"[screen] keeping {list(keep)} and adding what the data still determine",
@@ -1291,6 +1349,20 @@ def main() -> None:
         help="Newton-solve the whole composite to a fixed point and share it "
         "as t=0. Off by default: this composite is mixed, and DP14 senescence "
         "is progressive with no healthy fixed point to solve for",
+    )
+    ap.add_argument(
+        "--pool",
+        choices=("all", "declared"),
+        default="all",
+        help="screen: every calibratable parameter of the composite, or "
+        "only the demo's declared candidate set",
+    )
+    ap.add_argument(
+        "--no-clamp",
+        action="store_true",
+        dest="no_clamp",
+        help="let Mdm2 degradation leave the treated arm's oscillatory "
+        "window (default: boxed inside it)",
     )
     args = ap.parse_args()
     _COMMANDS[args.command](args)

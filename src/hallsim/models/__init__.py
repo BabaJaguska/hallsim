@@ -20,6 +20,7 @@ from hallsim.models.clamp_edge import (
 )
 from hallsim.models.gated_removal import GatedRemoval
 from hallsim.models.hill_edge import HillEdge
+from hallsim.models.observer import SumObserver
 from hallsim.models.kick_event import KickEvent
 from hallsim.models.running_integral import RunningIntegral
 from hallsim.models.saturating_removal import SaturatingRemoval
@@ -29,6 +30,7 @@ __all__ = [
     "ClampEdge",
     "GatedRemoval",
     "HillEdge",
+    "SumObserver",
     "KickEvent",
     "RunningIntegral",
     "SaturatingRemoval",

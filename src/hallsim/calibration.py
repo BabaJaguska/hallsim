@@ -1342,6 +1342,18 @@ class CalibrationProblem:
                 },
                 "scheduler_kwargs": kw.get("scheduler_kwargs") or {},
                 "hallmarks": hallmarks,
+                # what the reporter guard said about each mapping: a verdict
+                # that scrolled past in a log is not a verdict anyone read
+                "reporter_wiring": [
+                    {
+                        "level": str(getattr(r, "level", "")),
+                        "verdict": getattr(r, "category", ""),
+                        "message": getattr(r, "message", ""),
+                    }
+                    for r in getattr(
+                        getattr(self, "reporter_wiring", None), "results", []
+                    )
+                ],
                 "versions": versions,
                 "notes": kw.get("notes") or {},
             }

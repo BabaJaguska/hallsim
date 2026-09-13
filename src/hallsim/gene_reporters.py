@@ -553,13 +553,17 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         observable="gz06/y0",
         gene_symbol="MDM2",
         sign=+1,
-        summary=zerophase_mean(tau=0.75),
+        summary=zerophase_rms_raw(tau=0.75),
         description=(
             "MDM2 — the canonical p53 transcriptional target, mapped to GZ06's "
             "y0, which Table I defines as the 'Mdm2 precursor... representing, "
             "for example, Mdm2 mRNA'. A transcript reporter reads the "
             "transcript: y is the protein (UniProt Q00987). Read as the "
-            "lag-free DC level (zero-phase mean) of the raw trajectory."
+            "lag-free RMS amplitude √⟨y0²⟩ of the raw trajectory, as DDB2 "
+            "reads p53: under GZ06's ψ-cancellation the mean of y0 is as "
+            "damage-blind as the mean of x, so a mean reporter can only move "
+            "by shifting the fixed point, which the fit did by damping the "
+            "oscillator; the amplitude is the channel damage actually drives."
         ),
         reference="Barak et al. 1993, EMBO J 12:461–468",
     ),
@@ -579,22 +583,46 @@ PROTEOSTASIS_REPORTERS: list[GeneReporter] = [
         ),
         reference="Morimoto 1998, Genes Dev 12:3788–3796",
     ),
-    GeneReporter(
-        observable="p07/Ub",
-        gene_symbol="UBB",
-        sign=-1,
-        summary=zerophase_mean(tau=2.0),
-        description=(
-            "UBB — polyubiquitin B, induced when the free ubiquitin pool is "
-            "drawn down by conjugation and by sequestration into aggregates. "
-            "Reads Proctor 2007's free Ub, so the sign is negative: the "
-            "transcript answers the depletion. Ubiquitin is the conserved "
-            "quantity the UPS model is built around, which is why this pool "
-            "and not a subunit count is the readable state."
-        ),
-        reference="Ryu et al. 2007, J Biol Chem 282:36592–36602",
-    ),
 ]
+
+#: p62 on the aggregate total. Not in the default set: Proctor 2007 starts
+#: with no aggregates and accumulates them without clearance, so against a
+#: day-0 reference the transcript would read the model's own filling of an
+#: empty pool (+1.7 log2 in every arm), not a response. Usable with a
+#: time-matched control ("paired" normalization) or an aged starting state.
+SQSTM1_REPORTER = GeneReporter(
+    observable="p07/aggregates",
+    gene_symbol="SQSTM1",
+    sign=+1,
+    summary=zerophase_mean(tau=2.0),
+    description=(
+        "p62 (SQSTM1) — induced by aggregate load through NRF2 and TFEB, "
+        "and itself the receptor that ships aggregates to autophagy. "
+        "Reads the sum of Proctor 2007's aggregate pools (free, "
+        "proteasome-bound, sequestered) as one path."
+    ),
+    reference=(
+        "Jain et al. 2010, J Biol Chem 285:22576–22591; "
+        "Bjørkøy et al. 2005, J Cell Biol 171:603–614"
+    ),
+)
+
+#: Free ubiquitin as a transcript reporter. Not in the default set: Proctor
+#: 2007 keeps ubiquitin as a closed pool (E1 charging drains it, only
+#: degradation returns it, nothing makes it), so a treatment that lowers
+#: misfolding drains the free pool by bookkeeping, and a UBB transcript
+#: cannot track that.
+UBB_REPORTER = GeneReporter(
+    observable="p07/Ub",
+    gene_symbol="UBB",
+    sign=-1,
+    summary=zerophase_mean(tau=2.0),
+    description=(
+        "UBB — polyubiquitin B; reads Proctor 2007's free Ub with a negative "
+        "sign, the transcript answering depletion of the pool."
+    ),
+    reference="Ryu et al. 2007, J Biol Chem 282:36592–36602",
+)
 
 
 def summarize_reporters(

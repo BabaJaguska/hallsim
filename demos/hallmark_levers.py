@@ -17,11 +17,12 @@ is served and the others in the background.
 Proctor 2007 is a stochastic model and is drawn as one: its row runs the
 member at reaction level as a population of cells (one Gillespie path each,
 on the composite's clock, driven by DallePezze's ROS and phospho-mTORC1),
-as a spread band with the population mean and the mean field the
-calibration used over it. A sample is seconds of serial event loop, so the
-presets are sampled at startup, every sample is kept, and a new setting
-shows its mean field, faded and marked, until the sample lands.
-``--cells 0`` serves the page without a population.
+as a spread band with the population mean over it, the control population
+in grey. A sample is seconds of serial event loop, so the presets are
+sampled at startup, every sample is kept, and a new setting shows the
+control population alone, marked, until its sample lands. ``--cells 0``
+serves the page without a population and draws the deterministic
+trajectory in that row instead.
 
 Needs the ``app`` extra: ``pip install "hallsim[app]"``.
 """
@@ -124,7 +125,6 @@ PANELS = {
         # A free aggregate is sequestered or binds the proteasome within
         # minutes; what accumulates is the sum.
         (("p07/AggP", "p07/AggP_Proteasome", "p07/SeqAggP"), "aggregates"),
-        ("p07/Ub", "free ubiquitin"),
     ),
 }
 
@@ -217,13 +217,13 @@ def _series(ys, shown, cols):
 class LeverModel:
     """The composite behind the page for one exposure window, compiled once.
 
-    ``solve(severities)`` returns the mean-field trajectory; ``population(
+    ``solve(severities)`` returns the deterministic trajectory; ``population(
     severities)`` runs the reaction-level members as ``n_cells`` cells on the
     same grid, common random numbers across settings so a lever's effect is
     not confounded with the noise draw. The presets are sampled at
     construction and every sample is kept, so a setting is paid for once.
     ``n_cells=0`` skips the population and the reaction-level rows draw the
-    mean field.
+    deterministic trajectory.
     """
 
     def __init__(
@@ -284,7 +284,7 @@ class LeverModel:
             )
             self._presets.start()
         log.info(
-            "window %s ready: %d states, mean field compiled in %.1f s; "
+            "window %s ready: %d states, composite compiled in %.1f s; "
             "%d-cell presets sampling in the background",
             self.dose_window,
             len(self.keys),
@@ -534,12 +534,11 @@ CONTROL_COLOR = TOKENS["color-neutral-700"]
 PULSE_COLOR = TOKENS["color-pulse"]
 RAPA_COLOR = TOKENS["color-accent"]
 CURVE_WIDTH = 1.8
-# Control is true dots, the mean field long dashes, so the two read apart
+# Control is true dots, so it reads apart from the setting's solid line
 # even over a noisy population mean.
 CONTROL_LINE = dict(
     color=TOKENS["color-neutral-700"], width=1.4, dash="1px,3px"
 )
-MEAN_FIELD_DASH = "9px,5px"
 TIME_RANGE = (0.0, MULTI_HALLMARK_GRID.t_end)
 # Washout day and the two sampled days of the calibration data.
 TIME_TICKS = (0, RAPA_INTERVENTION_DAY, 7, MULTI_HALLMARK_GRID.t_end)
@@ -595,8 +594,6 @@ def legend_items(lm: LeverModel, severities):
         entry(html.Span(className="ln"), "current setting"),
         entry(html.Span(className="ln dotted"), "control"),
     ]
-    if lm.n_cells:
-        items.append(entry(html.Span(className="ln dashed"), "mean field"))
     names = ("etoposide", "rapamycin" if severities[1] < 0 else "mTORC1 drive")
     items += [
         entry(
@@ -688,7 +685,7 @@ def _row_figure(
 
 
 def _figure_for(model: str, lm: LeverModel, ys, severities):
-    """Mean-field row: control dotted, this setting solid."""
+    """Deterministic row: control dotted, this setting solid."""
     import plotly.graph_objects as go
 
     row = PANELS[model]
@@ -743,9 +740,11 @@ def _band(fig, t, cells, color, name, row, col):
         )
 
 
-def _population_figure(model: str, lm: LeverModel, ys_pop, ys_mf, severities):
+def _population_figure(model: str, lm: LeverModel, ys_pop, severities):
     """Reaction-level row: the spread across cells as a band, the population
-    mean bold, the mean field dashed, the control population in grey."""
+    mean bold, the control population in grey. ``ys_pop=None`` draws the
+    control population alone, for a setting whose sample is still running.
+    """
     import plotly.graph_objects as go
 
     row = PANELS[model]
@@ -757,7 +756,7 @@ def _population_figure(model: str, lm: LeverModel, ys_pop, ys_mf, severities):
     t = lm.ts[shown]
     control = lm.control_population
     for j, cols in enumerate(lm.columns[model]):
-        cells = _series(ys_pop, shown, cols)
+        control_cells = None
         if control is not None:
             control_cells = _series(control, shown, cols)
             _band(
@@ -769,6 +768,22 @@ def _population_figure(model: str, lm: LeverModel, ys_pop, ys_mf, severities):
                 1,
                 j + 1,
             )
+        if ys_pop is None:
+            # An unsampled setting: the control population alone, when
+            # its own sample has landed.
+            if control_cells is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=t,
+                        y=control_cells.mean(axis=1),
+                        line=CONTROL_LINE,
+                        hoverinfo="skip",
+                    ),
+                    row=1,
+                    col=j + 1,
+                )
+            continue
+        cells = _series(ys_pop, shown, cols)
         _band(fig, t, cells, _rgba(color, 0.22), "this setting", 1, j + 1)
         if control is not None:
             fig.add_trace(
@@ -781,16 +796,6 @@ def _population_figure(model: str, lm: LeverModel, ys_pop, ys_mf, severities):
                 row=1,
                 col=j + 1,
             )
-        fig.add_trace(
-            go.Scatter(
-                x=t,
-                y=_series(ys_mf, shown, cols),
-                line=dict(color=color, width=1.5, dash=MEAN_FIELD_DASH),
-                hoverinfo="skip",
-            ),
-            row=1,
-            col=j + 1,
-        )
         fig.add_trace(
             go.Scatter(
                 x=t,
@@ -836,7 +841,7 @@ def population_badge(lm: LeverModel | None, sev):
     if lm is None:
         return _badge("compiling…", pending=True)
     if not lm.n_cells:
-        return _badge("mean field")
+        return _badge("no population")
     if lm.population_cached(sev) is None:
         return _badge("sampling…", pending=True)
     return _badge("")
@@ -855,12 +860,14 @@ def render(lm: LeverModel | None, fallback: LeverModel, *severities):
     figures = []
     for name in PANELS:
         sample = model.population_cached(sev) if model.n_cells else None
-        if name in POPULATION_MODELS and sample is not None:
-            fig = _population_figure(name, model, sample[0], ys, sev)
+        if name in POPULATION_MODELS and model.n_cells:
+            fig = _population_figure(
+                name, model, None if sample is None else sample[0], sev
+            )
+            if sample is None:
+                _mark_pending(fig, "sampling…")
         else:
             fig = _figure_for(name, model, ys, sev)
-            if name in POPULATION_MODELS and model.n_cells:
-                _mark_pending(fig, "sampling…")
         if lm is None:
             _mark_pending(fig, "compiling…")
         figures.append(fig)
@@ -895,10 +902,8 @@ def render_population(lm: LeverModel, *severities):
     sample = lm.population_async(sev)
     if sample is None:
         return None
-    _, ys_mf = lm.solve(sev)
     figures = [
-        _population_figure(m, lm, sample[0], ys_mf, sev)
-        for m in POPULATION_MODELS
+        _population_figure(m, lm, sample[0], sev) for m in POPULATION_MODELS
     ]
     return (*figures, population_badge(lm, sev))
 
@@ -1186,7 +1191,7 @@ def main(
 ):
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     log.info(
-        "compiling the first exposure window's mean field; the page is "
+        "compiling the first exposure window's composite; the page is "
         "served as soon as that is done (about half a minute). The "
         "reaction-level population and the other windows are sampled and "
         "compiled behind it, and each row fills in as it lands."

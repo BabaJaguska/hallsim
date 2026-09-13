@@ -706,6 +706,20 @@ def gz06_damage_scan():
     help="score: the calibrate run directory to re-score (default: latest)",
 )
 @click.option(
+    "--pool",
+    type=click.Choice(["all", "declared"]),
+    default="all",
+    help="screen: every calibratable parameter of the composite, or only "
+    "the demo's declared candidate set",
+)
+@click.option(
+    "--no-clamp",
+    "no_clamp",
+    is_flag=True,
+    help="calibrate: let Mdm2 degradation leave the treated arm's "
+    "oscillatory window (default: boxed inside it)",
+)
+@click.option(
     "--rapa-intensity",
     type=float,
     default=None,
@@ -722,7 +736,7 @@ def gz06_damage_scan():
     "their placed values. A name from the demo's declared set, or any "
     "parameter as `process.key` the way `screen` names it (e.g. "
     "dp14.DNA_repair, p07.Source, mtor_synthesis.gain). Default: the "
-    "declared four",
+    "four the paper reports",
 )
 def multi_hallmark(
     command,
@@ -735,6 +749,8 @@ def multi_hallmark(
     fit,
     rapa_intensity,
     run,
+    pool,
+    no_clamp,
 ):
     """The multi-hallmark composite (DallePezze 2014 + Geva-Zatorsky 2006 +
     Proctor 2007) scored against GSE248823.
@@ -763,6 +779,8 @@ def multi_hallmark(
         fit=fit,
         rapa_intensity=rapa_intensity,
         run=run,
+        pool=pool,
+        no_clamp=no_clamp,
     )
     from demos.multi_hallmark_calibrate import cmd_score, cmd_screen
 

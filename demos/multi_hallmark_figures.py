@@ -930,28 +930,36 @@ def fig_temporal_compare(args):
         band = np.percentile(cells_fit[k], [10, 90], axis=1)
         return pooled_oob[k], pooled_fit[k], band
 
-    # One row per constituent, in reporter order: the ragged right edge is
-    # the composite's structure, and the spare cells hold the legend and
-    # the population note.
-    rows = []
+    # Panels are packed three to a row in reporter order, a constituent's
+    # panels kept together and a constituent joining the row above when
+    # its panels fit there; each constituent is headed above its first
+    # panel. The legend is a row of its own underneath.
+    ncol = 3
+    groups: list[tuple[str, list[int]]] = []
     for i, r in enumerate(problem.reporters):
         ns = r.observable.split("/")[0]
-        if not rows or rows[-1][0] != ns:
-            rows.append((ns, []))
-        rows[-1][1].append(i)
-    nrow, ncol = len(rows), max(len(idxs) for _, idxs in rows)
+        if not groups or groups[-1][0] != ns:
+            groups.append((ns, []))
+        groups[-1][1].append(i)
+    rows: list[list[tuple[str, int]]] = []
+    for ns, idxs in groups:
+        if rows and len(rows[-1]) + len(idxs) <= ncol:
+            rows[-1].extend((ns, i) for i in idxs)
+        else:
+            for start_ in range(0, len(idxs), ncol):
+                rows.append([(ns, i) for i in idxs[start_ : start_ + ncol]])
+    nrow = len(rows)
     fig, axes = plt.subplots(
-        nrow, ncol, figsize=(11, 3.2 * nrow), sharex=True, squeeze=False
+        nrow, ncol, figsize=(11, 3.3 * nrow + 0.6), sharex=True, squeeze=False
     )
-    spare = []
-    for r, (ns, idxs) in enumerate(rows):
+    headed: set = set()
+    for r, row in enumerate(rows):
         for c in range(ncol):
             ax = axes[r, c]
-            if c >= len(idxs):
+            if c >= len(row):
                 ax.axis("off")
-                spare.append(ax)
                 continue
-            i = idxs[c]
+            ns, i = row[c]
             gene = genes[i]
             ax.axhline(0, color=grid_c, lw=1.2, zorder=0)
             for arm, (label, color) in arms.items():
@@ -1003,6 +1011,8 @@ def fig_temporal_compare(args):
                 ax.spines[sp].set_visible(False)
             if c == 0:
                 ax.set_ylabel("log2FC")
+            if ns not in headed:
+                headed.add(ns)
                 ax.annotate(
                     CONSTITUENT_LABELS.get(ns, ns)
                     + (
@@ -1016,7 +1026,7 @@ def fig_temporal_compare(args):
                     color="#555",
                     ha="left",
                 )
-            below = r + 1 < nrow and c < len(rows[r + 1][1])
+            below = r + 1 < nrow and c < len(rows[r + 1])
             if not below:
                 ax.set_xlabel("day")
                 ax.tick_params(labelbottom=True)
@@ -1049,47 +1059,24 @@ def fig_temporal_compare(args):
     for h, lab in zip(*axes[0, 0].get_legend_handles_labels()):
         if lab in ("etoposide", "rapamycin"):
             other_entries.append((h, lab))
-    if pop_idx:
-        other_entries.append(
-            (Patch(color="#888", alpha=0.3), "cell-to-cell spread")
-        )
-    groups = [
-        ("arm", arm_entries),
-        ("parameters", style_entries),
-        (None, other_entries),
-    ]
-    if spare:
-        # one legend, the groups separated by a blank row, headed in bold
-        blank = Patch(alpha=0)
-        rows, headers = [], []
-        for gi, (title, entries) in enumerate(groups):
-            if gi:
-                rows.append((blank, ""))
-            if title:
-                headers.append(len(rows))
-                rows.append((blank, title))
-            rows.extend(entries)
-        leg = spare[0].legend(
-            [h for h, _ in rows],
-            [lab for _, lab in rows],
-            loc="upper left",
-            bbox_to_anchor=(0.0, 1.0),
-            frameon=False,
-            fontsize=10.5,
-        )
-        for i in headers:
-            leg.get_texts()[i].set_fontweight("bold")
-    else:
-        entries = [e for _, es in groups for e in es]
-        fig.legend(
-            [h for h, _ in entries],
-            [lab for _, lab in entries],
-            loc="lower center",
-            ncol=3,
-            frameon=False,
-            fontsize=9.0,
-            bbox_to_anchor=(0.5, -0.01),
-        )
+    # one row, the three groups separated by a gap
+    blank = Patch(alpha=0)
+    entries: list = []
+    for gi, es in enumerate((arm_entries, style_entries, other_entries)):
+        if gi:
+            entries.append((blank, ""))
+        entries.extend(es)
+    fig.legend(
+        [h for h, _ in entries],
+        [lab for _, lab in entries],
+        loc="lower center",
+        ncol=len(entries),
+        frameon=False,
+        fontsize=10,
+        handlelength=2.2,
+        columnspacing=1.2,
+        bbox_to_anchor=(0.5, 0.0),
+    )
     fig.suptitle(
         "Gene reporter trajectories in treated and untreated arms",
         fontsize=13,
@@ -1097,7 +1084,7 @@ def fig_temporal_compare(args):
         ha="center",
         fontweight="bold",
     )
-    fig.tight_layout(rect=(0, 0.0 if spare else 0.05, 1, 0.96))
+    fig.tight_layout(rect=(0, 0.06, 1, 0.96))
     OUT_CAL.mkdir(parents=True, exist_ok=True)
     for ext in ("png", "pdf"):
         fig.savefig(
@@ -1107,6 +1094,145 @@ def fig_temporal_compare(args):
         )
     plt.close(fig)
     print(f"wrote temporal_ddis_vs_rapa.png/.pdf -> {OUT_CAL}", flush=True)
+
+
+def fig_state_arms(args):
+    """The model state behind each reporter, every arm at the calibrated
+    parameters: the raw species the reporters read, before any summary or
+    fold change. The companion of :func:`fig_temporal_compare` for the
+    supplement, and what an SBML export of the composite reproduces
+    directly."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    from demos.multi_hallmark_calibrate import _annotate_interventions
+    from hallsim.units import canonical_units
+
+    ARM_STYLE = {
+        "ctrl": ("control", "#6b7280"),
+        "DDIS": ("DDIS", "#c0392b"),
+        "RAPA": ("rapamycin", "#2a78d6"),
+    }
+    grid_c = "#e6e6e2"
+    problem = _problem(args)
+    fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
+    runs = problem.simulate_all_conditions(fit, n_save=1401)
+    comp = problem.composite
+    units = canonical_units(comp.processes, comp.topology)
+    fit_conds = {problem.arm_pairs[a][0] for a in (problem.fit_arms or [])}
+    held_conds = {
+        problem.arm_pairs[a][0] for a in (problem.held_out_arms or [])
+    }
+    arms = {c: ARM_STYLE.get(c, (c, "#6b7280")) for c in runs}
+    panels = [
+        (r.observable.replace("_integral", ""), r.gene_symbol)
+        for r in problem.reporters
+    ]
+
+    # Same packing as the reporter figure: three to a row, a constituent's
+    # panels kept together, each constituent headed above its first panel.
+    ncol = 3
+    groups: list[tuple[str, list[int]]] = []
+    for i, (path, _) in enumerate(panels):
+        ns = path.split("/")[0]
+        if not groups or groups[-1][0] != ns:
+            groups.append((ns, []))
+        groups[-1][1].append(i)
+    rows: list[list[tuple[str, int]]] = []
+    for ns, idxs in groups:
+        if rows and len(rows[-1]) + len(idxs) <= ncol:
+            rows[-1].extend((ns, i) for i in idxs)
+        else:
+            for start_ in range(0, len(idxs), ncol):
+                rows.append([(ns, i) for i in idxs[start_ : start_ + ncol]])
+    nrow = len(rows)
+    # One unit across the panels is written on the left column only, as
+    # the reporter figure writes log2FC; a panel in a different unit says so.
+    panel_units = {units.get(path) or "model units" for path, _ in panels}
+    shared_unit = next(iter(panel_units)) if len(panel_units) == 1 else None
+    fig, axes = plt.subplots(
+        nrow, ncol, figsize=(11, 3.3 * nrow + 0.6), sharex=True, squeeze=False
+    )
+    headed: set = set()
+    for r, row in enumerate(rows):
+        for c in range(ncol):
+            ax = axes[r, c]
+            if c >= len(row):
+                ax.axis("off")
+                continue
+            ns, i = row[c]
+            path, gene = panels[i]
+            for cond, (label, color) in arms.items():
+                ts = np.asarray(runs[cond].ts)
+                y = np.asarray(runs[cond].get(path))
+                m = ts >= 0.0
+                ax.plot(ts[m], y[m], color=color, lw=1.8, zorder=3)
+            _annotate_interventions(ax, "RAPA_vs_ctrl")
+            ax.set_title(gene, fontsize=11, fontweight="bold", loc="left")
+            ax.set_title(path, fontsize=9, color="#777", loc="right")
+            unit = units.get(path) or "model units"
+            if c == 0 or unit != shared_unit:
+                ax.set_ylabel(unit, fontsize=9)
+            ax.set_xlim(0.0, float(problem.t_end))
+            ax.grid(True, color=grid_c, lw=0.6, alpha=0.7)
+            ax.set_axisbelow(True)
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+            if ns not in headed:
+                headed.add(ns)
+                ax.annotate(
+                    CONSTITUENT_LABELS.get(ns, ns),
+                    xy=(0, 1.2),
+                    xycoords="axes fraction",
+                    fontsize=11,
+                    color="#555",
+                    ha="left",
+                )
+            below = r + 1 < nrow and c < len(rows[r + 1])
+            if not below:
+                ax.set_xlabel("day")
+                ax.tick_params(labelbottom=True)
+
+    arm_entries = []
+    for cond, (label, color) in arms.items():
+        role = (
+            " (fit)"
+            if cond in fit_conds
+            else " (held out)" if cond in held_conds else ""
+        )
+        arm_entries.append((Line2D([], [], color=color, lw=2.2), label + role))
+    other_entries = [
+        (h, lab)
+        for h, lab in zip(*axes[0, 0].get_legend_handles_labels())
+        if lab in ("etoposide", "rapamycin")
+    ]
+    entries: list = list(arm_entries) + [(Patch(alpha=0), "")] + other_entries
+    fig.legend(
+        [h for h, _ in entries],
+        [lab for _, lab in entries],
+        loc="lower center",
+        ncol=len(entries),
+        frameon=False,
+        fontsize=10,
+        handlelength=2.2,
+        columnspacing=1.2,
+        bbox_to_anchor=(0.5, 0.0),
+    )
+    fig.suptitle(
+        "Model state behind each gene reporter in the control and treated arms",
+        fontsize=13,
+        x=0.5,
+        ha="center",
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=(0, 0.06, 1, 0.96))
+    OUT_CAL.mkdir(parents=True, exist_ok=True)
+    for ext in ("png", "pdf"):
+        fig.savefig(
+            OUT_CAL / f"state_ddis_vs_rapa.{ext}", dpi=150, bbox_inches="tight"
+        )
+    plt.close(fig)
+    print(f"wrote state_ddis_vs_rapa.png/.pdf -> {OUT_CAL}", flush=True)
 
 
 # ── before-after (standalone vs composite) ───────────────────────────────
@@ -1664,6 +1790,7 @@ FIGURES = {
     "concordance": fig_concordance,
     "temporal": fig_temporal,
     "temporal-compare": fig_temporal_compare,
+    "state-arms": fig_state_arms,
     "before-after": fig_before_after,
     "coupling-ablation": fig_coupling_ablation,
     "composite-graph": fig_composite_graph,

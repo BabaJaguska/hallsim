@@ -51,9 +51,9 @@ def test_etoposide_starts_p53_pulsing(lever_model):
 
 def test_render_draws_every_panel(lever_model):
     """A sampled preset's lever request draws the population row; an
-    unsampled setting draws its mean field faded and marked, and the badge
-    says so. The presets are sampled in the background so the page paints
-    without them, which a test has to wait for."""
+    unsampled setting draws the control population alone, marked, and the
+    badge says so. The presets are sampled in the background so the page
+    paints without them, which a test has to wait for."""
     lm = lever_model
     lm.wait_for_presets()
     n_models, n_levers = len(PANELS), len(LEVERS)
@@ -64,7 +64,7 @@ def test_render_draws_every_panel(lever_model):
     badge, legend, chips = out[-3], out[-2], out[-1]
     assert chips == ["chip", "chip", "chip selected"]
     for model, fig in zip(PANELS, figures):
-        per_panel = 7 if model in POPULATION_MODELS else 2
+        per_panel = 6 if model in POPULATION_MODELS else 2
         assert len(fig.data) == per_panel * len(PANELS[model])
         for trace in fig.data:
             assert np.isfinite(np.asarray(trace.y, dtype=float)).all()
@@ -81,7 +81,9 @@ def test_render_draws_every_panel(lever_model):
 
     out = render(lm, lm, 0.5, 0.0, 0.0)
     for model, fig in zip(PANELS, out[:n_models]):
-        assert len(fig.data) == 2 * len(PANELS[model])
+        # an unsampled population row: the control band and its mean only
+        per_panel = 3 if model in POPULATION_MODELS else 2
+        assert len(fig.data) == per_panel * len(PANELS[model])
         assert len(fig.layout.shapes) == len(PANELS[model])
         texts = _annotation_texts(fig)
         assert ("sampling…" in texts) == (model in POPULATION_MODELS)
@@ -111,9 +113,9 @@ def test_population_row_carries_the_spread(lever_model):
     *figures, badge = render_population(lm, 0.5, 0.0, 0.0)
     assert len(figures) == len(POPULATION_MODELS)
     # Per panel: two band edges for control, two for this setting, then the
-    # control mean, the mean field and the population mean.
+    # control mean and the population mean.
     for model, fig in zip(POPULATION_MODELS, figures):
-        assert len(fig.data) == 7 * len(PANELS[model])
+        assert len(fig.data) == 6 * len(PANELS[model])
     # The member is coupled: with ROS read from DallePezze it misfolds, so
     # free ubiquitin is drawn down from the deposit's full pool in every cell.
     ub = lm.keys.index("p07/Ub")

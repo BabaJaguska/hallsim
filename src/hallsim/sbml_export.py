@@ -29,7 +29,7 @@ import re
 import libsbml
 import sympy
 
-from hallsim.process import ProcessKind
+from hallsim.process import ProcessKind, block_element
 from hallsim.sbml_events import SBMLEvent
 from hallsim.sbml_math import TIME, to_ast
 from hallsim.store import as_paths
@@ -207,6 +207,14 @@ class _DeclaredExporter:
         entry = self.topo.get(port, port)
         return as_paths(entry)
 
+    def _element(self, name):
+        """``(port, path)`` when ``name`` names one element of a block port."""
+        element = block_element(self.schema, name)
+        if element is None:
+            return None
+        port, index = element
+        return port, self._paths(port)[index]
+
     def _parameter(self, name):
         """An SBML parameter for one of the process's own, prefixed."""
         if name not in self.parameter_sid:
@@ -223,6 +231,14 @@ class _DeclaredExporter:
             if sym.name not in self.schema:
                 if sym.name in self.values:
                     subs[sym] = sympy.Symbol(self._parameter(sym.name))
+                    continue
+                element = self._element(sym.name)
+                if element is not None:
+                    port, path = element
+                    subs[sym] = _scaled(
+                        sympy.Symbol(self.ids.path(path)),
+                        self.units.read(self.schema, port, path),
+                    )
                     continue
                 raise UnsupportedExportError(
                     f"{self.name!r}: {sym.name!r} in its symbolic form is "

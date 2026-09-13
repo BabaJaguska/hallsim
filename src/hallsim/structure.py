@@ -34,7 +34,7 @@ import jax.numpy as jnp
 import numpy as np
 import sympy
 
-from hallsim.process import PortRole
+from hallsim.process import PortRole, block_element
 from hallsim.sbml_math import TIME
 from hallsim.store import as_paths
 from hallsim.units import canonical_units, conversion_factor
@@ -523,17 +523,17 @@ def symbolic_field(composite, keys=None) -> SymbolicField:
         boundary = dict(getattr(proc, "boundary_rules", lambda: ())())
         scale = float(getattr(proc, "time_scale", 1.0))
 
-        def read_symbol(port):
+        def read_symbol(port, index=None):
             paths = as_paths(topo[port])
-            if len(paths) != 1:
+            if index is None and len(paths) != 1:
                 raise StructureError(
                     f"{name!r} reads port {port!r}, which binds {len(paths)} "
-                    "store paths; a symbolic form reads one"
+                    "store paths; a symbolic form reads one, or names an "
+                    "element as <port>_<index>"
                 )
-            fac = conversion_factor(
-                canon.get(paths[0], ""), schema[port].units
-            )
-            sym = sympy.Symbol(paths[0])
+            path = paths[0 if index is None else index]
+            fac = conversion_factor(canon.get(path, ""), schema[port].units)
+            sym = sympy.Symbol(path)
             return sym * fac if fac != 1.0 else sym
 
         def bind(expr):
@@ -544,6 +544,8 @@ def symbolic_field(composite, keys=None) -> SymbolicField:
                     continue
                 if sym.name in schema:
                     subs[sym] = read_symbol(sym.name)
+                elif (element := block_element(schema, sym.name)) is not None:
+                    subs[sym] = read_symbol(*element)
                 elif sym.name in boundary:
                     subs[sym] = bind(boundary[sym.name])
                 elif sym.name in values:
@@ -563,10 +565,15 @@ def symbolic_field(composite, keys=None) -> SymbolicField:
         def write_factor(port, path):
             return conversion_factor(schema[port].units, canon.get(path, ""))
 
+        # What an opaque form may depend on: its inputs and the states it
+        # evolves. Its own algebraic outputs are what it produces, not what
+        # it reads — an opaque function of its own output would never
+        # resolve.
         reads = sorted(
             path
             for port, s in schema.items()
-            if not (s.role is PortRole.EVOLVED and not s.reads_value)
+            if s.role is not PortRole.ASSIGNED
+            and not (s.role is PortRole.EVOLVED and not s.reads_value)
             for path in as_paths(topo[port])
         )
         read_args = [sympy.Symbol(p) for p in reads]

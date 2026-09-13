@@ -23,9 +23,8 @@ multi-hallmark composite's reporters:
 | `GLB1` (SA-β-gal) | `dp14/SA_beta_gal` | zero-phase mean, τ=2.0 | the canonical senescence marker, which DP14 models directly |
 | `BNIP3` | `dp14/FoxO3a` | zero-phase mean, τ=2.0 | FoxO3 target; reads the FoxO-driven mitophagy arm downstream of nutrient sensing |
 | `DDB2` | `gz06/x` | zero-phase **RMS** `√⟨x²⟩`, τ=0.75 | p53 target; GZ06's mean p53 is analytically damage-blind, so DDB2 reads pulse amplitude — see [gz06-basal-p53.md](gz06-basal-p53.md) |
-| `MDM2` | `gz06/y0` | zero-phase mean, τ=0.75 | p53 target; `y0` is the paper's Mdm2 precursor, "representing, for example, Mdm2 mRNA" — the transcript, not the protein `y` |
+| `MDM2` | `gz06/y0` | zero-phase RMS amplitude, τ=0.75 | p53 target; `y0` is the paper's Mdm2 precursor, "representing, for example, Mdm2 mRNA" — the transcript, not the protein `y`. RMS as for DDB2: the mean of `y0` is damage-blind under GZ06, the pulse amplitude is not |
 | `HSPA1A` | `p07/MisP` | zero-phase mean, τ=2.0 | *(--proteostasis)* HSP70, the canonical HSF1 target induced by misfolded load; reads Proctor's free misfolded pool — the load the heat-shock response would answer, not the response |
-| `UBB` | `p07/Ub` | zero-phase mean, τ=2.0, **sign −1** | *(--proteostasis)* polyubiquitin B, induced when the free ubiquitin pool is drawn down by conjugation and sequestration; ubiquitin is the conserved quantity the UPS model is built around |
 
 <!-- reporters:end -->
 
