@@ -135,3 +135,15 @@ would be the preferred modality for mechanistic inference of this kind;
 this dataset is used for its accessibility, topical alignment
 (gerotherapeutic modulation of senescence), and its two-arm
 ±intervention design.
+
+## Treatment protocol, as the series matrix records it
+
+`!Sample_treatment_protocol_ch1`: DDIS was triggered by etoposide at
+20 µM for two days; cells were then washed and given fresh medium
+without drug. For the rapamycin samples, rapamycin was added to the fresh
+medium at 20 nM "just before use"; the growth protocol changes the medium
+every two days, so rapamycin is present continuously from the washout at
+day 2 to harvest at day 7 and 14. The composite matches that shape: the
+Deregulated Nutrient Sensing handle is a step at day 2 held to the end
+of the run (`StepSource`, mTORC1 S2448 phosphorylation at half the
+published rate, `RAPA_INTENSITY = 0.5` declared), not a pulse.

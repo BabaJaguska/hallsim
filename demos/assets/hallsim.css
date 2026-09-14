@@ -6,11 +6,30 @@ body { font-family: var(--font-body); font-size: 13px; line-height: 1.5;
        color: var(--color-text); background: var(--color-bg); margin: 0; }
 
 .wrap { display: flex; gap: 24px; padding: 18px 22px; }
-.side { flex: 0 0 300px; }
+/* The levers take a fifth of the width at most and shrink with the window;
+   the plots keep the rest. */
+.side { flex: 0 0 clamp(168px, 19vw, 300px); min-width: 0; }
 .main { flex: 1 1 auto; min-width: 0; }
 
+/* On a phone-sized screen the levers sit above the rows and the panel grid
+   wraps two across (see the viewport store in demos/hallmark_levers.py);
+   anything wider keeps the levers beside the plots, smaller. */
+@media (max-width: 600px) {
+  .wrap { flex-direction: column; gap: 6px; padding: 14px 16px; }
+  .side { flex: none; width: auto; display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+          column-gap: 22px; align-items: start; }
+  .side > h1, .side > .tag, .side > .chips, .side > .logos {
+    grid-column: 1 / -1; }
+  h1 { font-size: 40px; }
+  .tag { margin: 8px 0 10px; }
+  .card { border-top: none; padding: 6px 0 8px; }
+  .logos { margin-top: 10px; }
+}
+
 /* Wordmark and tagline */
-h1 { font-family: var(--font-heading); font-size: 52px; font-weight: 700;
+h1 { font-family: var(--font-heading); font-size: clamp(30px, 4.2vw, 52px);
+     font-weight: 700;
      line-height: 1; letter-spacing: -0.01em; margin: 0; }
 /* The subtitle behaves like a field value: mono, lowercase, on a rule. */
 .tag { display: flex; align-items: center; gap: 12px;
@@ -20,12 +39,18 @@ h1 { font-family: var(--font-heading); font-size: 52px; font-weight: 700;
 .tag::before { content: ""; width: 30px; height: 1px;
                background: var(--color-neutral-400); }
 
-/* Scenario chips: hairline, the selected one in the accent */
+/* Scenario chips: a pair side by side at equal width, hairline, the
+   selected one in the accent; a long name wraps inside its chip rather
+   than pushing the other chip to the next line. */
+.chips { display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+         margin: 0 0 14px; }
 .chip { font-family: var(--font-heading); font-size: 12px; font-weight: 500;
         letter-spacing: 0.16em; text-transform: uppercase;
         color: var(--color-text); background: transparent;
         border: 1px solid var(--color-neutral-400); border-radius: 0;
-        padding: 4px 10px; margin: 0 6px 14px 0; cursor: pointer; }
+        padding: 5px 6px; margin: 0; cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        text-align: center; line-height: 1.25; white-space: normal; }
 .chip:hover { border-color: var(--color-text); }
 .chip.selected { color: var(--color-bg); background: var(--color-accent);
                  border-color: var(--color-accent); }
@@ -37,7 +62,7 @@ h1 { font-family: var(--font-heading); font-size: 52px; font-weight: 700;
            font-weight: 500; letter-spacing: 0.16em;
            text-transform: uppercase; color: var(--color-text);
            margin: 0 0 8px; display: flex; justify-content: space-between;
-           align-items: baseline; }
+           align-items: baseline; gap: 10px; }
 .card h3 .val { font-family: var(--font-mono); font-size: 14px;
                 font-weight: 500; letter-spacing: 0; text-transform: none;
                 font-variant-numeric: tabular-nums; }
@@ -56,6 +81,9 @@ h1 { font-family: var(--font-heading); font-size: 52px; font-weight: 700;
                           color: var(--color-text);
                           font-variant-numeric: tabular-nums; }
 .card .dash-slider-mark-outside-selection { color: var(--color-neutral-700); }
+/* Dash adds a number box beside a narrow slider; the card's header already
+   shows the value. */
+.card .dash-range-slider-input { display: none !important; }
 
 /* Exposure switch: a segmented control, the chosen segment in ink, a
    segment whose composite is still compiling greyed and disabled */
@@ -109,8 +137,18 @@ h1 { font-family: var(--font-heading); font-size: 52px; font-weight: 700;
 .ln.dashed { background: repeating-linear-gradient(90deg,
                var(--color-text) 0 9px, transparent 9px 14px); }
 
+/* What the page models, under the levers */
+.about { border-top: 1px solid var(--color-divider); margin-top: 6px;
+         padding-top: 12px; font-size: 11.5px; line-height: 1.45;
+         color: var(--color-neutral-700); }
+.about p { margin: 0 0 8px; }
+.about a { color: var(--color-text); text-decoration: underline;
+           text-underline-offset: 2px; }
+
 /* Institute and lab marks */
-.logos { display: flex; align-items: center; gap: 22px; margin-top: 22px; }
-.logos img { height: 24px; width: auto; }
-/* The lab lockup carries a tagline line; it needs the extra height to read. */
-.logos img[alt="Furman Lab"] { height: 40px; }
+.logos { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px;
+         margin-top: 22px; }
+.logos img { height: 24px; width: auto; max-width: 100%; }
+/* The lab lockup carries a tagline line; it needs the extra height to read,
+   and gives it up rather than overflow a narrow sidebar. */
+.logos img[alt="Furman Lab"] { height: auto; width: min(150px, 100%); }

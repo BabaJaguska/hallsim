@@ -754,7 +754,7 @@ def multi_hallmark(
     pool,
     no_clamp,
 ):
-    """The multi-hallmark composite (DallePezze 2014 + Geva-Zatorsky 2006 +
+    """The multi-hallmark composite (Dalle Pezze 2014 + Geva-Zatorsky 2006 +
     Proctor 2007) scored against GSE248823.
 
     \b
@@ -901,12 +901,11 @@ def multi_hallmark_ssa(t_end, save_dt, seed, max_events):
 def hallmark_levers(port, host, debug, cells, seed):
     """Serve the hallmark-lever page: one slider per hallmark of aging,
     wired into the multi-hallmark composite. Every pull applies the
-    severity through the hallmark layer, re-solves DallePezze 2014,
+    severity through the hallmark layer, re-solves Dalle Pezze 2014,
     Geva-Zatorsky 2006 and Proctor 2007 as one system and redraws them
-    against control. The etoposide
-    exposure window is shaded, with longer windows on a switch; Proctor
-    2007 is drawn as a population of cells at reaction level, with its mean
-    field over it.
+    against the etoposide arm. The etoposide exposure window is shaded,
+    with longer windows on a switch; Proctor 2007 is drawn as a population
+    of cells at reaction level, with the population mean over it.
 
     Needs the `app` extra: pip install "hallsim[app]".
     """

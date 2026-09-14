@@ -1,5 +1,5 @@
-"""The lever page renders what it claims: every mean-field panel carries a
-control and a current trace, the population row carries the spread band and
+"""The lever page renders what it claims: every deterministic panel carries
+the etoposide reference and a current trace, the population row carries the spread band and
 the three summary lines, a setting not yet sampled is drawn faded and
 marked, a pulled lever moves the parameters it names, and the exposure
 window is shaded. Bound to the multi-hallmark composite, so it is a demo
@@ -43,26 +43,27 @@ def test_etoposide_starts_p53_pulsing(lever_model):
     lm = lever_model
     col = lm.keys.index("gz06/x")
     _, ys = lm.solve(PRESETS["etoposide"])
+    _, ys_zero = lm.solve(np.zeros(len(LEVERS)))
     late = lm.ts >= 7.0
-    swing_ctrl = np.ptp(lm.control[late, col])
+    swing_ctrl = np.ptp(ys_zero[late, col])
     swing_ddis = np.ptp(ys[late, col])
     assert swing_ddis > 10 * max(swing_ctrl, 1e-9)
 
 
 def test_render_draws_every_panel(lever_model):
     """A sampled preset's lever request draws the population row; an
-    unsampled setting draws the control population alone, marked, and the
+    unsampled setting draws the etoposide population alone, marked, and the
     badge says so. The presets are sampled in the background so the page
     paints without them, which a test has to wait for."""
     lm = lever_model
     lm.wait_for_presets()
     n_models, n_levers = len(PANELS), len(LEVERS)
-    out = render(lm, lm, *PRESETS["+rapamycin"])
+    out = render(lm, lm, *PRESETS["etoposide + rapamycin"])
     assert len(out) == n_models + n_levers + 3
     figures = out[:n_models]
     values = out[n_models : n_models + n_levers]
     badge, legend, chips = out[-3], out[-2], out[-1]
-    assert chips == ["chip", "chip", "chip selected"]
+    assert chips == ["chip", "chip selected"]
     for model, fig in zip(PANELS, figures):
         per_panel = 6 if model in POPULATION_MODELS else 2
         assert len(fig.data) == per_panel * len(PANELS[model])
@@ -76,12 +77,12 @@ def test_render_draws_every_panel(lever_model):
     assert badge.className == "pop"
     assert badge.children == ""
     names = [item.children[-1] for item in legend]
-    assert names[:2] == ["current setting", "control"]
-    assert names[-2:] == ["etoposide", "rapamycin"]
+    assert names[:2] == ["current setting", "etoposide alone"]
+    assert names[-2:] == ["etoposide pulse", "rapamycin treatment"]
 
     out = render(lm, lm, 0.5, 0.0, 0.0)
     for model, fig in zip(PANELS, out[:n_models]):
-        # an unsampled population row: the control band and its mean only
+        # an unsampled population row: the reference band and its mean only
         per_panel = 3 if model in POPULATION_MODELS else 2
         assert len(fig.data) == per_panel * len(PANELS[model])
         assert len(fig.layout.shapes) == len(PANELS[model])
@@ -91,18 +92,24 @@ def test_render_draws_every_panel(lever_model):
     assert badge.className == "pop pending"
     assert badge.children[-1] == "sampling…"
     names = [item.children[-1] for item in legend]
-    assert names[-1] == "etoposide" and "rapamycin" not in names
-    assert chips == ["chip", "chip", "chip"]
+    assert (
+        names[-1] == "etoposide pulse" and "rapamycin treatment" not in names
+    )
+    assert chips == ["chip", "chip"]
 
     # A window still compiling: the fallback's rows, all marked.
-    out = render(None, lm, *PRESETS["control"])
+    out = render(None, lm, 0.0, 0.0, 0.0)
     for fig in out[:n_models]:
         assert "compiling…" in _annotation_texts(fig)
         assert len(fig.layout.shapes) == 0
     assert out[-3].children[-1] == "compiling…"
     names = [item.children[-1] for item in out[-2]]
-    assert not {"etoposide", "rapamycin", "mTORC1 drive"} & set(names)
-    assert out[-1] == ["chip selected", "chip", "chip"]
+    assert not {
+        "etoposide pulse",
+        "rapamycin treatment",
+        "mTORC1 drive",
+    } & set(names)
+    assert out[-1] == ["chip", "chip"]
 
 
 def test_population_row_carries_the_spread(lever_model):
@@ -112,8 +119,8 @@ def test_population_row_carries_the_spread(lever_model):
     lm.population((0.5, 0.0, 0.0))
     *figures, badge = render_population(lm, 0.5, 0.0, 0.0)
     assert len(figures) == len(POPULATION_MODELS)
-    # Per panel: two band edges for control, two for this setting, then the
-    # control mean and the population mean.
+    # Per panel: two band edges for the reference, two for this setting,
+    # then the reference mean and the population mean.
     for model, fig in zip(POPULATION_MODELS, figures):
         assert len(fig.data) == 6 * len(PANELS[model])
     # The member is coupled: with ROS read from DallePezze it misfolds, so
@@ -130,6 +137,17 @@ def test_population_row_carries_the_spread(lever_model):
     )
 
 
+def test_a_narrow_viewport_wraps_the_panels(lever_model):
+    """At three panels across, the five-panel row becomes two rows: same
+    traces and titles, a taller figure."""
+    lm = lever_model
+    wide = render(lm, lm, *PRESETS["etoposide"])[0]
+    narrow = render(lm, lm, *PRESETS["etoposide"], ncols=3)[0]
+    assert len(narrow.data) == len(wide.data)
+    assert _annotation_texts(narrow) == _annotation_texts(wide)
+    assert narrow.layout.height > wide.layout.height
+
+
 def test_moved_reports_the_registry_targets(lever_model):
     lm = lever_model
     gi, dns, lop = LEVERS
@@ -138,7 +156,7 @@ def test_moved_reports_the_registry_targets(lever_model):
     ]
     (rapa,) = lm.moved(dns, -1.0)
     assert rapa["target"] == "rapamycin_drive · after"
-    assert rapa["now"] < rapa["control"]
+    assert rapa["now"] < rapa["published"]
     (k69,) = lm.moved(lop, 1.0)
     assert k69["now"] == 0.0
 

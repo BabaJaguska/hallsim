@@ -2,11 +2,12 @@
 models re-solve.
 
 ``simulate hallmark-levers`` serves a page with one slider per hallmark of
-aging wired into the multi-hallmark composite (DallePezze 2014, Geva-Zatorsky
+aging wired into the multi-hallmark composite (Dalle Pezze 2014, Geva-Zatorsky
 2006, Proctor 2007). Moving a slider applies the severity through
 :func:`hallsim.hallmarks.with_hallmarks` — the same call the calibration arms
 are built with — re-solves the whole composite through the Scheduler and
-redraws every panel against control (all levers at 0).
+redraws every panel against the etoposide arm, the reference every
+setting is read against.
 
 Genomic Instability is an etoposide pulse: the exposure window is shaded
 in every row and named in the page legend, as is the rapamycin period,
@@ -17,10 +18,10 @@ is served and the others in the background.
 Proctor 2007 is a stochastic model and is drawn as one: its row runs the
 member at reaction level as a population of cells (one Gillespie path each,
 on the composite's clock, driven by DallePezze's ROS and phospho-mTORC1),
-as a spread band with the population mean over it, the control population
-in grey. A sample is seconds of serial event loop, so the presets are
-sampled at startup, every sample is kept, and a new setting shows the
-control population alone, marked, until its sample lands. ``--cells 0``
+as a spread band with the population mean over it, the etoposide
+population in grey. A sample is seconds of serial event loop, so the
+presets are sampled at startup, every sample is kept, and a new setting
+shows the etoposide population alone, marked, until its sample lands. ``--cells 0``
 serves the page without a population and draws the deterministic
 trajectory in that row instead.
 
@@ -85,11 +86,16 @@ LEVERS = (
 
 # The calibration arms, as severity vectors in LEVERS order.
 PRESETS = {
-    "control": (0.0, 0.0, 0.0),
     "etoposide": (1.0, 0.0, 0.0),
-    "+rapamycin": (1.0, -1.0, 0.0),
+    "etoposide + rapamycin": (1.0, -1.0, 0.0),
 }
-# The arm the page opens on.
+# The arm every setting is drawn against: the damaged cell, as the dataset's
+# rapamycin arm is read against its etoposide arm. The all-zero setting is
+# the published DallePezze model drifting into senescence on its own, which
+# is a statement about that model, not a reference for a lever.
+REFERENCE_PRESET = "etoposide"
+# The arm the page opens on: the damage alone, so the first click on the
+# rescue is the one that moves every panel.
 DEFAULT_PRESET = "etoposide"
 
 # Etoposide exposure windows on offer, in days from the start; the first is
@@ -98,13 +104,11 @@ DEFAULT_PRESET = "etoposide"
 DOSE_WINDOWS = {
     "days 0–2": DDIS_ETOPOSIDE_DOSE_WINDOW,
     "days 0–7": (0.0, 7.0),
-    "whole run": (0.0, MULTI_HALLMARK_GRID.t_end),
 }
 # Two-line face of each segment of the exposure switch.
 WINDOW_LABELS = {
     "days 0–2": ("0–2", "days"),
     "days 0–7": ("0–7", "days"),
-    "whole run": ("whole", "run"),
 }
 
 # What each publication's row shows: (store path or paths summed, label).
@@ -134,7 +138,7 @@ def panel_paths(spec) -> tuple[str, ...]:
 
 
 MODEL_TITLES = {
-    "dp14": "DallePezze 2014",
+    "dp14": "Dalle Pezze 2014",
     "gz06": "Geva-Zatorsky 2006",
     "p07": "Proctor 2007",
 }
@@ -262,7 +266,9 @@ class LeverModel:
         self._scheduler = Scheduler()
         self._solve = jax.jit(self._trajectory)
         t0 = time.perf_counter()
-        self.ts, self.control = self.solve(np.zeros(len(LEVERS)))
+        self.ts, self.reference = self.solve(
+            np.asarray(PRESETS[REFERENCE_PRESET], dtype=float)
+        )
         self.compile_seconds = time.perf_counter() - t0
         self._populations: dict[tuple, tuple] = {}
         self.population_compile_seconds = 0.0
@@ -319,13 +325,14 @@ class LeverModel:
             thread.join()
 
     def presets_ready(self) -> bool:
-        """Whether the control sample the rows draw against exists yet."""
-        return self.control_population is not None
+        """Whether the reference sample the rows draw against exists yet."""
+        return self.reference_population is not None
 
     @property
-    def control_population(self) -> np.ndarray | None:
-        """The control sample, or None while it is still being taken."""
-        cached = self.population_cached(PRESETS["control"])
+    def reference_population(self) -> np.ndarray | None:
+        """The reference arm's sample, or None while it is still being
+        taken."""
+        cached = self.population_cached(PRESETS[REFERENCE_PRESET])
         return None if cached is None else cached[0]
 
     def _severities(self, severities) -> dict[str, float]:
@@ -428,17 +435,18 @@ class LeverModel:
 
     def moved(self, lever: Lever, severity: float) -> list[dict]:
         """What the lever set, for the mappings that target this composite:
-        ``{target, control, now, description}`` per parameter."""
+        ``{target, published, now, description}`` per parameter, the
+        published value being the one at zero severity."""
         handle = self.registry[lever.hallmark]
         procs = self.base.processes
         present = [m for m in handle.mappings if m.process_name in procs]
-        at_control = handle.summary(0.0, procs)
+        at_zero = handle.summary(0.0, procs)
         at_now = handle.summary(float(severity), procs)
         return [
             {
                 "target": f"{m.process_name} · {m.param_name.split('.')[-1]}",
-                "control": float(
-                    at_control[f"{m.process_name}.{m.param_name}"]
+                "published": float(
+                    at_zero[f"{m.process_name}.{m.param_name}"]
                 ),
                 "now": float(at_now[f"{m.process_name}.{m.param_name}"]),
                 "description": m.description,
@@ -530,13 +538,13 @@ MODEL_COLORS = {
     "gz06": TOKENS["color-accent"],
     "p07": TOKENS["color-blue"],
 }
-CONTROL_COLOR = TOKENS["color-neutral-700"]
+REFERENCE_COLOR = TOKENS["color-neutral-700"]
 PULSE_COLOR = TOKENS["color-pulse"]
 RAPA_COLOR = TOKENS["color-accent"]
 CURVE_WIDTH = 1.8
-# Control is true dots, so it reads apart from the setting's solid line
-# even over a noisy population mean.
-CONTROL_LINE = dict(
+# The reference is true dots, so it reads apart from the setting's solid
+# line even over a noisy population mean.
+REFERENCE_LINE = dict(
     color=TOKENS["color-neutral-700"], width=1.4, dash="1px,3px"
 )
 TIME_RANGE = (0.0, MULTI_HALLMARK_GRID.t_end)
@@ -592,9 +600,12 @@ def legend_items(lm: LeverModel, severities):
 
     items = [
         entry(html.Span(className="ln"), "current setting"),
-        entry(html.Span(className="ln dotted"), "control"),
+        entry(html.Span(className="ln dotted"), "etoposide alone"),
     ]
-    names = ("etoposide", "rapamycin" if severities[1] < 0 else "mTORC1 drive")
+    names = (
+        "etoposide pulse",
+        "rapamycin treatment" if severities[1] < 0 else "mTORC1 drive",
+    )
     items += [
         entry(
             html.Span(
@@ -608,32 +619,60 @@ def legend_items(lm: LeverModel, severities):
     return items
 
 
+def _grid(n: int, ncols) -> tuple[int, int]:
+    """``(rows, cols)`` for ``n`` panels at most ``ncols`` across; ``None``
+    is one row. The viewport sets ``ncols``: five across on a wide screen,
+    three on a laptop, two on a phone, so a row wraps instead of squashing."""
+    cols = n if not ncols else max(1, min(n, int(ncols)))
+    return -(-n // cols), cols
+
+
+def _cell(j: int, cols: int) -> tuple[int, int]:
+    """Plotly's 1-based ``(row, col)`` of the ``j``-th panel in a grid."""
+    return j // cols + 1, j % cols + 1
+
+
 def _row_figure(
-    model: str, lm: LeverModel, titles: list[str], severities, height=210
+    model: str,
+    lm: LeverModel,
+    titles: list[str],
+    severities,
+    height=210,
+    ncols=None,
 ):
-    """An empty one-row figure for ``model``'s panels: titles, the
-    etoposide window and the rapamycin period, each labelled in the first
-    panel, the shared axes."""
+    """An empty figure for ``model``'s panels — one row, or a grid of
+    ``ncols`` across — with titles, the etoposide window and the rapamycin
+    period in every panel, the shared axes."""
     from plotly.subplots import make_subplots
 
     n = len(PANELS[model])
+    rows, cols = _grid(n, ncols)
+    # A wrapped row keeps each panel its usual height; the gap between the
+    # grid's rows is a fixed 64 px, expressed as Plotly's fraction of the
+    # figure.
+    total_height = height * rows + 64 * (rows - 1)
     fig = make_subplots(
-        rows=1, cols=n, subplot_titles=titles, horizontal_spacing=0.045
+        rows=rows,
+        cols=cols,
+        subplot_titles=titles,
+        horizontal_spacing=0.045,
+        vertical_spacing=(64 / total_height) if rows > 1 else 0.1,
     )
     # The traces come later, so the spans must not skip empty subplots.
     # Names live in the page legend, not in the panels.
     for on, x0, x1, color, opacity in _spans(lm, severities):
         if not on:
             continue
-        for col in range(1, n + 1):
+        for j in range(n):
+            r, c = _cell(j, cols)
             fig.add_vrect(
                 x0=x0,
                 x1=x1,
                 fillcolor=color,
                 opacity=opacity,
                 line_width=0,
-                row=1,
-                col=col,
+                row=r,
+                col=c,
                 exclude_empty_subplots=False,
             )
     axis = dict(
@@ -658,10 +697,11 @@ def _row_figure(
     )
     fig.update_yaxes(rangemode="tozero", **axis)
     if Y_UNITS[model]:
-        fig.update_yaxes(title_text=Y_UNITS[model], **title, row=1, col=1)
+        for r in range(1, rows + 1):
+            fig.update_yaxes(title_text=Y_UNITS[model], **title, row=r, col=1)
     fig.update_layout(
         template="plotly_white",
-        height=height,
+        height=total_height,
         margin=dict(l=52, r=10, t=30, b=40),
         font=_font("font-body", 11),
         paper_bgcolor="rgba(0,0,0,0)",
@@ -684,25 +724,30 @@ def _row_figure(
     return fig
 
 
-def _figure_for(model: str, lm: LeverModel, ys, severities):
-    """Deterministic row: control dotted, this setting solid."""
+def _figure_for(model: str, lm: LeverModel, ys, severities, ncols=None):
+    """Deterministic row: the etoposide reference dotted, this setting
+    solid."""
     import plotly.graph_objects as go
 
     row = PANELS[model]
     color = MODEL_COLORS[model]
-    fig = _row_figure(model, lm, [label for _, label in row], severities)
+    fig = _row_figure(
+        model, lm, [label for _, label in row], severities, ncols=ncols
+    )
+    _, grid_cols = _grid(len(row), ncols)
     shown = lm.ts >= TIME_RANGE[0]
     t = lm.ts[shown]
     for j, cols in enumerate(lm.columns[model]):
+        r, c = _cell(j, grid_cols)
         fig.add_trace(
             go.Scatter(
                 x=t,
-                y=_series(lm.control, shown, cols),
-                line=CONTROL_LINE,
+                y=_series(lm.reference, shown, cols),
+                line=REFERENCE_LINE,
                 hoverinfo="skip",
             ),
-            row=1,
-            col=j + 1,
+            row=r,
+            col=c,
         )
         fig.add_trace(
             go.Scatter(
@@ -711,8 +756,8 @@ def _figure_for(model: str, lm: LeverModel, ys, severities):
                 line=dict(color=color, width=CURVE_WIDTH),
                 hovertemplate=HOVER,
             ),
-            row=1,
-            col=j + 1,
+            row=r,
+            col=c,
         )
     return fig
 
@@ -740,22 +785,32 @@ def _band(fig, t, cells, color, name, row, col):
         )
 
 
-def _population_figure(model: str, lm: LeverModel, ys_pop, severities):
+def _population_figure(
+    model: str, lm: LeverModel, ys_pop, severities, ncols=None
+):
     """Reaction-level row: the spread across cells as a band, the population
-    mean bold, the control population in grey. ``ys_pop=None`` draws the
-    control population alone, for a setting whose sample is still running.
+    mean bold, the etoposide population in grey. ``ys_pop=None`` draws the
+    etoposide population alone, for a setting whose sample is still
+    running.
     """
     import plotly.graph_objects as go
 
     row = PANELS[model]
     color = MODEL_COLORS[model]
     fig = _row_figure(
-        model, lm, [label for _, label in row], severities, height=240
+        model,
+        lm,
+        [label for _, label in row],
+        severities,
+        height=240,
+        ncols=ncols,
     )
+    _, grid_cols = _grid(len(row), ncols)
     shown = lm.ts >= TIME_RANGE[0]
     t = lm.ts[shown]
-    control = lm.control_population
+    control = lm.reference_population
     for j, cols in enumerate(lm.columns[model]):
+        r, c = _cell(j, grid_cols)
         control_cells = None
         if control is not None:
             control_cells = _series(control, shown, cols)
@@ -763,38 +818,38 @@ def _population_figure(model: str, lm: LeverModel, ys_pop, severities):
                 fig,
                 t,
                 control_cells,
-                _rgba(CONTROL_COLOR, 0.18),
-                "control",
-                1,
-                j + 1,
+                _rgba(REFERENCE_COLOR, 0.18),
+                "etoposide alone",
+                r,
+                c,
             )
         if ys_pop is None:
-            # An unsampled setting: the control population alone, when
+            # An unsampled setting: the etoposide population alone, when
             # its own sample has landed.
             if control_cells is not None:
                 fig.add_trace(
                     go.Scatter(
                         x=t,
                         y=control_cells.mean(axis=1),
-                        line=CONTROL_LINE,
+                        line=REFERENCE_LINE,
                         hoverinfo="skip",
                     ),
-                    row=1,
-                    col=j + 1,
+                    row=r,
+                    col=c,
                 )
             continue
         cells = _series(ys_pop, shown, cols)
-        _band(fig, t, cells, _rgba(color, 0.22), "this setting", 1, j + 1)
+        _band(fig, t, cells, _rgba(color, 0.22), "this setting", r, c)
         if control is not None:
             fig.add_trace(
                 go.Scatter(
                     x=t,
                     y=control_cells.mean(axis=1),
-                    line=CONTROL_LINE,
+                    line=REFERENCE_LINE,
                     hoverinfo="skip",
                 ),
-                row=1,
-                col=j + 1,
+                row=r,
+                col=c,
             )
         fig.add_trace(
             go.Scatter(
@@ -803,8 +858,8 @@ def _population_figure(model: str, lm: LeverModel, ys_pop, severities):
                 line=dict(color=color, width=CURVE_WIDTH),
                 hovertemplate=HOVER,
             ),
-            row=1,
-            col=j + 1,
+            row=r,
+            col=c,
         )
     return fig
 
@@ -847,7 +902,9 @@ def population_badge(lm: LeverModel | None, sev):
     return _badge("")
 
 
-def render(lm: LeverModel | None, fallback: LeverModel, *severities):
+def render(
+    lm: LeverModel | None, fallback: LeverModel, *severities, ncols=None
+):
     """Everything the lever request shows for one severity vector, in the
     order the callback's outputs are declared: one figure per publication,
     one value per lever, the population badge, the legend for the shaded
@@ -862,12 +919,16 @@ def render(lm: LeverModel | None, fallback: LeverModel, *severities):
         sample = model.population_cached(sev) if model.n_cells else None
         if name in POPULATION_MODELS and model.n_cells:
             fig = _population_figure(
-                name, model, None if sample is None else sample[0], sev
+                name,
+                model,
+                None if sample is None else sample[0],
+                sev,
+                ncols=ncols,
             )
             if sample is None:
                 _mark_pending(fig, "sampling…")
         else:
-            fig = _figure_for(name, model, ys, sev)
+            fig = _figure_for(name, model, ys, sev, ncols=ncols)
         if lm is None:
             _mark_pending(fig, "compiling…")
         figures.append(fig)
@@ -893,7 +954,7 @@ def chip_classes(sev) -> list[str]:
     ]
 
 
-def render_population(lm: LeverModel, *severities):
+def render_population(lm: LeverModel, *severities, ncols=None):
     """The reaction-level rows for one severity vector, or ``None`` while
     its sample is still being taken: one figure per population publication,
     then the badge. Starts the sample it needs and returns rather than
@@ -903,7 +964,8 @@ def render_population(lm: LeverModel, *severities):
     if sample is None:
         return None
     figures = [
-        _population_figure(m, lm, sample[0], sev) for m in POPULATION_MODELS
+        _population_figure(m, lm, sample[0], sev, ncols=ncols)
+        for m in POPULATION_MODELS
     ]
     return (*figures, population_badge(lm, sev))
 
@@ -929,7 +991,14 @@ def build_app(bank: LeverBank):
     first = bank.get(bank.first)
     # The stylesheet is assets/hallsim.css, served by Dash with the marks;
     # the page only emits the tokens it is written against.
-    app = Dash(__name__, title="hallsim", external_stylesheets=[GOOGLE_FONTS])
+    # Dash retitles the tab "Updating..." while any callback is in flight,
+    # and the polls keep one in flight; the title stays the page's name.
+    app = Dash(
+        __name__,
+        title="hallsim",
+        update_title=None,
+        external_stylesheets=[GOOGLE_FONTS],
+    )
     app.index_string = app.index_string.replace(
         "</head>", f"<style>{root_css()}</style></head>"
     )
@@ -1032,7 +1101,8 @@ def build_app(bank: LeverBank):
                                 name, id={"preset": name}, className="chip"
                             )
                             for name in PRESETS
-                        ]
+                        ],
+                        className="chips",
                     ),
                     *[lever_card(i, lever) for i, lever in enumerate(LEVERS)],
                     html.Div(
@@ -1046,6 +1116,12 @@ def build_app(bank: LeverBank):
                             html.Div(id="window-note", className="seg-note"),
                             dcc.Store(id="window", data=bank.first),
                             dcc.Store(id="drawn", data=None),
+                            dcc.Store(id="viewport", data=None),
+                            dcc.Interval(
+                                id="viewport-poll",
+                                interval=1000,
+                                n_intervals=0,
+                            ),
                             dcc.Interval(
                                 id="window-poll", interval=2000, n_intervals=0
                             ),
@@ -1053,6 +1129,22 @@ def build_app(bank: LeverBank):
                                 id="population-poll",
                                 interval=1000,
                                 n_intervals=0,
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        className="about",
+                        children=[
+                            html.P(
+                                "Three published models composed into one "
+                                "system."
+                            ),
+                            html.P(
+                                "DNA damage-induced senescence and its "
+                                "rapamycin rescue follow the experiment of "
+                                "Tighanimine et al. 2024 (GSE248823): "
+                                "etoposide for two days, then rapamycin "
+                                "from day 2."
                             ),
                         ],
                     ),
@@ -1071,6 +1163,24 @@ def build_app(bank: LeverBank):
 
     lever_inputs = [Input(f"lever-{i}", "value") for i in range(len(LEVERS))]
     window_input = Input("window", "data")
+    # The panel grid follows the viewport: a full row on anything wider
+    # than a phone, where the panels shrink with the window, and two across
+    # on a phone-sized screen, where the levers also move above the rows
+    # (the same breakpoint as the stylesheet's). Measured in the browser and
+    # written only when the bucket changes, so the rows redraw once per
+    # resize.
+    app.clientside_callback(
+        """
+        function(n, current) {
+            const cols = window.innerWidth > 600 ? 5 : 2;
+            return cols === current ? window.dash_clientside.no_update : cols;
+        }
+        """,
+        Output("viewport", "data"),
+        Input("viewport-poll", "n_intervals"),
+        State("viewport", "data"),
+    )
+    viewport_input = Input("viewport", "data")
 
     @app.callback(
         Output("window", "data"),
@@ -1110,57 +1220,71 @@ def build_app(bank: LeverBank):
             Output("legend", "children"),
             Output({"preset": ALL}, "className"),
         ],
-        [window_input, *lever_inputs],
+        [window_input, viewport_input, *lever_inputs],
     )
-    def on_pull(window, *severities):
-        return render(bank.get(window), first, *severities)
+    def on_pull(window, ncols, *severities):
+        return render(bank.get(window), first, *severities, ncols=ncols)
 
     if first.n_cells:
+        # The poll sleeps once what is on screen is what the sliders ask
+        # for and the reference sample it is drawn against has landed; a
+        # lever pull to an unsampled setting wakes it.
         population_outputs = [
             Output(f"panel-{m}", "figure", allow_duplicate=True)
             for m in POPULATION_MODELS
         ] + [
             Output("population-status", "children", allow_duplicate=True),
             Output("drawn", "data", allow_duplicate=True),
+            Output("population-poll", "disabled", allow_duplicate=True),
         ]
-        idle = (no_update,) * (len(POPULATION_MODELS) + 2)
+        idle = (no_update,) * (len(POPULATION_MODELS) + 3)
+
+        def asleep(lm) -> bool:
+            """Nothing left to wait for: the reference sample exists."""
+            return lm is not None and lm.reference_population is not None
+
         lever_states = [
             State(f"lever-{i}", "value") for i in range(len(LEVERS))
         ]
 
-        def drawn_key(window, severities):
-            """What a drawn row depends on. The control sample is
-            in it because a setting can be sampled before the control it is
-            drawn against is, and the row gains its grey reference when that
-            lands."""
+        def drawn_key(window, severities, ncols):
+            """What a drawn row depends on. The reference sample is
+            in it because a setting can be sampled before the reference it
+            is drawn against is, and the row gains its grey reference when
+            that lands; the grid width, because a resize redraws it."""
             lm = bank.get(window)
             return [
                 window,
-                lm is not None and lm.control_population is not None,
+                lm is not None and lm.reference_population is not None,
+                ncols,
                 *(round(float(s), 6) for s in severities),
             ]
 
-        def population_rows(window, severities):
-            """The rows if their sample is taken, else the marker
-            that nothing is drawn for this setting yet."""
+        def population_rows(window, severities, ncols):
+            """The rows if their sample is taken, else the marker that
+            nothing is drawn for this setting yet, with the poll awake."""
             lm = bank.get(window)
             if lm is None:
-                return idle
-            rows = render_population(lm, *severities)
+                return (*(no_update,) * (len(POPULATION_MODELS) + 2), False)
+            rows = render_population(lm, *severities, ncols=ncols)
             if rows is None:
-                return (*(no_update,) * (len(POPULATION_MODELS) + 1), None)
-            return (*rows, drawn_key(window, severities))
+                return (
+                    *(no_update,) * (len(POPULATION_MODELS) + 1),
+                    None,
+                    False,
+                )
+            return (*rows, drawn_key(window, severities, ncols), asleep(lm))
 
         # Fires alongside the lever request. A setting already sampled is
         # drawn here; one that is not starts its sample and leaves the row
         # marked, for the poll below to draw when it lands.
         @app.callback(
             population_outputs,
-            [window_input, *lever_inputs],
+            [window_input, viewport_input, *lever_inputs],
             prevent_initial_call=True,
         )
-        def on_pull_population(window, *severities):
-            return population_rows(window, severities)
+        def on_pull_population(window, ncols, *severities):
+            return population_rows(window, severities, ncols)
 
         # A sample is seconds of serial event loop and nothing waits on it:
         # this asks once a second whether the setting on the sliders has one
@@ -1168,16 +1292,21 @@ def build_app(bank: LeverBank):
         @app.callback(
             population_outputs,
             Input("population-poll", "n_intervals"),
-            [State("window", "data"), State("drawn", "data"), *lever_states],
+            [
+                State("window", "data"),
+                State("drawn", "data"),
+                State("viewport", "data"),
+                *lever_states,
+            ],
             prevent_initial_call=True,
         )
-        def poll_population(_n, window, drawn, *severities):
-            if drawn == drawn_key(window, severities):
-                return idle
+        def poll_population(_n, window, drawn, ncols, *severities):
             lm = bank.get(window)
+            if drawn == drawn_key(window, severities, ncols):
+                return (*idle[:-1], asleep(lm))
             if lm is None or lm.population_cached(severities) is None:
                 return idle
-            return population_rows(window, severities)
+            return population_rows(window, severities, ncols)
 
     return app
 
