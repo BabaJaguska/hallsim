@@ -222,6 +222,7 @@ cython_debug/
 *.jpeg
 *.gif
 *.svg
+!demos/assets/*.svg
 *.bmp
 *.tiff
 
