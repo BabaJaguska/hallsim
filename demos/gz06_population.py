@@ -53,6 +53,10 @@ def build():
 
 def batched_runner(comp, sched, t_end, dt):
     """vmap one Scheduler.run over per-cell (beta_x, alpha_y, y0)."""
+    # Route once, eagerly, at the published parameters: under vmap the
+    # Jacobian is a tracer and a cold Scheduler would run the oscillator on
+    # the implicit solver.
+    sched.warm_up(comp, (0.0, t_end), macro_dt=t_end)
 
     def run(beta_x, alpha_y, y0):
         c = eqx.tree_at(
@@ -137,13 +141,13 @@ def main():
 
     conditions = {}
     k1, k2, k3, key = jax.random.split(key, 4)
-    conditions["vary beta_x only\n(amplitude)"] = run(
+    conditions["p53 production rate varies"] = run(
         lognormal(k1, 0.9, a.cv, n), jnp.full((n,), 0.8), base_y0
     )
-    conditions["vary alpha_y only\n(period)"] = run(
+    conditions["Mdm2 degradation rate varies"] = run(
         jnp.full((n,), 0.9), lognormal(k2, 0.8, a.cv, n), base_y0
     )
-    conditions["both + random phase\n(realistic bulk)"] = run(
+    conditions["both vary, random initial phase"] = run(
         lognormal(k3, 0.9, a.cv, n),
         lognormal(jax.random.fold_in(k3, 1), 0.8, a.cv, n),
         phase_y0,
@@ -182,23 +186,38 @@ def _plot(conditions, stats, tg, out):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.3), sharey=True)
-    for ax, (name, xs) in zip(axes, conditions.items()):
+    # The paper's figure style: the finding as the title, each panel named
+    # by what varies, single cells in grey and the population mean in the
+    # orange the surrogate figure uses.
+    fig, axes = plt.subplots(1, 3, figsize=(11, 3.6), sharey=True)
+    for j, (ax, (name, xs)) in enumerate(zip(axes, conditions.items())):
         xs = np.asarray(xs)
         for i in range(0, min(len(xs), 250), 25):
-            ax.plot(tg, xs[i], color="0.78", lw=0.5)
-        ax.plot(tg, xs.mean(0), color="C3", lw=2.3, label="bulk (pop. mean)")
-        s = stats[name]
-        ax.set_title(f"{name}\ncoherence {s['coherence']:.2f}", fontsize=10)
+            ax.plot(
+                tg,
+                xs[i],
+                color="0.78",
+                lw=0.5,
+                label="single cells" if i == 0 else None,
+            )
+        ax.plot(
+            tg, xs.mean(0), color="#d97706", lw=2.3, label="population mean"
+        )
+        ax.set_title(name, fontsize=11, fontweight="bold", loc="left")
         ax.set_xlabel("time (h)")
-        ax.legend(loc="upper right", fontsize=8)
         ax.set_ylim(0, 1.45)
-    axes[0].set_ylabel("p53  (x)")
+        ax.grid(True, color="#e6e6e2", lw=0.6, alpha=0.7)
+        ax.set_axisbelow(True)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        if j == 1:
+            ax.legend(loc="upper right", fontsize=9, frameon=False)
+    axes[0].set_ylabel("p53")
     fig.suptitle(
-        "GZ06 lifted to a heterogeneous population: period spread "
-        "(alpha_y) damps the bulk; amplitude spread (beta_x) does not",
-        fontsize=12,
-        y=1.03,
+        "Period spread damps the population mean",
+        fontsize=13,
+        fontweight="bold",
+        y=1.02,
     )
     fig.tight_layout()
     os.makedirs(os.path.dirname(out), exist_ok=True)

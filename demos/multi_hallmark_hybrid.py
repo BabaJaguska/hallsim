@@ -846,10 +846,10 @@ def _load_block(which=""):
 def _load_curves():
     """The α_y amplitude sweep for the mechanistic model and the kept block.
 
-    Read off the training record rather than re-solved: the sweep is ~30
+    Read off the provenance record rather than re-solved: the sweep is ~30
     sequential composite runs and nothing about it changes when a figure does.
     """
-    rec = json.loads((OUT / "training_record.json").read_text())
+    rec = json.loads((OUT / "provenance.json").read_text())
     stage = "shoot" if rec["kept_block"] == "shooting-refined" else "deriv"
     return {
         "mech": rec["bifurcation"]["mech"]["ay"],
@@ -1039,7 +1039,7 @@ def main():
         return
 
     if mode == "figures":
-        rec = json.loads((OUT / "training_record.json").read_text())
+        rec = json.loads((OUT / "provenance.json").read_text())
         b = rec["bifurcation"]
         bifurcation_figure(b["mech"], b["deriv"], b["shoot"])
         best_name = rec["kept_block"]
@@ -1063,7 +1063,12 @@ def main():
         )
         return
 
-    deriv, shoot, _ = train_stages()
+    def checkpoint(name, block):
+        eqx.tree_serialise_leaves(
+            str(OUT / f"gz06_neural_block_{name}.eqx"), block
+        )
+
+    deriv, shoot, _ = train_stages(checkpoint=checkpoint)
 
     mech_c = bifurcation_curves(None)
     deriv_c = bifurcation_curves(deriv)
@@ -1086,11 +1091,11 @@ def main():
         deriv_err,
         shoot_err,
     )
+    eqx.tree_serialise_leaves(str(OUT / "gz06_neural_block.eqx"), best)
     time_domain_figure(best)
 
     flag = ddb2_results(best)
     ddb2_figure(flag)
-    combined_figure(best, flag)
 
     prov = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -1106,8 +1111,7 @@ def main():
         "ddb2": flag,
     }
     write_provenance(prov)
-
-    eqx.tree_serialise_leaves(str(OUT / "gz06_neural_block.eqx"), best)
+    combined_figure(best, flag)
     print(
         f"\nkept {best_name}; amplitude error deriv={deriv_err:.3f} "
         f"shoot={shoot_err:.3f}"

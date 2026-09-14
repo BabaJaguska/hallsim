@@ -128,6 +128,15 @@ def _add_reaction(model, sid, stoichiometry: dict, law):
         ref.setConstant(True)
     kl = r.createKineticLaw()
     _set_math(kl, law)
+    # A species the law reads without consuming or producing it is a
+    # modifier, and SBML requires it declared as one; a validator (and a
+    # repository curator) rejects a law that reads an undeclared species.
+    referenced = {s.name for s in sympy.sympify(law).atoms(sympy.Symbol)}
+    declared = {s for s, c in stoichiometry.items() if c != 0}
+    for species in sorted(referenced - declared):
+        if model.getSpecies(species) is not None:
+            mod = r.createModifier()
+            mod.setSpecies(species)
     return r
 
 
@@ -138,11 +147,68 @@ def _add_rule(model, sid, expr, *, rate=False):
     return rule
 
 
-def composite_to_sbml(composite, *, model_id: str = "composite") -> str:
-    """The composite as an SBML Level 3 Version 2 document string."""
+def _clock_seconds(composite) -> float | None:
+    """Seconds in one unit of the composite's clock, from its imported
+    members (native unit length times the reconciliation scale); ``None``
+    when no member declares one or they disagree."""
+    found = set()
+    for proc in composite.processes.values():
+        native = getattr(proc, "native_time_seconds", None)
+        scale = getattr(proc, "time_scale", None)
+        if native is None or scale is None:
+            continue
+        found.add(round(float(native) * float(scale), 6))
+    return found.pop() if len(found) == 1 else None
+
+
+def composite_to_sbml(
+    composite,
+    *,
+    model_id: str = "composite",
+    name: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """The composite as an SBML Level 3 Version 2 document string.
+
+    ``name`` is the model's display name and ``notes`` a plain-text
+    description written as the model's XHTML notes — what a repository
+    deposit shows beside the file.
+    """
+    from xml.sax.saxutils import escape
+
     doc = libsbml.SBMLDocument(3, 2)
     model = doc.createModel()
     model.setId(_sid(model_id))
+    if name:
+        model.setName(name)
+    if notes:
+        paragraphs = "".join(
+            f"<p>{escape(p.strip())}</p>"
+            for p in notes.split("\n\n")
+            if p.strip()
+        )
+        model.setNotes(
+            f'<body xmlns="http://www.w3.org/1999/xhtml">{paragraphs}</body>'
+        )
+    # Every member's rates are compiled onto the composite's clock; the
+    # document declares that clock where a simulator and a curator read it.
+    seconds = _clock_seconds(composite)
+    if seconds is not None:
+        clock = model.createUnitDefinition()
+        clock.setId(
+            {
+                1.0: "second",
+                60.0: "minute",
+                3600.0: "hour",
+                86400.0: "day",
+            }.get(seconds, "time_unit")
+        )
+        unit = clock.createUnit()
+        unit.setKind(libsbml.UNIT_KIND_SECOND)
+        unit.setExponent(1)
+        unit.setScale(0)
+        unit.setMultiplier(float(seconds))
+        model.setTimeUnits(clock.getId())
     comp = model.createCompartment()
     comp.setId(COMPARTMENT)
     comp.setSize(1.0)

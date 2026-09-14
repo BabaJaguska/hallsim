@@ -1,7 +1,7 @@
 """Batched population of the FULL multi-hallmark composite.
 
 The single-model population (``gz06_population.py``) makes a mechanistic
-point; this is the capability claim: the entire 7-process composite (three
+point; this is the capability claim: the entire composite (three
 published models + custom coupling branches, on one shared clock) run as a
 heterogeneous population of ``N`` cells in a single differentiable
 ``Scheduler.run`` -- no per-cell Python loop.
@@ -97,6 +97,17 @@ def main():
     keys = comp.store_keys()
     y0 = np.asarray(comp.initial_state_vec())
     N = a.n_cells
+    # Route the groups once, eagerly, at the nominal parameters: under vmap
+    # the Jacobian is a tracer and a cold Scheduler would put every group
+    # on the implicit solver. A 30 % spread does not move a stiffness class.
+    verdict = sched.warm_up(comp, (0.0, a.t_end), macro_dt=a.macro_dt)
+    print(
+        "routing at the nominal parameters: "
+        + ", ".join(
+            f"{g} {'implicit' if gi.stiff else 'explicit'}"
+            for g, gi in verdict.items()
+        )
+    )
     print(
         f"composite: {len(procs)} processes, {len(keys)} state vars; "
         f"{N} cells"
@@ -142,11 +153,11 @@ def main():
             f"range=[{val.min():.4g}, {val.max():.4g}]"
         )
 
-    _plot(dist, cvs, a.out, N)
+    _plot(dist, cvs, a.out, N, len(base.processes))
     print(f"\nsaved figure -> {a.out}")
 
 
-def _plot(dist, cvs, out, N):
+def _plot(dist, cvs, out, N, n_processes):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -194,7 +205,7 @@ def _plot(dist, cvs, out, N):
     ax.set_xlabel("population CV (%)")
     ax.set_title("Cell-to-cell spread by reporter", fontsize=10)
     fig.suptitle(
-        "The full 7-process composite, run as a heterogeneous "
+        f"The full {n_processes}-process composite, run as a heterogeneous "
         "population in one differentiable solve",
         fontsize=12,
         y=1.03,

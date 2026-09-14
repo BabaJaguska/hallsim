@@ -662,7 +662,9 @@ def gz06_damage_scan():
 @simulate.command("multi-hallmark")
 @click.argument(
     "command",
-    type=click.Choice(["run", "calibrate", "score", "screen", "sweep"]),
+    type=click.Choice(
+        ["run", "calibrate", "score", "screen", "sweep", "export"]
+    ),
     default="run",
 )
 @click.option(
@@ -760,6 +762,7 @@ def multi_hallmark(
       calibrate  fit the mechanism parameters, evaluate on held-out arms
       score      re-score a saved fit under changed conditions, no refit
       sweep      two-hallmark severity sweep
+      export     write a saved fit's composite as SBML, one document per arm
     """
     from types import SimpleNamespace
 
@@ -784,7 +787,14 @@ def multi_hallmark(
     )
     from demos.multi_hallmark_calibrate import cmd_score, cmd_screen
 
-    dispatch = {"sweep": cmd_sweep, "score": cmd_score, "screen": cmd_screen}
+    from demos.multi_hallmark_calibrate import cmd_export
+
+    dispatch = {
+        "sweep": cmd_sweep,
+        "score": cmd_score,
+        "screen": cmd_screen,
+        "export": cmd_export,
+    }
     dispatch.get(command, cmd_run)(args)
 
 

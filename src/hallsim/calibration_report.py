@@ -24,9 +24,6 @@ def save_outputs(
     Generates:
 
     - ``graph.png`` — composite topology rendered via networkx.
-    - ``trajectories_<cond>_pre_vs_post.png`` — one figure per condition
-      overlaying pre-fit and post-fit reporter trajectories.
-    - ``trajectories_post_all_arms.png`` — all conditions at post-fit.
     - ``trajectories.json`` — per-condition reporter-path trajectories at
       post-fit (densely sampled, ``n_save_plot`` points).
     - ``summary.json`` — fitted params, init params, loss history, per-arm
@@ -40,7 +37,6 @@ def save_outputs(
     """
     from hallsim.plotting import (
         draw_composite_graph,
-        plot_runs_comparison,
         save_run_results,
     )
 
@@ -50,8 +46,7 @@ def save_outputs(
     init = problem.initial_params()
     final = history.best_params or init
 
-    # Densely-sampled trajectories at both ends of the fit.
-    pre_runs = problem.simulate_all_conditions(init, n_save=n_save_plot)
+    # Densely-sampled trajectories at the fitted parameters, for the JSON.
     post_runs = problem.simulate_all_conditions(final, n_save=n_save_plot)
 
     # Concordance — uses the standard n_save path (matches the numbers the
@@ -60,12 +55,6 @@ def save_outputs(
     results_post = problem.evaluate(final)
 
     reporter_paths = [r.observable for r in problem.reporters]
-    # Title panels by the gene each path is read as, not by the
-    # model-internal species name it happens to carry.
-    reporter_labels = {
-        r.observable: f"{r.gene_symbol}  [{r.observable}]"
-        for r in problem.reporters
-    }
 
     # 1. Topology
     draw_composite_graph(
@@ -74,29 +63,7 @@ def save_outputs(
         title="composite topology",
     )
 
-    # 2. Per-condition pre-vs-post trajectory overlays
-    for cond_name in problem.conditions:
-        plot_runs_comparison(
-            {
-                "pre-fit": pre_runs[cond_name],
-                "post-fit": post_runs[cond_name],
-            },
-            paths=reporter_paths,
-            labels=reporter_labels,
-            title=f"{cond_name}: pre vs post",
-            save=str(out / f"trajectories_{cond_name}_pre_vs_post.png"),
-        )
-
-    # 3. All conditions at post-fit
-    plot_runs_comparison(
-        post_runs,
-        paths=reporter_paths,
-        labels=reporter_labels,
-        title="all conditions at post-fit params",
-        save=str(out / "trajectories_post_all_arms.png"),
-    )
-
-    # 4. Trajectories JSON (post-fit only — pre-fit is in the plots)
+    # 2. Trajectories JSON (post-fit only — pre-fit is in the plots)
     save_run_results(
         post_runs,
         str(out / "trajectories.json"),

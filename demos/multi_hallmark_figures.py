@@ -793,13 +793,15 @@ def fig_temporal(args):
             fontweight="bold",
         )
         fig.tight_layout(rect=(0, 0.05, 1, 0.97))
+        # One arm on its own is a diagnostic; the paper's figure overlays
+        # the arms.
         stem = f"temporal_oob_vs_fit_{arm}"
+        debug = OUT_CAL / "debug"
+        debug.mkdir(parents=True, exist_ok=True)
         for ext in ("png", "pdf"):
-            fig.savefig(
-                OUT_CAL / f"{stem}.{ext}", dpi=150, bbox_inches="tight"
-            )
+            fig.savefig(debug / f"{stem}.{ext}", dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"wrote {stem}.png/.pdf", flush=True)
+        print(f"wrote debug/{stem}.png/.pdf", flush=True)
 
     problem = _problem(args)
     init = problem.initial_params()
@@ -834,6 +836,30 @@ def _reaction_level_reporters(problem):
     ]
 
 
+def _population_run(problem, params, cond_name, n_cells, seed):
+    """The condition ``cond_name`` at ``params`` with every reaction-level
+    member sampled as ``n_cells`` cells on the shared trajectory: the
+    Scheduler result, ``ys`` shaped ``(n_save, n_cells, n_keys)``."""
+    from hallsim.scheduler import Scheduler
+
+    procs = dict(problem._substitute(problem.composite.processes, params))
+    for name in REACTION_LEVEL:
+        procs[name] = procs[name].as_stochastic()
+    registry = problem._registry(params)
+    cond = problem.conditions[cond_name]
+    comp = problem._condition_composite(procs, cond, registry=registry)
+    y0 = comp.initial_state_vec()
+    span = problem.t_end - problem.t_start
+    return Scheduler(**problem.scheduler_kwargs).run(
+        comp,
+        t_span=(problem.t_start, problem.t_end),
+        macro_dt=problem.macro_dt,
+        y0=jnp.tile(y0[None], (n_cells, 1)),
+        save_dt=max(1e-6, span / max(1, problem.n_save - 1)),
+        seed=seed,
+    )
+
+
 def _population_lfc(problem, params, arm, qt, n_cells, seed):
     """Reaction-level members as ``n_cells`` cells on the trajectory of
     ``arm`` at ``params``: per-cell and pooled sign-aligned log2
@@ -844,24 +870,9 @@ def _population_lfc(problem, params, arm, qt, n_cells, seed):
     ``(n_rep, n_t)`` over :func:`_reaction_level_reporters`."""
     import numpy as np
 
-    from hallsim.scheduler import Scheduler
-
     rep_idx = _reaction_level_reporters(problem)
-    procs = dict(problem._substitute(problem.composite.processes, params))
-    for name in REACTION_LEVEL:
-        procs[name] = procs[name].as_stochastic()
-    registry = problem._registry(params)
-    cond = problem.conditions[problem.arm_pairs[arm][0]]
-    comp = problem._condition_composite(procs, cond, registry=registry)
-    y0 = comp.initial_state_vec()
-    span = problem.t_end - problem.t_start
-    res = Scheduler(**problem.scheduler_kwargs).run(
-        comp,
-        t_span=(problem.t_start, problem.t_end),
-        macro_dt=problem.macro_dt,
-        y0=jnp.tile(y0[None], (n_cells, 1)),
-        save_dt=max(1e-6, span / max(1, problem.n_save - 1)),
-        seed=seed,
+    res = _population_run(
+        problem, params, problem.arm_pairs[arm][0], n_cells, seed
     )
     trajs = jnp.stack(
         [res.ys[..., idx] for idx in problem._reporter_indices]
@@ -1005,6 +1016,12 @@ def fig_temporal_compare(args):
                 ax, max(arms, key=lambda a: ("rapa" in a.lower(), a))
             )
             ax.set_title(gene, fontsize=11, fontweight="bold", loc="left")
+            ax.set_title(
+                problem.reporters[i].observable.replace("_integral", ""),
+                fontsize=9,
+                color="#777",
+                loc="right",
+            )
             ax.grid(True, color=grid_c, lw=0.6, alpha=0.7)
             ax.set_axisbelow(True)
             for sp in ("top", "right"):
@@ -1088,12 +1105,12 @@ def fig_temporal_compare(args):
     OUT_CAL.mkdir(parents=True, exist_ok=True)
     for ext in ("png", "pdf"):
         fig.savefig(
-            OUT_CAL / f"temporal_ddis_vs_rapa.{ext}",
+            OUT_CAL / f"B_reporter_fold_changes.{ext}",
             dpi=150,
             bbox_inches="tight",
         )
     plt.close(fig)
-    print(f"wrote temporal_ddis_vs_rapa.png/.pdf -> {OUT_CAL}", flush=True)
+    print(f"wrote B_reporter_fold_changes.png/.pdf -> {OUT_CAL}", flush=True)
 
 
 def fig_state_arms(args):
@@ -1108,10 +1125,12 @@ def fig_state_arms(args):
     from demos.multi_hallmark_calibrate import _annotate_interventions
     from hallsim.units import canonical_units
 
+    # The control arm is the reference the treated arms are read against,
+    # so it is drawn lighter and thinner than they are.
     ARM_STYLE = {
-        "ctrl": ("control", "#6b7280"),
-        "DDIS": ("DDIS", "#c0392b"),
-        "RAPA": ("rapamycin", "#2a78d6"),
+        "ctrl": ("control", "#b3b7bd", 1.4),
+        "DDIS": ("DDIS", "#c0392b", 1.8),
+        "RAPA": ("rapamycin", "#2a78d6", 1.8),
     }
     grid_c = "#e6e6e2"
     problem = _problem(args)
@@ -1119,15 +1138,26 @@ def fig_state_arms(args):
     runs = problem.simulate_all_conditions(fit, n_save=1401)
     comp = problem.composite
     units = canonical_units(comp.processes, comp.topology)
-    fit_conds = {problem.arm_pairs[a][0] for a in (problem.fit_arms or [])}
-    held_conds = {
-        problem.arm_pairs[a][0] for a in (problem.held_out_arms or [])
-    }
-    arms = {c: ARM_STYLE.get(c, (c, "#6b7280")) for c in runs}
     panels = [
         (r.observable.replace("_integral", ""), r.gene_symbol)
         for r in problem.reporters
     ]
+    # Reaction-level members are drawn as the reporter figure draws them:
+    # a population of cells on the same trajectory, its 10–90 % band and
+    # pooled mean, not the mean field.
+    n_cells = int(getattr(args, "n_cells", 64))
+    seed = int(getattr(args, "seed", 0))
+    has_pop = any(p.split("/")[0] in REACTION_LEVEL for p, _ in panels)
+    pop = (
+        {c: _population_run(problem, fit, c, n_cells, seed) for c in runs}
+        if has_pop
+        else {}
+    )
+    fit_conds = {problem.arm_pairs[a][0] for a in (problem.fit_arms or [])}
+    held_conds = {
+        problem.arm_pairs[a][0] for a in (problem.held_out_arms or [])
+    }
+    arms = {c: ARM_STYLE.get(c, (c, "#6b7280", 1.8)) for c in runs}
 
     # Same packing as the reporter figure: three to a row, a constituent's
     # panels kept together, each constituent headed above its first panel.
@@ -1146,9 +1176,15 @@ def fig_state_arms(args):
             for start_ in range(0, len(idxs), ncol):
                 rows.append([(ns, i) for i in idxs[start_ : start_ + ncol]])
     nrow = len(rows)
-    # One unit across the panels is written on the left column only, as
-    # the reporter figure writes log2FC; a panel in a different unit says so.
-    panel_units = {units.get(path) or "model units" for path, _ in panels}
+
+    # A unit is written on the left column only, as the reporter figure
+    # writes log2FC, and a panel in a different unit says so; a
+    # dimensionless level carries no label at all.
+    def unit_of(path):
+        unit = units.get(path, "")
+        return "" if unit in ("", "dimensionless") else unit
+
+    panel_units = {unit_of(path) for path, _ in panels}
     shared_unit = next(iter(panel_units)) if len(panel_units) == 1 else None
     fig, axes = plt.subplots(
         nrow, ncol, figsize=(11, 3.3 * nrow + 0.6), sharex=True, squeeze=False
@@ -1162,16 +1198,31 @@ def fig_state_arms(args):
                 continue
             ns, i = row[c]
             path, gene = panels[i]
-            for cond, (label, color) in arms.items():
+            for cond, (label, color, lw) in arms.items():
+                if ns in REACTION_LEVEL and cond in pop:
+                    res = pop[cond]
+                    ts = np.asarray(res.ts)
+                    cells = np.asarray(res.ys)[:, :, res.keys.index(path)]
+                    m = ts >= 0.0
+                    # The treated arms carry their 10–90 % band; the control,
+                    # drawn as the reference, its pooled mean only.
+                    if cond in fit_conds | held_conds:
+                        lo, hi = np.percentile(cells[m], [10, 90], axis=1)
+                        ax.fill_between(
+                            ts[m], lo, hi, color=color, alpha=0.15, lw=0
+                        )
+                    y = cells[m].mean(axis=1)
+                    ax.plot(ts[m], y, color=color, lw=lw, zorder=3)
+                    continue
                 ts = np.asarray(runs[cond].ts)
                 y = np.asarray(runs[cond].get(path))
                 m = ts >= 0.0
-                ax.plot(ts[m], y[m], color=color, lw=1.8, zorder=3)
+                ax.plot(ts[m], y[m], color=color, lw=lw, zorder=3)
             _annotate_interventions(ax, "RAPA_vs_ctrl")
             ax.set_title(gene, fontsize=11, fontweight="bold", loc="left")
             ax.set_title(path, fontsize=9, color="#777", loc="right")
-            unit = units.get(path) or "model units"
-            if c == 0 or unit != shared_unit:
+            unit = unit_of(path)
+            if unit and (c == 0 or unit != shared_unit):
                 ax.set_ylabel(unit, fontsize=9)
             ax.set_xlim(0.0, float(problem.t_end))
             ax.grid(True, color=grid_c, lw=0.6, alpha=0.7)
@@ -1181,7 +1232,12 @@ def fig_state_arms(args):
             if ns not in headed:
                 headed.add(ns)
                 ax.annotate(
-                    CONSTITUENT_LABELS.get(ns, ns),
+                    CONSTITUENT_LABELS.get(ns, ns)
+                    + (
+                        f" — {n_cells}-cell population"
+                        if pop and ns in REACTION_LEVEL
+                        else ""
+                    ),
                     xy=(0, 1.2),
                     xycoords="axes fraction",
                     fontsize=11,
@@ -1194,13 +1250,15 @@ def fig_state_arms(args):
                 ax.tick_params(labelbottom=True)
 
     arm_entries = []
-    for cond, (label, color) in arms.items():
+    for cond, (label, color, lw) in arms.items():
         role = (
             " (fit)"
             if cond in fit_conds
             else " (held out)" if cond in held_conds else ""
         )
-        arm_entries.append((Line2D([], [], color=color, lw=2.2), label + role))
+        arm_entries.append(
+            (Line2D([], [], color=color, lw=lw + 0.4), label + role)
+        )
     other_entries = [
         (h, lab)
         for h, lab in zip(*axes[0, 0].get_legend_handles_labels())
@@ -1219,7 +1277,8 @@ def fig_state_arms(args):
         bbox_to_anchor=(0.5, 0.0),
     )
     fig.suptitle(
-        "Model state behind each gene reporter in the control and treated arms",
+        "Species levels of the calibrated composite in the control, "
+        "DDIS and rapamycin arms",
         fontsize=13,
         x=0.5,
         ha="center",
@@ -1229,10 +1288,10 @@ def fig_state_arms(args):
     OUT_CAL.mkdir(parents=True, exist_ok=True)
     for ext in ("png", "pdf"):
         fig.savefig(
-            OUT_CAL / f"state_ddis_vs_rapa.{ext}", dpi=150, bbox_inches="tight"
+            OUT_CAL / f"A_species_levels.{ext}", dpi=150, bbox_inches="tight"
         )
     plt.close(fig)
-    print(f"wrote state_ddis_vs_rapa.png/.pdf -> {OUT_CAL}", flush=True)
+    print(f"wrote A_species_levels.png/.pdf -> {OUT_CAL}", flush=True)
 
 
 # ── before-after (standalone vs composite) ───────────────────────────────

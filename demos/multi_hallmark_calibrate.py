@@ -483,7 +483,9 @@ def plot(pre, post, path: Path) -> None:
 def write_concordance_table(pre, post, out_dir: Path) -> None:
     """Per-arm ρ and mean|error|, out-of-box → calibrated, as a CSV and a
     colored PNG table (green where calibration improves on out-of-box, orange
-    where it worsens). Fit and held-out arms are labelled."""
+    where it worsens). Fit and held-out arms are labelled. The no-change
+    baseline stays in the summary JSON; it is a property of the constituent
+    models, not of the calibration, so the table does not carry it."""
     import csv
 
     import matplotlib
@@ -505,7 +507,6 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
                     post[arm][t].spearman_r,
                     pre[arm][t].mean_abs_error,
                     post[arm][t].mean_abs_error,
-                    post[arm][t].null_abs_error,
                 )
             )
 
@@ -519,10 +520,9 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
                 "rho_cal",
                 "mean_abs_err_oob",
                 "mean_abs_err_cal",
-                "mean_abs_err_null",
             ]
         )
-        for arm, day, ro, rc, eo, ec, en in rows:
+        for arm, day, ro, rc, eo, ec in rows:
             w.writerow(
                 [
                     arm,
@@ -531,7 +531,6 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
                     f"{rc:.3f}",
                     f"{eo:.3f}",
                     f"{ec:.3f}",
-                    f"{en:.3f}",
                 ]
             )
 
@@ -543,23 +542,13 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
         "ρ calibrated",
         "|err| published",
         "|err| calibrated",
-        "|err| no change",
     ]
-    text, colors = [header], [[INK] * 7]
-    for arm, day, ro, rc, eo, ec, en in rows:
+    text, colors = [header], [[INK] * 6]
+    for arm, day, ro, rc, eo, ec in rows:
         text.append(
-            [
-                arm,
-                day,
-                f"{ro:+.2f}",
-                f"{rc:+.2f}",
-                f"{eo:.2f}",
-                f"{ec:.2f}",
-                f"{en:.2f}",
-            ]
+            [arm, day, f"{ro:+.2f}", f"{rc:+.2f}", f"{eo:.2f}", f"{ec:.2f}"]
         )
-        # calibrated against published in its own cell; the no-change
-        # floor lights up where it beats the calibrated model
+        # calibrated against published in its own cell
         colors.append(
             [
                 INK,
@@ -568,7 +557,6 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
                 IMP if rc >= ro else REG,
                 DIM,
                 IMP if ec <= eo else REG,
-                REG if en < ec else DIM,
             ]
         )
 
@@ -578,7 +566,7 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
         cellText=text,
         cellLoc="center",
         loc="center",
-        colWidths=[0.19, 0.07, 0.13, 0.14, 0.15, 0.16, 0.16],
+        colWidths=[0.21, 0.08, 0.15, 0.16, 0.17, 0.18],
     )
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(10.5)
@@ -594,8 +582,7 @@ def write_concordance_table(pre, post, out_dir: Path) -> None:
                 cell.get_text().set_fontweight("bold")
     ax.set_title(
         "Calibrated vs published concordance\n"
-        "green: calibration improves on published; "
-        "orange floor: predicting no change beats the calibrated model",
+        "green: calibration improves on published; orange: it worsens",
         fontsize=11,
         fontweight="bold",
         color=INK,
@@ -934,6 +921,7 @@ def fig_constituents(
     )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     for ext in ("png", "pdf"):
+        out_dir.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_dir / f"{stem}.{ext}", dpi=140, bbox_inches="tight")
     plt.close(fig)
     print(f"wrote {stem}.png -> {out_dir}", flush=True)
@@ -1083,11 +1071,11 @@ def cmd_run(args) -> None:
     write_reporter_table(pre, post, out_dir)
     plot_history(problem, history, out_dir / "training_history.png")
     save_outputs(problem, str(out_dir), history)
-    fig_constituents(problem, init, history.best_params, out_dir)
-    # Calibrated reporter figures on the fit just written, so the time-domain
-    # trajectories and concordance dumbbells never lag behind the checkpoint.
+    # The paper's two panels first, on the fit just written so they never
+    # lag behind the checkpoint; the diagnostics under debug/.
     from demos.multi_hallmark_figures import (
         fig_concordance,
+        fig_state_arms,
         fig_temporal,
         fig_temporal_compare,
         use_run,
@@ -1096,9 +1084,11 @@ def cmd_run(args) -> None:
     # This run's own directory, not `latest`: another run may have moved
     # the symlink since this one started.
     use_run(out_dir)
-    fig_temporal(args)
+    fig_state_arms(args)
     fig_temporal_compare(args)
     fig_concordance(args)
+    fig_temporal(args)
+    fig_constituents(problem, init, history.best_params, out_dir / "debug")
 
     print(
         f"\nbest loss {history.best_loss:.4g} over {len(history.losses)} "
@@ -1136,6 +1126,7 @@ def cmd_score(args) -> None:
     """
     from demos.multi_hallmark_figures import (
         fig_concordance,
+        fig_state_arms,
         fig_temporal,
         fig_temporal_compare,
         use_run,
@@ -1195,9 +1186,10 @@ def cmd_score(args) -> None:
         )
     )
     use_run(out_dir)
-    fig_temporal(args)
+    fig_state_arms(args)
     fig_temporal_compare(args)
     fig_concordance(args)
+    fig_temporal(args)
     print(f"\nre-scored → {out_dir.relative_to(ROOT)}/", flush=True)
 
 
@@ -1297,11 +1289,93 @@ def cmd_screen(args) -> None:
     )
 
 
+def cmd_export(args) -> None:
+    """Write the calibrated composite as SBML, one document per arm, beside
+    a saved fit: the object a model repository deposits and any SBML
+    simulator runs. Time is in days; the fitted parameters are the run's."""
+    from hallsim.sbml_export import composite_to_sbml
+
+    default = ROOT / "outputs" / RUN_NAME / "latest"
+    run_dir = Path(getattr(args, "run", None) or default).resolve()
+    ckpt = run_dir / "checkpoint.npz"
+    if not ckpt.exists():
+        raise SystemExit(
+            f"no checkpoint at {ckpt}. Point --run at a calibrate run, or "
+            f"run `simulate multi-hallmark calibrate` first."
+        )
+    saved = json.loads((run_dir / "summary.json").read_text())
+    fitted = tuple(saved["params"])
+    intensity = getattr(args, "rapa_intensity", None)
+    problem = build_problem(
+        fitted=fitted, rapa_intensity=intensity, clamp=False
+    )
+    params, _ = load_checkpoint(ckpt)
+    params = {k: jnp.asarray(v) for k, v in params.items()}
+    substituted = problem._substitute(problem.composite.processes, params)
+    registry = problem._registry(params)
+    out = run_dir / "sbml"
+    out.mkdir(exist_ok=True)
+
+    values = ", ".join(
+        f"{name} = {float(v):.4g}" for name, v in sorted(params.items())
+    )
+    fitted_desc = ", ".join(
+        f"{name}: {ref.process_name} {ref.field.removeprefix('parameters.')}"
+        for name, ref in sorted(problem.params.items())
+    )
+    readme = [
+        f"# Multi-hallmark composite, calibrated — run {run_dir.name}",
+        "",
+        "One SBML Level 3 Version 2 document per experimental arm, exported",
+        "from HallSim with the run's fitted parameters. Time is in days;",
+        "species are amounts in one unit compartment. Any SBML simulator",
+        "(libRoadRunner, COPASI) solves each document as it is; a run to",
+        "day 14 reproduces the species levels of the paper's Figure 2A.",
+        "",
+        "| document | arm | hallmark severities |",
+        "|---|---|---|",
+    ]
+    for cond_name, cond in problem.conditions.items():
+        comp = problem._condition_composite(
+            substituted, cond, registry=registry
+        )
+        sev = ", ".join(f"{h} {s:g}" for h, s in cond.hallmarks.items())
+        notes = (
+            "HallSim multi-hallmark composite: Dalle Pezze 2014 "
+            "(BIOMD0000000582), Geva-Zatorsky 2006 (BIOMD0000000157) and "
+            "Proctor 2007 (BIOMD0000000105) joined by four coupling edges, "
+            f"in the {cond_name} arm (hallmark severities: {sev or 'none'}). "
+            "Time is in days.\n\n"
+            f"Calibrated against GSE248823; fitted parameters ({fitted_desc}): "
+            f"{values}. Every other parameter is the deposit's own."
+        )
+        xml = composite_to_sbml(
+            comp,
+            model_id=f"multi_hallmark_{cond_name}",
+            name=f"Multi-hallmark composite, {cond_name} arm",
+            notes=notes,
+        )
+        path = out / f"multi_hallmark_{cond_name}.xml"
+        path.write_text(xml)
+        readme.append(f"| `{path.name}` | {cond_name} | {sev or 'none'} |")
+        print(f"wrote sbml/{path.name}", flush=True)
+    readme += [
+        "",
+        f"Fitted parameters ({fitted_desc}): {values}.",
+        "",
+        "Source: https://github.com/BabaJaguska/hallsim — "
+        "`simulate multi-hallmark export --run <run>`.",
+    ]
+    (out / "README.md").write_text("\n".join(readme) + "\n")
+    print(f"wrote sbml/README.md -> {out}", flush=True)
+
+
 _COMMANDS = {
     "run": cmd_run,
     "score": cmd_score,
     "screen": cmd_screen,
     "sweep": cmd_sweep,
+    "export": cmd_export,
 }
 
 
