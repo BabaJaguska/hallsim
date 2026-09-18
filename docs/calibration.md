@@ -202,12 +202,12 @@ parameter is fitted:
 
 ```python
 # Is the p53 -> CDKN1A edge load-bearing? Switch it off and re-score.
-off = problem.with_overrides({"p53_cdkn1a.k_act": 0.0})
-ablated = off.evaluate(params)
+off = problem.with_overrides({"p53_cdkn1a.hi": 0.0})
+ablated = off.evaluate(history.best_params)
 ```
 
 A key names either a fittable (whatever `params` calls it) or a process field
-in dotted form — `"p53_cdkn1a.k_act"` and `"dp14.parameters.k"` address the same
+in dotted form — `"p53_cdkn1a.hi"` and `"dp14.parameters.k"` address the same
 places `ParameterRef` does. Both spellings reach the same field, so which list a
 parameter happens to be in is not something you have to know. The call returns a
 new problem and leaves the original alone; overrides compose.

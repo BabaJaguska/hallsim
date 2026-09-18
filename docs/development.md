@@ -6,6 +6,8 @@
 
 See [CLAUDE.md](../CLAUDE.md) for the load-bearing architecture invariants and the "where to add things" guide.
 
+`make test-docs` runs every Python block in the README, [architecture.md](architecture.md) and [calibration.md](calibration.md) as written, top to bottom per page. Minutes on CPU and needs the network; run it before a release.
+
 ## Key files
 
 ```

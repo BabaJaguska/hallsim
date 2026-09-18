@@ -1,5 +1,5 @@
 .PHONY: install install-dev format lint check test test-all \
-	test-single-process run run-compose run-validate hooks help all
+	test-single-process test-docs run run-compose run-validate hooks help all
 
 # A uv-created .venv has no pip, and a CI runner has pip and no uv. Pick
 # whichever is on PATH so one command installs in both.
@@ -75,6 +75,12 @@ test-all:
 test-single-process:
 	$(PYTHON) -m pytest tests/ -m "not slow and not network and not demo"
 
+# Every Python block in the README, architecture and calibration pages, run
+# as written. Minutes on CPU and needs the network, so it is not in `test`;
+# run it before a release.
+test-docs:
+	$(PYTHON) -m pytest tests/integration/test_doc_examples.py
+
 run:
 	simulate multi-hallmark run
 
@@ -94,6 +100,7 @@ help:
 	@echo "  make lint         - Lint the code using flake8"
 	@echo "  make test         - Run tests (chunked, one interpreter per chunk)"
 	@echo "  make test-all     - Run every non-network test, chunked"
+	@echo "  make test-docs    - Run the README and docs examples as written (slow, network)"
 	@echo "  make run          - Run the multi-hallmark demo (simulate multi-hallmark run)"
 	@echo "  make run-compose  - Run the composable architecture demo"
 	@echo "  make run-validate - Run the semantic validation demo"

@@ -282,11 +282,11 @@ from demos.models.multi_hallmark import build_multi_hallmark_composite
 
 comp = build_multi_hallmark_composite()
 y0 = comp.initial_state_vec()                        # (n_vars,)
-y0 = jnp.broadcast_to(y0, (1024, y0.shape[0]))       # (1024, n_vars)
+y0 = jnp.broadcast_to(y0, (64, y0.shape[0]))         # (64, n_vars)
 y0 = y0.at[..., comp.store_index()["dp14/DNA_damage"]].set(
-    jnp.linspace(0.0, 10.0, 1024))
+    jnp.linspace(0.0, 10.0, 64))
 result = Scheduler().run(comp, t_span=(0.0, 50.0), macro_dt=5.0, y0=y0)
-result.get("dp14/CDKN1A").shape                      # (n_time, 1024)
+result.get("dp14/CDKN1A").shape                      # (n_time, 64)
 ```
 
 Near-flat in `batch` on GPU (kernel launch dominates) is the design intent
