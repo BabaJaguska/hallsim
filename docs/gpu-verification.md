@@ -119,11 +119,13 @@ The newly added plan-rank regression passes. `git diff --check` passes.
 
 Run from the repository with GPU and SBML cache access:
 
+The scripts these commands name are not in the repository (P0.91 in [known-problems.md](known-problems.md)); the commands are the record of how the numbers were produced.
+
 ```bash
-CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/verify_gpu_batch.py
-JAX_PLATFORMS=cpu .venv/bin/python scripts/verify_gpu_batch.py --reference
-CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/verify_gpu_batch.py --models composite --sizes 256 --repeats 1 --rtol 1e-7 --atol 1e-10 --out outputs/gpu_verification_refined
-JAX_PLATFORMS=cpu .venv/bin/python scripts/verify_gpu_batch.py --reference --models composite --rtol 1e-7 --atol 1e-10 --out outputs/gpu_verification_refined
+CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false python scripts/verify_gpu_batch.py
+JAX_PLATFORMS=cpu python scripts/verify_gpu_batch.py --reference
+CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false python scripts/verify_gpu_batch.py --models composite --sizes 256 --repeats 1 --rtol 1e-7 --atol 1e-10 --out outputs/gpu_verification_refined
+JAX_PLATFORMS=cpu python scripts/verify_gpu_batch.py --reference --models composite --rtol 1e-7 --atol 1e-10 --out outputs/gpu_verification_refined
 ```
 
 The default-tolerance CPU command intentionally exits nonzero for the

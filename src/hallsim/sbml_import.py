@@ -629,6 +629,9 @@ class SBMLProcess(ImportedODEProcess):
             if name not in skip
         }
 
+    def frozen_species(self) -> list[str]:
+        return [self._species_names[i] for i in self._frozen_indices]
+
     def metadata(self):
         base = super().metadata()
         base["sbml_name"] = self._name
@@ -1299,8 +1302,20 @@ def process_from_sbml(
         assigned_indexes,
     ) = _settable_surface(xml_path, c, w0, c_indexes, w_indexes_map)
     frozen_indices = _frozen_sink_indices(xml_path, species_names, name)
+    published = tuple(sorted(params_dict.items()))
     _apply_parameter_overrides(
         params_dict, parameters, c_indexes, boundary_inputs
+    )
+    # Hash the file the caller handed over when there is one (a .cps is
+    # converted before it is read), else the cached download.
+    import os
+
+    from hallsim.io import file_sha256
+
+    hashed = (
+        model_id
+        if isinstance(model_id, str) and os.path.isfile(model_id)
+        else xml_path
     )
 
     # Translate SBML <event> elements (the compiled core ignores them)
@@ -1329,6 +1344,10 @@ def process_from_sbml(
         _w0=w0,
         _c=c,
         _name=name,
+        source=str(model_id),
+        source_path=str(xml_path),
+        source_sha256=file_sha256(hashed),
+        _published_parameters=published,
         parameters=params_dict,
         _param_names=param_names,
         _param_indexes=param_indexes,

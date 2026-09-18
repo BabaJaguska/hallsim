@@ -24,7 +24,7 @@ multi-hallmark composite's reporters:
 | `BNIP3` | `dp14/FoxO3a` | zero-phase mean, τ=2.0 | FoxO3 target; reads the FoxO-driven mitophagy arm downstream of nutrient sensing |
 | `DDB2` | `gz06/x` | zero-phase **RMS** `√⟨x²⟩`, τ=0.75 | p53 target; GZ06's mean p53 is analytically damage-blind, so DDB2 reads pulse amplitude — see [gz06-basal-p53.md](gz06-basal-p53.md) |
 | `MDM2` | `gz06/y0` | zero-phase RMS amplitude, τ=0.75 | p53 target; `y0` is the paper's Mdm2 precursor, "representing, for example, Mdm2 mRNA" — the transcript, not the protein `y`. RMS as for DDB2: the mean of `y0` is damage-blind under GZ06, the pulse amplitude is not |
-| `HSPA1A` | `p07/MisP` | zero-phase mean, τ=2.0 | *(--proteostasis)* HSP70, the canonical HSF1 target induced by misfolded load; reads Proctor's free misfolded pool — the load the heat-shock response would answer, not the response |
+| `HSPA1A` | `p07/MisP` | zero-phase mean, τ=2.0 | HSP70, the canonical HSF1 target induced by misfolded load; reads Proctor's free misfolded pool — the load the heat-shock response would answer, not the response |
 
 <!-- reporters:end -->
 
@@ -52,6 +52,8 @@ for wiring any composite to any held-out gene-expression dataset:
 from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
 from hallsim.gene_reporters import GeneExpressionDataset, MULTI_HALLMARK_REPORTERS
 from demos.models.multi_hallmark import build_multi_hallmark_composite
+from demos.multi_hallmark_calibrate import (
+    PLATFORM, SAMPLE_POSITION_GROUPS, SERIES_MATRIX, fetch_dataset)
 
 composite = build_multi_hallmark_composite()
 
@@ -61,19 +63,20 @@ composite = build_multi_hallmark_composite()
 for p in composite.calibration_targets():
     print(p.process_name, p.field, p.default, p.clamp)
 
+fetch_dataset()   # GSE248823 from GEO into data/, once
 ds = GeneExpressionDataset.from_series_matrix(
-    series_matrix_path, platform_path, sample_position_groups=...)
+    SERIES_MATRIX, PLATFORM, sample_position_groups=SAMPLE_POSITION_GROUPS)
 
 problem = CalibrationProblem(
     composite=composite,
     reporters=MULTI_HALLMARK_REPORTERS,
     conditions={
-        "ctrl": Condition("ctrl", {"Genomic Instability": 0.0,
-                                   "Deregulated Nutrient Sensing": 0.5}),
-        "DDIS": Condition("DDIS", {"Genomic Instability": 1.0,
-                                   "Deregulated Nutrient Sensing": 1.0}),
+        "ctrl": Condition("ctrl", {"Genomic Instability": 0.0}),
+        "DDIS": Condition("DDIS", {"Genomic Instability": 1.0}),
+        # Rapamycin is a downward shift on nutrient sensing: -1 holds DP14's
+        # mTORC1 phosphorylation rate below published from the dosing day on.
         "RAPA": Condition("RAPA", {"Genomic Instability": 1.0,
-                                   "Deregulated Nutrient Sensing": 0.3}),
+                                   "Deregulated Nutrient Sensing": -1.0}),
     },
     arm_pairs={"DDIS_vs_ctrl": ("DDIS", "ctrl"),
                "RAPA_vs_ctrl": ("RAPA", "DDIS")},
@@ -84,10 +87,10 @@ problem = CalibrationProblem(
     # culture's day 0 *is* ETOP_D00, since the drug goes in on day 2. The drug
     # contrast is recovered afterwards by differencing the two arm curves.
     data={
-        "DDIS_vs_ctrl": {7.0: ds.delta("ETOP_D07", "ETOP_D00"),
-                         14.0: ds.delta("ETOP_D14", "ETOP_D00")},
-        "RAPA_vs_ctrl": {7.0: ds.delta("RAPA_D07", "ETOP_D00"),
-                         14.0: ds.delta("RAPA_D14", "ETOP_D00")},
+        "DDIS_vs_ctrl": {7.0: ds.delta("ETOPOSIDE_D07", "ETOPOSIDE_D00"),
+                         14.0: ds.delta("ETOPOSIDE_D14", "ETOPOSIDE_D00")},
+        "RAPA_vs_ctrl": {7.0: ds.delta("ETOPOSIDE_RAPA_D07", "ETOPOSIDE_D00"),
+                         14.0: ds.delta("ETOPOSIDE_RAPA_D14", "ETOPOSIDE_D00")},
     },
     params={
         # No starting value: the fit begins at the composite's own value for
@@ -104,7 +107,7 @@ problem = CalibrationProblem(
 )
 
 history = problem.fit(steps=150, mode="reverse")
-results = problem.evaluate(history.final_params)
+results = problem.evaluate(history.best_params)
 ```
 
 ### Fitting a parameter to a trajectory
@@ -113,14 +116,21 @@ The gene-expression layer above is one loss. `Calibrator` takes any
 JAX-traceable scalar of the parameter pytree, with the solve inside it, so
 the commonest fitting task — recover a rate constant from a time series —
 needs no reporters, conditions or arms. Proctor 2007's synthesis rate from a
-synthetic native-protein trajectory, start 0.005, true 0.012:
+synthetic native-protein trajectory over one native hour, start 0.005, true
+0.012:
 
 ```python
+import jax.numpy as jnp
 from hallsim.calibration import Calibrator
+from hallsim.composite import single_process_composite
+from hallsim.sbml_import import process_from_sbml
 from hallsim.scheduler import Scheduler
 
+base = single_process_composite(process_from_sbml(105), name="p07")
+T_END = 3600.0
+
 def natp(k1):
-    comp = base.with_params({"ups.parameters.k1": k1})
+    comp = base.with_params({"p07.parameters.k1": k1})
     return Scheduler().run(comp, t_span=(0.0, T_END), macro_dt=T_END,
                            y0=comp.initial_state_vec(),
                            save_dt=T_END / 50).get("p07/NatP")
@@ -133,13 +143,13 @@ def loss(params):
 hist = Calibrator(loss_fn=loss, init_params={"k1": jnp.asarray(0.005)},
                   log_params=True, clamps={"k1": (1e-4, 1e-1)},
                   mode="reverse", learning_rate=0.05).fit(steps=60)
-hist.best_params["k1"]   # 0.01199 after 60 steps, ~20 s
+hist.best_params["k1"]   # 0.01199 after 60 steps, ~16 s on a laptop CPU
 ```
 
 `log_params=True` fits in log10 so a rate constant spanning decades takes
 even steps; `clamps` is the box; `mode="reverse"` is the adjoint through the
-solve. The runnable version is `scratch/2026-09-10-fit-path/k1_recovery.py`.
-There is no CLI for this yet; the gap is filed.
+solve. The block runs as written. There is no CLI for this yet; the gap is
+filed.
 
 ### Principles the API enforces
 

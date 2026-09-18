@@ -366,8 +366,7 @@ biogenesis is throughput into the old pool. The k34 → 0 fit is not only an
 optimiser flattening a redundant coordinate; the data rejects the term. Merging
 k33/k34 to their sum (Phase 1 of the rebuild plan) remains the right repair.
 
-Reproduce: `one_off_scripts/dp14_loop_ablation.py`,
-`dp14_intensive_psi_probe.py`, `dp14_reaction31_probe.py`.
+The probe scripts behind these numbers are not in the repository.
 
 ---
 

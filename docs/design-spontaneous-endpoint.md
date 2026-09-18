@@ -104,6 +104,9 @@ signal *is* the perturbation, so comparing it counts the input as output.
 ## Report
 
 ```python
+from dataclasses import dataclass
+
+
 @dataclass
 class SpontaneousReport:
     n_sources: int

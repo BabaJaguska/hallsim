@@ -60,13 +60,15 @@ were fitted to make the plots agree.
 
 ## Reproduce and inspect
 
+The scripts these commands name are not in the repository (P0.91 in [known-problems.md](known-problems.md)); the commands are the record of how the numbers were produced.
+
 From the repository root (external simulator dependencies already live in
 `.venv-comparison`):
 
 ```bash
 .venv-comparison/bin/python scripts/compare_proctor2007.py tellurium
-JAX_PLATFORMS=cpu .venv/bin/python scripts/compare_proctor2007.py hallsim
-.venv/bin/python scripts/compare_proctor2007.py plot
+JAX_PLATFORMS=cpu python scripts/compare_proctor2007.py hallsim
+python scripts/compare_proctor2007.py plot
 ```
 
 Artifacts in `outputs/proctor2007_comparison/`:

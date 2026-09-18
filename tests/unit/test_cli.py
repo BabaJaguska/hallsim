@@ -141,6 +141,11 @@ def test_unscored_run_receives_the_equilibrate_option(monkeypatch, tmp_path):
 
     monkeypatch.setattr(demo, "SERIES_MATRIX", tmp_path / "missing.txt")
     monkeypatch.setattr(demo, "make_run_dir", lambda name: tmp_path)
+
+    def offline():
+        raise OSError("no network")
+
+    monkeypatch.setattr(demo, "fetch_dataset", offline)
     received = {}
 
     def unscored(equilibrate, out_dir):

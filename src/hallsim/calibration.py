@@ -43,7 +43,7 @@ import numpy as np
 import optax
 import optax.contrib
 
-from hallsim.process import read_param, write_param
+from hallsim.process import read_param, split_param_address, write_param
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -781,10 +781,10 @@ def _validate_parameter_ref(pname: str, pref, proc) -> None:
             f"params[{pname!r}] fits {address}, which is {why}. "
             "The fittable surface is proc.calibratable_params()."
         )
-    if jnp.ndim(value) != 0:
+    if np.ndim(value) != 0:
         raise ValueError(
             f"params[{pname!r}] fits {address}, which holds a "
-            f"{type(value).__name__} of shape {tuple(jnp.shape(value))}, not "
+            f"{type(value).__name__} of shape {tuple(np.shape(value))}, not "
             "a scalar. A tuple-valued field such as a Hill edge's K or n is "
             "not fittable through a ParameterRef."
         )
@@ -1296,6 +1296,11 @@ class CalibrationProblem:
                         n: type(pr).__name__
                         for n, pr in comp.processes.items()
                     },
+                    "imported": {
+                        n: pr.provenance()
+                        for n, pr in comp.processes.items()
+                        if hasattr(pr, "provenance")
+                    },
                     "fingerprint": comp.structural_fingerprint(),
                 },
                 "reporters": [
@@ -1389,24 +1394,26 @@ class CalibrationProblem:
             if key in self._all_refs:
                 pinned[key] = value
                 continue
-            proc_name, _, field_path = key.partition(".")
-            proc = self.composite.processes.get(proc_name)
-            if proc is not None and field_path:
-                try:
-                    read_param(proc, field_path)
-                except (AttributeError, KeyError, TypeError) as exc:
-                    raise KeyError(
-                        f"{key!r} names no field on process {proc_name!r} "
-                        f"({type(proc).__name__})."
-                    ) from exc
-                fields[(proc_name, field_path)] = value
-                continue
-            raise KeyError(
-                f"{key!r} is neither a fittable of this problem "
-                f"({sorted(self._all_refs)}) nor a '<process>.<field>' "
-                f"address into it (processes: "
-                f"{sorted(self.composite.processes)})."
-            )
+            try:
+                proc_name, field_path = split_param_address(
+                    key, self.composite.processes
+                )
+            except (KeyError, ValueError):
+                raise KeyError(
+                    f"{key!r} is neither a fittable of this problem "
+                    f"({sorted(self._all_refs)}) nor a '<process>.<field>' "
+                    f"address into it (processes: "
+                    f"{sorted(self.composite.processes)})."
+                ) from None
+            proc = self.composite.processes[proc_name]
+            try:
+                read_param(proc, field_path)
+            except (AttributeError, KeyError, TypeError) as exc:
+                raise KeyError(
+                    f"{key!r} names no field on process {proc_name!r} "
+                    f"({type(proc).__name__})."
+                ) from exc
+            fields[(proc_name, field_path)] = value
         clone = copy.copy(self)
         clone._override_params = pinned
         clone._override_fields = fields

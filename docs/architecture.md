@@ -83,11 +83,13 @@ overlapping biology onto canonical paths.
 
 ```python
 from hallsim import Composite, analyze_composability
+from hallsim.composite import single_process_composite
 from hallsim.sbml_import import process_from_sbml
 
-a = process_from_sbml(582, name="dp14")   # DallePezze 2014
-b = process_from_sbml(157, name="gz06")   # Geva-Zatorsky 2006 (p53 oscillator)
-report = analyze_composability(dp14=a, gz06=b)   # candidate overlaps + rewire
+a = process_from_sbml(582, name="dp14").reconciled_to(86400.0)  # DallePezze 2014, days
+b = process_from_sbml(157, name="gz06").reconciled_to(86400.0)  # Geva-Zatorsky 2006, hours -> days
+report = analyze_composability(dp14=single_process_composite(a),
+                               gz06=single_process_composite(b))  # overlaps + rewire
 merged = Composite(processes={"dp14": a, "gz06": b},
                    rewire=report.suggested_rewire)
 ```
@@ -166,7 +168,17 @@ The importer:
   make the outcome depend on round-off at the crossing, and equalities against
   time, which make the scheduler's `macro_dt` decide whether the event fires at
   all;
-- extracts MIRIAM annotations into `Port.ontology` from species CVTerms.
+- extracts MIRIAM annotations into `Port.ontology` from species CVTerms;
+- freezes inert sinks (species reactions write and nothing reads) at their
+  initial value so a degradation counter cannot grow without bound. A
+  terminal product looks the same to that test: `proc.frozen_species()`
+  names them, a composite lifts the freeze for any the wiring reads, and
+  reading a still-frozen path from a result warns and names
+  `proc.with_unfrozen(...)`;
+- records provenance, `proc.provenance()`: the source asked for, the file
+  read and its SHA-256, the native clock and its reconciliation, the frozen
+  species, and every parameter changed from the deposit. A calibration
+  run's `config.json` and `Composite.to_sbml()` carry it.
 
 Discover-then-import is two calls — the catalog is directly usable by an agent:
 
@@ -174,14 +186,14 @@ Discover-then-import is two calls — the catalog is directly usable by an agent
 from hallsim.discovery import search_for_model
 from hallsim.sbml_import import process_from_sbml
 
-hits = search_for_model("genotoxic stress NFkB")   # -> [{'id': 'MODEL...'}]
-proc = process_from_sbml(hits[0]["id"], name="dna_nfkb")   # fetch + generate
+hits = search_for_model("genotoxic stress NFkB")   # -> [ModelCandidate, ...]
+proc = process_from_sbml(hits[0].id, name="dna_nfkb")   # fetch + generate
 ```
 
-Bundled SBML ships as package data under
-[`src/hallsim/models/sbml/<author><year>/`](../src/hallsim/models/sbml/) for
-offline use; arbitrary IDs download to `~/.cache/hallsim/biomodels/` on first
-import.
+A BioModels ID downloads to `~/.cache/hallsim/biomodels/` on first import.
+The demos' own models ship under
+[`demos/models/sbml/<author><year>/`](../demos/models/sbml/) and are loaded
+by path.
 
 ### On-disk caches
 
@@ -207,19 +219,17 @@ mechanism parameters and then `apply_hallmarks` at the experimental severity
 profile without the hallmark clobbering the fit.
 
 ```python
-from hallsim import Composite
-from hallsim.hallmarks import apply_hallmarks
+from hallsim.hallmarks import with_hallmarks
 from demos.models.multi_hallmark import build_multi_hallmark_composite
 
 base = build_multi_hallmark_composite()
 # Rapamycin = downward shift on Deregulated Nutrient Sensing (targets DP14's
-# mTORC1 phosphorylation rate): severity 1.0 = full dysregulation, 0.3 = rescued.
-treated = Composite(
-    processes=apply_hallmarks(base.processes,
-                              {"Deregulated Nutrient Sensing": 0.3}),
-    semantic_validation={"check_semantics": False},
-)
+# mTORC1 phosphorylation rate): +1 is full dysregulation, -1 is rapamycin.
+treated = with_hallmarks(base, {"Deregulated Nutrient Sensing": -1.0})
 ```
+
+`with_hallmarks` keeps the topology; `apply_hallmarks(processes, {...})` is
+the same transform on a bare process dict.
 
 **Pharmacological interventions belong on the hallmark layer they perturb**,
 not as separate Processes. **Cross-model coupling is mediated at the
@@ -266,6 +276,11 @@ flows through every group's Diffrax solve as one batched computation, no
 `jax.vmap` over `Scheduler.run`:
 
 ```python
+import jax.numpy as jnp
+from hallsim.scheduler import Scheduler
+from demos.models.multi_hallmark import build_multi_hallmark_composite
+
+comp = build_multi_hallmark_composite()
 y0 = comp.initial_state_vec()                        # (n_vars,)
 y0 = jnp.broadcast_to(y0, (1024, y0.shape[0]))       # (1024, n_vars)
 y0 = y0.at[..., comp.store_index()["dp14/DNA_damage"]].set(

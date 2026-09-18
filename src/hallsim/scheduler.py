@@ -271,6 +271,8 @@ class SchedulerResult:
     keys: list[str]
     events: list[EventRecord] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
+    #: Paths import froze as inert sinks; :meth:`get` warns on them.
+    frozen: frozenset = field(default_factory=frozenset)
 
     @cached_property
     def _index(self) -> dict[str, int]:
@@ -281,6 +283,14 @@ class SchedulerResult:
     def get(self, key: str) -> jnp.ndarray:
         """Per-path trajectory — ``(n_time,)``, or ``(n_time, batch)``
         batched."""
+        if key in self.frozen:
+            log.warning(
+                "%r holds its initial value for the whole run: import froze "
+                "it as an inert sink (written by reactions, read by nothing). "
+                "It is not a prediction; proc.with_unfrozen(...) integrates "
+                "it.",
+                key,
+            )
         return self.ys[..., self._index[key]]
 
     @property
@@ -1281,6 +1291,7 @@ class Scheduler:
                 keys=keys,
                 events=events,
                 stats=_attach_diagnosis(stats, ys),
+                frozen=composite.frozen_paths(),
             )
 
         jump_ts = plan.jump_ts
@@ -1590,6 +1601,7 @@ class Scheduler:
             keys=keys,
             events=events,
             stats=_attach_diagnosis(stats, ys),
+            frozen=composite.frozen_paths(),
         )
 
     def _continuous_core(

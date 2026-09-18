@@ -230,3 +230,14 @@ def test_the_two_model_composite_reads_back_as_the_same_vector_field(
         build(tmp_path), tmp_path
     ).items():
         assert theirs == pytest.approx(ours, rel=1e-9, abs=1e-12), k
+
+
+def test_the_notes_carry_each_import_provenance(tmp_path):
+    from hallsim.sbml_export import composite_to_sbml
+
+    comp = build(tmp_path)
+    xml = composite_to_sbml(comp, notes="A deposit.")
+    notes = libsbml.readSBMLFromString(xml).getModel().getNotesString()
+    assert "A deposit." in notes
+    for name in ("a", "b"):
+        assert comp.processes[name].source_sha256 in notes

@@ -19,8 +19,10 @@ Usage
 >>> proc = NeuralODEProcess(fields=["x", "y"], width=32, depth=2)
 >>> comp = Composite(
 ...     processes={"neural": proc},
-...     topology={"neural": {"x": "pool/x", "y": "pool/y"}},
+...     topology={"neural": {"state": ["pool/x", "pool/y"]}},
 ... )
+
+One block port, ``state``, carries every field; bind it to one path per field.
 >>> # Fit via fit_neuralode_derivative(...) or fit_neuralode_shooting(...)
 """
 

@@ -147,7 +147,6 @@ def main() -> None:
     dataset = GeneExpressionDataset.from_series_matrix(
         SERIES_MATRIX,
         PLATFORM,
-        sample_groups={},
         sample_position_groups=SAMPLE_POSITION_GROUPS,
     )
     measured_genes = list(dataset.gene_expr.index)

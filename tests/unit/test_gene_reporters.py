@@ -467,3 +467,75 @@ class TestPublishedReporterTable:
         from demos.models import multi_hallmark
 
         assert set(self._ARROW.findall(multi_hallmark.__doc__)) == self._live()
+
+
+class TestFetchGeoSeries:
+    """The GEO fetch lands the two files ``load_gene_expression`` reads and
+    records their checksums beside them."""
+
+    SOFT = (
+        "^SERIES = GSE1\n^PLATFORM = GPL1\n!platform_table_begin\n"
+        "ID\tgene_assignment\nP1\tNM_1 // GENE1 // a gene\n"
+        "!platform_table_end\n^SAMPLE = GSM1\n"
+    )
+    MATRIX = (
+        '!Series_platform_id\t"GPL1"\n!series_matrix_table_begin\n'
+        '"ID_REF"\t"GSM1"\nP1\t3.0\n!series_matrix_table_end\n'
+    )
+
+    def _fetch(self, monkeypatch, tmp_path):
+        import gzip
+        import io
+
+        from hallsim import gene_reporters as gr
+
+        bodies = dict(
+            zip(
+                gr.geo_series_urls("GSE1"),
+                (
+                    gzip.compress(self.MATRIX.encode()),
+                    gzip.compress(self.SOFT.encode()),
+                ),
+            )
+        )
+        monkeypatch.setattr(
+            gr.urllib.request,
+            "urlopen",
+            lambda url, timeout: io.BytesIO(bodies[url]),
+        )
+        matrix, platform = tmp_path / "m.txt", tmp_path / "p.txt"
+        gr.fetch_geo_series("GSE1", matrix, platform)
+        return gr, matrix, platform
+
+    def test_platform_table_and_matrix_land_and_load(
+        self, monkeypatch, tmp_path
+    ):
+        gr, matrix, platform = self._fetch(monkeypatch, tmp_path)
+        assert matrix.read_text() == self.MATRIX
+        assert platform.read_text() == (
+            "ID\tgene_assignment\nP1\tNM_1 // GENE1 // a gene\n"
+        )
+        expr = gr.load_gene_expression(matrix, platform)
+        assert expr.loc["GENE1", "GSM1"] == 3.0
+
+    def test_checksums_are_recorded_and_checked_on_load(
+        self, monkeypatch, tmp_path
+    ):
+        gr, matrix, platform = self._fetch(monkeypatch, tmp_path)
+        sums = (tmp_path / "SHA256SUMS").read_text()
+        assert "  m.txt" in sums and "  p.txt" in sums
+        gr.load_gene_expression(matrix, platform)
+        matrix.write_text(self.MATRIX.replace("3.0", "4.0"))
+        with pytest.raises(ValueError, match="SHA-256"):
+            gr.load_gene_expression(matrix, platform)
+
+    def test_urls_follow_geo_layout(self):
+        from hallsim.gene_reporters import geo_series_urls
+
+        matrix, soft = geo_series_urls("GSE248823")
+        assert matrix.endswith(
+            "/GSE248nnn/GSE248823/matrix/GSE248823_series_matrix.txt.gz"
+        )
+        assert soft.endswith(
+            "/GSE248nnn/GSE248823/soft/GSE248823_family.soft.gz"
+        )

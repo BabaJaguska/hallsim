@@ -663,7 +663,15 @@ def gz06_damage_scan():
 @click.argument(
     "command",
     type=click.Choice(
-        ["run", "calibrate", "score", "screen", "sweep", "export"]
+        [
+            "run",
+            "calibrate",
+            "score",
+            "screen",
+            "sweep",
+            "export",
+            "fetch-data",
+        ]
     ),
     default="run",
 )
@@ -763,6 +771,7 @@ def multi_hallmark(
       score      re-score a saved fit under changed conditions, no refit
       sweep      two-hallmark severity sweep
       export     write a saved fit's composite as SBML, one document per arm
+      fetch-data download GSE248823 from GEO (run does this on first use)
     """
     from types import SimpleNamespace
 
@@ -787,13 +796,14 @@ def multi_hallmark(
     )
     from demos.multi_hallmark_calibrate import cmd_score, cmd_screen
 
-    from demos.multi_hallmark_calibrate import cmd_export
+    from demos.multi_hallmark_calibrate import cmd_export, cmd_fetch_data
 
     dispatch = {
         "sweep": cmd_sweep,
         "score": cmd_score,
         "screen": cmd_screen,
         "export": cmd_export,
+        "fetch-data": cmd_fetch_data,
     }
     dispatch.get(command, cmd_run)(args)
 
@@ -954,36 +964,11 @@ def info():
     click.echo("  CouplingAuditor  — duplicate reaction detection")
     click.echo()
     click.echo("CLI commands:")
-    click.echo(
-        "  simulate compose          — demo: ROS production + antioxidant defense"
-    )
-    click.echo("  simulate compose-kick     — demo: perturbation + recovery")
-    click.echo(
-        "  simulate multiscale       — demo: continuous + discrete + event scheduling"
-    )
-    click.echo(
-        "  simulate validate-demo    — demo: validation catching unit/semantic issues"
-    )
-    click.echo(
-        "  simulate stiffness        — per-group Jacobian-spectrum solver verdict"
-    )
-    click.echo(
-        "  simulate multi-hallmark   — demo: three published SBML models,"
-        " composed and calibrated"
-    )
-    click.echo("  simulate mito-aging       — mitochondrial decline with age")
-    click.echo(
-        "  simulate clamp            — hold a consumed species at a setpoint"
-    )
-    click.echo(
-        "  simulate find             — find a model that EMITS a "
-        "quantity, not one that mentions it"
-    )
-    click.echo(
-        "  simulate rejections       — deposits screened out of a slot, "
-        "and why"
-    )
-    click.echo("  simulate info             — this help")
+    width = max(len(name) for name in simulate.commands)
+    for name, cmd in sorted(simulate.commands.items()):
+        click.echo(
+            f"  simulate {name:<{width}}  — {cmd.get_short_help_str(limit=70)}"
+        )
     click.echo()
     click.echo("Python usage:")
     click.echo(

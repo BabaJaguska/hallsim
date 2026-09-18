@@ -55,11 +55,10 @@ This change is confined to two functions and it gates everything below.
 `∂preds/∂log10 θ` and `cov = pinv(JᵀJ)`. That is the Laplace covariance with two
 pieces missing, and both are worth naming as findings rather than as work items:
 
-1. **The noise scale is set to 1.** `std_decades` is a 1σ *in units of a
-   unit-variance residual*; the real one is `σ̂ ×` the reported number. A log2
-   fold-change residual around 0.3 means the current numbers overstate the
-   spread by roughly 3×, so the `std_tol=1.0` threshold files parameters as
-   `practical` more often than the data warrants.
+1. **The noise scale.** `identifiability.residual_scale` estimates
+   `σ̂² = RSS/(n − p)` from the MAP residuals, and `local_identifiability`
+   and `screen_fittable` default to it, so `std_decades` is in real decades.
+   The loss above still does not use it.
 2. **The prior precision is absent from the Fisher matrix.** A parameter with an
    operative prior is constrained even when no reporter moves with it. The MAP
    posterior precision is `JᵀJ/σ̂² + diag(1/σ_prior²)` — both terms already in

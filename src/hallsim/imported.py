@@ -36,6 +36,13 @@ class ParamInput(eqx.Module):
         return signal
 
 
+def _scalar(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class ImportedODEProcess(Process):
     """Base for an ODE model auto-generated from an external format.
 
@@ -63,6 +70,13 @@ class ImportedODEProcess(Process):
     # ParamInput). Static, so it round-trips untouched through the tree_at
     # substitutions hallmarks and Calibrator apply to `parameters`.
     _param_drivers: tuple = eqx.field(static=True, default=())
+    # Provenance: the accession or path asked for, the file actually read,
+    # its SHA-256, and the deposit's own parameter values before any
+    # override — so a result can say what it was computed from.
+    source: str = eqx.field(static=True, default="")
+    source_path: str = eqx.field(static=True, default="")
+    source_sha256: str = eqx.field(static=True, default="")
+    _published_parameters: tuple = eqx.field(static=True, default=())
 
     _param_label = "parameter"  # "SBML constant" / "XPP parameter"
 
@@ -147,11 +161,35 @@ class ImportedODEProcess(Process):
         # static — the clock ratio would recompile per factor.
         return eqx.tree_at(lambda p: p.time_scale, self, jnp.asarray(scale))
 
+    def frozen_species(self) -> list[str]:
+        """Species import holds at their initial value; none unless the
+        importer freezes inert sinks."""
+        return []
+
+    def provenance(self) -> dict:
+        """Where this model came from and what import did to it: the source
+        asked for, the file read and its SHA-256, the native clock and its
+        reconciliation factor, the species frozen at import, and every
+        parameter whose value differs from the deposit's."""
+        published = dict(self._published_parameters)
+        current = {k: _scalar(v) for k, v in (self.parameters or {}).items()}
+        return {
+            "source": self.source,
+            "source_path": self.source_path,
+            "source_sha256": self.source_sha256,
+            "native_time_seconds": self.native_time_seconds,
+            "native_time_source": self.native_time_source,
+            "time_scale": _scalar(self.time_scale),
+            "frozen_species": self.frozen_species(),
+            "published_parameters": published,
+            "modified_parameters": {
+                k: v for k, v in current.items() if published.get(k) != v
+            },
+        }
+
     def metadata(self):
         base = super().metadata()
-        base["native_time_seconds"] = self.native_time_seconds
-        base["native_time_source"] = self.native_time_source
-        base["time_scale"] = self.time_scale
+        base.update(self.provenance())
         base["n_parameters"] = len(self._param_names)
         return base
 

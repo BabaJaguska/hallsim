@@ -1014,23 +1014,11 @@ class Composite(eqx.Module):
         """
         import equinox as eqx
 
-        from hallsim.process import write_param
+        from hallsim.process import split_param_address, write_param
 
         procs = dict(self.processes)
         for address, value in overrides.items():
-            # Split on the LAST dot: a nested process is itself named
-            # ``<outer>.<inner>``, so the first dot is part of the name.
-            name, _, field = address.rpartition(".")
-            if not name:
-                raise ValueError(
-                    f"Override key {address!r} must be "
-                    f"'<process>.<field>', e.g. 'mtor_nfkb.k_act'."
-                )
-            if name not in procs:
-                raise KeyError(
-                    f"No process {name!r} in this composite; "
-                    f"available: {sorted(procs)}"
-                )
+            name, field = split_param_address(address, procs)
             procs[name] = write_param(procs[name], field, value)
         return eqx.tree_at(lambda c: c.processes, self, procs)
 
@@ -1050,6 +1038,22 @@ class Composite(eqx.Module):
             for entry in proc_topo.values():
                 paths.update(as_paths(entry))
         return paths
+
+    def frozen_paths(self) -> frozenset[str]:
+        """Store paths held at their initial value because import froze the
+        species as an inert sink (see ``SBMLProcess.with_unfrozen``). A
+        trajectory read there is a constant, not a prediction."""
+        out: set[str] = set()
+        for name, proc in self.processes.items():
+            species = getattr(proc, "frozen_species", lambda: [])()
+            if not species:
+                continue
+            schema = proc.ports_schema()
+            topo = self.topology.get(name, {})
+            for port in species:
+                entry = topo.get(port) or _auto_paths(name, port, schema[port])
+                out.update(as_paths(entry))
+        return frozenset(out)
 
     def to_sbml(
         self, path: str | None = None, *, model_id: str = "composite"

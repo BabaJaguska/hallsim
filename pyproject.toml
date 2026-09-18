@@ -5,9 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name            = "hallsim"
 version         = "0.1.0"
-description     = "HallSim: cell-agent simulator of Hallmarks of Aging"
+description     = "Differentiable, composable multi-scale modelling framework for aging biology"
 readme          = "README.md"
+license         = {text = "MIT"}
+authors         = [{name = "Baba Jaguska"}]
 requires-python = ">=3.11"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
 dependencies    = [
   "numpy",
   "scipy",
@@ -79,6 +88,7 @@ hallsim = [
 demos = ["assets/*"]
 
 [project.urls]
+Repository    = "https://github.com/BabaJaguska/HallSim"
 Documentation = "https://github.com/BabaJaguska/HallSim#readme"
 
 [project.scripts]

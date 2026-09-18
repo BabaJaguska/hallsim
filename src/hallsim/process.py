@@ -107,6 +107,25 @@ def read_param(proc, field: str):
     return getattr(proc, field)
 
 
+def split_param_address(address: str, processes) -> tuple[str, str]:
+    """Split a ``"<process>.<field>"`` address into the process name and the
+    dotted field :func:`read_param` reads. The name is the longest key of
+    ``processes`` the address starts with: a nested process is itself named
+    ``outer.inner``, and a parameters entry is ``parameters.k``."""
+    for name in sorted(processes, key=len, reverse=True):
+        if address.startswith(name + "."):
+            return name, address[len(name) + 1 :]
+    if "." not in address:
+        raise ValueError(
+            f"Parameter address {address!r} must be '<process>.<field>', "
+            f"e.g. 'mtor_nfkb.k_act' or 'dp14.parameters.kdeg'."
+        )
+    raise KeyError(
+        f"{address!r} starts with no process of this composite; "
+        f"available: {sorted(processes)}"
+    )
+
+
 def write_param(proc, field: str, value):
     """A copy of ``proc`` with ``field`` set to ``value``, in the same dotted
     convention as :func:`read_param`.

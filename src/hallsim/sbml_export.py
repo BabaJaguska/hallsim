@@ -24,6 +24,8 @@ one that declares neither is refused by name.
 
 from __future__ import annotations
 
+import os
+
 import re
 
 import libsbml
@@ -161,6 +163,43 @@ def _clock_seconds(composite) -> float | None:
     return found.pop() if len(found) == 1 else None
 
 
+def _provenance_notes(composite) -> list[str]:
+    """One paragraph per imported member: its source and the SHA-256 of the
+    file read, its clock, what import froze, and what was changed from the
+    deposit — so the document says what it was computed from."""
+    out = []
+    for name, proc in composite.processes.items():
+        if not getattr(proc, "source_sha256", ""):
+            continue
+        p = proc.provenance()
+        # A local file is named by its basename: the hash identifies it and
+        # a deposit must not carry a machine's directory layout.
+        source = (
+            os.path.basename(p["source"])
+            if os.path.isfile(p["source"])
+            else p["source"]
+        )
+        parts = [
+            f"{name}: {source} (sha256 {p['source_sha256']})",
+            f"native time unit {p['native_time_seconds']:g} s "
+            f"({p['native_time_source']}), rates scaled by "
+            f"{p['time_scale']:g} onto the composite clock",
+        ]
+        if p["frozen_species"]:
+            parts.append(
+                "held at initial value: " + ", ".join(p["frozen_species"])
+            )
+        if p["modified_parameters"]:
+            parts.append(
+                "changed from the deposit: "
+                + ", ".join(
+                    f"{k}={v:g}" for k, v in p["modified_parameters"].items()
+                )
+            )
+        out.append("; ".join(parts) + ".")
+    return out
+
+
 def composite_to_sbml(
     composite,
     *,
@@ -181,14 +220,12 @@ def composite_to_sbml(
     model.setId(_sid(model_id))
     if name:
         model.setName(name)
-    if notes:
-        paragraphs = "".join(
-            f"<p>{escape(p.strip())}</p>"
-            for p in notes.split("\n\n")
-            if p.strip()
-        )
+    paragraphs = [p.strip() for p in (notes or "").split("\n\n") if p.strip()]
+    paragraphs += _provenance_notes(composite)
+    if paragraphs:
+        body = "".join(f"<p>{escape(p)}</p>" for p in paragraphs)
         model.setNotes(
-            f'<body xmlns="http://www.w3.org/1999/xhtml">{paragraphs}</body>'
+            f'<body xmlns="http://www.w3.org/1999/xhtml">{body}</body>'
         )
     # Every member's rates are compiled onto the composite's clock; the
     # document declares that clock where a simulator and a curator read it.

@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
@@ -835,6 +836,30 @@ class TestParameterOverrides:
         assert float(out.processes["prod"].rate) == 0.9
         assert float(out.processes["decay"].rate) == 0.2
         assert float(comp.processes["prod"].rate) == 0.1
+
+    def test_with_params_reaches_a_parameters_entry(self):
+        """An imported model keeps its constants in a ``parameters`` dict, so
+        the address has two dots: ``<process>.parameters.<key>``."""
+
+        class Tabled(Process):
+            parameters: dict = eqx.field(
+                default_factory=lambda: {"k": jnp.asarray(0.1)}
+            )
+
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"x": -self.parameters["k"] * state["x"]}
+
+        comp = Composite(
+            processes={"dp": Tabled()},
+            topology={"dp": {"x": "pool/x"}},
+            semantic_validation=False,
+        )
+        out = comp.with_params({"dp.parameters.k": 0.5})
+        assert float(out.processes["dp"].parameters["k"]) == 0.5
+        assert float(comp.processes["dp"].parameters["k"]) == 0.1
 
     def test_unknown_process_named_with_alternatives(self):
         comp = Composite(

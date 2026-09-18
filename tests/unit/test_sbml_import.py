@@ -1,5 +1,7 @@
 """Tests for SBMLProcess timed-intervention mechanisms."""
 
+import logging
+
 import jax.numpy as jnp
 import pytest
 
@@ -313,3 +315,72 @@ class TestEventTargetKeepsPublishedInitial:
         assert events, "expected the <event> to translate"
         ports = events[0].ports_schema()
         assert ports["__set_S"].default is None
+
+
+SBML_WITH_INERT_SINK = """<?xml version="1.0" encoding="UTF-8"?>
+<sbml xmlns="http://www.sbml.org/sbml/level2/version4" level="2" version="4">
+  <model id="sink">
+    <listOfCompartments>
+      <compartment id="c" size="1" constant="true"/>
+    </listOfCompartments>
+    <listOfSpecies>
+      <species id="A" compartment="c" initialConcentration="5"
+        boundaryCondition="false" constant="false"/>
+      <species id="B" compartment="c" initialConcentration="0"
+        boundaryCondition="false" constant="false"/>
+    </listOfSpecies>
+    <listOfParameters>
+      <parameter id="k" value="0.1" constant="true"/>
+    </listOfParameters>
+    <listOfReactions>
+      <reaction id="convert" reversible="false">
+        <listOfReactants><speciesReference species="A"/></listOfReactants>
+        <listOfProducts><speciesReference species="B"/></listOfProducts>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <apply><times/><ci>k</ci><ci>A</ci></apply>
+          </math>
+        </kineticLaw>
+      </reaction>
+    </listOfReactions>
+  </model>
+</sbml>
+"""
+
+
+class TestProvenance:
+    """An import says where it came from and what was done to it."""
+
+    def test_import_records_source_hash_and_changes(self):
+        from hallsim.io import file_sha256
+
+        proc = _gz06(0.123)
+        meta = proc.metadata()
+        assert meta["source"] == str(GZ06_SBML_PATH)
+        assert meta["source_sha256"] == file_sha256(GZ06_SBML_PATH)
+        assert GZ06_PSI_NAME in meta["published_parameters"]
+        assert meta["modified_parameters"] == {GZ06_PSI_NAME: 0.123}
+        again = proc.with_param(f"parameters.{GZ06_PSI_NAME}", 0.2)
+        assert again.provenance()["modified_parameters"] == {
+            GZ06_PSI_NAME: 0.2
+        }
+
+    def test_a_frozen_sink_is_named_and_warns_when_read(
+        self, tmp_path, caplog
+    ):
+        from hallsim.composite import single_process_composite
+
+        path = tmp_path / "sink.xml"
+        path.write_text(SBML_WITH_INERT_SINK)
+        proc = process_from_sbml(str(path), name="sink")
+        assert proc.frozen_species() == ["B"]
+        comp = single_process_composite(proc)
+        assert comp.frozen_paths() == {"sink/B"}
+        res = Scheduler().run(
+            comp, t_span=(0.0, 1.0), macro_dt=1.0, save_dt=0.5
+        )
+        with caplog.at_level(logging.WARNING, logger="hallsim.scheduler"):
+            held = res.get("sink/B")
+        assert "with_unfrozen" in caplog.text
+        assert float(held[-1]) == 0.0
+        assert float(res.get("sink/A")[-1]) < 5.0

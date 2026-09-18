@@ -131,7 +131,7 @@ that this file was never an ODE.
 
 ## Measured budget
 
-Prototype (`scratch/2026-09-06-ssa-prototype/ssa_probe.py`): direct-method SSA
+Prototype (a probe script, not in the repository): direct-method SSA
 over the generated propensity vector, `lax.scan` over jumps, `vmap` over cells.
 Measured on CPU: 6.6e4 events/s at 1 cell, 3.7e5 at 64, **6.25e5 at 256**.
 

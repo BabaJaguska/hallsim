@@ -15,7 +15,8 @@ fold-change loss, and writes the before/after comparison figures.
     simulate multi-hallmark run
     simulate multi-hallmark calibrate
 
-Needs the GSE248823 matrix under data/FibroblastsDNA_dmg_Rapamycin/; the
+``run`` downloads GSE248823 from GEO into data/FibroblastsDNA_dmg_Rapamycin/
+on first use (``fetch-data`` does only that); offline it runs unscored. The
 SBML models download from BioModels on first import and cache locally.
 """
 
@@ -38,7 +39,7 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from hallsim.process import read_param
+from hallsim.process import read_param, split_param_address
 from hallsim.calibration import (  # noqa: E402
     CalibrationProblem,
     Condition,
@@ -51,7 +52,7 @@ from hallsim.calibration_report import (  # noqa: E402
     rows_by_gene,
     save_outputs,
 )
-from hallsim.io import make_run_dir  # noqa: E402
+from hallsim.io import file_sha256, make_run_dir  # noqa: E402
 from dataclasses import replace as dc_replace  # noqa: E402
 from hallsim.hallmarks import (  # noqa: E402
     HALLMARK_REGISTRY,
@@ -62,6 +63,7 @@ from hallsim.gene_reporters import (  # noqa: E402
     MULTI_HALLMARK_REPORTERS,
     PROTEOSTASIS_REPORTERS,
     GeneExpressionDataset,
+    fetch_geo_series,
 )
 from demos.models.multi_hallmark import (  # noqa: E402
     MULTI_HALLMARK_GRID as GRID,
@@ -103,8 +105,9 @@ def _annotate_interventions(ax, arm: str) -> None:
 
 
 ROOT = Path(__file__).resolve().parent.parent
+GEO_ACCESSION = "GSE248823"
 DATA_DIR = ROOT / "data" / "FibroblastsDNA_dmg_Rapamycin"
-SERIES_MATRIX = DATA_DIR / "GSE248823_series_matrix.txt"
+SERIES_MATRIX = DATA_DIR / f"{GEO_ACCESSION}_series_matrix.txt"
 PLATFORM = DATA_DIR / "GPL17586-45144.txt"
 
 RUN_NAME = "multi_hallmark_calibrate"
@@ -282,7 +285,6 @@ def build_problem(
         GeneExpressionDataset.from_series_matrix(
             SERIES_MATRIX,
             PLATFORM,
-            sample_groups={},
             sample_position_groups=SAMPLE_POSITION_GROUPS,
         )
         if SERIES_MATRIX.exists()
@@ -318,10 +320,11 @@ def build_problem(
         for name in fitted:
             if name in params:
                 continue
-            proc_name, _, key = name.partition(".")
-            proc = composite.processes.get(proc_name)
-            if proc is None or not key:
+            try:
+                proc_name, key = split_param_address(name, composite.processes)
+            except (KeyError, ValueError):
                 continue
+            proc = composite.processes[proc_name]
             table = getattr(proc, "parameters", None)
             field = (
                 f"parameters.{key}"
@@ -400,6 +403,11 @@ def build_problem(
         params=params,
         notes={
             "dataset": "GSE248823 (bulk microarray, day 0/7/14, two replicates)",
+            "dataset_sha256": (
+                {p.name: file_sha256(p) for p in (SERIES_MATRIX, PLATFORM)}
+                if ds is not None
+                else None
+            ),
             "rapa_intensity": (
                 RAPA_INTENSITY if rapa_intensity is None else rapa_intensity
             ),
@@ -941,15 +949,24 @@ def run_oob(problem, params, out_dir: Path):
     return pre
 
 
-def _missing_data_notice() -> str:
-    """Where to get the dataset the scored path needs."""
+def fetch_dataset() -> None:
+    """Download GSE248823 into DATA_DIR: the series matrix and the GPL17586
+    annotation table. Files already there are kept."""
+    fetch_geo_series(GEO_ACCESSION, SERIES_MATRIX, PLATFORM)
+
+
+def cmd_fetch_data(args) -> None:
+    fetch_dataset()
+    print(f"dataset in {DATA_DIR.relative_to(ROOT)}/", flush=True)
+
+
+def _missing_data_notice(error: Exception) -> str:
+    """What the scored path needs and why it could not be fetched."""
     return (
-        f"Dataset not found: {SERIES_MATRIX.name}\n"
+        f"Dataset not found: {SERIES_MATRIX.name} and {PLATFORM.name}\n"
         f"  expected in : {DATA_DIR}\n"
-        f"  download    : GEO accession GSE248823 (series matrix), plus the\n"
-        f"                GPL17586 platform annotation ({PLATFORM.name})\n"
-        f"                https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi"
-        f"?acc=GSE248823\n"
+        f"  fetch failed: {error}\n"
+        f"  retry with  : simulate multi-hallmark fetch-data\n"
         "Running the composite unscored: it will simulate and write "
         "trajectories, but concordance against measured expression is skipped."
     )
@@ -993,9 +1010,12 @@ def cmd_run(args) -> None:
     fitted = tuple(getattr(args, "fit", ()) or ()) or DEFAULT_FIT
     intensity = getattr(args, "rapa_intensity", None)
     clamp = not getattr(args, "no_clamp", False)
-    if not SERIES_MATRIX.exists():
-        print(_missing_data_notice(), flush=True)
-        return run_unscored(equilibrate, make_run_dir(RUN_NAME))
+    if not (SERIES_MATRIX.exists() and PLATFORM.exists()):
+        try:
+            fetch_dataset()
+        except OSError as error:
+            print(_missing_data_notice(error), flush=True)
+            return run_unscored(equilibrate, make_run_dir(RUN_NAME))
     problem = build_problem(
         equilibrate=equilibrate,
         fitted=fitted,
@@ -1376,6 +1396,7 @@ _COMMANDS = {
     "screen": cmd_screen,
     "sweep": cmd_sweep,
     "export": cmd_export,
+    "fetch-data": cmd_fetch_data,
 }
 
 

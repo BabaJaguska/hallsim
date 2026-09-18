@@ -222,7 +222,7 @@ integrated, 9 processes, 2 stiff groups — control arm over 14 days,
 `macro_dt` 0.5, `save_dt` 0.5, initial conditions jittered log-normally
 (σ = 0.1) on the integrated states, one `Scheduler.run` per size, second call
 timed as warm. Apple Silicon, 11 cores, no GPU; the batch used 3.7 cores.
-`scratch/2026-09-10-batch/batch_1024.py`.
+The probe script is not in the repository.
 
 | batch | cold | warm | per member | against B single runs |
 |---|---|---|---|---|

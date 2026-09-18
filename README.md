@@ -16,7 +16,7 @@ HallSim is a **composition framework** — you bring the modules (hand-written, 
 ## Goals
 
 - A composable, differentiable, multi-scale simulator for aging biology — bring your own modules (hand-written, SBML-imported, or learned via `NeuralODE`).
-- High-level severity handles for the 12 hallmarks of aging [2] (4 mapped today; each new one a single handle away).
+- High-level severity handles for the 12 hallmarks of aging [2] (5 mapped today; each new one a single handle away).
 - Calibrate interventions and emergent phenotypes against real data, with held-out validation.
 - Make multi-model composition tractable for AI agents building digital twins — at a scale no one assembles by hand.
 - Serve as an educational in-silico testbed for perturbations (rapamycin, caloric restriction, …).
@@ -38,26 +38,6 @@ Use `--output PATH`, `--samples N`, and `--max-events N` to control output
 and event capacity. Exceeding capacity raises an error instead of returning
 a truncated trajectory. These plots illustrate stochastic variability;
 they are not a reproduction of the paper's figures.
-
-The multi-hallmark composite includes Proctor only when built with
-`proteostasis=True`. It starts with normal activity, `p07.parameters["k69"] = 1e-3`.
-Apply reduced proteasome activity through the hallmark interface:
-
-```python
-from demos.models.multi_hallmark import build_multi_hallmark_composite
-from hallsim.hallmarks import apply_hallmarks
-from hallsim.composite import Composite
-
-base = build_multi_hallmark_composite(proteostasis=True)
-processes = apply_hallmarks(base.processes, {"Loss of Proteostasis": 0.5})
-perturbed = Composite(processes=processes, topology=base.topology)
-```
-
-Severity in `[0, 1]` scales the current `k69` by `1 - severity`: 0 leaves
-it unchanged, 0.5 halves it, and 1 completely inhibits degradation. This
-linear intervention represents reduced proteasome activity, not every
-mechanism of proteostasis loss. Apply each severity to the same base;
-repeated applications compound. The base composite is unchanged.
 
 ## Architecture
 
@@ -147,6 +127,9 @@ simulate multi-hallmark sweep      # two-hallmark severity sweep
 simulate multi-hallmark-ssa        # one-way DP14/GZ06 + Proctor SSA hybrid
 simulate hallmark-levers           # browser page: pull a hallmark, watch all three re-solve
 ```
+
+The first `run` downloads the dataset (GEO GSE248823, about 200 MB unpacked)
+into `data/`; `simulate multi-hallmark fetch-data` does only that.
 
 The lever page needs the `app` extra (`pip install "hallsim[app]"`). Each
 slider is a hallmark severity; a pull re-solves the composite against

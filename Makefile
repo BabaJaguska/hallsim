@@ -94,7 +94,7 @@ help:
 	@echo "  make lint         - Lint the code using flake8"
 	@echo "  make test         - Run tests (chunked, one interpreter per chunk)"
 	@echo "  make test-all     - Run every non-network test, chunked"
-	@echo "  make run          - Run the legacy simulation"
+	@echo "  make run          - Run the multi-hallmark demo (simulate multi-hallmark run)"
 	@echo "  make run-compose  - Run the composable architecture demo"
 	@echo "  make run-validate - Run the semantic validation demo"
 	@echo "  make help         - Show this help message"

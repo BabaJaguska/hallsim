@@ -626,6 +626,7 @@ def process_from_xpp(
     with open(path, encoding="utf-8", errors="replace") as f:
         parsed = _parse_xpp_text(f.read())
 
+    published = tuple(sorted(parsed.params.items()))
     if parameters:
         overrides = {k.lower(): float(v) for k, v in parameters.items()}
         missing = [k for k in overrides if k not in parsed.params]
@@ -673,6 +674,12 @@ def process_from_xpp(
     object.__setattr__(proc, "parameters", dict(parsed.params))
     object.__setattr__(proc, "_param_names", tuple(parsed.params.keys()))
     object.__setattr__(proc, "_name", name)
+    from hallsim.io import file_sha256
+
+    object.__setattr__(proc, "source", str(path))
+    object.__setattr__(proc, "source_path", str(path))
+    object.__setattr__(proc, "source_sha256", file_sha256(path))
+    object.__setattr__(proc, "_published_parameters", published)
     object.__setattr__(
         proc,
         "timescale",

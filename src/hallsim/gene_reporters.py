@@ -20,6 +20,10 @@ conditions.
 
 from __future__ import annotations
 
+import gzip
+import logging
+import os
+import urllib.request
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
@@ -29,6 +33,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
+
+from hallsim.io import record_checksum, verify_checksum
+
+log = logging.getLogger(__name__)
 
 # ── Trajectory summaries ───────────────────────────────────────────
 #
@@ -667,7 +675,12 @@ def load_gene_expression(
     - Probes are mapped to the first gene symbol in the
       ``gene_assignment`` column of the platform file.
     - Multi-probe-per-gene values are collapsed by mean.
+
+    A file listed in the ``SHA256SUMS`` beside it (written by
+    :func:`fetch_geo_series`) is checked against it first.
     """
+    verify_checksum(series_matrix_path)
+    verify_checksum(platform_path)
     with open(series_matrix_path) as f:
         lines = f.readlines()
     start = next(
@@ -708,6 +721,79 @@ def load_gene_expression(
     expr = expr.loc[common].copy()
     expr["__gene__"] = [probe_to_gene[p] for p in expr.index]
     return expr.groupby("__gene__").mean(numeric_only=True)
+
+
+GEO_SERIES = "https://ftp.ncbi.nlm.nih.gov/geo/series"
+
+
+def geo_series_urls(accession: str) -> tuple[str, str]:
+    """The series-matrix and family-SOFT URLs GEO serves for ``accession``."""
+    base = f"{GEO_SERIES}/{accession[:3]}{accession[3:-3]}nnn/{accession}"
+    return (
+        f"{base}/matrix/{accession}_series_matrix.txt.gz",
+        f"{base}/soft/{accession}_family.soft.gz",
+    )
+
+
+def platform_table(lines) -> list[str]:
+    """The first platform annotation table of a GEO family SOFT: the lines
+    between ``!platform_table_begin`` and ``!platform_table_end``, header
+    first, in the layout :func:`load_gene_expression` reads."""
+    table: list[str] = []
+    inside = False
+    for line in lines:
+        if line.startswith("!platform_table_begin"):
+            inside = True
+        elif line.startswith("!platform_table_end"):
+            break
+        elif inside:
+            table.append(line)
+    if not table:
+        raise ValueError("no platform table in the SOFT stream")
+    return table
+
+
+def _write_atomic(path: Path, lines) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(path.name + ".part")
+    with open(part, "w") as out:
+        out.writelines(lines)
+    os.replace(part, path)
+
+
+def fetch_geo_series(
+    accession: str,
+    series_matrix_path: Path | str,
+    platform_path: Path | str,
+    *,
+    timeout: float = 300.0,
+) -> None:
+    """Download a GEO series into the two files :func:`load_gene_expression`
+    reads: the series matrix, and the platform annotation table cut from the
+    head of the series' family SOFT (GEO serves a platform's own full table
+    only to a browser). A file already present is kept.
+    """
+    matrix_url, soft_url = geo_series_urls(accession)
+    series_matrix_path = Path(series_matrix_path)
+    platform_path = Path(platform_path)
+    if not series_matrix_path.exists():
+        log.info("fetching %s -> %s", matrix_url, series_matrix_path)
+        with urllib.request.urlopen(matrix_url, timeout=timeout) as resp:
+            with gzip.open(resp, "rt", errors="replace") as fh:
+                _write_atomic(series_matrix_path, fh)
+        log.info(
+            "sha256 %s  %s",
+            record_checksum(series_matrix_path),
+            series_matrix_path.name,
+        )
+    if not platform_path.exists():
+        log.info("fetching %s -> %s", soft_url, platform_path)
+        with urllib.request.urlopen(soft_url, timeout=timeout) as resp:
+            with gzip.open(resp, "rt", errors="replace") as fh:
+                _write_atomic(platform_path, platform_table(fh))
+        log.info(
+            "sha256 %s  %s", record_checksum(platform_path), platform_path.name
+        )
 
 
 def log2_fold_change(
@@ -753,7 +839,7 @@ class GeneExpressionDataset:
         cls,
         series_matrix_path,
         platform_path,
-        sample_groups: dict[str, list],
+        sample_groups: dict[str, list] | None = None,
         sample_position_groups: dict[str, list[int]] | None = None,
     ) -> "GeneExpressionDataset":
         """Build from a GEO series matrix + Affymetrix platform pair.
@@ -762,6 +848,10 @@ class GeneExpressionDataset:
         ``sample_position_groups`` for position-based selection that
         gets resolved against the loaded matrix's columns.
         """
+        if (sample_groups is None) == (sample_position_groups is None):
+            raise ValueError(
+                "give exactly one of sample_groups or sample_position_groups"
+            )
         gene_expr = load_gene_expression(series_matrix_path, platform_path)
         if sample_position_groups is not None:
             samples = list(gene_expr.columns)

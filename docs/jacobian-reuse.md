@@ -135,8 +135,10 @@ uninstrumented VeryChord case in `whole_step/results.json`.
 
 ## Reproduction
 
+The scripts these commands name are not in the repository (P0.91 in [known-problems.md](known-problems.md)); the commands are the record of how the numbers were produced.
+
 ```bash
-CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false HALLSIM_COMPILATION_CACHE_DIR=off .venv/bin/python scripts/profile_jacobian_reuse.py --methods newton,chord,step_chord
+CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false HALLSIM_COMPILATION_CACHE_DIR=off python scripts/profile_jacobian_reuse.py --methods newton,chord,step_chord
 ```
 
 For a warm-only Nsight trace, use `nsys profile --trace=cuda --sample=none

@@ -147,13 +147,15 @@ workload, not biological validity.
 
 ## Reproduction
 
+The scripts these commands name are not in the repository (P0.91 in [known-problems.md](known-problems.md)); the commands are the record of how the numbers were produced.
+
 From the repository root, with access to the GPU and Hallsim's SBML cache:
 
 ```bash
-uv venv --python .venv/bin/python .venv-comparison
+uv venv --python python .venv-comparison
 uv pip install --python .venv-comparison/bin/python tellurium==2.2.13.1 vivarium-core==1.6.5
-CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false .venv/bin/python scripts/verify_gpu_batch.py --models composite --sizes 1,8,32,128,256 --repeats 3 --rtol 1e-8 --atol 1e-11 --out outputs/gpu_comparison_accuracy
-JAX_PLATFORMS=cpu .venv/bin/python scripts/prepare_simulator_comparison.py --composite-gpu-dir outputs/gpu_comparison_accuracy
+CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false python scripts/verify_gpu_batch.py --models composite --sizes 1,8,32,128,256 --repeats 3 --rtol 1e-8 --atol 1e-11 --out outputs/gpu_comparison_accuracy
+JAX_PLATFORMS=cpu python scripts/prepare_simulator_comparison.py --composite-gpu-dir outputs/gpu_comparison_accuracy
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MPLCONFIGDIR=/tmp/hallsim-mpl .venv-comparison/bin/python scripts/bench_simulator_comparison.py --models dp14
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MPLCONFIGDIR=/tmp/hallsim-mpl .venv-comparison/bin/python scripts/bench_simulator_comparison.py --models composite --tolerance-factor 0.1
 MPLCONFIGDIR=/tmp/hallsim-mpl .venv-comparison/bin/python scripts/bench_simulator_comparison.py --summarize

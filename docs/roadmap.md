@@ -31,12 +31,13 @@ step is the prerequisite for the next.
   and drops the ½, `data_loss` means again over arms, `prior_weight` is a free
   multiplier. The MAP is unaffected; every reported *width* is scaled by an
   unknown factor. Needs a residual σ — real precision weights where the data has
-  them, else σ̂ from the MAP residuals.
+  them, else σ̂ from the MAP residuals, which `identifiability.residual_scale`
+  already computes for the identifiability report.
 * [ ] **Laplace / delta-method bands** — `(JᵀJ/σ̂² + Π_prior)⁻¹` off the Jacobian
   `identifiability.py` already builds, and `sqrt(diag(J Σ Jᵀ))` on any
   prediction. Closes P3.9 for the common case at the cost of one Jacobian
-  (~41 s on the multi-hallmark demo, one fit step). Also fixes the same module's
-  σ=1 covariance and its missing prior-precision term.
+  (~41 s on the multi-hallmark demo, one fit step). Also adds the same module's
+  missing prior-precision term.
 * [ ] **Profile likelihood** (Raue 2009) — the nonlinear check on the ellipse,
   and the way to report a fit above `MAX_FIT_CONDITION_NUMBER` instead of
   refusing it. Batched over the profile grid; unverified whether the
@@ -58,7 +59,7 @@ step is the prerequisite for the next.
   dose axis of the readout difference between two levels of the contrasting
   parameter) and it needs a simulation rather than arithmetic, so it belongs
   next to `place_clamp_rate`, which already measures through the composite.
-  Done by hand in `one_off_scripts/k14_dose_place.py`; see P0.45.
+  Done by hand in a probe script that is not in the repository; see P0.45.
 * [ ] **Lipid-metabolism extension** — Tighanimine et al. 2024 (*Nat Metab*, the paper behind GSE248823) identified a G3P/PEtn homeostatic switch as *causal* for senescence (p53 → glycerol kinase activation drives G3P↑; PCYT2 post-translational inactivation drives PEtn↑; lipid droplet biogenesis is the downstream effect). Adding a `LipidMetabolism` Process (states: G3P, PEtn; inputs: `p53_activity`, a PCYT2-PTM proxy; outputs: a senescence-amplifying signal that feeds back into the SASP axis) would let HallSim test their causal claim *in silico* — and the GSE248824 SuperSeries includes the paired metabolomics needed to validate it. HallSim recapitulates the G3P/PEtn → senescence amplification loop and predicts G3PP/ETNPPL overexpression as senomorphic.
 * [ ] **Trajectory-level validation** — GSE248823 has 3 timepoints per arm (DDIS: D00/D07/D14, OIS: D00/D04/D07). Current concordance uses two-endpoint deltas; matching predicted vs. measured pathway-score *trajectories* (rate of change, time-constant ordering across pathways) would be a substantially stronger validation than scalar deltas.
 * [ ] Validate against scRNA-seq (Tabula Muris Senis, Ma 2020 caloric restriction) — pseudobulk ssGSEA

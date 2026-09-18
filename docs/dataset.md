@@ -3,7 +3,10 @@
 The dataset the multi-hallmark **demo** is calibrated and evaluated against.
 Loaded by
 [`demos/multi_hallmark_calibrate.py`](../demos/multi_hallmark_calibrate.py)
-from `data/FibroblastsDNA_dmg_Rapamycin/`.
+from `data/FibroblastsDNA_dmg_Rapamycin/`, which `simulate multi-hallmark
+run` fills from GEO on first use (`fetch-data` does only that). The fetch
+writes each file's SHA-256 to `SHA256SUMS` beside it, the loader checks
+them, and the run's `config.json` records them.
 
 The demo exists to exercise the calibration machinery — held-out arms,
 fold-change loss, gene reporters, gradients through a stiff multi-group solve
@@ -147,3 +150,12 @@ day 2 to harvest at day 7 and 14. The composite matches that shape: the
 Deregulated Nutrient Sensing handle is a step at day 2 held to the end
 of the run (`StepSource`, mTORC1 S2448 phosphorylation at half the
 published rate, `RAPA_INTENSITY = 0.5` declared), not a pulse.
+
+## Deposit
+
+The calibrated composite is in BioModels as MODEL2609140001
+(https://identifiers.org/biomodels.db/MODEL2609140001), submitted
+2026-09-14 from run 2026-09-13_15-34-44: the etoposide arm as the main
+file, the control and etoposide-plus-rapamycin arms and the README as
+additional files. Private until the paper is out; reviewer access on
+request from the entry's toolbox.
