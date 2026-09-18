@@ -31,7 +31,7 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)
 
 from hallsim.composite import Composite
-from hallsim.hallmarks import apply_hallmarks
+from hallsim.handles import apply_handles
 from demos.models.multi_hallmark import build_multi_hallmark_composite
 from hallsim.scheduler import Scheduler
 
@@ -83,7 +83,7 @@ def main():
     a = ap.parse_args()
 
     base = build_multi_hallmark_composite()
-    procs = apply_hallmarks(
+    procs = apply_handles(
         base.processes,
         {"Genomic Instability": a.gi, "Deregulated Nutrient Sensing": a.dns},
     )

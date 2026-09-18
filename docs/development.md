@@ -25,12 +25,15 @@ src/hallsim/
   diagnostics.py       — screen_process / screen_composite, coupling-source verdicts
   intake.py            — triage_sbml, published_fit_chi2
   discovery.py         — search_for_model across BioModels, JWS, ModelDB, BioSimulations, Physiome, Europe PMC
+  literature.py        — Europe PMC full text, model pointers, what a cited repository holds
+  datasets.py          — search_for_dataset (GEO), platform-table check against the loader
   rejections.py        — the record of deposits screened out, and why
   sbml_core.py, sbml_math.py, sbml_events.py — libsbml -> sympy -> JAX
   sbml_import.py, cps_import.py, xpp_import.py — SBML / COPASI / XPPAUT importers
   sbml_export.py       — Composite.to_sbml
   imported.py          — ImportedODEProcess: time reconciliation, parameter and species inputs
-  hallmarks.py         — HallmarkHandle, ParameterMapping, HALLMARK_REGISTRY, with_hallmarks
+  handles.py           — Handle, ParameterMapping, apply_handles, with_handles
+  hallmarks.py         — HALLMARK_REGISTRY: the hallmarks of aging as handles
   gene_reporters.py    — GeneReporter, MULTI_HALLMARK_REPORTERS, GeneExpressionDataset, GEO fetch
   calibration.py       — Calibrator, CalibrationProblem, Condition, ParameterRef
   identifiability.py   — structural redundancy, fittable-set screen
@@ -49,6 +52,6 @@ demos/models/          — specific biology: multi_hallmark (DP14 + GZ06 + Proct
 `hallsim.calibration` wires any composite to any held-out gene-expression
 dataset. Three principles are enforced by the framework:
 
-1. **Hallmark-targeted parameters are not fittable by default.** Hallmarks represent experimental conditions (DDIS severity, rapamycin treatment) — knobs the experimenter set per arm, not biology to be inferred from data. `Composite.calibration_targets()` subtracts them from discovery; `CalibrationProblem.__init__` raises if you pass one as a `ParameterRef`, naming the hallmark that controls it. Escape hatch: `allow_hallmark_override=True`.
+1. **Handle-targeted parameters are not fittable by default.** A handle's severity is the experimental condition (DDIS severity, rapamycin), set per arm, not inferred from data. `Composite.calibration_targets()` subtracts its targets from discovery; `CalibrationProblem.__init__` raises if you pass one as a `ParameterRef`, naming the handle that controls it.
 2. **`Process.calibratable_params()` is the self-documenting discovery API.** Each Process declares its own fittable scalars; `Composite.calibration_targets()` aggregates with namespaced names. `SBMLProcess` auto-returns every SBML constant with a published default and a two-OOM clamp — no per-composite hand-curated list anywhere.
 3. **Held-out splits are mandatory.** Calibrate on one arm, evaluate on a held-out arm via `problem.evaluate(...)`. Same-data calibrate-and-evaluate is curve-fit, not concordance.

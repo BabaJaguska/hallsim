@@ -582,8 +582,8 @@ class ParamStep:
 
     Represents a pharmacological intervention delivered partway through the
     trajectory (e.g. rapamycin added at washout): the constant holds
-    ``value_before`` until ``t_step`` and its condition-configured (hallmark-
-    set) value afterwards. Applied after :func:`apply_hallmarks` via
+    ``value_before`` until ``t_step`` and its condition-configured (handle-
+    set) value afterwards. Applied after :func:`apply_handles` via
     :meth:`hallsim.sbml_import.SBMLProcess.with_param_step`, so the severity
     sets the post-intervention level and this supplies the pre-intervention
     level and the switch time.
@@ -596,7 +596,7 @@ class ParamStep:
 
     def apply(self, processes: dict, reference: dict | None = None) -> dict:
         """Wire the timed step. ``value_before=None`` holds the pre-step level
-        at the param's value in ``reference`` (the substituted, pre-hallmark
+        at the param's value in ``reference`` (the substituted, pre-handle
         processes) — i.e. the fitted, untreated-severity level — so it tracks a
         fitted rate rather than a frozen constant."""
         vb = self.value_before
@@ -613,17 +613,17 @@ class ParamStep:
 @dataclass(frozen=True)
 class Condition:
     """A named experimental arm — one setup (untreated DDIS, control,
-    rapamycin rescue) expressed as the severities each hallmark is applied at,
+    rapamycin rescue) expressed as the severities each handle is applied at,
     reused across calibration iterations.
 
-    ``hallmarks`` is ``{hallmark_name: severity}`` for :func:`apply_hallmarks`.
+    ``hallmarks`` is ``{hallmark_name: severity}`` for :func:`apply_handles`.
     ``interventions`` are timed :class:`ParamStep` effects applied *after* the
     severities — a drug that starts partway through the trajectory rather than
     a severity held for its whole duration.
     """
 
     name: str
-    hallmarks: dict[str, float]
+    handles: dict[str, float]
     interventions: tuple = ()
     description: str = ""
 
@@ -633,7 +633,7 @@ class ParameterRef:
     """Declarative pointer to a fittable parameter inside a composite.
 
     ``field`` follows the dotted convention of
-    :attr:`hallsim.hallmarks.ParameterMapping.param_name`: ``"alpha"`` targets
+    :attr:`hallsim.handles.ParameterMapping.param_name`: ``"alpha"`` targets
     ``proc.alpha``, ``"parameters.<key>"`` a single entry in an SBMLProcess's
     parameters dict. Calibrator substitutes the current iterate there via
     ``eqx.tree_at`` before each loss evaluation.
@@ -666,26 +666,26 @@ class ParameterRef:
 
 
 @dataclass(frozen=True)
-class HallmarkCoeffRef:
-    """Declarative pointer to a fittable coefficient of a hallmark mapping.
+class HandleCoeffRef:
+    """Declarative pointer to a fittable coefficient of a handle mapping.
 
     Points at an affine coefficient (``floor`` or ``slope``) of the
-    :class:`hallsim.hallmarks.ParameterMapping` identified by
-    ``(hallmark, param_name)``. The Calibrator fits it exactly like a
+    :class:`hallsim.handles.ParameterMapping` identified by
+    ``(handle, param_name)``. The Calibrator fits it exactly like a
     :class:`ParameterRef` (same ``clamp`` / ``prior`` / ``prior_sigma``
     surface, and the same read-from-the-model start), but instead of substituting into a process it
-    overrides the coefficient in a per-evaluation hallmark registry — so the
+    overrides the coefficient in a per-evaluation handle registry — so the
     severity map ``base * (floor + slope * h)`` calibrates end to end. This is
     the home for a coefficient that has no SBML-parameter host (the mTOR
-    rapamycin suppression gain, say): it lives on the hallmark edge, not a
+    rapamycin suppression gain, say): it lives on the handle edge, not a
     process, so it rides the registry rather than ``eqx.tree_at``.
 
-    Attributes mirror :class:`ParameterRef`; ``hallmark`` + ``param_name``
+    Attributes mirror :class:`ParameterRef`; ``handle`` + ``param_name``
     together select the mapping, and ``coeff`` names which affine coefficient
     to fit (``"floor"`` or ``"slope"``).
     """
 
-    hallmark: str
+    handle: str
     param_name: str
     clamp: tuple[float, float] | None = None
     prior: float | None = None
@@ -867,7 +867,7 @@ class CalibrationProblem:
     arm_pairs:
         ``{arm_pair_name: (condition_name, baseline_name)}``.
     params:
-        ``{param_name: ParameterRef | HallmarkCoeffRef}``.
+        ``{param_name: ParameterRef | HandleCoeffRef}``.
     fit_arms, held_out_arms:
         Subsets of ``arm_pairs`` included in / excluded from the loss.
     normalization:
@@ -902,7 +902,7 @@ class CalibrationProblem:
         conditions: dict[str, Condition],
         data: dict[str, "pd.Series"],
         arm_pairs: dict[str, tuple[str, str]],
-        params: dict[str, "ParameterRef | HallmarkCoeffRef"],
+        params: dict[str, "ParameterRef | HandleCoeffRef"],
         fit_arms: list[str],
         held_out_arms: list[str] | None = None,
         normalization: str = "baseline",
@@ -916,7 +916,7 @@ class CalibrationProblem:
         likelihood: Callable | None = None,
         weights: dict | None = None,
         scheduler_kwargs: dict | None = None,
-        hallmark_registry: dict | None = None,
+        registry: dict | None = None,
         notes: dict | None = None,
     ) -> None:
         self._ctor_kwargs = {
@@ -926,14 +926,14 @@ class CalibrationProblem:
         from hallsim.hallmarks import HALLMARK_REGISTRY
 
         # A ParameterRef substitutes into a process (`eqx.tree_at`); a
-        # HallmarkCoeffRef overrides a hallmark-mapping coefficient in a
+        # HandleCoeffRef overrides a handle-mapping coefficient in a
         # per-eval registry. Both share the optimizer surface (init / clamp /
         # prior); only the application path differs.
         proc_params = {
             k: v for k, v in params.items() if isinstance(v, ParameterRef)
         }
         coeff_params = {
-            k: v for k, v in params.items() if isinstance(v, HallmarkCoeffRef)
+            k: v for k, v in params.items() if isinstance(v, HandleCoeffRef)
         }
 
         # Validation pass over the wiring — catch typos early so the
@@ -969,17 +969,13 @@ class CalibrationProblem:
         # Block fitting a severity *dial* (a transform that ignores `base`, so
         # severity would overwrite the fitted value) but allow fitting the
         # magnitude a dial scales. Probed with two distinct bases rather than
-        # by name, so it generalises to any hallmark.
-        reg = (
-            HALLMARK_REGISTRY
-            if hallmark_registry is None
-            else hallmark_registry
-        )
-        hallmark_targets: dict[tuple[str, str], list[tuple[str, Any]]] = {}
+        # by name, so it generalises to any handle.
+        reg = HALLMARK_REGISTRY if registry is None else registry
+        handle_targets: dict[tuple[str, str], list[tuple[str, Any]]] = {}
         for hname, handle in reg.items():
             for mapping in handle.mappings:
                 key = (mapping.process_name, mapping.param_name)
-                hallmark_targets.setdefault(key, []).append((hname, mapping))
+                handle_targets.setdefault(key, []).append((hname, mapping))
 
         def _ignores_base(mapping) -> bool:
             try:
@@ -991,7 +987,7 @@ class CalibrationProblem:
 
         offenders = []
         for pname, pref in proc_params.items():
-            entries = hallmark_targets.get((pref.process_name, pref.field))
+            entries = handle_targets.get((pref.process_name, pref.field))
             if not entries:
                 continue
             if all(_ignores_base(m) for _, m in entries):
@@ -1007,15 +1003,15 @@ class CalibrationProblem:
                     ", ".join(h for h, _ in entries),
                 )
 
-        # Validate each HallmarkCoeffRef resolves to a real affine mapping
+        # Validate each HandleCoeffRef resolves to a real affine mapping
         # with a fittable floor — fail early on a typo, not mid-trace — and
         # record the mapping's own value as the optimizer's start.
         coeff_baseline: dict = {}
         for cname, cref in coeff_params.items():
-            handle = reg.get(cref.hallmark)
+            handle = reg.get(cref.handle)
             if handle is None:
                 raise KeyError(
-                    f"params[{cname!r}].hallmark={cref.hallmark!r} not in "
+                    f"params[{cname!r}].handle={cref.handle!r} not in "
                     f"registry (have {sorted(reg)})"
                 )
             hits = [
@@ -1023,8 +1019,8 @@ class CalibrationProblem:
             ]
             if not hits:
                 raise KeyError(
-                    f"params[{cname!r}] targets {cref.hallmark!r}."
-                    f"{cref.param_name!r}, which no mapping in that hallmark "
+                    f"params[{cname!r}] targets {cref.handle!r}."
+                    f"{cref.param_name!r}, which no mapping in that handle "
                     "declares."
                 )
             if cref.coeff not in ("floor", "slope") or any(
@@ -1032,7 +1028,7 @@ class CalibrationProblem:
             ):
                 raise ValueError(
                     f"params[{cname!r}] coeff={cref.coeff!r} is not a "
-                    f"fittable affine floor/slope on {cref.hallmark!r}."
+                    f"fittable affine floor/slope on {cref.handle!r}."
                     f"{cref.param_name!r}."
                 )
             # `_registry` overrides every hit, so they must already agree —
@@ -1041,7 +1037,7 @@ class CalibrationProblem:
             if len(values) > 1:
                 raise ValueError(
                     f"params[{cname!r}] matches {len(hits)} mappings on "
-                    f"{cref.hallmark!r}.{cref.param_name!r} whose "
+                    f"{cref.handle!r}.{cref.param_name!r} whose "
                     f"{cref.coeff} values disagree ({sorted(values)}); the "
                     "starting value would depend on which is read."
                 )
@@ -1052,13 +1048,13 @@ class CalibrationProblem:
                 msgs.append(
                     f"  params[{pname!r}] targets {pref.process_name}."
                     f"{pref.field}, a pure severity dial set by the "
-                    f"{', '.join(repr(h) for h in hmarks)} hallmark(s)."
+                    f"{', '.join(repr(h) for h in hmarks)} handle."
                 )
             raise ValueError(
                 "Severity dials are not valid Calibrator inputs:\n"
                 + "\n".join(msgs)
                 + "\n\nThese parameters are set directly by "
-                "Condition.hallmarks severity (the transform discards the "
+                "Condition.handles severity (the transform discards the "
                 "parameter's own value), so fitting them is degenerate — "
                 "severity would overwrite the fit. Fit the mechanism "
                 "magnitude the dial scales (e.g. a per-exposure potency) "
@@ -1213,7 +1209,7 @@ class CalibrationProblem:
     @property
     def param_refs(self) -> dict:
         """All fittable references — process params (:class:`ParameterRef`)
-        plus hallmark coefficients (:class:`HallmarkCoeffRef`) — in
+        plus hallmark coefficients (:class:`HandleCoeffRef`) — in
         declaration order. The optimizer's full surface; iterate this, not
         ``params`` (process-only), when you need every fitted quantity."""
         return self._all_refs
@@ -1223,7 +1219,7 @@ class CalibrationProblem:
         starting vector, exactly what :meth:`fit` packs internally.
 
         Read from the model, never declared: a :class:`ParameterRef` starts at
-        the composite's value for its field, a :class:`HallmarkCoeffRef` at its
+        the composite's value for its field, a :class:`HandleCoeffRef` at its
         mapping's coefficient. There is nowhere to write a starting value that
         the model would then contradict.
         """
@@ -1249,13 +1245,13 @@ class CalibrationProblem:
 
         kw = self._ctor_kwargs
         comp = self.composite
-        registry = kw.get("hallmark_registry")
+        registry = kw.get("registry")
         if registry is None:
             from hallsim.hallmarks import HALLMARK_REGISTRY
 
             registry = HALLMARK_REGISTRY
-        used = {h for c in kw["conditions"].values() for h in c.hallmarks}
-        hallmarks = {
+        used = {h for c in kw["conditions"].values() for h in c.handles}
+        handles = {
             name: [
                 _jsonable(m) for m in getattr(registry[name], "mappings", ())
             ]
@@ -1317,7 +1313,7 @@ class CalibrationProblem:
                 ],
                 "conditions": {
                     n: {
-                        "hallmarks": dict(c.hallmarks),
+                        "handles": dict(c.handles),
                         "interventions": c.interventions,
                         "description": c.description,
                     }
@@ -1346,7 +1342,7 @@ class CalibrationProblem:
                     "n_save": kw["n_save"],
                 },
                 "scheduler_kwargs": kw.get("scheduler_kwargs") or {},
-                "hallmarks": hallmarks,
+                "handles": handles,
                 # what the reporter guard said about each mapping: a verdict
                 # that scrolled past in a log is not a verdict anyone read
                 "reporter_wiring": [
@@ -1450,7 +1446,7 @@ class CalibrationProblem:
 
     def _registry(self, param_values: dict):
         """The hallmark registry for this evaluation, with each fitted affine
-        coefficient (:class:`HallmarkCoeffRef`, ``floor`` or ``slope``)
+        coefficient (:class:`HandleCoeffRef`, ``floor`` or ``slope``)
         overridden by its current value from ``param_values``. Returns the base
         registry unchanged when no coefficients are fitted, so the affine
         coefficients stay at their ``init``."""
@@ -1459,7 +1455,7 @@ class CalibrationProblem:
         param_values = self._pinned(param_values)
         overrides: dict[str, dict[str, dict[str, Any]]] = {}
         for name, cref in self._coeffs.items():
-            overrides.setdefault(cref.hallmark, {}).setdefault(
+            overrides.setdefault(cref.handle, {}).setdefault(
                 cref.param_name, {}
             )[cref.coeff] = param_values[name]
         reg = dict(self._base_registry)
@@ -1482,11 +1478,11 @@ class CalibrationProblem:
         self, processes: dict, condition: Condition, registry=None
     ):
         """Apply a condition's hallmark severities and wire a composite."""
-        from hallsim.hallmarks import apply_hallmarks
+        from hallsim.handles import apply_handles
 
-        procs = apply_hallmarks(
+        procs = apply_handles(
             processes,
-            condition.hallmarks,
+            condition.handles,
             registry=registry or self._base_registry,
         )
         for iv in condition.interventions:

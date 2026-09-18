@@ -62,7 +62,7 @@ The Scheduler is the only runner; there is no separate `Simulator`. Single-group
 - `adaptive_dt=True`: PLL-inspired step control on coupling residual.
 - Strang + interpolated are rejected in `Scheduler.__init__` — Strang's reverse pass needs an interpolant that has not been produced yet.
 
-**Hallmarks are immutable parameter modifiers.** `apply_hallmarks(processes, {hallmark: severity})` returns a *new* dict. Severity is differentiable end-to-end.
+**Handles are immutable parameter modifiers.** `apply_handles(processes, {handle: severity})` returns a *new* dict; the hallmarks of aging are one registry of handles (`hallsim.hallmarks.HALLMARK_REGISTRY`). Severity is differentiable end-to-end.
 
 **Validation layer is on by default, warning-by-default.** `Composite(...)` runs UnitChecker / SemanticChecker / GraphAnalyzer / CouplingAuditor. Unit/ontology *conflicts* raise; everything else warns. Disable with `semantic_validation=False`; promote to errors with `semantic_validation={"strict": True}`.
 
@@ -89,7 +89,7 @@ These decide whether the framework is fast. Violating one is a performance bug, 
 - **The multi-hallmark demo is a test workload, never evidence.** It is the biggest composite on hand, so most defects were found against it — that is all it is for. It is known-broken as biology (P0.14: its control arm is not a control; a constant null beats its score, P1.6). Do not cite its concordance, its reporter signs, or any number derived from it as a claim about HallSim, and do not call it "the flagship" — that name is retired, it set exactly the expectation this bullet exists to prevent. When something needs demonstrating, demonstrate it on the framework capability itself.
 - **Multiplicative coupling**: effects are summed via EVOLVED ports. For multiplicative coupling, route the modulating variable through a separate store path and read it via an `INPUT` port.
 - **SBML model**: `hallsim.sbml_import.process_from_sbml(...)`; discover candidates with `hallsim.discovery.search_for_model`. Vendored SBML lives under `demos/models/sbml/<author><year>/` — it is data for the examples, not part of the package.
-- **Hallmark mapping**: `hallsim.hallmarks.apply_hallmarks`.
+- **Perturbation handle**: `hallsim.handles` (`Handle`, `ParameterMapping`, `apply_handles`, `with_handles`); the aging registry is `hallsim.hallmarks.HALLMARK_REGISTRY`.
 - **Tests**: `tests/unit/test_composition.py` (Process/Port/Topology contracts), `test_multiscale.py` (Scheduler), `test_validation.py` (semantic layer), `test_models.py` (per-model regression), `test_performance.py` (JAX invariants above).
 
 ## Notes for editing

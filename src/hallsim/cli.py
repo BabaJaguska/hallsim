@@ -509,7 +509,21 @@ def clamp(level, t1, rel_error, k_clamps):
     default=False,
     help="Run the numerical screen on the producers.",
 )
-def find(query, pattern, limit, sources, triage):
+@click.option(
+    "--repos/--no-repos",
+    default=True,
+    help="Follow the code-availability links of the papers found and say "
+    "what each repository holds: importable files, or source that needs "
+    "translating.",
+)
+@click.option(
+    "--repo-limit",
+    type=int,
+    default=10,
+    help="repositories to classify per run (the forges rate-limit keyless "
+    "calls)",
+)
+def find(query, pattern, limit, sources, triage, repos, repo_limit):
     """Search every repository for a model that EMITS a quantity.
 
     A text search answers "is this deposit about IL6"; composing needs "does
@@ -572,6 +586,21 @@ def find(query, pattern, limit, sources, triage):
         if r.status not in ("produces", "no-match"):
             click.echo(f"  [{r.status}] {r.model_id}: {r.note[:88]}")
 
+    papers = [c for c in cands if c.source == "europepmc"]
+    if repos and papers:
+        from hallsim.literature import repositories_cited
+
+        click.echo(f"\n=== REPOSITORIES cited by {len(papers)} paper(s) ===")
+        cited = repositories_cited(papers, limit=repo_limit)
+        for cand, by_papers in cited:
+            click.echo(
+                f"  {cand.kind:18s} {cand.source}:{cand.id}  "
+                f"{cand.description[:90]}"
+            )
+            click.echo(f"      cited by {', '.join(by_papers)}")
+        if not cited:
+            click.echo("  (none)")
+
     if triage and producers:
         from hallsim.intake import triage_sbml
 
@@ -579,6 +608,86 @@ def find(query, pattern, limit, sources, triage):
         for r in producers:
             click.echo(f"\n{by[r.model_id].name[:88]}")
             click.echo(str(triage_sbml(r.model_id)))
+
+
+@simulate.command("find-data")
+@click.argument("query", nargs=-1, required=True)
+@click.option("--limit", type=int, default=20)
+@click.option("--organism", default=None, help='e.g. "Homo sapiens"')
+@click.option(
+    "--check/--no-check",
+    default=False,
+    help="Read each series' platform table header from GEO and say whether "
+    "the loader can map its probes to genes.",
+)
+def find_data(query, limit, organism, check):
+    """Search GEO for a dataset to calibrate against.
+
+    Lists series with their kind, organism, platform and sample titles (the
+    arms and timepoints are usually in the titles). Array expression series
+    carry their values in the series matrix the loader reads; sequencing
+    series usually do not.
+    """
+    from hallsim.datasets import (
+        loader_reads,
+        platform_columns,
+        search_for_dataset,
+    )
+
+    seen, hits = set(), []
+    for term in query:
+        for d in search_for_dataset(term, limit=limit, organism=organism):
+            if d.accession not in seen:
+                seen.add(d.accession)
+                hits.append(d)
+    hits.sort(key=lambda d: not d.series_matrix_has_values)
+    click.echo(f"{len(hits)} series")
+    for d in hits:
+        click.echo(
+            f"\n{d.accession:11s} {d.short_kind:<14.14s} {d.organism:<16.16s} "
+            f"{d.n_samples:4d} samples  {d.platform}"
+        )
+        click.echo(f"    {d.title[:100]}")
+        if d.samples:
+            click.echo(f"    samples: {', '.join(d.samples[:6])}")
+        if check and d.series_matrix_has_values:
+            cols = platform_columns(d.accession)
+            verdict = (
+                "loader reads it"
+                if loader_reads(cols)
+                else "no gene_assignment column, the loader cannot map it"
+            )
+            click.echo(f"    platform: {', '.join(cols[:8])} -> {verdict}")
+
+
+@simulate.command("screen")
+@click.argument("model")
+@click.option(
+    "--t-end",
+    type=float,
+    default=10.0,
+    help="solo solve window, in the model's native time unit",
+)
+def screen(model, t_end):
+    """Screen one model on its own before it joins a composite.
+
+    Imports MODEL (a BioModels id, or a path to an SBML or COPASI file),
+    triages it, and runs the numerical screen: exploding, vanishing,
+    tolerance-sensitive, not at rest, non-tunable. Nothing should be
+    composed unscreened.
+    """
+    from pathlib import Path
+
+    from hallsim.intake import triage_sbml
+
+    if model.isdigit():
+        target, name = int(model), f"biomodel_{model}"
+    else:
+        target, name = model, Path(model).stem
+    verdict = triage_sbml(target, t_end=t_end, name=name)
+    click.echo(str(verdict))
+    if verdict.screen is not None:
+        click.echo(str(verdict.screen))
 
 
 @simulate.command("rejections")

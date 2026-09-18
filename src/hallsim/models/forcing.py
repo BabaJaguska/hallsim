@@ -42,7 +42,7 @@ class PulseSource(Process):
     t_end: float | None = eqx.field(static=True, default=1.0)
     signal_units: str = eqx.field(static=True, default="dimensionless")
     signal_ontology: dict | None = eqx.field(static=True, default=None)
-    hallmark: str | None = eqx.field(static=True, default=None)
+    handle: str | None = eqx.field(static=True, default=None)
     description: str | None = eqx.field(static=True, default=None)
 
     def ports_schema(self):
@@ -104,7 +104,7 @@ def drive_pulse(
     amplitude=1.0,
     source_name=None,
     signal_ontology=None,
-    hallmark=None,
+    handle=None,
     driven_rate=None,
     warn_factor=3.0,
 ):
@@ -134,7 +134,7 @@ def drive_pulse(
         t_start=float(t_start),
         t_end=None if t_end is None else float(t_end),
         signal_ontology=signal_ontology,
-        hallmark=hallmark,
+        handle=handle,
     )
     processes[target] = _attach_driver(processes[target], input_name, port)
     topology[src] = {"signal": path}
@@ -202,7 +202,7 @@ class StepSource(Process):
     signal_default: float = eqx.field(static=True, default=0.0)
     signal_units: str = eqx.field(static=True, default="dimensionless")
     signal_ontology: dict | None = eqx.field(static=True, default=None)
-    hallmark: str | None = eqx.field(static=True, default=None)
+    handle: str | None = eqx.field(static=True, default=None)
     description: str | None = eqx.field(static=True, default=None)
 
     def ports_schema(self):
@@ -241,7 +241,7 @@ def drive_step(
     before=1.0,
     source_name=None,
     signal_ontology=None,
-    hallmark=None,
+    handle=None,
 ):
     """Drive ``target``'s boundary input ``input_name`` with a two-level step
     at ``t_step``, composed from the same port path as :func:`drive_pulse`:
@@ -265,7 +265,7 @@ def drive_step(
         t_step=float(t_step),
         signal_default=float(before),
         signal_ontology=signal_ontology,
-        hallmark=hallmark,
+        handle=handle,
     )
     processes[target] = _attach_driver(processes[target], input_name, port)
     topology[src] = {"signal": path}

@@ -4,7 +4,7 @@ models re-solve.
 ``simulate hallmark-levers`` serves a page with one slider per hallmark of
 aging wired into the multi-hallmark composite (Dalle Pezze 2014, Geva-Zatorsky
 2006, Proctor 2007). Moving a slider applies the severity through
-:func:`hallsim.hallmarks.with_hallmarks` — the same call the calibration arms
+:func:`hallsim.handles.with_handles` — the same call the calibration arms
 are built with — re-solves the whole composite through the Scheduler and
 redraws every panel against the etoposide arm, the reference every
 setting is read against.
@@ -55,7 +55,7 @@ from demos.multi_hallmark_calibrate import (
 )
 from demos.multi_hallmark_figures import MODEL_BLOCKS, REACTION_LEVEL
 from hallsim.composite import Composite
-from hallsim.hallmarks import with_hallmarks
+from hallsim.handles import with_handles
 from hallsim.scheduler import Scheduler
 
 log = logging.getLogger(__name__)
@@ -348,7 +348,7 @@ class LeverModel:
         )
 
     def _trajectory(self, severities):
-        comp = with_hallmarks(
+        comp = with_handles(
             self.base, self._severities(severities), registry=self.registry
         )
         res = self._scheduler.run(
@@ -357,7 +357,7 @@ class LeverModel:
         return res.ts, res.ys
 
     def _population(self, severities, key):
-        comp = with_hallmarks(
+        comp = with_handles(
             self.stochastic_base,
             self._severities(severities),
             registry=self.registry,

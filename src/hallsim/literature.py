@@ -158,8 +158,16 @@ def _harvest(blob: bytes, dest: Path, stem: str, depth: int) -> list[Path]:
 #: Where a paper's model actually lives when it is not an attachment. Measured
 #: on a 12-paper sample: 0 shipped a model file, 4 linked GitHub, 2 Zenodo.
 POINTER_PATTERNS = {
+    # An owner alone is kept: a code-availability statement often names the
+    # lab's organisation and leaves the repository to the reader.
     "github": re.compile(
-        r"github\.com/([\w.\-]+/[\w.\-]+?)(?:\.git)?\b", re.I
+        r"github\.com/([\w.\-]+(?:/[\w.\-]+?)?)(?:\.git)?\b", re.I
+    ),
+    "bitbucket": re.compile(
+        r"bitbucket\.org/([\w.\-]+(?:/[\w.\-]+?)?)(?:\.git)?\b", re.I
+    ),
+    "gitlab": re.compile(
+        r"gitlab\.com/([\w.\-]+(?:/[\w.\-]+?)?)(?:\.git)?\b", re.I
     ),
     "zenodo": re.compile(
         r"(?:zenodo\.org/record/|10\.5281/zenodo\.)(\d+)", re.I
@@ -203,8 +211,12 @@ def model_pointers(pmcid: str, *, timeout: float = 60.0) -> dict:
     paper deposited nothing" and "the model cannot be obtained".
     """
     text = full_text(pmcid, timeout=timeout)
-    if not text:
-        return {}
+    return pointers_in(text) if text else {}
+
+
+def pointers_in(text: str) -> dict:
+    """``{kind: [identifier, ...]}`` for every repository, archive or
+    accession ``text`` names, in order of first mention."""
     out = {}
     for kind, pattern in POINTER_PATTERNS.items():
         seen = []
@@ -253,3 +265,192 @@ def supplementary_model_files(
         len(found),
     )
     return sorted(found)
+
+
+# ── What a cited repository holds ───────────────────────────────────────
+
+#: Files an importer reads, by suffix.
+IMPORTABLE_SUFFIXES = {
+    ".xml": "sbml",
+    ".sbml": "sbml",
+    ".cps": "copasi",
+    ".ode": "xpp",
+}
+#: Source a model would have to be translated from, by suffix.
+SOURCE_SUFFIXES = {
+    ".m": "matlab",
+    ".py": "python",
+    ".ipynb": "python",
+    ".c": "c",
+    ".cpp": "c++",
+    ".h": "c",
+    ".r": "r",
+    ".jl": "julia",
+}
+FORGE_URL = {
+    "github": "https://github.com/{}",
+    "gitlab": "https://gitlab.com/{}",
+    "bitbucket": "https://bitbucket.org/{}",
+}
+_TREE_PAGES = 5
+
+
+def repository_files(
+    pointer: str, forge: str = "github", *, timeout: float = 30.0
+) -> list[str]:
+    """Every path in a repository's default branch, read keyless from
+    GitHub, GitLab or Bitbucket. An owner alone (an organisation) returns
+    its repositories as ``owner/repo`` names instead."""
+    import urllib.parse
+
+    owner, _, repo = pointer.partition("/")
+    if forge == "github":
+        if not repo:
+            rows = _get_json(
+                f"https://api.github.com/users/{owner}/repos",
+                {"per_page": 100},
+                timeout,
+            )
+            return [r["full_name"] for r in rows]
+        meta = _get_json(
+            f"https://api.github.com/repos/{pointer}", {}, timeout
+        )
+        tree = _get_json(
+            f"https://api.github.com/repos/{pointer}/git/trees/"
+            f"{meta['default_branch']}",
+            {"recursive": 1},
+            timeout,
+        )
+        return [t["path"] for t in tree.get("tree", []) if t["type"] == "blob"]
+    if forge == "gitlab":
+        if not repo:
+            rows = _get_json(
+                f"https://gitlab.com/api/v4/groups/{owner}/projects",
+                {"per_page": 100},
+                timeout,
+            )
+            return [r["path_with_namespace"] for r in rows]
+        project = urllib.parse.quote(pointer, safe="")
+        out = []
+        for page in range(1, _TREE_PAGES + 1):
+            rows = _get_json(
+                f"https://gitlab.com/api/v4/projects/{project}/repository/tree",
+                {"recursive": "true", "per_page": 100, "page": page},
+                timeout,
+            )
+            out += [r["path"] for r in rows if r["type"] == "blob"]
+            if len(rows) < 100:
+                break
+        return out
+    if forge == "bitbucket":
+        base = "https://api.bitbucket.org/2.0/repositories"
+        if not repo:
+            rows = _get_json(f"{base}/{owner}", {"pagelen": 100}, timeout)
+            return [r["full_name"] for r in rows.get("values", [])]
+        meta = _get_json(f"{base}/{pointer}", {}, timeout)
+        branch = meta["mainbranch"]["name"]
+        out, params = [], {"max_depth": 8, "pagelen": 100}
+        for _ in range(_TREE_PAGES):
+            page = _get_json(
+                f"{base}/{pointer}/src/{branch}/", params, timeout
+            )
+            out += [
+                v["path"]
+                for v in page.get("values", [])
+                if v.get("type") == "commit_file"
+            ]
+            if not page.get("next"):
+                break
+            params = {"page": page["next"].rsplit("page=", 1)[-1], **params}
+        return out
+    raise ValueError(f"unknown forge {forge!r}; have {sorted(FORGE_URL)}")
+
+
+def classify_repository(
+    pointer: str, forge: str = "github", *, timeout: float = 30.0
+) -> ModelCandidate:
+    """What a cited repository holds, as a candidate ``simulate find`` can
+    list beside the deposits: ``importable:<format>`` when a file an
+    importer reads is there (judged by suffix), ``source:<language>`` when
+    the model exists only as code to translate, ``organisation`` for an
+    owner-level link, ``unknown`` otherwise."""
+    from collections import Counter
+    from pathlib import Path
+
+    files = repository_files(pointer, forge, timeout=timeout)
+    url = FORGE_URL[forge].format(pointer)
+    if "/" not in pointer:
+        return ModelCandidate(
+            source=forge,
+            id=pointer,
+            name=pointer,
+            format="organisation",
+            url=url,
+            curated=False,
+            kind="organisation",
+            description=f"{len(files)} repositories: " + ", ".join(files[:20]),
+        )
+    suffix = {f: Path(f).suffix.lower() for f in files}
+    importable = [f for f in files if suffix[f] in IMPORTABLE_SUFFIXES]
+    languages = Counter(
+        SOURCE_SUFFIXES[suffix[f]]
+        for f in files
+        if suffix[f] in SOURCE_SUFFIXES
+    )
+    if importable:
+        fmt = IMPORTABLE_SUFFIXES[suffix[importable[0]]]
+        kind, listed = f"importable:{fmt}", importable
+    elif languages:
+        fmt = languages.most_common(1)[0][0]
+        kind = f"source:{fmt}"
+        listed = [f for f in files if SOURCE_SUFFIXES.get(suffix[f]) == fmt]
+    else:
+        fmt, kind, listed = "unknown", "unknown", []
+    return ModelCandidate(
+        source=forge,
+        id=pointer,
+        name=pointer,
+        format=fmt,
+        url=url,
+        curated=False,
+        kind=kind,
+        description=f"{len(files)} files; " + ", ".join(listed[:12]),
+    )
+
+
+def repositories_cited(
+    papers, *, limit: int = 10, timeout: float = 30.0
+) -> list[tuple[ModelCandidate, list[str]]]:
+    """The repositories the given Europe PMC candidates cite, classified,
+    each with the PMC ids that cite it. Stops at ``limit`` repositories
+    and records a forge it could not reach (rate limit, private, gone) as
+    kind ``unreachable`` rather than dropping it."""
+    import urllib.error
+
+    cited: dict[tuple[str, str], list[str]] = {}
+    for paper in papers:
+        try:
+            pointers = model_pointers(paper.id, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - one paper, not the run
+            log.warning("full text of %s unavailable: %s", paper.id, exc)
+            continue
+        for forge in FORGE_URL:
+            for pointer in pointers.get(forge, []):
+                cited.setdefault((forge, pointer), []).append(paper.id)
+    out = []
+    for (forge, pointer), by_papers in list(cited.items())[:limit]:
+        try:
+            cand = classify_repository(pointer, forge, timeout=timeout)
+        except (urllib.error.URLError, KeyError, ValueError) as exc:
+            cand = ModelCandidate(
+                source=forge,
+                id=pointer,
+                name=pointer,
+                format="unknown",
+                url=FORGE_URL[forge].format(pointer),
+                curated=False,
+                kind="unreachable",
+                description=str(exc)[:120],
+            )
+        out.append((cand, by_papers))
+    return out

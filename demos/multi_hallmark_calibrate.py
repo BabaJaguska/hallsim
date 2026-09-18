@@ -54,10 +54,8 @@ from hallsim.calibration_report import (  # noqa: E402
 )
 from hallsim.io import file_sha256, make_run_dir  # noqa: E402
 from dataclasses import replace as dc_replace  # noqa: E402
-from hallsim.hallmarks import (  # noqa: E402
-    HALLMARK_REGISTRY,
-    with_hallmarks,
-)
+from hallsim.handles import with_handles  # noqa: E402
+from hallsim.hallmarks import HALLMARK_REGISTRY  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.gene_reporters import (  # noqa: E402
     MULTI_HALLMARK_REPORTERS,
@@ -415,7 +413,7 @@ def build_problem(
         },
         fit_arms=["DDIS_vs_ctrl"],
         held_out_arms=["RAPA_vs_ctrl"],
-        hallmark_registry=_registry_with_intensity(
+        registry=_registry_with_intensity(
             RAPA_INTENSITY if rapa_intensity is None else rapa_intensity
         ),
         prior_weight=0.03,
@@ -1124,7 +1122,7 @@ def _run_arms(base, gi, dns, t_end=50.0, macro_dt=5.0):
     hallmarks = {"Genomic Instability": gi}
     if dns != 0.0:
         hallmarks["Deregulated Nutrient Sensing"] = dns
-    comp = with_hallmarks(base, hallmarks)
+    comp = with_handles(base, hallmarks)
     return Scheduler().run(
         comp,
         t_span=(0.0, t_end),
@@ -1359,7 +1357,7 @@ def cmd_export(args) -> None:
         comp = problem._condition_composite(
             substituted, cond, registry=registry
         )
-        sev = ", ".join(f"{h} {s:g}" for h, s in cond.hallmarks.items())
+        sev = ", ".join(f"{h} {s:g}" for h, s in cond.handles.items())
         notes = (
             "HallSim multi-hallmark composite: Dalle Pezze 2014 "
             "(BIOMD0000000582), Geva-Zatorsky 2006 (BIOMD0000000157) and "

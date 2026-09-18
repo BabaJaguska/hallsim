@@ -79,13 +79,13 @@ class SaturatingRemoval(Process):
     def metadata(self):
         base = super().metadata()
         if self.alpha > 0 and self.eta == 0:
-            base["hallmark"] = "Genomic Instability"
+            base["handle"] = "Genomic Instability"
             base["mode"] = "ddr"
         elif self.eta > 0 and self.alpha == 0:
-            base["hallmark"] = "Genomic Instability (age-ramp)"
+            base["handle"] = "Genomic Instability (age-ramp)"
             base["mode"] = "age_ramp"
         else:
-            base["hallmark"] = "Genomic Instability"
+            base["handle"] = "Genomic Instability"
             base["mode"] = "mixed"
         base["reference"] = (
             "Alon 2006; Karin & Alon 2019; Reinhardt & Yaffe 2009"

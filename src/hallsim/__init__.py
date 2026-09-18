@@ -42,12 +42,8 @@ from hallsim.calibration import (
     ParameterRef,
 )
 from hallsim.composite import Composite
-from hallsim.hallmarks import (
-    HALLMARK_REGISTRY,
-    HallmarkHandle,
-    ParameterMapping,
-    apply_hallmarks,
-)
+from hallsim.handles import Handle, ParameterMapping, apply_handles
+from hallsim.hallmarks import HALLMARK_REGISTRY
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.scheduler import EventRecord, Scheduler, SchedulerResult
 from hallsim.validation import (
@@ -66,7 +62,7 @@ __all__ = [
     "Condition",
     "EventRecord",
     "HALLMARK_REGISTRY",
-    "HallmarkHandle",
+    "Handle",
     "OverlapMatch",
     "ParameterMapping",
     "ParameterRef",
@@ -77,5 +73,5 @@ __all__ = [
     "Scheduler",
     "SchedulerResult",
     "analyze_composability",
-    "apply_hallmarks",
+    "apply_handles",
 ]

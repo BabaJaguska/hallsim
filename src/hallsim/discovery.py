@@ -273,6 +273,9 @@ def search_biomodels(
     ``sbml_only`` drops the MATLAB/R/other-format entries the search also
     returns, since only SBML has an importer.
     """
+    # The endpoint answers a quoted phrase with HTTP 400; the words are
+    # matched individually, so quotes only ever break the call.
+    query = query.replace('"', "")
     payload = _get_json(
         BIOMODELS_SEARCH,
         {

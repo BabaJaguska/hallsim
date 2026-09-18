@@ -387,7 +387,7 @@ class TestCalibrationTargets:
     def _composite_with_hallmark_target(self):
         """Two processes; one has an attribute that's a hallmark target,
         plus a non-target attribute that should remain calibratable."""
-        from hallsim.hallmarks import HallmarkHandle, ParameterMapping
+        from hallsim.handles import Handle, ParameterMapping
         from hallsim.calibration import CalibratableParam
 
         class Knob(Process):
@@ -423,7 +423,7 @@ class TestCalibrationTargets:
             semantic_validation=False,
         )
         registry = {
-            "Test": HallmarkHandle(
+            "Test": Handle(
                 name="Test",
                 mappings=[
                     ParameterMapping(
@@ -445,13 +445,13 @@ class TestCalibrationTargets:
         ), "non-hallmark mechanism param should be present"
         assert "knob" not in fields, "hallmark target should be subtracted"
 
-    def test_include_hallmark_targets_kwarg(self):
+    def test_include_handle_targets_kwarg(self):
         comp, registry = self._composite_with_hallmark_target()
         targets = comp.calibration_targets(
-            registry=registry, include_hallmark_targets=True
+            registry=registry, include_handle_targets=True
         )
         fields = {t.field for t in targets}
-        assert "knob" in fields, "include_hallmark_targets should re-expose"
+        assert "knob" in fields, "include_handle_targets should re-expose"
         assert "mech" in fields
 
     def test_process_name_filled_in_by_aggregator(self):
@@ -1191,9 +1191,9 @@ class TestHallmarkWithNoTarget:
 
     @staticmethod
     def _handle():
-        from hallsim.hallmarks import HallmarkHandle, ParameterMapping
+        from hallsim.handles import Handle, ParameterMapping
 
-        return HallmarkHandle(
+        return Handle(
             name="Test Dial",
             mappings=[
                 ParameterMapping(
@@ -1218,9 +1218,9 @@ class TestHallmarkWithNoTarget:
     def test_one_reachable_mapping_is_enough(self):
         """A hallmark may span composites that hold different subsets, so a
         partial hit stays legal — only a total miss is the defect."""
-        from hallsim.hallmarks import HallmarkHandle, ParameterMapping
+        from hallsim.handles import Handle, ParameterMapping
 
-        handle = HallmarkHandle(
+        handle = Handle(
             name="Test Dial",
             mappings=[
                 ParameterMapping(

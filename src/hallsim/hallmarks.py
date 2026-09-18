@@ -1,277 +1,25 @@
-"""Hallmark handles — high-level control interface for aging biology.
+"""The hallmarks of aging as perturbation handles.
 
-A hallmark of aging (Lopez-Otin et al., 2023) is a signed severity handle in
+A hallmark of aging (Lopez-Otin et al., 2023) is a signed severity in
 [-1, 1] modulating parameters across one or more Processes: -1 is the full
 opposite perturbation (mTOR suppression), 0 homeostasis, +1 severely impaired.
 A hallmark with no meaningful opposite — there is no negative DNA damage —
 uses the [0, 1] half. :data:`HALLMARK_REGISTRY` maps 5 of the 12 today; each
-new one is a single :class:`HallmarkHandle` entry.
-
-Transforms are **multiplicative of the current base**: ``base * f(severity)``,
-not an absolute value, so a calibration can fit mechanism parameters and then
-apply severities without the hallmark clobbering the fit. Processes are
-immutable, so applying a handle builds *new* instances; both severity and base
-are JAX-traceable, and ``jax.grad`` flows through either.
-
-**Severity is an experimental-design knob, not a fittable parameter.** Set it
-per condition (DDIS=1.0, ctrl=0.0) and fit mechanism parameters with
-Calibrator. Its differentiability is there for sensitivity analysis and
-severity sweeps, not for inferring "what severity does the data show" — that
-would conflate experimental setup with model state.
-
->>> handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
->>> new_composite = Composite(
-...     handle.apply(composite.processes, severity=0.7), composite.topology
-... )
+new one is a single :class:`hallsim.handles.Handle` entry. The machinery,
+and how to apply a registry, is :mod:`hallsim.handles`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable
-
-import equinox as eqx
-
-from hallsim.process import Process
-
-
-@dataclass(frozen=True)
-class FittableCoeff:
-    """A hallmark-mapping coefficient the Calibrator may fit.
-
-    Stands in for a plain float in a mapping's ``floor``. The Calibrator
-    discovers it via a :class:`hallsim.calibration.HallmarkCoeffRef` and
-    substitutes a fitted value per loss evaluation (clamp / prior handled
-    like any :class:`hallsim.calibration.ParameterRef`). Outside calibration
-    the mapping evaluates at ``init``.
-    """
-
-    init: float
-    clamp: tuple[float, float] | None = None
-    prior: float | None = None
-    prior_sigma: float = 0.5
-    description: str = ""
-
-
-@dataclass
-class ParameterMapping:
-    """Maps a hallmark severity to a process parameter value, two forms:
-
-    - **Affine** (``floor`` set): ``base * (floor + slope * severity)``. Use
-      ``floor=1`` for a modifier that leaves ``base`` untouched at neutral,
-      ``floor=0`` for an input that is off there. ``slope`` is the signed gain
-      per unit severity and is required — the neutral point is fixed at
-      severity=0, not at either end. Either coefficient may be a
-      :class:`FittableCoeff`.
-    - **Custom** (``transform`` set): ``transform(severity, base)``, for a dial
-      that sets the value directly and ignores ``base`` (``lambda h, _: h``).
-
-    ``process_name`` keys into the composite; ``param_name`` is an attribute
-    (``"alpha"``) or dotted path (``"parameters.<key>"``). ``base`` is read
-    fresh on each application, so an earlier calibration flows through.
-    """
-
-    process_name: str
-    param_name: str
-    floor: "float | FittableCoeff | None" = None
-    slope: float | None = None
-    transform: Callable[[Any, Any], Any] | None = None
-    description: str = ""
-
-    @property
-    def floor_value(self):
-        f = self.floor
-        return f.init if isinstance(f, FittableCoeff) else f
-
-    @property
-    def slope_value(self):
-        s = self.slope
-        return s.init if isinstance(s, FittableCoeff) else s
-
-    def value(self, severity, base):
-        """Resolve the parameter value at ``severity`` given current ``base``."""
-        if self.transform is not None:
-            return self.transform(severity, base)
-        if self.floor is None:
-            raise ValueError(
-                f"ParameterMapping {self.process_name}.{self.param_name} "
-                "needs either an affine `floor` or a `transform`."
-            )
-        slope = self.slope_value
-        if slope is None:
-            raise ValueError(
-                f"ParameterMapping {self.process_name}.{self.param_name} "
-                "is affine but has no `slope`; the signed severity gain is "
-                "required (neutral is fixed at severity=0)."
-            )
-        return base * (self.floor_value + slope * severity)
-
-
-@dataclass
-class HallmarkHandle:
-    """A control knob for one hallmark of aging.
-
-    Attributes
-    ----------
-    name:
-        Human-readable name (e.g., "Mitochondrial Dysfunction").
-    description:
-        Brief description of the biology.
-    mappings:
-        List of ParameterMapping defining how severity affects processes.
-    category:
-        "Primary", "Antagonistic", or "Integrative" (Lopez-Otin taxonomy).
-    references:
-        Literature references supporting the parameter mappings.
-    """
-
-    name: str
-    description: str = ""
-    mappings: list[ParameterMapping] = field(default_factory=list)
-    category: str = ""
-    references: list[str] = field(default_factory=list)
-
-    def apply(
-        self,
-        processes: dict[str, Process],
-        severity: float,
-    ) -> dict[str, Process]:
-        """New ``{name: Process}`` with this hallmark applied at ``severity``
-        (in [-1, 1], 0 = homeostasis). Untargeted processes pass through
-        unchanged; targeted ones are rebuilt via ``eqx.tree_at``. A dotted
-        ``param_name`` reaches inside a dict-valued field, which is how a
-        hallmark drives one SBML rate constant."""
-        result = dict(processes)
-        if self.mappings and not any(
-            m.process_name in result for m in self.mappings
-        ):
-            raise KeyError(
-                f"Hallmark {self.name!r} has no target in this composite: "
-                f"none of {sorted({m.process_name for m in self.mappings})} "
-                f"is a process here (it has "
-                f"{sorted(result)}). Setting its severity would change "
-                "nothing and every arm would run identically. Build the "
-                "composite with the process the dial drives, or drop the "
-                "hallmark from the condition."
-            )
-        for mapping in self.mappings:
-            pname = mapping.process_name
-            if pname not in result:
-                continue
-            proc = result[pname]
-            if "." in mapping.param_name:
-                # Dotted form: target a key inside a dict-valued field.
-                field_name, key = mapping.param_name.split(".", 1)
-                current = getattr(proc, field_name)
-                if not isinstance(current, dict):
-                    raise TypeError(
-                        f"Dotted param_name {mapping.param_name!r} "
-                        f"requires {field_name!r} to be a dict on "
-                        f"{type(proc).__name__}; got "
-                        f"{type(current).__name__}"
-                    )
-                if key not in current:
-                    raise KeyError(
-                        f"Key {key!r} not in {pname}.{field_name}; "
-                        f"available: {sorted(current.keys())}"
-                    )
-                base = current[key]
-                new_val = mapping.value(severity, base)
-                result[pname] = eqx.tree_at(
-                    lambda p, fn=field_name, k=key: getattr(p, fn)[k],
-                    proc,
-                    new_val,
-                )
-            else:
-                base = getattr(proc, mapping.param_name)
-                new_val = mapping.value(severity, base)
-                result[pname] = eqx.tree_at(
-                    lambda p, pn=mapping.param_name: getattr(p, pn),
-                    proc,
-                    new_val,
-                )
-        return result
-
-    def summary(
-        self,
-        severity: float,
-        processes: dict[str, Process] | None = None,
-    ) -> dict[str, Any]:
-        """What each mapping resolves to at ``severity``. With ``processes``,
-        reads each target's real base; without, uses ``base=1.0``, which shows
-        the transform's shape but not the absolute value."""
-        out: dict[str, Any] = {}
-        for m in self.mappings:
-            base: Any = 1.0
-            if processes is not None and m.process_name in processes:
-                proc = processes[m.process_name]
-                if "." in m.param_name:
-                    field_name, key = m.param_name.split(".", 1)
-                    base = getattr(proc, field_name)[key]
-                else:
-                    base = getattr(proc, m.param_name)
-            out[f"{m.process_name}.{m.param_name}"] = m.value(severity, base)
-        return out
-
-
-def apply_hallmarks(
-    processes: dict[str, Process],
-    hallmarks: dict[str, float],
-    registry: dict[str, HallmarkHandle] | None = None,
-) -> dict[str, Process]:
-    """Apply multiple hallmark severities to a process dict.
-
-    Parameters
-    ----------
-    processes:
-        ``{name: Process}`` from a Composite.
-    hallmarks:
-        ``{hallmark_name: severity}`` — which hallmarks to apply.
-    registry:
-        Hallmark registry to look up handles. Defaults to
-        ``HALLMARK_REGISTRY``.
-
-    Returns
-    -------
-    New process dict with all hallmark effects applied.
-    """
-    if registry is None:
-        registry = HALLMARK_REGISTRY
-    result = dict(processes)
-    for hname, severity in hallmarks.items():
-        handle = registry[hname]
-        result = handle.apply(result, severity)
-    return result
-
-
-def with_hallmarks(composite, hallmarks: dict[str, float], *, registry=None):
-    """Return a new Composite with ``hallmarks`` severities applied.
-
-    Applies :func:`apply_hallmarks` to ``composite.processes`` and rewires
-    them on the same topology, with topology + semantic checks off (the
-    wiring is unchanged from the validated base — only parameter values
-    move). The one call for "give me the treated/severity variant of this
-    composite", e.g. ``Scheduler().run(with_hallmarks(base, {...}), ...)``.
-    """
-    from hallsim.composite import Composite
-
-    return Composite(
-        processes=apply_hallmarks(
-            composite.processes, hallmarks, registry=registry
-        ),
-        topology=composite.topology,
-        validate=False,
-        semantic_validation={"check_semantics": False},
-    )
-
+from hallsim.handles import FittableCoeff, Handle, ParameterMapping
 
 # ── Registry ────────────────────────────────────────────────────────────
 
 # Hallmark definitions for ERiQ-based processes.
 # Process names match those in build_eriq_composite().
 
-HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
-    "Loss of Proteostasis": HallmarkHandle(
+HALLMARK_REGISTRY: dict[str, Handle] = {
+    "Loss of Proteostasis": Handle(
         name="Loss of Proteostasis",
         description=(
             "Reduced proteasomal degradation capacity in Proctor 2007. "
@@ -295,7 +43,7 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ),
         ],
     ),
-    "Stem Cell Exhaustion": HallmarkHandle(
+    "Stem Cell Exhaustion": Handle(
         name="Stem Cell Exhaustion",
         description=(
             "Age-dependent decline in stem cell niche signaling. "
@@ -318,7 +66,7 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ),
         ],
     ),
-    "Mitochondrial Dysfunction": HallmarkHandle(
+    "Mitochondrial Dysfunction": Handle(
         name="Mitochondrial Dysfunction",
         description=(
             "Impairment in mitochondrial function leading to reduced ATP "
@@ -339,7 +87,7 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ),
         ],
     ),
-    "Deregulated Nutrient Sensing": HallmarkHandle(
+    "Deregulated Nutrient Sensing": Handle(
         name="Deregulated Nutrient Sensing",
         description=(
             "Imbalance in nutrient-sensing pathways (mTOR, AMPK, sirtuins). "
@@ -387,7 +135,7 @@ HALLMARK_REGISTRY: dict[str, HallmarkHandle] = {
             ),
         ],
     ),
-    "Genomic Instability": HallmarkHandle(
+    "Genomic Instability": Handle(
         name="Genomic Instability",
         description=(
             "Exogenous DNA damage exposure. Drives ERiQ's damage_repair "

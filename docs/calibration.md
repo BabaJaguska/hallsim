@@ -58,8 +58,8 @@ from demos.multi_hallmark_calibrate import (
 composite = build_multi_hallmark_composite()
 
 # Self-documenting parameter discovery: walks every Process, enumerates each
-# SBML constant / scalar attr, and hides hallmark-controlled knobs (they're
-# set by Condition.hallmarks per arm, not learned from data).
+# SBML constant / scalar attr, and hides handle-controlled knobs (they're
+# set by Condition.handles per arm, not learned from data).
 for p in composite.calibration_targets():
     print(p.process_name, p.field, p.default, p.clamp)
 
@@ -153,8 +153,9 @@ filed.
 
 ### Principles the API enforces
 
-- **Hallmark knobs aren't fittable by default** — a guard rail raises if you
-  try to fit a pure severity dial (severity would overwrite the fit).
+- **Handle targets aren't fittable by default** — a guard rail raises if you
+  try to fit a parameter a handle's severity drives (severity would overwrite
+  the fit).
 - **One route for changing a parameter** — `with_overrides`, fitted or not. An
   edit that substitution would overwrite raises instead of running unablated.
 - **Parameter discovery is self-documenting** via `calibration_targets()`.
@@ -281,7 +282,7 @@ mechanism parameters spread across independently-published SBML models.
 1. **Substitute** the fit parameters `θ` into the composite's process pytree
    via `eqx.tree_at` (`_substitute`), so each lands *inside* its model as a
    traced array — the step that makes it reachable by autodiff.
-2. For each `Condition`, apply the hallmark severities, build the flat RHS
+2. For each `Condition`, apply the handle severities, build the flat RHS
    `f(t, y; θ)` (`Composite.build_rhs`), and solve `dy/dt = f` over the full
    `t_span` with the Scheduler (one `diffeqsolve` per timescale group, under
    operator splitting / a single `lax.scan`).

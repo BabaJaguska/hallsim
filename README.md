@@ -54,7 +54,7 @@ they are not a reproduction of the paper's figures.
 
 A composition-time **validation layer** (units via pint, ontology IDs, feedback/fan-in graph analysis, duplicate-reaction heuristics) runs warnings-by-default and raises on hard conflicts.
 
-**Full details** — process kinds & port roles, the validation layer, composing composites, the merge-or-couple protocol, SBML import, hallmark handles, and batched population studies — are in **[docs/architecture.md](docs/architecture.md)**. The multi-rate scheduler (splitting schemes, coupling modes, adaptive step control) is in **[docs/design-multiscale-scheduler.md](docs/design-multiscale-scheduler.md)**.
+**Full details** — process kinds & port roles, the validation layer, composing composites, the merge-or-couple protocol, SBML import, perturbation handles, and batched population studies — are in **[docs/architecture.md](docs/architecture.md)**. The multi-rate scheduler (splitting schemes, coupling modes, adaptive step control) is in **[docs/design-multiscale-scheduler.md](docs/design-multiscale-scheduler.md)**.
 
 ## Quickstart
 
@@ -95,6 +95,16 @@ Parameters are JAX arrays, so you can `jax.grad` through an entire simulation.
 Calibration through the solve is documented in
 **[docs/calibration.md](docs/calibration.md)**.
 
+### Workflow
+
+Every model goes through the same steps, and each has a command:
+
+1. **Find** — `simulate find <query>`: search the repositories for a deposit that *emits* what you need; `simulate find-data <query>` does the same for a GEO dataset to calibrate against.
+2. **Screen** — `simulate screen <id-or-path>`: triage and the numerical screen of that one model on its own. Nothing joins a composite unscreened.
+3. **Import** — `process_from_sbml` / `process_from_xpp`, then `reconciled_to` to put it on the composite's clock.
+4. **Compose** — `Composite` with a topology; `analyze_composability` where two models overlap.
+5. **Calibrate** — `CalibrationProblem` with held-out arms ([docs/calibration.md](docs/calibration.md)).
+
 ### Demos & tests
 
 Framework mechanics, end to end:
@@ -114,6 +124,7 @@ Finding a model to compose is part of the workflow, not a prerequisite for it:
 ```bash
 simulate find NFkB inflammation --produces 'IL6|CXCL8'   # every repository, filtered by what a deposit EMITS
 simulate rejections                                       # what was screened out, and why
+simulate find-data "Down syndrome" --organism "Homo sapiens"   # GEO series, with the arms their sample titles reveal
 ```
 
 One worked case study composes two published SBML models and calibrates them
@@ -140,7 +151,7 @@ is shaded, with longer windows on a switch.
 ## What you can do with it
 
 - **Compose published models.** Search BioModels, JWS Online, ModelDB, BioSimulations, Physiome and Europe PMC supplements from one call, filtered by what a deposit *emits*; import SBML, COPASI `.cps` or XPPAUT `.ode`. The full mechanism surface auto-populates and is discoverable, and every candidate screened out is recorded with its reason in [docs/rejections.md](docs/rejections.md). → [docs/architecture.md#sbml-import](docs/architecture.md#sbml-import)
-- **Turn hallmark severities.** 0–1 differentiable handles that modulate the right parameters across models; interventions (rapamycin, CR) live on the hallmark layer they perturb. → [docs/architecture.md#hallmark-handles](docs/architecture.md#hallmark-handles)
+- **Pull a perturbation handle.** A named, differentiable severity that moves the right parameters across models. The hallmarks of aging ship as one registry; a drug or a gene dosage is another entry, applied the same way. → [docs/architecture.md#hallmark-handles](docs/architecture.md#perturbation-handles)
 - **Calibrate against data with held-out validation.** Gene-reporter concordance, log2-fold-change loss, MAP priors, differentiation through the stiff solve. → [docs/calibration.md](docs/calibration.md)
 - **Run batched population studies.** A `(batch, n_vars)` `y0` flows through the solve as one computation — no `vmap` to write. Measured on CPU it pays off to about 64 members and not beyond, because one adaptive loop takes the slowest member's step count; the GPU claim is unmeasured. Numbers in [docs/benchmarks.md](docs/benchmarks.md). → [docs/architecture.md#population-studies-via-batched-y0](docs/architecture.md#population-studies-via-batched-y0)
 

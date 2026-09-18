@@ -249,7 +249,7 @@ class TestCalibrationProblemValidation:
         )
         from hallsim.composite import Composite
         from hallsim.gene_reporters import GeneReporter
-        from hallsim.hallmarks import HallmarkHandle, ParameterMapping
+        from hallsim.handles import Handle, ParameterMapping
         from hallsim.process import Port, PortRole, Process
         import pandas as pd
 
@@ -271,7 +271,7 @@ class TestCalibrationProblemValidation:
 
         # Transform ignores `base` — severity IS the value (a pure dial).
         custom_reg = {
-            "Test Hallmark": HallmarkHandle(
+            "Test Hallmark": Handle(
                 name="Test Hallmark",
                 mappings=[
                     ParameterMapping(
@@ -295,7 +295,7 @@ class TestCalibrationProblemValidation:
                     "dial": ParameterRef(process_name="k", field="knob"),
                 },
                 fit_arms=["a_vs_a"],
-                hallmark_registry=custom_reg,
+                registry=custom_reg,
             )
 
     def test_scaled_magnitude_param_is_fittable(self):
@@ -311,7 +311,7 @@ class TestCalibrationProblemValidation:
         )
         from hallsim.composite import Composite
         from hallsim.gene_reporters import GeneReporter
-        from hallsim.hallmarks import HallmarkHandle, ParameterMapping
+        from hallsim.handles import Handle, ParameterMapping
         from hallsim.process import Port, PortRole, Process
         import pandas as pd
 
@@ -332,7 +332,7 @@ class TestCalibrationProblemValidation:
         )
         # Transform depends on `base` — fitting it calibrates the magnitude.
         custom_reg = {
-            "Test": HallmarkHandle(
+            "Test": Handle(
                 name="Test",
                 mappings=[
                     ParameterMapping(
@@ -354,7 +354,7 @@ class TestCalibrationProblemValidation:
                 "magnitude": ParameterRef(process_name="k", field="knob"),
             },
             fit_arms=["a_vs_a"],
-            hallmark_registry=custom_reg,
+            registry=custom_reg,
         )
 
     def test_params_reference_unknown_process_raises(self):
@@ -979,9 +979,9 @@ class TestStartingValueComesFromTheModel:
         """There is nowhere to write a start that could contradict the model."""
         import dataclasses
 
-        from hallsim.calibration import HallmarkCoeffRef, ParameterRef
+        from hallsim.calibration import HandleCoeffRef, ParameterRef
 
-        for cls in (ParameterRef, HallmarkCoeffRef):
+        for cls in (ParameterRef, HandleCoeffRef):
             assert "init" not in {
                 f.name for f in dataclasses.fields(cls)
             }, f"{cls.__name__} regained a declared starting value"

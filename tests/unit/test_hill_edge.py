@@ -63,8 +63,8 @@ class TestHillEdge:
         }
 
     def test_declarative_metadata_folds_in(self):
-        m = _edge(hallmark="H", reference="R", description="D").metadata()
-        assert (m["hallmark"], m["reference"], m["description"]) == (
+        m = _edge(handle="H", reference="R", description="D").metadata()
+        assert (m["handle"], m["reference"], m["description"]) == (
             "H",
             "R",
             "D",

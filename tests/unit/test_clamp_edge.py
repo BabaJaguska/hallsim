@@ -104,8 +104,8 @@ class TestClampEdge:
         }
 
     def test_declarative_metadata_folds_in(self):
-        m = ClampEdge(hallmark="H", reference="R", description="D").metadata()
-        assert (m["hallmark"], m["reference"], m["description"]) == (
+        m = ClampEdge(handle="H", reference="R", description="D").metadata()
+        assert (m["handle"], m["reference"], m["description"]) == (
             "H",
             "R",
             "D",

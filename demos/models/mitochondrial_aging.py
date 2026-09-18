@@ -1017,12 +1017,13 @@ def mito_hallmark_registry(registry: dict | None = None) -> dict:
     (``floor=0`` — severity 0 really is unirradiated). Model-local so the
     multi-hallmark demo, which holds that constant fixed and doses through
     the pulse, is
-    untouched: pass it as ``with_hallmarks(..., registry=...)`` or
-    ``CalibrationProblem(hallmark_registry=...)``.
+    untouched: pass it as ``with_handles(..., registry=...)`` or
+    ``CalibrationProblem(registry=...)``.
     """
     import copy
 
-    from hallsim.hallmarks import HALLMARK_REGISTRY, ParameterMapping
+    from hallsim.handles import ParameterMapping
+    from hallsim.hallmarks import HALLMARK_REGISTRY
 
     base = copy.deepcopy(HALLMARK_REGISTRY if registry is None else registry)
     base["Genomic Instability"].mappings.append(
@@ -1122,7 +1123,7 @@ def build_mitochondrial_aging_composite(
             "superoxide/H2O2",
             source_ontology=({"chebi": "CHEBI:16240"},),
             source_descriptions=("mitochondrial ROS relative to basal",),
-            hallmark="Mitochondrial Dysfunction",
+            handle="Mitochondrial Dysfunction",
             reference="Passos et al. 2007, PLoS Biol 5:e110",
             description="mitochondrial ROS → DallePezze ROS pool.",
         ),

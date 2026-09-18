@@ -35,8 +35,8 @@ Cross-publication edges:
 Conditions and drugs both enter through the hallmark layer::
 
     comp = build_multi_hallmark_composite()
-    ddis = apply_hallmarks(comp.processes, {"Genomic Instability": 1.0})
-    rapa = apply_hallmarks(comp.processes, {
+    ddis = apply_handles(comp.processes, {"Genomic Instability": 1.0})
+    rapa = apply_handles(comp.processes, {
         "Genomic Instability": 1.0,
         "Deregulated Nutrient Sensing": -1.0,   # mTORC1 suppressed
     })
@@ -274,7 +274,7 @@ def build_multi_hallmark_composite(
             n=(GZ06_DAMAGE_DRIVE_N,),
             source_ontology=({"go": "GO:0006974"},),
             source_descriptions=("DP14 accumulated DNA damage",),
-            hallmark="Genomic Instability",
+            handle="Genomic Instability",
             reference="Banin et al. 1998, Science 281:1674–1677",
             description="DNA damage ⊣ p53 degradation (GZ06 alpha_x).",
         ),
@@ -291,7 +291,7 @@ def build_multi_hallmark_composite(
             target_description="p53-driven transcription summed into CDKN1A",
             source_ontology=({"go": "GO:0006977"},),
             source_descriptions=("GZ06 p53 level",),
-            hallmark="Genomic Instability",
+            handle="Genomic Instability",
             reference="el-Deiry et al. 1993; Purvis et al. 2012; Shi et al. 2021",
             description="p53 → CDKN1A (p21) edge (Geva-Zatorsky 2006 → DallePezze).",
         ),
@@ -324,7 +324,7 @@ def build_multi_hallmark_composite(
             t_end=dose_window[1],
             amplitude=1.0,
             source_name="irradiation_pulse",
-            hallmark="Genomic Instability",
+            handle="Genomic Instability",
             driven_rate=(
                 DP14_IRRADIATION_RATE_NAME,
                 DP14_SBML_IRRADIATION_RATE,
@@ -342,7 +342,7 @@ def build_multi_hallmark_composite(
         before=DP14_MTOR_PHOS_RATE_DEFAULT,
         after=DP14_MTOR_PHOS_RATE_DEFAULT,
         source_name="rapamycin_drive",
-        hallmark="Deregulated Nutrient Sensing",
+        handle="Deregulated Nutrient Sensing",
     )
     return Composite(
         processes=processes,
@@ -389,7 +389,7 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
         source_description="DP14 ROS",
         target_ontology={"chebi": "CHEBI:26523"},
         target_description="Proctor 2007 ROS, read from DP14's pool.",
-        hallmark="Loss of Proteostasis",
+        handle="Loss of Proteostasis",
         reference=(
             "Proctor et al. 2007, BMC Syst Biol 1:17; "
             "Dalle Pezze et al. 2014, PLoS Comput Biol 10:e1003728"
@@ -414,7 +414,7 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
         target_description=(
             "Proctor 2007 synthesis rate k1, rescaled to DP14 phospho-mTORC1."
         ),
-        hallmark="Deregulated Nutrient Sensing",
+        handle="Deregulated Nutrient Sensing",
         reference="Ma & Blenis 2009, Nat Rev Mol Cell Biol 10:307–318",
         description=(
             "mTORC1 → protein synthesis (DP14 phospho-mTORC1 drives "

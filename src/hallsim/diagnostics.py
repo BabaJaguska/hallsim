@@ -1048,7 +1048,7 @@ class SensitivityReport:
 def screen_sensitivity(
     composite: Composite,
     reporters,
-    hallmarks,
+    handles,
     *,
     baseline: dict[str, float] | None = None,
     t_end: float = 14.0,
@@ -1063,7 +1063,7 @@ def screen_sensitivity(
     For each ``hallmark`` it differentiates every reporter's summary with
     respect to that hallmark's severity at ``baseline`` (the operating point —
     sensitivity is regime-dependent, which is the whole point), using the same
-    differentiable ``apply_hallmarks`` → ``Scheduler.run`` path the calibrator
+    differentiable ``apply_handles`` → ``Scheduler.run`` path the calibrator
     does. A reporter whose relative sensitivity falls below ``rel_threshold``
     is ``FLAT`` — calibrating or validating it in this regime is
     uninformative. A non-finite gradient means the composite is not
@@ -1074,10 +1074,10 @@ def screen_sensitivity(
     mode is unavailable); the Scheduler is warmed on the concrete baseline
     first so ``auto_stiffness`` resolves its solvers outside the trace.
     """
-    from hallsim.hallmarks import apply_hallmarks
+    from hallsim.handles import apply_handles
 
-    hallmarks = list(hallmarks)
-    base = dict(baseline or {h: 1.0 for h in hallmarks})
+    handles = list(handles)
+    base = dict(baseline or {h: 1.0 for h in handles})
     qt = jnp.atleast_1d(
         jnp.asarray(
             query_time if query_time is not None else t_end, dtype=float
@@ -1085,11 +1085,11 @@ def screen_sensitivity(
     )
     mdt = macro_dt if macro_dt is not None else t_end / 4.0
     sched = Scheduler(auto_stiffness=auto_stiffness)
-    base_vec = jnp.asarray([float(base[h]) for h in hallmarks])
+    base_vec = jnp.asarray([float(base[h]) for h in handles])
 
     def _build(hm):
         return Composite(
-            apply_hallmarks(composite.processes, hm, registry),
+            apply_handles(composite.processes, hm, registry),
             composite.topology,
             validate=False,
             semantic_validation=False,
@@ -1097,7 +1097,7 @@ def screen_sensitivity(
 
     def reporter_values(sev_vec):
         hm = dict(base)
-        for i, h in enumerate(hallmarks):
+        for i, h in enumerate(handles):
             hm[h] = sev_vec[i]
         comp = _build(hm)
         res = sched.run(
@@ -1121,12 +1121,12 @@ def screen_sensitivity(
         y0=base_comp.initial_state_vec(),
     )
     values = reporter_values(base_vec)
-    jac = jax.jacrev(reporter_values)(base_vec)  # (n_reporter, n_hallmark)
+    jac = jax.jacrev(reporter_values)(base_vec)  # (n_reporter, n_handle)
 
     reports = []
     for i, r in enumerate(reporters):
         val = float(values[i])
-        for j, h in enumerate(hallmarks):
+        for j, h in enumerate(handles):
             sens = float(jac[i, j])
             finite = bool(jnp.isfinite(sens))
             rel = abs(sens) / (abs(val) + 1e-12)

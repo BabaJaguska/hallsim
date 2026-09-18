@@ -680,3 +680,18 @@ class TestProducedSpeciesScreen:
         (row,) = discovery.screen_produced_species(["MODEL1"], r"\bIL6\b")
         assert row.status == "no-rate-laws"
         assert row.n_reactions == 1
+
+
+def test_biomodels_search_drops_phrase_quotes(monkeypatch):
+    """The search endpoint answers a quoted phrase with HTTP 400."""
+    from hallsim import discovery
+
+    sent = {}
+
+    def fake(url, params, timeout):
+        sent.update(params)
+        return {"models": []}
+
+    monkeypatch.setattr(discovery, "_get_json", fake)
+    discovery.search_biomodels('"Down syndrome" AND glutathione')
+    assert sent["query"] == "Down syndrome AND glutathione"

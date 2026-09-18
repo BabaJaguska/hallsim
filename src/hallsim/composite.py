@@ -1364,16 +1364,16 @@ class Composite(eqx.Module):
     def calibration_targets(
         self,
         *,
-        include_hallmark_targets: bool = False,
+        include_handle_targets: bool = False,
         registry: dict | None = None,
     ) -> list:
         """Every process's ``calibratable_params()`` with the namespace filled
         in, minus the ``(process, field)`` pairs any hallmark mapping targets.
 
         Hallmarks are experimenter knobs set through
-        ``Condition.hallmarks[name] = severity``, so their targets aren't valid
+        ``Condition.handles[name] = severity``, so their targets aren't valid
         Calibrator inputs; everything else in those processes stays
-        calibratable. Set ``include_hallmark_targets`` to keep them.
+        calibratable. Set ``include_handle_targets`` to keep them.
 
         Returns :class:`~hallsim.calibration.CalibratableParam` entries — pass
         one through ``ParameterRef(...)`` to wire it into a
@@ -1384,19 +1384,17 @@ class Composite(eqx.Module):
 
         reg = HALLMARK_REGISTRY if registry is None else registry
 
-        hallmark_targets: set[tuple[str, str]] = set()
+        handle_targets: set[tuple[str, str]] = set()
         for handle in reg.values():
             for mapping in handle.mappings:
-                hallmark_targets.add(
-                    (mapping.process_name, mapping.param_name)
-                )
+                handle_targets.add((mapping.process_name, mapping.param_name))
 
         out: list = []
         for proc_name, proc in self.processes.items():
             for item in proc.calibratable_params():
                 if (
-                    not include_hallmark_targets
-                    and (proc_name, item.field) in hallmark_targets
+                    not include_handle_targets
+                    and (proc_name, item.field) in handle_targets
                 ):
                     continue
                 out.append(

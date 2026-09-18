@@ -64,7 +64,7 @@ class ClampEdge(Process):
     target_default: float = eqx.field(static=True, default=0.0)
     target_ontology: dict | None = eqx.field(static=True, default=None)
     target_description: str = eqx.field(static=True, default="")
-    hallmark: str | None = eqx.field(static=True, default=None)
+    handle: str | None = eqx.field(static=True, default=None)
     reference: str | None = eqx.field(static=True, default=None)
     description: str | None = eqx.field(static=True, default=None)
 
@@ -194,7 +194,7 @@ def clamp_species(
     t_start: float = 0.0,
     source_name=None,
     edge_name=None,
-    hallmark=None,
+    handle=None,
 ):
     """Hold ``target``'s ``species`` port at ``level`` from ``t_start`` on.
 
@@ -235,7 +235,7 @@ def clamp_species(
         target_default=float(port.default),
         target_ontology=dict(port.ontology or {}),
         target_description=f"{species} held at a setpoint",
-        hallmark=hallmark,
+        handle=handle,
     )
     topology[src] = {"signal": signal_path}
     topology[edge] = {"target": path, "setpoint": signal_path}

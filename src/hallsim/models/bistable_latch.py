@@ -71,7 +71,7 @@ class BistableLatch(Process):
     trigger_description: str = eqx.field(static=True, default="")
     target_ontology: dict | None = eqx.field(static=True, default=None)
     target_description: str = eqx.field(static=True, default="")
-    hallmark: str | None = eqx.field(static=True, default=None)
+    handle: str | None = eqx.field(static=True, default=None)
     reference: str | None = eqx.field(static=True, default=None)
     description: str | None = eqx.field(static=True, default=None)
 

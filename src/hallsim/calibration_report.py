@@ -87,9 +87,9 @@ def save_outputs(
             }
             for k, p in problem.params.items()
         },
-        "hallmark_coeffs": {
+        "handle_coeffs": {
             k: {
-                "hallmark": c.hallmark,
+                "handle": c.handle,
                 "param_name": c.param_name,
                 "coeff": c.coeff,
                 "clamp": list(c.clamp) if c.clamp else None,
@@ -113,7 +113,7 @@ def save_outputs(
         "wall_time_s": float(history.wall_time_s),
         "conditions": {
             name: {
-                "hallmarks": dict(c.hallmarks),
+                "handles": dict(c.handles),
                 "description": c.description,
             }
             for name, c in problem.conditions.items()

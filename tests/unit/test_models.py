@@ -222,10 +222,10 @@ def test_shooting_stabilizer_knobs_run_and_stay_finite():
 # ── Hallmark Handles ────────────────────────────────────────────────────
 
 
-# Machinery (apply_hallmarks) but exercised through the ERiQ demo model; demo
+# Machinery (apply_handles) but exercised through the ERiQ demo model; demo
 # until decoupled onto a toy process.
 @pytest.mark.demo
-class TestHallmarkHandles:
+class TestHandles:
     def test_apply_modifies_parameter(self):
         from hallsim.hallmarks import HALLMARK_REGISTRY
         from demos.models.eriq import ERiQOxidativeStress
@@ -251,8 +251,8 @@ class TestHallmarkHandles:
             1.0
         )
 
-    def test_apply_hallmarks_multiple(self):
-        from hallsim.hallmarks import apply_hallmarks
+    def test_apply_handles_multiple(self):
+        from hallsim.handles import apply_handles
         from demos.models.eriq import (
             ERiQEnergyMetabolism,
             ERiQOxidativeStress,
@@ -263,7 +263,7 @@ class TestHallmarkHandles:
             "energy": ERiQEnergyMetabolism(GLYCOL_SA=1.0),
         }
 
-        modified = apply_hallmarks(
+        modified = apply_handles(
             procs,
             {
                 "Mitochondrial Dysfunction": 0.8,
@@ -321,7 +321,7 @@ class TestHallmarkHandles:
 
     def test_grad_through_severity(self):
         """Severity-differentiability claim — pass a jnp.ndarray severity
-        and confirm jax.grad through apply_hallmarks returns finite.
+        and confirm jax.grad through apply_handles returns finite.
         """
         import jax
         import jax.numpy as jnp
@@ -345,15 +345,13 @@ class TestHallmarkHandles:
 def test_proteostasis_handle_scales_composite_activity_without_mutation():
     import equinox as eqx
     from demos.models.multi_hallmark import build_multi_hallmark_composite
-    from hallsim.hallmarks import apply_hallmarks
+    from hallsim.handles import apply_handles
 
     composite = build_multi_hallmark_composite(validate=False)
     original = composite.processes
     assert float(original["p07"].parameters["k69"]) == pytest.approx(1e-3)
     for severity, expected in [(0.0, 1e-3), (0.5, 5e-4), (1.0, 0.0)]:
-        modified = apply_hallmarks(
-            original, {"Loss of Proteostasis": severity}
-        )
+        modified = apply_handles(original, {"Loss of Proteostasis": severity})
         assert float(modified["p07"].parameters["k69"]) == pytest.approx(
             expected
         )
@@ -366,13 +364,11 @@ def test_proteostasis_handle_scales_composite_activity_without_mutation():
     )
 
     def activity(severity):
-        return apply_hallmarks(fitted, {"Loss of Proteostasis": severity})[
+        return apply_handles(fitted, {"Loss of Proteostasis": severity})[
             "p07"
         ].parameters["k69"]
 
     assert float(activity(0.5)) == pytest.approx(1e-3)
     assert float(jax.grad(activity)(0.5)) == pytest.approx(-2e-3)
     with pytest.raises(KeyError, match="no target"):
-        apply_hallmarks(
-            {"dp14": original["dp14"]}, {"Loss of Proteostasis": 1}
-        )
+        apply_handles({"dp14": original["dp14"]}, {"Loss of Proteostasis": 1})

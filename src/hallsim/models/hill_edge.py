@@ -54,7 +54,7 @@ class HillEdge(Process):
     target_description: str = eqx.field(static=True, default="")
     source_ontology: tuple | None = eqx.field(static=True, default=None)
     source_descriptions: tuple | None = eqx.field(static=True, default=None)
-    hallmark: str | None = eqx.field(static=True, default=None)
+    handle: str | None = eqx.field(static=True, default=None)
     reference: str | None = eqx.field(static=True, default=None)
     description: str | None = eqx.field(static=True, default=None)
 

@@ -121,7 +121,7 @@ class NeuralODEProcess(Process):
     # Hill couplings: each (control_field, port, basal_param, hi, K, n) reads
     # ``port`` and interpolates ``parameters[basal_param]``→``hi``. Static
     # metadata so it round-trips through the ``eqx.tree_at`` substitutions the
-    # hallmark / Calibrator paths apply to ``parameters``.
+    # handle / Calibrator paths apply to ``parameters``.
     _hill_drivers: tuple = eqx.field(static=True, default=())
 
     def __init__(

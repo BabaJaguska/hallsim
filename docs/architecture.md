@@ -209,29 +209,32 @@ Writes are atomic, so concurrent processes never read a partial file. Set
 `HALLSIM_COMPILATION_CACHE_DIR` to relocate the compile cache, or to `off` to
 disable it — which is what you want when timing a cold compile.
 
-## Hallmark handles
+## Perturbation handles
 
-Each hallmark of aging is a 0–1 severity handle that modulates parameters
-across one or more processes, differentiable end-to-end. Transforms are
+A handle is a named severity that moves parameters across one or more
+processes, differentiable end-to-end (`hallsim.handles`). Transforms are
 **multiplicative of the current calibrated base value** — a transform gets
 `(severity, base)` and returns `base * f(severity)` — so `Calibrator` can fit
-mechanism parameters and then `apply_hallmarks` at the experimental severity
-profile without the hallmark clobbering the fit.
+mechanism parameters and then apply severities without the handle
+clobbering the fit. The hallmarks of aging ship as one registry of handles,
+`hallsim.hallmarks.HALLMARK_REGISTRY`; a drug, a gene dosage or any other
+perturbation is another `Handle` in a registry of its own, applied the same
+way. An experimental arm is a choice of severities over one composite.
 
 ```python
-from hallsim.hallmarks import with_hallmarks
+from hallsim.handles import with_handles
 from demos.models.multi_hallmark import build_multi_hallmark_composite
 
 base = build_multi_hallmark_composite()
 # Rapamycin = downward shift on Deregulated Nutrient Sensing (targets DP14's
 # mTORC1 phosphorylation rate): +1 is full dysregulation, -1 is rapamycin.
-treated = with_hallmarks(base, {"Deregulated Nutrient Sensing": -1.0})
+treated = with_handles(base, {"Deregulated Nutrient Sensing": -1.0})
 ```
 
-`with_hallmarks` keeps the topology; `apply_hallmarks(processes, {...})` is
+`with_handles` keeps the topology; `apply_handles(processes, {...})` is
 the same transform on a bare process dict.
 
-**Pharmacological interventions belong on the hallmark layer they perturb**,
+**Pharmacological interventions belong on the handle layer they perturb**,
 not as separate Processes. **Cross-model coupling is mediated at the
 experimental-condition level where possible**: e.g. Genomic Instability drives
 both DP14's `DNA_damaged_by_irradiation` and GZ06's `psi` at each model's own

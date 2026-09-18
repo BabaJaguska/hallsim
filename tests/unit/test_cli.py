@@ -155,3 +155,14 @@ def test_unscored_run_receives_the_equilibrate_option(monkeypatch, tmp_path):
     result = CliRunner().invoke(simulate, ["multi-hallmark", "run"])
     assert result.exit_code == 0, result.output
     assert received == {"equilibrate": False}
+
+
+def test_screen_runs_the_triage_on_a_bundled_model():
+    from demos.models.multi_hallmark import GZ06_SBML_PATH
+
+    result = CliRunner().invoke(
+        simulate, ["screen", str(GZ06_SBML_PATH), "--t-end", "5"]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(("[PASS]", "[FLAG]", "[REJECT]"))
+    assert "species" in result.output

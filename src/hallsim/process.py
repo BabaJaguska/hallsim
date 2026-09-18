@@ -98,7 +98,7 @@ def calibratable(
 
 def read_param(proc, field: str):
     """Current value at ``field`` on ``proc``, in the dotted convention shared
-    by :attr:`hallsim.hallmarks.ParameterMapping.param_name` and
+    by :attr:`hallsim.handles.ParameterMapping.param_name` and
     :class:`hallsim.calibration.ParameterRef`: ``"alpha"`` reads ``proc.alpha``,
     ``"parameters.<key>"`` one entry of a parameters dict."""
     if "." in field:
@@ -332,7 +332,7 @@ class Process(eqx.Module):
 
     # Folded into metadata() when set. Plain class attributes, not fields, so
     # they add nothing to the traced pytree.
-    hallmark = None
+    handle = None
     reference = None
     description = None
 
@@ -517,7 +517,7 @@ class Process(eqx.Module):
         declared with :func:`calibratable`, at its current value.
 
         Subclasses with a non-field parameter surface (``SBMLProcess``'s
-        constants dict) extend this. Safe to expose a hallmark target too:
+        constants dict) extend this. Safe to expose a handle target too:
         :meth:`Composite.calibration_targets` subtracts those.
         """
         from hallsim.calibration import CalibratableParam
@@ -554,7 +554,7 @@ class Process(eqx.Module):
                 for name, port in self.ports_schema().items()
             },
         }
-        for key in ("hallmark", "reference", "description"):
+        for key in ("handle", "reference", "description"):
             value = getattr(self, key, None)
             if value:
                 meta[key] = value
