@@ -227,7 +227,7 @@ def test_shooting_stabilizer_knobs_run_and_stay_finite():
 @pytest.mark.demo
 class TestHandles:
     def test_apply_modifies_parameter(self):
-        from hallsim.hallmarks import HALLMARK_REGISTRY
+        from demos.models.hallmarks import HALLMARK_REGISTRY
         from demos.models.eriq import ERiQOxidativeStress
 
         handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
@@ -240,7 +240,7 @@ class TestHandles:
         )
 
     def test_severity_zero_no_change(self):
-        from hallsim.hallmarks import HALLMARK_REGISTRY
+        from demos.models.hallmarks import HALLMARK_REGISTRY
         from demos.models.eriq import ERiQOxidativeStress
 
         handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
@@ -252,6 +252,7 @@ class TestHandles:
         )
 
     def test_apply_handles_multiple(self):
+        from demos.models.hallmarks import HALLMARK_REGISTRY
         from hallsim.handles import apply_handles
         from demos.models.eriq import (
             ERiQEnergyMetabolism,
@@ -269,6 +270,7 @@ class TestHandles:
                 "Mitochondrial Dysfunction": 0.8,
                 "Deregulated Nutrient Sensing": 0.5,
             },
+            HALLMARK_REGISTRY,
         )
 
         assert float(modified["oxidative_stress"].MDAMAGE_SA) == pytest.approx(
@@ -281,7 +283,7 @@ class TestHandles:
     def test_a_hallmark_with_no_target_at_all_raises(self):
         """Applying it would change nothing, so every arm of the sweep would
         run identically and the dial would read as inert biology."""
-        from hallsim.hallmarks import HALLMARK_REGISTRY
+        from demos.models.hallmarks import HALLMARK_REGISTRY
 
         handle = HALLMARK_REGISTRY["Genomic Instability"]
         procs = {"something_else": ERiQOxidativeStress()}
@@ -289,7 +291,7 @@ class TestHandles:
             handle.apply(procs, severity=0.5)
 
     def test_summary(self):
-        from hallsim.hallmarks import HALLMARK_REGISTRY
+        from demos.models.hallmarks import HALLMARK_REGISTRY
 
         handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
         summary = handle.summary(severity=0.5)
@@ -300,7 +302,7 @@ class TestHandles:
         """Core invariant: if you change the base value, the transform's
         output scales with it.
         """
-        from hallsim.hallmarks import HALLMARK_REGISTRY
+        from demos.models.hallmarks import HALLMARK_REGISTRY
         from demos.models.eriq import ERiQOxidativeStress
 
         handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
@@ -325,7 +327,7 @@ class TestHandles:
         """
         import jax
         import jax.numpy as jnp
-        from hallsim.hallmarks import HALLMARK_REGISTRY
+        from demos.models.hallmarks import HALLMARK_REGISTRY
         from demos.models.eriq import ERiQOxidativeStress
 
         handle = HALLMARK_REGISTRY["Mitochondrial Dysfunction"]
@@ -344,6 +346,7 @@ class TestHandles:
 @pytest.mark.demo
 def test_proteostasis_handle_scales_composite_activity_without_mutation():
     import equinox as eqx
+    from demos.models.hallmarks import HALLMARK_REGISTRY
     from demos.models.multi_hallmark import build_multi_hallmark_composite
     from hallsim.handles import apply_handles
 
@@ -351,7 +354,9 @@ def test_proteostasis_handle_scales_composite_activity_without_mutation():
     original = composite.processes
     assert float(original["p07"].parameters["k69"]) == pytest.approx(1e-3)
     for severity, expected in [(0.0, 1e-3), (0.5, 5e-4), (1.0, 0.0)]:
-        modified = apply_handles(original, {"Loss of Proteostasis": severity})
+        modified = apply_handles(
+            original, {"Loss of Proteostasis": severity}, HALLMARK_REGISTRY
+        )
         assert float(modified["p07"].parameters["k69"]) == pytest.approx(
             expected
         )
@@ -364,14 +369,18 @@ def test_proteostasis_handle_scales_composite_activity_without_mutation():
     )
 
     def activity(severity):
-        return apply_handles(fitted, {"Loss of Proteostasis": severity})[
-            "p07"
-        ].parameters["k69"]
+        return apply_handles(
+            fitted, {"Loss of Proteostasis": severity}, HALLMARK_REGISTRY
+        )["p07"].parameters["k69"]
 
     assert float(activity(0.5)) == pytest.approx(1e-3)
     assert float(jax.grad(activity)(0.5)) == pytest.approx(-2e-3)
     with pytest.raises(KeyError, match="no target"):
-        apply_handles({"dp14": original["dp14"]}, {"Loss of Proteostasis": 1})
+        apply_handles(
+            {"dp14": original["dp14"]},
+            {"Loss of Proteostasis": 1},
+            HALLMARK_REGISTRY,
+        )
 
 
 @pytest.mark.demo
@@ -379,7 +388,7 @@ def test_every_hallmark_names_a_real_parameter_of_a_demo_composite():
     """Each registry mapping resolves on the composite it targets, so a
     placeholder handle cannot point at a rate that does not exist."""
     from demos.models.multi_hallmark import build_multi_hallmark_composite
-    from hallsim.hallmarks import HALLMARK_REGISTRY
+    from demos.models.hallmarks import HALLMARK_REGISTRY
     from hallsim.process import read_param
 
     comp = build_multi_hallmark_composite(validate=False)
@@ -398,6 +407,7 @@ def test_every_hallmark_names_a_real_parameter_of_a_demo_composite():
 @pytest.mark.demo
 def test_the_composite_carries_no_damage_until_a_handle_sets_it():
     from demos.models.multi_hallmark import build_multi_hallmark_composite
+    from demos.models.hallmarks import HALLMARK_REGISTRY
     from hallsim.handles import with_handles
     from hallsim.process import read_param
     from hallsim.scheduler import Scheduler
@@ -407,7 +417,9 @@ def test_the_composite_carries_no_damage_until_a_handle_sets_it():
         float(read_param(base.processes["irradiation_pulse"], "amplitude"))
         == 0.0
     )
-    treated = with_handles(base, {"Genomic Instability": 1.0})
+    treated = with_handles(
+        base, {"Genomic Instability": 1.0}, registry=HALLMARK_REGISTRY
+    )
 
     def damage(comp):
         res = Scheduler().run(
@@ -417,3 +429,55 @@ def test_the_composite_carries_no_damage_until_a_handle_sets_it():
 
     # DP14 makes some damage from its own ROS; the pulse adds a multiple.
     assert damage(treated) > 3 * damage(base)
+
+
+@pytest.mark.demo
+def test_hallmark_intents_suggest_the_hand_placed_mappings():
+    """On the multi-hallmark composite the intents must land on the rates
+    the reviewed registry names, driven ones included; anything extra is
+    review material, anything missing is a wrong intent or a missing
+    annotation."""
+    from demos.models.multi_hallmark import (
+        DP14_MTOR_PHOS_RATE_NAME,
+        build_multi_hallmark_composite,
+    )
+    from hallsim.handles import suggest_registry
+    from hallsim.hallmarks import HALLMARK_INTENTS
+
+    comp = build_multi_hallmark_composite(validate=False)
+    suggested = suggest_registry(HALLMARK_INTENTS, comp)
+    expected = {
+        "Genomic Instability": {
+            ("dp14", "parameters.DNA_damaged_by_irradiation"),
+            ("dp14", "parameters.DNA_damaged_by_ROS"),
+        },
+        "Loss of Proteostasis": {("p07", "parameters.k69")},
+        "Deregulated Nutrient Sensing": {
+            ("dp14", f"parameters.{DP14_MTOR_PHOS_RATE_NAME}")
+        },
+        "Mitochondrial Dysfunction": {("dp14", "parameters.mito_dysfunction")},
+        "Cellular Senescence": {
+            ("p53_cdkn1a", "hi"),
+            ("dp14", "parameters.sen_ass_beta_gal_inc_by_ROS"),
+        },
+        "Epigenetic Alterations": {
+            ("dp14", "parameters.CDKN1B_transcr_by_FoxO3a_n_DNA_damage")
+        },
+        "Chronic Inflammation": {
+            ("dp14", "parameters.IKKbeta_activ_by_ROS"),
+            ("dp14", "parameters.JNK_activ_by_ROS"),
+        },
+        "Altered Intercellular Communication": {
+            ("dp14", "parameters.Insulin")
+        },
+    }
+    for name, must in expected.items():
+        got = {
+            (m.process_name, m.param_name) for m in suggested[name].mappings
+        }
+        assert must <= got, (name, must - got, got)
+    # The driven rate is reported as driven, not as a bare constant.
+    dns = suggested["Deregulated Nutrient Sensing"].mappings
+    driven = [m for m in dns if DP14_MTOR_PHOS_RATE_NAME in m.param_name]
+    assert driven and "driven through port" in driven[0].description
+    assert suggested["Stem Cell Exhaustion"].mappings == []

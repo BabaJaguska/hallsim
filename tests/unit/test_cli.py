@@ -191,3 +191,13 @@ def test_module_runs_as_a_script():
     )
     assert result.returncode == 0, result.stderr
     assert "Usage" in result.stdout
+
+
+def test_handles_lists_where_the_hallmarks_land():
+    from demos.models.multi_hallmark import GZ06_SBML_PATH
+
+    result = CliRunner().invoke(simulate, ["handles", str(GZ06_SBML_PATH)])
+    assert result.exit_code == 0, result.output
+    assert "Telomere Attrition" in result.output
+    assert "parameters.alpha_k" in result.output  # Mdm2-mediated p53 loss
+    assert "no annotated species matches" in result.output  # e.g. dysbiosis

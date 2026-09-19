@@ -31,6 +31,7 @@ import numpy as np  # noqa: E402
 from hallsim.composite import Composite, single_process_composite  # noqa: E402
 from hallsim.config import DEFAULT_ATOL, DEFAULT_RTOL  # noqa: E402
 from hallsim.handles import with_handles  # noqa: E402
+from demos.models.hallmarks import HALLMARK_REGISTRY  # noqa: E402
 from hallsim.process import Port, PortRole, Process  # noqa: E402
 from hallsim.root_finders import Chord  # noqa: E402
 from hallsim.sbml_import import process_from_sbml  # noqa: E402
@@ -129,6 +130,7 @@ def multi_hallmark_composite() -> Composite:
     return with_handles(
         build_multi_hallmark_composite(validate=False),
         {"Genomic Instability": 1.0},
+        registry=HALLMARK_REGISTRY,
     )
 
 

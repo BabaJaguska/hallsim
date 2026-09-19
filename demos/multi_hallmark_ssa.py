@@ -19,6 +19,7 @@ from demos.models.multi_hallmark import (
     build_multi_hallmark_composite,
 )
 from hallsim.handles import with_handles
+from demos.models.hallmarks import HALLMARK_REGISTRY
 from hallsim.scheduler import Scheduler
 from hallsim.stochastic import SSAResult, simulate_ssa
 
@@ -35,6 +36,7 @@ def run(
     deterministic = with_handles(
         build_multi_hallmark_composite(validate=False),
         {"Genomic Instability": 1.0},
+        registry=HALLMARK_REGISTRY,
     )
     keys = deterministic.store_keys()
     trajectory = Scheduler().run(

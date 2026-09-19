@@ -125,7 +125,7 @@ on its own; the number above never supported it.
 > reaching GZ06 only through the coupling edge.
 
 The Genomic Instability hallmark interpolates `psi` from a basal level
-(control) to the full-dose reference at DDIS (`hallsim.hallmarks`, Genomic
+(control) to the full-dose reference at DDIS (`demos.models.hallmarks`, Genomic
 Instability → `gz06.parameters.psi`):
 
 ```

@@ -218,19 +218,33 @@ processes, differentiable end-to-end (`hallsim.handles`). Transforms are
 **multiplicative of the current calibrated base value** — a transform gets
 `(severity, base)` and returns `base * f(severity)` — so `Calibrator` can fit
 mechanism parameters and then apply severities without the handle
-clobbering the fit. The hallmarks of aging ship as one registry of handles,
-`hallsim.hallmarks.HALLMARK_REGISTRY`; a drug, a gene dosage or any other
-perturbation is another `Handle` in a registry of its own, applied the same
-way. An experimental arm is a choice of severities over one composite.
+clobbering the fit. A registry is a plain `{name: Handle}` dict and every
+call names the one it uses. The demos ship the hallmarks of aging as one,
+`demos.models.hallmarks.HALLMARK_REGISTRY`, mapped onto the demo models; a
+drug, a gene dosage or any other perturbation is another `Handle` in a
+registry of its own, applied the same way. An experimental arm is a choice
+of severities over one composite.
+
+A registry is written, not resolved: the hallmarks are also described once
+without naming any model, as intents in ontology terms
+(`hallsim.hallmarks.HALLMARK_INTENTS`: the species by UniProt, ChEBI or GO
+id, its role in the reactions to scale, the gain), and
+`hallsim.handles.suggest_registry(intents, composite)` proposes named
+mappings for any composite from what its members annotate. `simulate
+handles <id-or-path>` prints that table for a model, including where
+nothing is annotated the way an intent asks. The proposal is reviewed and
+kept as a file, and the file is what gets applied.
 
 ```python
 from hallsim.handles import with_handles
+from demos.models.hallmarks import HALLMARK_REGISTRY
 from demos.models.multi_hallmark import build_multi_hallmark_composite
 
 base = build_multi_hallmark_composite()
 # Rapamycin = downward shift on Deregulated Nutrient Sensing (targets DP14's
 # mTORC1 phosphorylation rate): +1 is full dysregulation, -1 is rapamycin.
-treated = with_handles(base, {"Deregulated Nutrient Sensing": -1.0})
+treated = with_handles(base, {"Deregulated Nutrient Sensing": -1.0},
+                       registry=HALLMARK_REGISTRY)
 ```
 
 `with_handles` keeps the topology; `apply_handles(processes, {...})` is

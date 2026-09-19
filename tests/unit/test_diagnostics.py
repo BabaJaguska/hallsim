@@ -19,6 +19,7 @@ from hallsim.diagnostics import (
 )
 from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
 from hallsim.models.hill_edge import HillEdge
+from demos.models.hallmarks import HALLMARK_REGISTRY
 from demos.models.multi_hallmark import (
     GZ06_PSI_PUBLISHED,
     GZ06_PSI_NAME,
@@ -285,6 +286,7 @@ def test_screen_sensitivity_finite_gradients_and_live_detection():
         baseline={"Genomic Instability": 1.0},
         t_end=14.0,
         macro_dt=3.5,
+        registry=HALLMARK_REGISTRY,
     )
     by = {r.reporter: r for r in reports}
     assert all(r.finite for r in reports), reports

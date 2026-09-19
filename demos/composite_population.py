@@ -32,6 +32,7 @@ jax.config.update("jax_enable_x64", True)
 
 from hallsim.composite import Composite
 from hallsim.handles import apply_handles
+from demos.models.hallmarks import HALLMARK_REGISTRY
 from demos.models.multi_hallmark import build_multi_hallmark_composite
 from hallsim.scheduler import Scheduler
 
@@ -86,6 +87,7 @@ def main():
     procs = apply_handles(
         base.processes,
         {"Genomic Instability": a.gi, "Deregulated Nutrient Sensing": a.dns},
+        HALLMARK_REGISTRY,
     )
     comp = Composite(
         processes=procs,

@@ -32,8 +32,9 @@ src/hallsim/
   sbml_import.py, cps_import.py, xpp_import.py — SBML / COPASI / XPPAUT importers
   sbml_export.py       — Composite.to_sbml
   imported.py          — ImportedODEProcess: time reconciliation, parameter and species inputs
-  handles.py           — Handle, ParameterMapping, apply_handles, with_handles
-  hallmarks.py         — HALLMARK_REGISTRY: the hallmarks of aging as handles
+  handles.py           — Handle, ParameterMapping, apply_handles, with_handles; targets_for,
+                         suggest_mappings, Intent, suggest_registry (proposals from annotations)
+  hallmarks.py         — HALLMARK_INTENTS: the twelve hallmarks in ontology terms, naming no model
   gene_reporters.py    — GeneReporter, MULTI_HALLMARK_REPORTERS, GeneExpressionDataset, GEO fetch
   calibration.py       — Calibrator, CalibrationProblem, Condition, ParameterRef
   identifiability.py   — structural redundancy, fittable-set screen
@@ -44,7 +45,8 @@ src/hallsim/
                          forcing, running_integral, bistable_latch, gated_removal,
                          saturating_removal, observer, neuralode
 demos/models/          — specific biology: multi_hallmark (DP14 + GZ06 + Proctor 2007), eriq,
-                         stem_cell_niche, and the vendored SBML under sbml/
+                         stem_cell_niche, hallmarks (HALLMARK_REGISTRY on those models),
+                         and the vendored SBML under sbml/
 ```
 
 ## Calibration principles

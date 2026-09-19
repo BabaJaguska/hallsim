@@ -923,8 +923,13 @@ class CalibrationProblem:
             k: v for k, v in locals().items() if k not in ("self", "__class__")
         }
         from hallsim.composite import Composite  # local import — avoid cycle
-        from hallsim.hallmarks import HALLMARK_REGISTRY
 
+        if registry is None and any(c.handles for c in conditions.values()):
+            raise ValueError(
+                "the conditions name handles but no registry was given; "
+                "pass registry={name: Handle} (the demos' hallmarks are "
+                "demos.models.hallmarks.HALLMARK_REGISTRY)"
+            )
         # A ParameterRef substitutes into a process (`eqx.tree_at`); a
         # HandleCoeffRef overrides a handle-mapping coefficient in a
         # per-eval registry. Both share the optimizer surface (init / clamp /
@@ -970,7 +975,7 @@ class CalibrationProblem:
         # severity would overwrite the fitted value) but allow fitting the
         # magnitude a dial scales. Probed with two distinct bases rather than
         # by name, so it generalises to any handle.
-        reg = HALLMARK_REGISTRY if registry is None else registry
+        reg = {} if registry is None else registry
         handle_targets: dict[tuple[str, str], list[tuple[str, Any]]] = {}
         for hname, handle in reg.items():
             for mapping in handle.mappings:
@@ -1232,6 +1237,11 @@ class CalibrationProblem:
             for k in self._all_refs
         }
 
+    @property
+    def registry(self) -> dict:
+        """The ``{name: Handle}`` this problem's conditions are applied with."""
+        return self._base_registry
+
     def describe(self) -> dict:
         """Everything that defines this problem, as plain JSON: the composite
         and its processes, the reporters, the conditions and arms, the data
@@ -1245,11 +1255,7 @@ class CalibrationProblem:
 
         kw = self._ctor_kwargs
         comp = self.composite
-        registry = kw.get("registry")
-        if registry is None:
-            from hallsim.hallmarks import HALLMARK_REGISTRY
-
-            registry = HALLMARK_REGISTRY
+        registry = kw.get("registry") or {}
         used = {h for c in kw["conditions"].values() for h in c.handles}
         handles = {
             name: [

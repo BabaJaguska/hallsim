@@ -32,6 +32,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from hallsim.composite import Composite  # noqa: E402
 from hallsim.handles import apply_handles, with_handles  # noqa: E402
+from demos.models.hallmarks import HALLMARK_REGISTRY  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.calibration import load_checkpoint  # noqa: E402
 from demos.models.multi_hallmark import (  # noqa: E402
@@ -404,7 +405,7 @@ def fig_trajectories(args):
         hallmarks = {"Genomic Instability": gi}
         if dns != 0.0:
             hallmarks["Deregulated Nutrient Sensing"] = dns
-        comp = with_handles(base, hallmarks)
+        comp = with_handles(base, hallmarks, registry=HALLMARK_REGISTRY)
         return Scheduler(auto_stiffness=True).run(
             comp,
             t_span=(0.0, 50.0),
@@ -461,7 +462,9 @@ def fig_reporter_levels(args):
 
     def levels(problem, params, cond, qt):
         sub = problem._substitute(problem.composite.processes, params)
-        procs = apply_handles(sub, problem.conditions[cond].handles)
+        procs = apply_handles(
+            sub, problem.conditions[cond].handles, problem.registry
+        )
         comp = Composite(
             processes=procs,
             topology=problem.composite.topology,
@@ -1384,7 +1387,9 @@ def fig_before_after(args):
     # processes; nothing is a hand-passed parameter value.
     def procs_of(cname):
         sub = problem._substitute(problem.composite.processes, pj)
-        return apply_handles(sub, problem.conditions[cname].handles)
+        return apply_handles(
+            sub, problem.conditions[cname].handles, problem.registry
+        )
 
     def solo(proc, te, sdt):
         comp = Composite(
@@ -1550,7 +1555,11 @@ def fig_coupling_ablation(args):
     # Freeze at what each edge actually saw in the control arm — a source's
     # declared value is a published starting point, not a rest level.
     ctrl = Scheduler(auto_stiffness=True).run(
-        with_handles(problem.composite, problem.conditions["ctrl"].handles),
+        with_handles(
+            problem.composite,
+            problem.conditions["ctrl"].handles,
+            registry=problem.registry,
+        ),
         t_span=(0.0, args.t_end),
         macro_dt=0.5,
         save_dt=args.t_end / 149,

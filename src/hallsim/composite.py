@@ -1380,9 +1380,8 @@ class Composite(eqx.Module):
         :class:`~hallsim.calibration.CalibrationProblem`.
         """
         from hallsim.calibration import CalibratableParam
-        from hallsim.hallmarks import HALLMARK_REGISTRY
 
-        reg = HALLMARK_REGISTRY if registry is None else registry
+        reg = {} if registry is None else registry
 
         handle_targets: set[tuple[str, str]] = set()
         for handle in reg.values():

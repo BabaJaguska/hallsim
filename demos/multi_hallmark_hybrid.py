@@ -54,6 +54,7 @@ import jax.numpy as jnp  # noqa: E402
 
 from hallsim.composite import Composite  # noqa: E402
 from hallsim.handles import apply_handles  # noqa: E402
+from demos.models.hallmarks import HALLMARK_REGISTRY  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.sbml_import import process_from_sbml  # noqa: E402
 from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS  # noqa: E402
@@ -586,6 +587,7 @@ def _ddb2_for_severity(comp_processes, severity):
     procs = apply_handles(
         comp_processes,
         {"Genomic Instability": severity},
+        HALLMARK_REGISTRY,
     )
     comp = Composite(
         procs,

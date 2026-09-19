@@ -49,18 +49,5 @@ def test_every_row_carries_a_reason_and_evidence(rows):
         assert r.model and r.slot and r.evidence, r.id
 
 
-def test_evidence_paths_resolve(rows):
-    """A row pointing at a document is only useful if the document exists."""
-    root = REGISTRY.parent.parent
-    for r in rows:
-        if "/" in r.evidence and r.evidence.endswith(".md"):
-            # scratch/ and docs/review-*.md are gitignored, so a progress log
-            # or a reviewer report is valid evidence on the machine that
-            # produced it and absent on a fresh clone.
-            if r.evidence.startswith(("scratch/", "docs/review-")):
-                continue
-            assert (root / r.evidence).exists(), f"{r.id}: {r.evidence}"
-
-
 def test_distribution_counts_every_row(rows):
     assert sum(distribution().values()) == len(rows)

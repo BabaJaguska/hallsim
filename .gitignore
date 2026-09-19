@@ -259,9 +259,9 @@ docs/dp_edison.txt
 # kept locally, not shipped.
 docs/crossgen-suggestions.md
 docs/dallepezze2014-critique.md
-docs/design-fate-architecture.md
 docs/design-model-admissibility.md
 docs/design-pathway-maps.md
+docs/design-fate-architecture.md
 docs/design-spontaneous-endpoint.md
 docs/design-stochastic-lane.md
 docs/eriq-equation-revisions.md

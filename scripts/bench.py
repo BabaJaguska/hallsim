@@ -20,6 +20,7 @@ import optimistix as optx
 
 from hallsim.composite import Composite
 from hallsim.handles import with_handles
+from demos.models.hallmarks import HALLMARK_REGISTRY
 from hallsim.process import Port, PortRole, Process
 from hallsim.scheduler import Scheduler
 
@@ -90,7 +91,9 @@ def bench_splitting() -> None:
     print("\n== 2. Lie splitting vs one merged group ==")
     # The etoposide arm; the composite as built carries no exposure.
     comp = with_handles(
-        build_multi_hallmark_composite(), {"Genomic Instability": 1.0}
+        build_multi_hallmark_composite(),
+        {"Genomic Instability": 1.0},
+        registry=HALLMARK_REGISTRY,
     )
     auto = comp.auto_groups()
     merged = {"all": sorted({p for ps in auto.values() for p in ps})}
@@ -136,7 +139,9 @@ def bench_group_dimension() -> None:
     print("\n== 3. Group solve dimension (sizes _ReducedRHS) ==")
     # The etoposide arm; the composite as built carries no exposure.
     comp = with_handles(
-        build_multi_hallmark_composite(), {"Genomic Instability": 1.0}
+        build_multi_hallmark_composite(),
+        {"Genomic Instability": 1.0},
+        registry=HALLMARK_REGISTRY,
     )
     keys = comp.store_keys()
     y0 = comp.initial_state_vec()
@@ -193,7 +198,9 @@ def bench_solver() -> None:
     print("\n== 4. Implicit root finder ==")
     # The etoposide arm; the composite as built carries no exposure.
     comp = with_handles(
-        build_multi_hallmark_composite(), {"Genomic Instability": 1.0}
+        build_multi_hallmark_composite(),
+        {"Genomic Instability": 1.0},
+        registry=HALLMARK_REGISTRY,
     )
     for label, implicit in (
         ("optx.Newton (shipped)", None),
@@ -230,7 +237,9 @@ def bench_graph() -> None:
     print("\n== 5. RHS jaxpr composition ==")
     # The etoposide arm; the composite as built carries no exposure.
     comp = with_handles(
-        build_multi_hallmark_composite(), {"Genomic Instability": 1.0}
+        build_multi_hallmark_composite(),
+        {"Genomic Instability": 1.0},
+        registry=HALLMARK_REGISTRY,
     )
     rhs, _ = comp.build_rhs()
     y0 = comp.initial_state_vec()

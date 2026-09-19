@@ -34,6 +34,7 @@ from demos.models.sbml import sbml_dir
 from hallsim.composite import Composite, single_process_composite
 from hallsim.diagnostics import trajectory_agreements
 from hallsim.handles import with_handles
+from demos.models.hallmarks import HALLMARK_REGISTRY
 from hallsim.sbml_import import process_from_sbml
 from hallsim.scheduler import Scheduler
 
@@ -447,7 +448,9 @@ def check_multi_hallmark(tmp: Path, t_end: float = 2.0) -> int:
 
     # The etoposide arm; the composite as built carries no exposure.
     comp = with_handles(
-        build_multi_hallmark_composite(), {"Genomic Instability": 1.0}
+        build_multi_hallmark_composite(),
+        {"Genomic Instability": 1.0},
+        registry=HALLMARK_REGISTRY,
     )
     path = str(tmp / "multi_hallmark.xml")
     comp.to_sbml(path)

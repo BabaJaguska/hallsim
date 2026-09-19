@@ -1023,7 +1023,7 @@ def mito_hallmark_registry(registry: dict | None = None) -> dict:
     import copy
 
     from hallsim.handles import ParameterMapping
-    from hallsim.hallmarks import HALLMARK_REGISTRY
+    from demos.models.hallmarks import HALLMARK_REGISTRY
 
     base = copy.deepcopy(HALLMARK_REGISTRY if registry is None else registry)
     base["Genomic Instability"].mappings.append(

@@ -55,7 +55,7 @@ from hallsim.calibration_report import (  # noqa: E402
 from hallsim.io import file_sha256, make_run_dir  # noqa: E402
 from dataclasses import replace as dc_replace  # noqa: E402
 from hallsim.handles import with_handles  # noqa: E402
-from hallsim.hallmarks import HALLMARK_REGISTRY  # noqa: E402
+from demos.models.hallmarks import HALLMARK_REGISTRY  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.gene_reporters import (  # noqa: E402
     MULTI_HALLMARK_REPORTERS,
@@ -248,7 +248,7 @@ RAPA_INTENSITY = 0.5
 
 def _registry_with_intensity(intensity: float) -> dict:
     """The hallmark registry with the rapamycin intensity set. Everything
-    else is :data:`hallsim.hallmarks.HALLMARK_REGISTRY` unchanged."""
+    else is :data:`demos.models.hallmarks.HALLMARK_REGISTRY` unchanged."""
     handle = HALLMARK_REGISTRY["Deregulated Nutrient Sensing"]
     mappings = [
         (
@@ -1122,7 +1122,7 @@ def _run_arms(base, gi, dns, t_end=50.0, macro_dt=5.0):
     hallmarks = {"Genomic Instability": gi}
     if dns != 0.0:
         hallmarks["Deregulated Nutrient Sensing"] = dns
-    comp = with_handles(base, hallmarks)
+    comp = with_handles(base, hallmarks, registry=HALLMARK_REGISTRY)
     return Scheduler().run(
         comp,
         t_span=(0.0, t_end),

@@ -35,11 +35,12 @@ Cross-publication edges:
 Conditions and drugs both enter through the hallmark layer::
 
     comp = build_multi_hallmark_composite()
-    ddis = apply_handles(comp.processes, {"Genomic Instability": 1.0})
+    ddis = apply_handles(comp.processes, {"Genomic Instability": 1.0},
+                         HALLMARK_REGISTRY)
     rapa = apply_handles(comp.processes, {
         "Genomic Instability": 1.0,
         "Deregulated Nutrient Sensing": -1.0,   # mTORC1 suppressed
-    })
+    }, HALLMARK_REGISTRY)
 
 Severity 0 is homeostasis for both; Nutrient Sensing runs -1 (rapamycin) to +1
 (hyperactivation) on DP14's mTORC1 phosphorylation rate, Genomic Instability 0
@@ -125,7 +126,7 @@ PROCTOR07_SYNTHESIS_MTOR_FRACTION = 0.5
 # 600-day value tied the interface to a state the experiment never occupies.
 # The excursion is DallePezze's own claim about control cells and passes
 # through the interface as such.
-# SBML defaults, named at module level so hallsim.hallmarks can target the
+# SBML defaults, named at module level so demos.models.hallmarks can target the
 # same constants. DallePezze 2014 supplementary Table S2.
 DP14_MTOR_PHOS_RATE_DEFAULT = 162.471039450073
 DP14_MTOR_PHOS_RATE_NAME = "mTORC1_S2448_phos_by_AA_n_Akt_pS473"

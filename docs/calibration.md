@@ -51,6 +51,7 @@ for wiring any composite to any held-out gene-expression dataset:
 ```python
 from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
 from hallsim.gene_reporters import GeneExpressionDataset, MULTI_HALLMARK_REPORTERS
+from demos.models.hallmarks import HALLMARK_REGISTRY
 from demos.models.multi_hallmark import build_multi_hallmark_composite
 from demos.multi_hallmark_calibrate import (
     PLATFORM, SAMPLE_POSITION_GROUPS, SERIES_MATRIX, fetch_dataset)
@@ -104,6 +105,7 @@ problem = CalibrationProblem(
     },
     fit_arms=["DDIS_vs_ctrl"],       # in the loss
     held_out_arms=["RAPA_vs_ctrl"],  # evaluated, not fit
+    registry=HALLMARK_REGISTRY,      # what the condition names mean
 )
 
 history = problem.fit(steps=150, mode="reverse")

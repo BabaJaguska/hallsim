@@ -43,7 +43,6 @@ from hallsim.calibration import (
 )
 from hallsim.composite import Composite
 from hallsim.handles import Handle, ParameterMapping, apply_handles
-from hallsim.hallmarks import HALLMARK_REGISTRY
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.scheduler import EventRecord, Scheduler, SchedulerResult
 from hallsim.validation import (
@@ -61,7 +60,6 @@ __all__ = [
     "CompositeValidator",
     "Condition",
     "EventRecord",
-    "HALLMARK_REGISTRY",
     "Handle",
     "OverlapMatch",
     "ParameterMapping",

@@ -1056,7 +1056,7 @@ def screen_sensitivity(
     query_time: float | None = None,
     rel_threshold: float = 1e-3,
     auto_stiffness: bool = True,
-    registry=None,
+    registry,
 ) -> list["SensitivityReport"]:
     """Flag reporters that are insensitive to a hallmark *in this regime*.
 

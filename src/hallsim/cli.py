@@ -692,6 +692,63 @@ def screen(model, t_end):
         click.echo(str(verdict.screen))
 
 
+@simulate.command("handles")
+@click.argument("models", nargs=-1)
+@click.option(
+    "--demo",
+    is_flag=True,
+    help="Use the multi-hallmark demo composite instead of MODELS.",
+)
+def handles(models, demo):
+    """Where the hallmarks of aging would land on a model.
+
+    MODELS are BioModels ids or SBML/COPASI paths, imported side by side.
+    For each hallmark intent (hallsim.hallmarks) the table lists the rates
+    its annotated species take part in, as ready ParameterMapping entries,
+    or says that nothing on the model is annotated the way it asks. A
+    suggestion is a place the biology could act; review it before it goes
+    into a registry.
+    """
+    from pathlib import Path
+
+    from hallsim.composite import Composite
+    from hallsim.handles import suggest_registry
+    from hallsim.hallmarks import HALLMARK_INTENTS
+
+    if demo:
+        from demos.models.multi_hallmark import (
+            build_multi_hallmark_composite,
+        )
+
+        comp = build_multi_hallmark_composite(validate=False)
+    elif models:
+        from hallsim.sbml_import import process_from_sbml
+
+        procs = {}
+        for m in models:
+            target = int(m) if m.isdigit() else m
+            name = f"biomodel_{m}" if m.isdigit() else Path(m).stem
+            procs[name] = process_from_sbml(target, name=name)
+        comp = Composite(
+            processes=procs,
+            topology={},
+            validate=False,
+            semantic_validation=False,
+        )
+    else:
+        raise click.UsageError("give MODELS or --demo")
+    for name, handle in suggest_registry(HALLMARK_INTENTS, comp).items():
+        click.echo(f"\n{name}  [{handle.category}]  {handle.description}")
+        if not handle.mappings:
+            click.echo("    no annotated species matches")
+        for m in handle.mappings:
+            click.echo(
+                f"    {m.process_name}.{m.param_name:<46s} "
+                f"x(1 {'+' if m.slope >= 0 else '-'} {abs(m.slope):g}*s)"
+            )
+            click.echo(f"        {m.description}")
+
+
 @simulate.command("rejections")
 @click.option(
     "--class", "cls", default=None, help="Show only this failure class."
