@@ -19,6 +19,7 @@ import numpy as np
 import optimistix as optx
 
 from hallsim.composite import Composite
+from hallsim.handles import with_handles
 from hallsim.process import Port, PortRole, Process
 from hallsim.scheduler import Scheduler
 
@@ -87,7 +88,10 @@ def bench_splitting() -> None:
     from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     print("\n== 2. Lie splitting vs one merged group ==")
-    comp = build_multi_hallmark_composite()
+    # The etoposide arm; the composite as built carries no exposure.
+    comp = with_handles(
+        build_multi_hallmark_composite(), {"Genomic Instability": 1.0}
+    )
     auto = comp.auto_groups()
     merged = {"all": sorted({p for ps in auto.values() for p in ps})}
 
@@ -130,7 +134,10 @@ def bench_group_dimension() -> None:
     from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     print("\n== 3. Group solve dimension (sizes _ReducedRHS) ==")
-    comp = build_multi_hallmark_composite()
+    # The etoposide arm; the composite as built carries no exposure.
+    comp = with_handles(
+        build_multi_hallmark_composite(), {"Genomic Instability": 1.0}
+    )
     keys = comp.store_keys()
     y0 = comp.initial_state_vec()
     solver = dfx.Kvaerno5(root_finder=optx.Newton(rtol=1e-6, atol=1e-9))
@@ -184,7 +191,10 @@ def bench_solver() -> None:
     from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     print("\n== 4. Implicit root finder ==")
-    comp = build_multi_hallmark_composite()
+    # The etoposide arm; the composite as built carries no exposure.
+    comp = with_handles(
+        build_multi_hallmark_composite(), {"Genomic Instability": 1.0}
+    )
     for label, implicit in (
         ("optx.Newton (shipped)", None),
         ("VeryChord (diffrax default)", dfx.Kvaerno5()),
@@ -218,7 +228,10 @@ def bench_graph() -> None:
     from demos.models.multi_hallmark import build_multi_hallmark_composite
 
     print("\n== 5. RHS jaxpr composition ==")
-    comp = build_multi_hallmark_composite()
+    # The etoposide arm; the composite as built carries no exposure.
+    comp = with_handles(
+        build_multi_hallmark_composite(), {"Genomic Instability": 1.0}
+    )
     rhs, _ = comp.build_rhs()
     y0 = comp.initial_state_vec()
     jaxpr = jax.make_jaxpr(lambda y: rhs(0.0, y))(y0)

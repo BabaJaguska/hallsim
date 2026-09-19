@@ -45,18 +45,25 @@ def test_geo_hits_become_candidates(monkeypatch):
     )
 
 
-def test_platform_columns_come_from_the_soft_head(monkeypatch):
+def test_platform_head_and_loader_route(monkeypatch):
     soft = (
         "^SERIES = GSE1\n^PLATFORM = GPL1\n!platform_table_begin\n"
-        "ID\tprobeset_id\tgene_assignment\nP1\tP1\tNM_1 // G1 // x\n"
-        "!platform_table_end\n"
+        "ID\tprobeset_id\tgene_assignment\n"
+        + "".join(
+            f"TC0100000{i}.hg.1\tTC0100000{i}.hg.1\tNM_{i} // GENE{i} // x\n"
+            for i in range(8)
+        )
+        + "!platform_table_end\n^SAMPLE = GSM1\n"
     )
     monkeypatch.setattr(
         datasets.urllib.request,
         "urlopen",
         lambda url, timeout: io.BytesIO(gzip.compress(soft.encode())),
     )
-    cols = datasets.platform_columns("GSE1")
-    assert cols == ["ID", "probeset_id", "gene_assignment"]
-    assert datasets.loader_reads(cols)
-    assert not datasets.loader_reads(["ID", "Symbol"])
+    head = datasets.platform_head("GSE1")
+    assert list(head.columns) == ["ID", "probeset_id", "gene_assignment"]
+    assert len(head) == 8
+    assert datasets.loader_route(head) == (
+        "the loader reads symbols from column 'gene_assignment'"
+    )
+    assert "cannot map" in datasets.loader_route(head[["ID", "probeset_id"]])

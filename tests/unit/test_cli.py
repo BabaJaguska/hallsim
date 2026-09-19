@@ -18,10 +18,15 @@ from hallsim.cli import simulate
 DEMOS = Path(__file__).resolve().parents[2] / "demos"
 
 
-@pytest.mark.parametrize("name", sorted(simulate.commands))
-def test_command_help_works(name):
+COMMANDS = [[n] for n in sorted(simulate.commands) if n != "demo"] + [
+    ["demo", n] for n in sorted(simulate.commands["demo"].commands)
+]
+
+
+@pytest.mark.parametrize("path", COMMANDS, ids=" ".join)
+def test_command_help_works(path):
     """Every registered command exposes help without blowing up."""
-    result = CliRunner().invoke(simulate, [name, "--help"])
+    result = CliRunner().invoke(simulate, [*path, "--help"])
     assert result.exit_code == 0, result.output
 
 
@@ -37,14 +42,19 @@ def test_multi_hallmark_dispatch_targets_exist():
     finally:
         sys.path.remove(str(DEMOS))
 
-    offered = simulate.commands["multi-hallmark"].params[0].type.choices
+    offered = (
+        simulate.commands["demo"]
+        .commands["multi-hallmark"]
+        .params[0]
+        .type.choices
+    )
     # "calibrate" is "run" with args.calibrate set, not its own handler.
     assert {c for c in offered if c != "calibrate"} <= set(_COMMANDS)
     assert "run" in _COMMANDS
 
 
 def test_clamp_options_name_real_config_keys():
-    """``simulate clamp`` forwards its options as config overrides, so an
+    """``simulate demo clamp`` forwards its options as config overrides, so an
     option whose name drifts from the demo's config key silently stops
     applying."""
     sys.path.insert(0, str(DEMOS))
@@ -53,7 +63,9 @@ def test_clamp_options_name_real_config_keys():
     finally:
         sys.path.remove(str(DEMOS))
 
-    offered = {p.name for p in simulate.commands["clamp"].params} - {"help"}
+    offered = {
+        p.name for p in simulate.commands["demo"].commands["clamp"].params
+    } - {"help"}
     assert offered and offered <= set(DEFAULTS)
 
 
@@ -152,7 +164,7 @@ def test_unscored_run_receives_the_equilibrate_option(monkeypatch, tmp_path):
         received.update(equilibrate=equilibrate)
 
     monkeypatch.setattr(demo, "run_unscored", unscored)
-    result = CliRunner().invoke(simulate, ["multi-hallmark", "run"])
+    result = CliRunner().invoke(simulate, ["demo", "multi-hallmark", "run"])
     assert result.exit_code == 0, result.output
     assert received == {"equilibrate": False}
 
@@ -166,3 +178,16 @@ def test_screen_runs_the_triage_on_a_bundled_model():
     assert result.exit_code == 0, result.output
     assert result.output.startswith(("[PASS]", "[FLAG]", "[REJECT]"))
     assert "species" in result.output
+
+
+def test_module_runs_as_a_script():
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, "-m", "hallsim.cli", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Usage" in result.stdout

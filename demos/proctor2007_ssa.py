@@ -1,6 +1,6 @@
 """Repeated standalone Proctor 2007 Gillespie trajectories.
 
-Run via the CLI: simulate proctor2007-ssa
+Run via the CLI: simulate demo proctor2007-ssa
 The bundled SBML describes proteasome inhibition (k69=0); by default this
 uses its documented normal-condition value k69=1e-3. All other parameters
 and initial counts are identical across runs; only the random seed changes.

@@ -18,6 +18,7 @@ from demos.models.multi_hallmark import (
     _add_proteostasis,
     build_multi_hallmark_composite,
 )
+from hallsim.handles import with_handles
 from hallsim.scheduler import Scheduler
 from hallsim.stochastic import SSAResult, simulate_ssa
 
@@ -29,8 +30,12 @@ def run(
     seed: int = 0,
     max_events: int = 10_000_000,
 ) -> tuple[SSAResult, object]:
-    """Run deterministic DP14/GZ06 and stochastic Proctor on one-way inputs."""
-    deterministic = build_multi_hallmark_composite(validate=False)
+    """Run deterministic DP14/GZ06 and stochastic Proctor on one-way inputs,
+    on the etoposide arm."""
+    deterministic = with_handles(
+        build_multi_hallmark_composite(validate=False),
+        {"Genomic Instability": 1.0},
+    )
     keys = deterministic.store_keys()
     trajectory = Scheduler().run(
         deterministic,

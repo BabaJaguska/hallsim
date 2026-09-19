@@ -4,9 +4,11 @@ A hallmark of aging (Lopez-Otin et al., 2023) is a signed severity in
 [-1, 1] modulating parameters across one or more Processes: -1 is the full
 opposite perturbation (mTOR suppression), 0 homeostasis, +1 severely impaired.
 A hallmark with no meaningful opposite — there is no negative DNA damage —
-uses the [0, 1] half. :data:`HALLMARK_REGISTRY` maps 5 of the 12 today; each
-new one is a single :class:`hallsim.handles.Handle` entry. The machinery,
-and how to apply a registry, is :mod:`hallsim.handles`.
+uses the [0, 1] half. :data:`HALLMARK_REGISTRY` carries all 12; five are
+grounded in a calibrated composite, the other seven point at plausible
+rates of the same models and say so in their description. Each is a single
+:class:`hallsim.handles.Handle` entry. The machinery, and how to apply a
+registry, is :mod:`hallsim.handles`.
 """
 
 from __future__ import annotations
@@ -76,6 +78,15 @@ HALLMARK_REGISTRY: dict[str, Handle] = {
         category="Primary",
         references=["Lopez-Otin et al. 2023", "Alfego & Kriete 2017"],
         mappings=[
+            # DP14-based composites: the mitochondrial dysfunction rate the
+            # model already carries, 1x -> 3x; placeholder gain, not calibrated.
+            ParameterMapping(
+                process_name="dp14",
+                param_name="parameters.mito_dysfunction",
+                floor=1.0,
+                slope=2.0,
+                description="Mitochondrial dysfunction rate scales 1x->3x (DP14-based composites; uncalibrated placeholder)",
+            ),
             # severity=0 → base (no perturbation); severity=1 → 3*base
             # (the published "severely impaired" factor).
             ParameterMapping(
@@ -183,6 +194,167 @@ HALLMARK_REGISTRY: dict[str, Handle] = {
             # GZ06's psi is not mapped here — it is driven by DP14's
             # DNA_damage via a topology edge (see multi_hallmark), so GI
             # severity reaches GZ06 through Irradiation → DNA_damage → psi.
+        ],
+    ),
+    # The seven below complete the Lopez-Otin 2023 inventory. Each points at
+    # a rate the multi-hallmark composite already carries and none is
+    # calibrated against data: they are plausible placeholders, chosen off
+    # the parameters the demo fits so the calibration surface is unchanged.
+    "Telomere Attrition": Handle(
+        name="Telomere Attrition",
+        description=(
+            "Persistent telomere-initiated DNA damage response: the basal "
+            "level of the damage signal into p53 (GZ06 alpha_x at zero "
+            "acute damage) falls, so p53 sits closer to its pulsing regime. "
+            "Uncalibrated placeholder."
+        ),
+        category="Primary",
+        references=[
+            "Lopez-Otin et al. 2023",
+            "d'Adda di Fagagna et al. 2003 (telomere-initiated DDR)",
+        ],
+        mappings=[
+            ParameterMapping(
+                process_name="damage_bridge",
+                param_name="basal",
+                floor=1.0,
+                slope=-0.5,
+                description="Damage-free p53 degradation drive 1x->0.5x with attrition",
+            ),
+        ],
+    ),
+    "Epigenetic Alterations": Handle(
+        name="Epigenetic Alterations",
+        description=(
+            "Derepression of CDK-inhibitor loci with heterochromatin loss: "
+            "CDKN1B transcription rises. Uncalibrated placeholder."
+        ),
+        category="Primary",
+        references=["Lopez-Otin et al. 2023"],
+        mappings=[
+            ParameterMapping(
+                process_name="dp14",
+                param_name="parameters.CDKN1B_transcr_by_FoxO3a_n_DNA_damage",
+                floor=1.0,
+                slope=1.0,
+                description="CDKN1B transcription 1x->2x (DP14-based composites)",
+            ),
+        ],
+    ),
+    "Disabled Macroautophagy": Handle(
+        name="Disabled Macroautophagy",
+        description=(
+            "Autophagic flux falls: DP14's mitophagy of new and old "
+            "mitochondria slows. Uncalibrated placeholder."
+        ),
+        category="Primary",
+        references=["Lopez-Otin et al. 2023"],
+        mappings=[
+            ParameterMapping(
+                process_name="dp14",
+                param_name="parameters.mitophagy_new",
+                floor=1.0,
+                slope=-0.8,
+                description="Mitophagy of new mitochondria 1x->0.2x",
+            ),
+            ParameterMapping(
+                process_name="dp14",
+                param_name="parameters.mitophagy_old",
+                floor=1.0,
+                slope=-0.8,
+                description="Mitophagy of old mitochondria 1x->0.2x",
+            ),
+        ],
+    ),
+    "Cellular Senescence": Handle(
+        name="Cellular Senescence",
+        description=(
+            "Senescence as a lever rather than an outcome: p53-driven "
+            "CDKN1A transcription and ROS-driven SA-beta-gal accumulation "
+            "gain. Uncalibrated placeholder."
+        ),
+        category="Antagonistic",
+        references=["Lopez-Otin et al. 2023"],
+        mappings=[
+            ParameterMapping(
+                process_name="p53_cdkn1a",
+                param_name="hi",
+                floor=1.0,
+                slope=1.0,
+                description="p53 -> CDKN1A transcription gain 1x->2x",
+            ),
+            ParameterMapping(
+                process_name="dp14",
+                param_name="parameters.sen_ass_beta_gal_inc_by_ROS",
+                floor=1.0,
+                slope=1.0,
+                description="ROS-driven SA-beta-gal accumulation 1x->2x",
+            ),
+        ],
+    ),
+    "Altered Intercellular Communication": Handle(
+        name="Altered Intercellular Communication",
+        description=(
+            "Endocrine drift: the insulin/IGF-1 input DP14 reads falls. "
+            "Uncalibrated placeholder."
+        ),
+        category="Integrative",
+        references=["Lopez-Otin et al. 2023"],
+        mappings=[
+            ParameterMapping(
+                process_name="dp14",
+                param_name="parameters.Insulin",
+                floor=1.0,
+                slope=-0.5,
+                description="Insulin input 1x->0.5x",
+            ),
+        ],
+    ),
+    "Chronic Inflammation": Handle(
+        name="Chronic Inflammation",
+        description=(
+            "Inflammaging: ROS-driven IKKbeta and JNK activation gain. "
+            "Uncalibrated placeholder."
+        ),
+        category="Integrative",
+        references=[
+            "Lopez-Otin et al. 2023",
+            "Franceschi et al. 2018 (inflammaging)",
+        ],
+        mappings=[
+            ParameterMapping(
+                process_name="dp14",
+                param_name="parameters.IKKbeta_activ_by_ROS",
+                floor=1.0,
+                slope=2.0,
+                description="IKKbeta activation by ROS 1x->3x",
+            ),
+            ParameterMapping(
+                process_name="dp14",
+                param_name="parameters.JNK_activ_by_ROS",
+                floor=1.0,
+                slope=1.0,
+                description="JNK activation by ROS 1x->2x",
+            ),
+        ],
+    ),
+    "Dysbiosis": Handle(
+        name="Dysbiosis",
+        description=(
+            "Microbial products feed the inflammatory axis: a weaker "
+            "IKKbeta activation gain than Chronic Inflammation. "
+            "Uncalibrated placeholder."
+        ),
+        category="Integrative",
+        references=["Lopez-Otin et al. 2023"],
+        mappings=[
+            ParameterMapping(
+                process_name="dp14",
+                param_name="parameters.IKKbeta_activ_by_ROS",
+                floor=1.0,
+                slope=0.5,
+                description="IKKbeta activation by ROS 1x->1.5x",
+            ),
         ],
     ),
 }

@@ -21,8 +21,12 @@ conditions.
 from __future__ import annotations
 
 import gzip
+import hashlib
+import json
 import logging
 import os
+import re
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from io import StringIO
@@ -667,13 +671,15 @@ def load_gene_expression(
     series_matrix_path: Path,
     platform_path: Path,
 ) -> pd.DataFrame:
-    """Parse GEO series-matrix expression + Affymetrix platform annotation
-    into a ``(gene_symbol × sample)`` DataFrame.
+    """Parse GEO series-matrix expression + platform annotation into a
+    ``(gene_symbol × sample)`` DataFrame.
 
     - Series-matrix expression values are typically log2-RMA normalized;
       no further transform is applied.
-    - Probes are mapped to the first gene symbol in the
-      ``gene_assignment`` column of the platform file.
+    - Probes are mapped to gene symbols by whatever the platform table
+      carries, chosen by content (:func:`choose_annotation`): a symbol
+      column, an Affymetrix assignment string, or bare accessions resolved
+      through MyGene.info.
     - Multi-probe-per-gene values are collapsed by mean.
 
     A file listed in the ``SHA256SUMS`` beside it (written by
@@ -683,6 +689,16 @@ def load_gene_expression(
     verify_checksum(platform_path)
     with open(series_matrix_path) as f:
         lines = f.readlines()
+    taxid = next(
+        (
+            int(m.group(1))
+            for ln in lines
+            if ln.startswith(("!Sample_taxid_ch1", "!Series_platform_taxid"))
+            for m in [re.search(r"(\d+)", ln)]
+            if m
+        ),
+        None,
+    )
     start = next(
         i
         for i, ln in enumerate(lines)
@@ -701,26 +717,187 @@ def load_gene_expression(
         quotechar='"',
     ).dropna(how="all")
 
-    plat = pd.read_csv(platform_path, sep="\t", comment="#", low_memory=False)
-    probe_to_gene: dict[str, str] = {}
-    for probe, raw in zip(plat["ID"], plat["gene_assignment"].fillna("")):
-        if not raw or raw == "---":
-            continue
-        first = raw.split("///", 1)[0]
-        parts = [p.strip() for p in first.split("//")]
-        if (
-            len(parts) < 2
-            or not parts[1]
-            or parts[1] == "---"
-            or not parts[1][0].isalpha()
-        ):
-            continue
-        probe_to_gene[probe] = parts[1].strip()
+    plat = pd.read_csv(
+        platform_path, sep="\t", comment="#", low_memory=False, dtype=str
+    )
+    probe_to_gene = probe_gene_map(plat, taxid=taxid)
 
     common = expr.index.intersection(probe_to_gene.keys())
     expr = expr.loc[common].copy()
     expr["__gene__"] = [probe_to_gene[p] for p in expr.index]
     return expr.groupby("__gene__").mean(numeric_only=True)
+
+
+# ── Platform annotation: where a table names its genes ─────────────────
+
+#: A gene symbol: HGNC-style, at most 15 characters.
+SYMBOL = re.compile(r"^(?:[A-Z][A-Z0-9-]{0,14}|C[0-9XY]+orf[0-9]+)$")
+#: An accession: RefSeq, Ensembl, GenBank or UniProt, with optional version.
+#: UniProt is here because "Q8NH21" reads as a gene symbol otherwise.
+ACCESSION = re.compile(
+    r"^(?:[NX][MRPCGTWZ]_\d+|ENS[A-Z]*[GTP]\d{6,}|[A-Z]{1,2}\d{5,6}"
+    r"|[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})"
+    r"(?:\.\d+)?$"
+)
+MYGENE_QUERY = "https://mygene.info/v3/query"
+MYGENE_BATCH = 1000
+
+
+def _fields(value) -> list[str]:
+    """The fields of one annotation cell: ``///`` separates entries, ``//``
+    fields within an entry, so both a bare value and an Affymetrix
+    assignment string yield their parts."""
+    return [
+        f.strip() for part in str(value).split("///") for f in part.split("//")
+    ]
+
+
+def first_symbol(value) -> str | None:
+    """The first field of ``value`` that is a gene symbol, else ``None``."""
+    for f in _fields(value):
+        if SYMBOL.match(f) and not ACCESSION.match(f):
+            return f
+    return None
+
+
+def first_accession(value) -> str | None:
+    """The first field of ``value`` that is a sequence accession, without
+    its version, else ``None``."""
+    for f in _fields(value):
+        if ACCESSION.match(f):
+            return f.split(".")[0]
+    return None
+
+
+def choose_annotation(
+    frame: pd.DataFrame, *, sample: int = 2000, min_fraction: float = 0.2
+) -> tuple[str, str]:
+    """``(column, route)``: where a platform table names its genes.
+
+    Judged by content over a sample of rows, so the column's name does not
+    matter: ``"symbol"`` when a field of the column is a gene symbol (a
+    ``Gene Symbol`` column, an Affymetrix ``gene_assignment`` string),
+    ``"accession"`` when the column holds RefSeq, Ensembl or GenBank
+    accessions to resolve. A column with few distinct values (a control
+    flag, a chromosome) is never chosen. Raises when nothing qualifies.
+    """
+    head = frame.head(sample)
+    ids = head["ID"].astype(str) if "ID" in head else None
+    scores: dict[str, dict[str, float]] = {}
+    for col in frame.columns:
+        # A copy of the probe id (Affymetrix's probeset_id) annotates nothing.
+        if (
+            col != "ID"
+            and ids is not None
+            and head[col].astype(str).equals(ids)
+        ):
+            continue
+        values = head[col].dropna().astype(str).str.strip()
+        values = values[values.ne("") & values.ne("---")]
+        if values.empty or values.nunique() / len(values) < 0.3:
+            continue
+        scores[col] = {}
+        for route, extract in (
+            ("symbol", first_symbol),
+            ("accession", first_accession),
+        ):
+            found = values.map(extract).dropna()
+            # A database name in an assignment string ("ENSEMBL") passes
+            # as a symbol on every row; real symbols are mostly distinct.
+            distinct = found.nunique() / len(found) if len(found) else 0.0
+            scores[col][route] = (
+                len(found) / len(values) if distinct >= 0.2 else 0.0
+            )
+    # The probe id is the annotation of last resort: a custom array may
+    # name its probes by gene, but a platform that annotates elsewhere
+    # never means its ids as symbols.
+    annotation = [c for c in scores if c != "ID"]
+    for cols in (annotation, [c for c in scores if c == "ID"]):
+        for route in ("symbol", "accession"):
+            ranked = sorted(cols, key=lambda c: -scores[c][route])
+            if ranked and scores[ranked[0]][route] >= min_fraction:
+                return ranked[0], route
+    raise ValueError(
+        "no column of the platform table names genes by symbol or "
+        f"accession; columns: {list(frame.columns)}"
+    )
+
+
+def symbols_for_accessions(
+    accessions,
+    *,
+    taxid: int | None = None,
+    timeout: float = 60.0,
+    cache_dir: str | Path | None = None,
+) -> dict[str, str]:
+    """``accession -> gene symbol`` through MyGene.info, keyless, a
+    thousand a request, each batch cached under ``~/.cache/hallsim/mygene``
+    so a platform is resolved once per machine."""
+    accessions = sorted(set(accessions))
+    cache = Path(cache_dir or os.path.expanduser("~/.cache/hallsim/mygene"))
+    out: dict[str, str] = {}
+    for i in range(0, len(accessions), MYGENE_BATCH):
+        batch = accessions[i : i + MYGENE_BATCH]
+        key = hashlib.sha256(
+            ("\n".join(batch) + f"|{taxid}").encode()
+        ).hexdigest()[:24]
+        path = cache / f"{key}.json"
+        if path.exists():
+            hits = json.loads(path.read_text())
+        else:
+            form = {
+                "q": ",".join(batch),
+                "scopes": "refseq,accession,ensembl.transcript,ensembl.gene,"
+                "uniprot",
+                "fields": "symbol",
+            }
+            if taxid is not None:
+                form["species"] = str(taxid)
+            request = urllib.request.Request(
+                MYGENE_QUERY, data=urllib.parse.urlencode(form).encode()
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as fh:
+                hits = json.load(fh)
+            _write_atomic(path, [json.dumps(hits)])
+        for hit in hits:
+            symbol = hit.get("symbol")
+            if symbol and hit["query"] not in out:
+                out[hit["query"]] = symbol
+    log.info("mygene: %d of %d accessions resolved", len(out), len(accessions))
+    return out
+
+
+def probe_gene_map(
+    frame: pd.DataFrame, *, taxid: int | None = None, resolve=None
+) -> dict[str, str]:
+    """``probe id -> gene symbol`` from a platform table, by whatever
+    annotation it carries (:func:`choose_annotation`). ``resolve`` maps
+    accessions to symbols and defaults to :func:`symbols_for_accessions`.
+    """
+    col, route = choose_annotation(frame)
+    extract = first_symbol if route == "symbol" else first_accession
+    # Plain Python, not Series.map: pandas turns a None result into NaN,
+    # which is truthy, and an unannotated probe would map to a NaN key.
+    found = {
+        str(p): x
+        for p, v in zip(frame["ID"], frame[col].fillna(""))
+        for x in [extract(v)]
+        if x
+    }
+    if route == "symbol":
+        out = found
+    else:
+        resolve = resolve or symbols_for_accessions
+        symbols = resolve(sorted(set(found.values())), taxid=taxid)
+        out = {p: symbols[a] for p, a in found.items() if a in symbols}
+    log.info(
+        "platform annotation: column %r (%s), %d of %d probes mapped",
+        col,
+        route,
+        len(out),
+        len(frame),
+    )
+    return out
 
 
 GEO_SERIES = "https://ftp.ncbi.nlm.nih.gov/geo/series"
@@ -842,7 +1019,8 @@ class GeneExpressionDataset:
         sample_groups: dict[str, list] | None = None,
         sample_position_groups: dict[str, list[int]] | None = None,
     ) -> "GeneExpressionDataset":
-        """Build from a GEO series matrix + Affymetrix platform pair.
+        """Build from a GEO series matrix + platform annotation pair; any
+        array platform the loader can read (:func:`choose_annotation`).
 
         Use ``sample_groups`` for explicit column-name lists, or
         ``sample_position_groups`` for position-based selection that

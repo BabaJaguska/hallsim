@@ -1,7 +1,7 @@
 """Hallmark levers — pull a hallmark severity and watch three published
 models re-solve.
 
-``simulate hallmark-levers`` serves a page with one slider per hallmark of
+``simulate demo hallmark-levers`` serves a page with one slider per hallmark of
 aging wired into the multi-hallmark composite (Dalle Pezze 2014, Geva-Zatorsky
 2006, Proctor 2007). Moving a slider applies the severity through
 :func:`hallsim.handles.with_handles` — the same call the calibration arms

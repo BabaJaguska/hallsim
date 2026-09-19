@@ -3,7 +3,7 @@
 The dataset the multi-hallmark **demo** is calibrated and evaluated against.
 Loaded by
 [`demos/multi_hallmark_calibrate.py`](../demos/multi_hallmark_calibrate.py)
-from `data/FibroblastsDNA_dmg_Rapamycin/`, which `simulate multi-hallmark
+from `data/FibroblastsDNA_dmg_Rapamycin/`, which `simulate demo multi-hallmark
 run` fills from GEO on first use (`fetch-data` does only that). The fetch
 writes each file's SHA-256 to `SHA256SUMS` beside it, the loader checks
 them, and the run's `config.json` records them.
@@ -110,7 +110,7 @@ and RAS D00/D04/D07, each arm normalised to its own day 0; no untreated culture
 is measured at D07 or D14. Nothing in this dataset can distinguish a trigger-
 driven trajectory from one a culture would have followed anyway, which is the
 same missing measurement that let DallePezze 2014's spontaneous senescence go
-unnoticed — see [senescence-model-rebuild.md](senescence-model-rebuild.md) §6.
+unnoticed.
 A dataset with a time-matched untreated arm is a prerequisite for any
 concordance number that claims the perturbation caused the change.
 

@@ -1,7 +1,7 @@
 # HallSim Roadmap
 
 Planned and queued work, grouped by area. See
-[crossgen-suggestions.md](crossgen-suggestions.md) for the cross-domain
+the CrossGen suggestions (working notes, not in the repository) for the cross-domain
 analysis behind the Scheduler items.
 
 ## Scheduler & Multi-Scale
@@ -257,7 +257,7 @@ below, having been invisible to the search before it.
   parsing SBML event MathML (trigger expressions, assignments, delays, persistence)
   and emitting the corresponding `condition` / `handler` methods.
   **Promoted to the critical path 2026-08-29.** Yao 2008 (BIOMD0000000318), the
-  arrest switch Phase 2 of [senescence-model-rebuild.md](senescence-model-rebuild.md)
+  arrest switch Phase 2 of the senescence-model rebuild plan (working notes, not in the repository)
   is built on, has its serum steps as events `e1`/`e2` that assign to the
   **parameter** `S`, not to a species. `sbml_events` skips both, so the model's
   own published experiment cannot be run and the constituent cannot be validated

@@ -25,9 +25,9 @@ make lint           # flake8, ignores E501,E402,W504,W503,E226,E203
 make check          # format --check + lint (what CI runs)
 
 # Demos via the `simulate` entry point (hallsim.cli:simulate)
-simulate compose | compose-kick | multiscale | validate-demo | info
-simulate multi-hallmark run | calibrate | sweep
-simulate stiffness
+simulate demo compose | compose-kick | multiscale | validate-demo | info
+simulate demo multi-hallmark run | calibrate | sweep
+simulate demo stiffness
 ```
 
 ## Architecture invariants

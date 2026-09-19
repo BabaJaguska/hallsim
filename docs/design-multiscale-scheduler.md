@@ -435,7 +435,7 @@ The scheduler will:
 
 ### Phase 5: Documentation & Examples — DONE
 - [x] Update README (roadmap, architecture, API examples, test count)
-- [x] CLI demo: `simulate multiscale`
+- [x] CLI demo: `simulate demo multiscale`
 - [x] Example processes for each kind (in test_multiscale.py)
 
 ---

@@ -372,3 +372,48 @@ def test_proteostasis_handle_scales_composite_activity_without_mutation():
     assert float(jax.grad(activity)(0.5)) == pytest.approx(-2e-3)
     with pytest.raises(KeyError, match="no target"):
         apply_handles({"dp14": original["dp14"]}, {"Loss of Proteostasis": 1})
+
+
+@pytest.mark.demo
+def test_every_hallmark_names_a_real_parameter_of_a_demo_composite():
+    """Each registry mapping resolves on the composite it targets, so a
+    placeholder handle cannot point at a rate that does not exist."""
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
+    from hallsim.hallmarks import HALLMARK_REGISTRY
+    from hallsim.process import read_param
+
+    comp = build_multi_hallmark_composite(validate=False)
+    reached = set()
+    for name, handle in HALLMARK_REGISTRY.items():
+        assert handle.mappings, name
+        assert handle.references, name
+        for m in handle.mappings:
+            if m.process_name in comp.processes:
+                read_param(comp.processes[m.process_name], m.param_name)
+                reached.add(name)
+    # Every hallmark lands somewhere on the composite the demos build.
+    assert reached == set(HALLMARK_REGISTRY) - {"Stem Cell Exhaustion"}
+
+
+@pytest.mark.demo
+def test_the_composite_carries_no_damage_until_a_handle_sets_it():
+    from demos.models.multi_hallmark import build_multi_hallmark_composite
+    from hallsim.handles import with_handles
+    from hallsim.process import read_param
+    from hallsim.scheduler import Scheduler
+
+    base = build_multi_hallmark_composite(validate=False)
+    assert (
+        float(read_param(base.processes["irradiation_pulse"], "amplitude"))
+        == 0.0
+    )
+    treated = with_handles(base, {"Genomic Instability": 1.0})
+
+    def damage(comp):
+        res = Scheduler().run(
+            comp, t_span=(0.0, 2.0), macro_dt=0.5, save_dt=0.5
+        )
+        return float(res.get("dp14/DNA_damage")[-1])
+
+    # DP14 makes some damage from its own ROS; the pulse adds a multiple.
+    assert damage(treated) > 3 * damage(base)

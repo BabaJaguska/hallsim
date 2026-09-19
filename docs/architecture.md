@@ -131,7 +131,7 @@ another writer. So the hold is proportional: with net removal flux `v` at the
 setpoint, the clamped level settles at `setpoint − v/k_clamp`. Measure `v`
 with `measure_unclamped_flux` and pick the rate with `place_clamp_rate`
 (which also flags a clamp stiff enough to split off into its own
-`auto_groups` group) instead of guessing. `simulate clamp` plots all of it.
+`auto_groups` group) instead of guessing. `simulate demo clamp` plots all of it.
 
 ## SBML import
 
@@ -186,6 +186,8 @@ Discover-then-import is two calls — the catalog is directly usable by an agent
 from hallsim.discovery import search_for_model
 from hallsim.sbml_import import process_from_sbml
 
+# Every registered repository at once: BioModels, JWS Online, ModelDB,
+# BioSimulations and Europe PMC supplements; sources=[...] narrows it.
 hits = search_for_model("genotoxic stress NFkB")   # -> [ModelCandidate, ...]
 proc = process_from_sbml(hits[0].id, name="dna_nfkb")   # fetch + generate
 ```

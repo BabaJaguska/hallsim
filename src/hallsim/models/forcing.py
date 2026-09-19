@@ -115,12 +115,13 @@ def drive_pulse(
     (no washout). Mutates ``processes``/``topology`` in place and returns
     ``(processes, topology, source_name)``.
 
-    Warns when the **delivered dose** differs from the model's native one by
-    more than ``warn_factor``×. Dose is exposure × the rate the input drives,
-    so a window change that is compensated by rescaling that rate is not a
-    mismatch. Pass ``driven_rate=(param_name, native_value)`` to be scored on
-    the product; without it only exposure is compared, which flags a
-    compensated setup as if it were off-calibration."""
+    Warns when the dose the pulse would deliver **at full exposure**
+    (amplitude 1, the level a handle sets) differs from the model's native
+    one by more than ``warn_factor``×. Dose is exposure × the rate the input
+    drives, so a window change that is compensated by rescaling that rate is
+    not a mismatch. Pass ``driven_rate=(param_name, native_value)`` to be
+    scored on the product; without it only exposure is compared, which flags
+    a compensated setup as if it were off-calibration."""
     src = source_name or f"{input_name.lower()}_pulse"
     port = f"{input_name.lower()}_in"
     path = f"{src}/signal"
@@ -148,7 +149,7 @@ def drive_pulse(
     native = processes[target].native_input_exposure(
         input_name, t_start, t_end
     )
-    imposed = float(amplitude) * (float(t_end) - float(t_start))
+    imposed = float(t_end) - float(t_start)
     quantity = "exposure"
     if driven_rate is not None:
         rate_name, native_rate = driven_rate

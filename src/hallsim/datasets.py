@@ -16,15 +16,15 @@ import logging
 import urllib.request
 from dataclasses import dataclass
 
+import pandas as pd
+
 from hallsim.discovery import _get_json
-from hallsim.gene_reporters import geo_series_urls
+from hallsim.gene_reporters import choose_annotation, geo_series_urls
 
 log = logging.getLogger(__name__)
 
 GEO_EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 GEO_ACCESSION_URL = "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={}"
-#: The platform-table columns the loader maps probes to genes with.
-LOADER_COLUMNS = frozenset({"ID", "gene_assignment"})
 
 
 @dataclass(frozen=True)
@@ -138,19 +138,41 @@ def search_for_dataset(
     return found
 
 
-def platform_columns(accession: str, *, timeout: float = 60.0) -> list[str]:
-    """Column names of the platform table in a series' family SOFT, read
-    from the head of the stream so it costs kilobytes, not the table."""
+def platform_head(
+    accession: str, n_rows: int = 200, *, timeout: float = 60.0
+) -> pd.DataFrame:
+    """The first ``n_rows`` of the platform table in a series' family SOFT,
+    read from the head of the stream so it costs kilobytes, not the table.
+    """
+    from io import StringIO
+
     _, soft_url = geo_series_urls(accession)
+    lines: list[str] = []
     with urllib.request.urlopen(soft_url, timeout=timeout) as resp:
         with gzip.open(resp, "rt", errors="replace") as fh:
+            inside = False
             for line in fh:
                 if line.startswith("!platform_table_begin"):
-                    return next(fh).rstrip("\n").split("\t")
-    return []
+                    inside = True
+                elif line.startswith("!platform_table_end"):
+                    break
+                elif inside:
+                    lines.append(line)
+                    if len(lines) > n_rows:
+                        break
+    if not lines:
+        return pd.DataFrame()
+    return pd.read_csv(StringIO("".join(lines)), sep="\t", dtype=str)
 
 
-def loader_reads(columns) -> bool:
-    """Whether :func:`hallsim.gene_reporters.load_gene_expression` can map
-    this platform's probes to genes."""
-    return LOADER_COLUMNS <= set(columns)
+def loader_route(frame: pd.DataFrame) -> str:
+    """How :func:`hallsim.gene_reporters.load_gene_expression` would map
+    this platform's probes to genes, or why it cannot."""
+    if frame.empty or "ID" not in frame.columns:
+        return "no platform table in the series' SOFT"
+    try:
+        col, route = choose_annotation(frame)
+    except ValueError as exc:
+        return f"the loader cannot map it: {exc}"
+    via = " via MyGene.info" if route == "accession" else ""
+    return f"the loader reads {route}s from column {col!r}{via}"

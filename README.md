@@ -1,43 +1,19 @@
 # HallSim: A Differentiable, Composable Multi-Scale Modelling Framework for Aging Biology
 [![Basic CI/CD Workflow](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml/badge.svg)](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml)
 
-**HallSim composes independently-published systems-biology models into one multi-scale dynamical system — and calibrates the whole thing by gradient descent through the ODE solve.** Built on JAX / Equinox / Diffrax, with a focus on aging biology, where no single model captures the crosstalk between hallmarks.
+**HallSim composes independently-published systems-biology models into one multi-scale dynamical system and calibrates the whole thing by gradient descent through the ODE solve.** Built on JAX / Equinox / Diffrax, with a focus on aging biology, where no single model captures the crosstalk between hallmarks.
 
-- **End-to-end differentiable.** The entire composite — multiple stiff SBML models, operator-split across timescales — is a single differentiable function. Mechanism parameters spread across separate publications are fit with the same reverse-mode autodiff that trains neural networks, *through* the stiff ODE solve. GPU-friendly, with held-out validation. See [docs/calibration.md](docs/calibration.md).
-- **Agent-friendly by construction.** A published model becomes a `Process` in one call — `process_from_sbml` for SBML or COPASI `.cps` from any source, `process_from_xpp` for XPPAUT `.ode` — wired by a plain `{process: {port: path}}` topology dict, with its fittable parameters self-documenting via `Composite.calibration_targets()`. Typed ports carry units and ontology; `analyze_composability` proposes how to merge overlapping models. Meant for an LLM agent to assemble and calibrate a digital twin without bespoke glue. See [docs/architecture.md](docs/architecture.md).
-- **Scale is the point, not an edge case.** The reason to hand assembly to an agent is to go past what a person wires by hand, so composites are expected to be **generated** — hundreds to thousands of ports, built from a network file rather than typed out. Everything downstream is built for that shape: one flat state vector, batched scatter-adds instead of per-process Python, `store_index()` to align externally-built node-indexed arrays, and natural-sorted keys so generated names keep their numbering. Where a reduced path is still missing, it is tracked as a defect, not a limit — see [docs/known-problems.md](docs/known-problems.md).
+- **End-to-end differentiable.** The entire composite of multiple stiff models, operator-split across timescales, is a single differentiable function. 
+- **Agent-friendly by construction.** 
+- **Scale is central, not an edge case.** 
 
 ## Why
 
-Aging is network-level: its hallmarks — mitochondrial dysfunction, genomic instability, altered intercellular communication, and more — form dense webs of feedback, not isolated axes. Inspired by complex-systems framings of aging (Cohen et al. 2022 [1]), HallSim explores emergent properties that arise from loss of resilience across sub-systems.
+Aging is network-level: its hallmarks — mitochondrial dysfunction, genomic instability, altered intercellular communication, and more — form dense webs of feedback, not isolated axes. Hallsim explores emergent properties that arise from loss of resilience across sub-systems.
 
-HallSim is a **composition framework** — you bring the modules (hand-written, SBML-imported, or learned). It is JAX-native end to end — the composition itself is differentiable, JIT-compiled, and GPU-batched — and **built for an LLM agent** to discover, assemble, and calibrate a 'digital twin' without bespoke glue.
-
-## Goals
-
-- A composable, differentiable, multi-scale simulator for aging biology — bring your own modules (hand-written, SBML-imported, or learned via `NeuralODE`).
-- High-level severity handles for the 12 hallmarks of aging [2] (5 mapped today; each new one a single handle away).
 - Calibrate interventions and emergent phenotypes against real data, with held-out validation.
-- Make multi-model composition tractable for AI agents building digital twins — at a scale no one assembles by hand.
-- Serve as an educational in-silico testbed for perturbations (rapamycin, caloric restriction, …).
-
-## Standalone stochastic demo
-
-```bash
-simulate proctor2007-ssa --runs 6 --hours 24 --seed 0
-```
-
-Simulates the bundled Proctor 2007 ubiquitin–proteasome model with direct
-Gillespie SSA, holding initial counts and parameters fixed across seeds.
-Writes six species panels to `outputs/proctor2007_ssa/trajectories.png` and
-all sampled species, seeds, and event counts to `trajectories.npz`.
-Time is displayed in hours; the simulation uses the model's native seconds.
-The default uses normal proteasome activity (`k69=1e-3`, documented in the
-SBML notes); `--inhibited` selects the deposit's `k69=0` condition.
-Use `--output PATH`, `--samples N`, and `--max-events N` to control output
-and event capacity. Exceeding capacity raises an error instead of returning
-a truncated trajectory. These plots illustrate stochastic variability;
-they are not a reproduction of the paper's figures.
+- Make multi-model composition tractable for AI agents building at a scale no one assembles by hand.
+- Serve as an in-silico testbed for perturbations (rapamycin, caloric restriction, …).
 
 ## Architecture
 
@@ -54,7 +30,6 @@ they are not a reproduction of the paper's figures.
 
 A composition-time **validation layer** (units via pint, ontology IDs, feedback/fan-in graph analysis, duplicate-reaction heuristics) runs warnings-by-default and raises on hard conflicts.
 
-**Full details** — process kinds & port roles, the validation layer, composing composites, the merge-or-couple protocol, SBML import, perturbation handles, and batched population studies — are in **[docs/architecture.md](docs/architecture.md)**. The multi-rate scheduler (splitting schemes, coupling modes, adaptive step control) is in **[docs/design-multiscale-scheduler.md](docs/design-multiscale-scheduler.md)**.
 
 ## Quickstart
 
@@ -97,8 +72,6 @@ Calibration through the solve is documented in
 
 ### Workflow
 
-Every model goes through the same steps, and each has a command:
-
 1. **Find** — `simulate find <query>`: search the repositories for a deposit that *emits* what you need; `simulate find-data <query>` does the same for a GEO dataset to calibrate against.
 2. **Screen** — `simulate screen <id-or-path>`: triage and the numerical screen of that one model on its own. Nothing joins a composite unscreened.
 3. **Import** — `process_from_sbml` / `process_from_xpp`, then `reconciled_to` to put it on the composite's clock.
@@ -110,37 +83,33 @@ Every model goes through the same steps, and each has a command:
 Framework mechanics, end to end:
 
 ```bash
-simulate compose        # a minimal two-process composite
-simulate compose-kick   # the same, with a mid-run perturbation
-simulate multiscale     # continuous + discrete + event processes on one clock
-simulate clamp          # chronic vs transient exposure: hold a consumed species
-simulate stiffness      # per-group stiffness verdict + solver routing
+simulate demo compose        # a minimal two-process composite
+simulate demo compose-kick   # the same, with a mid-run perturbation
+simulate demo multiscale     # continuous + discrete + event processes on one clock
+simulate demo clamp          # chronic vs transient exposure: hold a consumed species
+simulate demo stiffness      # per-group stiffness verdict + solver routing
 simulate info           # what the architecture exposes
-make test
 ```
 
 Finding a model to compose is part of the workflow, not a prerequisite for it:
 
 ```bash
-simulate find NFkB inflammation --produces 'IL6|CXCL8'   # every repository, filtered by what a deposit EMITS
-simulate rejections                                       # what was screened out, and why
-simulate find-data "Down syndrome" --organism "Homo sapiens"   # GEO series, with the arms their sample titles reveal
+simulate find NFkB inflammation --produces 'IL6|CXCL8'   # every repository, filtered by what a deposit emits
 ```
 
-One worked case study composes two published SBML models and calibrates them
-against a public dataset. It is there to exercise the framework on real
-published models — not a model of senescence to build on:
+One worked case study composes three published SBML models and calibrates them
+against a public dataset:
 
 ```bash
-simulate multi-hallmark run        # score it out of the box, no fitting
-simulate multi-hallmark calibrate  # fit, then evaluate on held-out arms
-simulate multi-hallmark sweep      # two-hallmark severity sweep
-simulate multi-hallmark-ssa        # one-way DP14/GZ06 + Proctor SSA hybrid
-simulate hallmark-levers           # browser page: pull a hallmark, watch all three re-solve
+simulate demo multi-hallmark run        # score it out of the box, no fitting
+simulate demo multi-hallmark calibrate  # fit, then evaluate on held-out arms
+simulate demo multi-hallmark sweep      # two-hallmark severity sweep
+simulate demo multi-hallmark-ssa        # one-way DP14/GZ06 + Proctor SSA hybrid
+simulate demo hallmark-levers           # browser page: pull a hallmark, watch all three re-solve
 ```
 
 The first `run` downloads the dataset (GEO GSE248823, about 200 MB unpacked)
-into `data/`; `simulate multi-hallmark fetch-data` does only that.
+into `data/`; `simulate demo multi-hallmark fetch-data` does only that.
 
 The lever page needs the `app` extra (`pip install "hallsim[app]"`). Each
 slider is a hallmark severity; a pull re-solves the composite against
@@ -150,10 +119,10 @@ is shaded, with longer windows on a switch.
 
 ## What you can do with it
 
-- **Compose published models.** Search BioModels, JWS Online, ModelDB, BioSimulations, Physiome and Europe PMC supplements from one call, filtered by what a deposit *emits*; import SBML, COPASI `.cps` or XPPAUT `.ode`. The full mechanism surface auto-populates and is discoverable, and every candidate screened out is recorded with its reason in [docs/rejections.md](docs/rejections.md). → [docs/architecture.md#sbml-import](docs/architecture.md#sbml-import)
-- **Pull a perturbation handle.** A named, differentiable severity that moves the right parameters across models. The hallmarks of aging ship as one registry; a drug or a gene dosage is another entry, applied the same way. → [docs/architecture.md#hallmark-handles](docs/architecture.md#perturbation-handles)
-- **Calibrate against data with held-out validation.** Gene-reporter concordance, log2-fold-change loss, MAP priors, differentiation through the stiff solve. → [docs/calibration.md](docs/calibration.md)
-- **Run batched population studies.** A `(batch, n_vars)` `y0` flows through the solve as one computation — no `vmap` to write. Measured on CPU it pays off to about 64 members and not beyond, because one adaptive loop takes the slowest member's step count; the GPU claim is unmeasured. Numbers in [docs/benchmarks.md](docs/benchmarks.md). → [docs/architecture.md#population-studies-via-batched-y0](docs/architecture.md#population-studies-via-batched-y0)
+- **Compose published models.** Search BioModels, JWS Online, ModelDB, BioSimulations, Physiome and Europe PMC supplements from one call, filtered by what a deposit *emits*; import SBML, COPASI `.cps` or XPPAUT `.ode`. 
+- **Pull a perturbation handle.** A named, differentiable severity that moves the right parameters across models. The hallmarks of aging ship as one registry; a drug or a gene dosage is another entry, applied the same way.
+- **Calibrate against data.** Gene-reporter concordance, log2-fold-change loss, MAP priors, differentiation through the stiff solve. 
+- **Run batched population studies.** A `(batch, n_vars)` `y0` flows through the solve as one computation — no `vmap` to write. 
 
 ## License
 
@@ -161,8 +130,4 @@ MIT.
 
 ## References
 
-1. Cohen, A. A., et al. "A complex systems approach to aging biology." *Nature Aging* 2.7 (2022): 580–591.
-2. López-Otín, C., et al. "Hallmarks of aging: An expanding universe." *Cell* 186.2 (2023): 243–278.
-3. Agmon, E., et al. "Vivarium: an interface and engine for integrative multiscale modeling in computational biology." *Bioinformatics* 38.7 (2022): 1972–1979.
-4. Alfego, D., & Kriete, A. "Simulation of cellular energy restriction in quiescence (ERiQ)." *Biology* 6.4 (2017): 44.
-5. Ptolemaeus, C. (Ed.). *System Design, Modeling, and Simulation using Ptolemy II.* Ptolemy.org, 2014.
+Preprint available at: []

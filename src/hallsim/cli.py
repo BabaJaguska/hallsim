@@ -35,10 +35,16 @@ def simulate(verbose, quiet):
     logging.getLogger("hallsim").setLevel(level)
 
 
+@simulate.group("demo")
+def demo():
+    """Worked examples: framework mechanics on toy processes, and the
+    multi-hallmark case study. Test workloads, not models to build on."""
+
+
 # ── Composable architecture commands ─────────────────────────────────────
 
 
-@simulate.command()
+@demo.command("compose")
 @click.option("--t1", type=float, default=50.0, help="End time")
 @click.option("--dt", type=float, default=1.0, help="Save interval")
 @click.option(
@@ -143,7 +149,7 @@ def compose(t1, dt, validate):
     )
 
 
-@simulate.command("compose-kick")
+@demo.command("compose-kick")
 @click.option("--t1", type=float, default=100.0, help="End time")
 @click.option(
     "--kick-time", type=float, default=50.0, help="Time of perturbation"
@@ -230,7 +236,7 @@ def compose_kick(t1, kick_time, kick_ros):
     )
 
 
-@simulate.command("validate-demo")
+@demo.command("validate")
 @click.option("--strict", is_flag=True, help="Promote warnings to errors")
 def validate_demo(strict):
     """Demo: show the semantic validation layer catching issues."""
@@ -314,7 +320,7 @@ def validate_demo(strict):
         )
 
 
-@simulate.command("multiscale")
+@demo.command("multiscale")
 @click.option("--t1", type=float, default=100.0, help="End time (seconds)")
 @click.option(
     "--macro-dt", type=float, default=5.0, help="Macro step interval"
@@ -450,7 +456,7 @@ def multiscale(t1, macro_dt):
     click.echo(f"Alarm triggered: {'yes' if float(alarm[-1]) > 0.5 else 'no'}")
 
 
-@simulate.command("clamp")
+@demo.command("clamp")
 @click.option(
     "--level", type=float, default=2.0, show_default=True, help="Setpoint"
 )
@@ -617,8 +623,8 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
 @click.option(
     "--check/--no-check",
     default=False,
-    help="Read each series' platform table header from GEO and say whether "
-    "the loader can map its probes to genes.",
+    help="Read the head of each series' platform table from GEO and say "
+    "how the loader would map its probes to genes.",
 )
 def find_data(query, limit, organism, check):
     """Search GEO for a dataset to calibrate against.
@@ -629,8 +635,8 @@ def find_data(query, limit, organism, check):
     series usually do not.
     """
     from hallsim.datasets import (
-        loader_reads,
-        platform_columns,
+        loader_route,
+        platform_head,
         search_for_dataset,
     )
 
@@ -651,13 +657,9 @@ def find_data(query, limit, organism, check):
         if d.samples:
             click.echo(f"    samples: {', '.join(d.samples[:6])}")
         if check and d.series_matrix_has_values:
-            cols = platform_columns(d.accession)
-            verdict = (
-                "loader reads it"
-                if loader_reads(cols)
-                else "no gene_assignment column, the loader cannot map it"
+            click.echo(
+                f"    platform: {loader_route(platform_head(d.accession))}"
             )
-            click.echo(f"    platform: {', '.join(cols[:8])} -> {verdict}")
 
 
 @simulate.command("screen")
@@ -721,7 +723,7 @@ def rejections(cls, slot):
         click.echo(f"    evidence: {r.evidence}")
 
 
-@simulate.command("stiffness")
+@demo.command("stiffness")
 @click.option(
     "--macro-dt",
     default=5.0,
@@ -753,7 +755,7 @@ def stiffness(macro_dt):
     )
 
 
-@simulate.command("gz06-damage-scan")
+@demo.command("gz06-damage-scan")
 def gz06_damage_scan():
     """Which Geva-Zatorsky 2006 parameter should carry DNA damage?
 
@@ -768,7 +770,7 @@ def gz06_damage_scan():
     run_scan()
 
 
-@simulate.command("multi-hallmark")
+@demo.command("multi-hallmark")
 @click.argument(
     "command",
     type=click.Choice(
@@ -917,7 +919,7 @@ def multi_hallmark(
     dispatch.get(command, cmd_run)(args)
 
 
-@simulate.command("proctor2007-ssa")
+@demo.command("proctor2007-ssa")
 @click.option(
     "--runs",
     type=click.IntRange(min=2),
@@ -979,7 +981,7 @@ def proctor2007_ssa(runs, hours, samples, seed, max_events, inhibited, output):
     )
 
 
-@simulate.command("multi-hallmark-ssa")
+@demo.command("multi-hallmark-ssa")
 @click.option("--t-end", type=float, default=14.0, show_default=True)
 @click.option("--save-dt", type=float, default=0.1, show_default=True)
 @click.option("--seed", type=int, default=0, show_default=True)
@@ -1000,7 +1002,7 @@ def multi_hallmark_ssa(t_end, save_dt, seed, max_events):
     )
 
 
-@simulate.command("hallmark-levers")
+@demo.command("hallmark-levers")
 @click.option("--port", type=int, default=8050, show_default=True)
 @click.option("--host", default="127.0.0.1", show_default=True)
 @click.option("--debug", is_flag=True, help="Dash debug mode")
@@ -1073,8 +1075,16 @@ def info():
     click.echo("  CouplingAuditor  — duplicate reaction detection")
     click.echo()
     click.echo("CLI commands:")
-    width = max(len(name) for name in simulate.commands)
+    rows = []
     for name, cmd in sorted(simulate.commands.items()):
+        if isinstance(cmd, click.Group):
+            rows += [
+                (f"{name} {sub}", c) for sub, c in sorted(cmd.commands.items())
+            ]
+        else:
+            rows.append((name, cmd))
+    width = max(len(n) for n, _ in rows)
+    for name, cmd in rows:
         click.echo(
             f"  simulate {name:<{width}}  — {cmd.get_short_help_str(limit=70)}"
         )
@@ -1086,3 +1096,7 @@ def info():
     click.echo("  from hallsim.composite import Composite")
     click.echo("  from hallsim.scheduler import Scheduler")
     click.echo("  from hallsim.validation import CompositeValidator")
+
+
+if __name__ == "__main__":
+    simulate()

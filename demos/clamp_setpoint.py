@@ -229,7 +229,7 @@ def plot(runs, sweep_k, residuals, flux, placed, cfg, path):
 
 
 def run_demo(argv=(), **overrides):
-    """Solve, sweep and plot; the entry point `simulate clamp` calls."""
+    """Solve, sweep and plot; the entry point `simulate demo clamp` calls."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = dict(DEFAULTS)
     if argv:

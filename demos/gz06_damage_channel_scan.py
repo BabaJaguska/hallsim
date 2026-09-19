@@ -18,7 +18,7 @@ published parameter set is the damaged state: a usable channel puts the
 published value on the oscillating side and a control-side displacement on the
 quiescent side.
 
-    simulate gz06-damage-scan
+    simulate demo gz06-damage-scan
 """
 
 from __future__ import annotations

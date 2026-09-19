@@ -12,8 +12,8 @@ alpha_x) on the DDIS-vs-control arm, evaluates
 concordance on the held-out rapamycin arm with a magnitude-aware log2
 fold-change loss, and writes the before/after comparison figures.
 
-    simulate multi-hallmark run
-    simulate multi-hallmark calibrate
+    simulate demo multi-hallmark run
+    simulate demo multi-hallmark calibrate
 
 ``run`` downloads GSE248823 from GEO into data/FibroblastsDNA_dmg_Rapamycin/
 on first use (``fetch-data`` does only that); offline it runs unscored. The
@@ -964,7 +964,7 @@ def _missing_data_notice(error: Exception) -> str:
         f"Dataset not found: {SERIES_MATRIX.name} and {PLATFORM.name}\n"
         f"  expected in : {DATA_DIR}\n"
         f"  fetch failed: {error}\n"
-        f"  retry with  : simulate multi-hallmark fetch-data\n"
+        f"  retry with  : simulate demo multi-hallmark fetch-data\n"
         "Running the composite unscored: it will simulate and write "
         "trajectories, but concordance against measured expression is skipped."
     )
@@ -1156,7 +1156,7 @@ def cmd_score(args) -> None:
     if not ckpt.exists():
         raise SystemExit(
             f"no checkpoint at {ckpt}. Point --run at a calibrate run, or "
-            f"run `simulate multi-hallmark calibrate` first."
+            f"run `simulate demo multi-hallmark calibrate` first."
         )
     saved = json.loads((run_dir / "summary.json").read_text())
     fitted = tuple(saved["params"])
@@ -1319,7 +1319,7 @@ def cmd_export(args) -> None:
     if not ckpt.exists():
         raise SystemExit(
             f"no checkpoint at {ckpt}. Point --run at a calibrate run, or "
-            f"run `simulate multi-hallmark calibrate` first."
+            f"run `simulate demo multi-hallmark calibrate` first."
         )
     saved = json.loads((run_dir / "summary.json").read_text())
     fitted = tuple(saved["params"])
@@ -1382,7 +1382,7 @@ def cmd_export(args) -> None:
         f"Fitted parameters ({fitted_desc}): {values}.",
         "",
         "Source: https://github.com/BabaJaguska/hallsim — "
-        "`simulate multi-hallmark export --run <run>`.",
+        "`simulate demo multi-hallmark export --run <run>`.",
     ]
     (out / "README.md").write_text("\n".join(readme) + "\n")
     print(f"wrote sbml/README.md -> {out}", flush=True)

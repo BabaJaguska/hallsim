@@ -185,7 +185,7 @@ RAPA_INTERVENTION_DAY = DDIS_ETOPOSIDE_DOSE_WINDOW[1]
 
 # GZ06's `psi` is the paper's ξ, a noise gain on protein production, and stays
 # at its published 1.0. Damage enters on `alpha_x`, Mdm2-independent p53
-# degradation — the channel `simulate gz06-damage-scan` picks: its Hopf is at
+# degradation — the channel `simulate demo gz06-damage-scan` picks: its Hopf is at
 # 0.1662 and damage crosses it, where alpha_k's and alpha_y's damage
 # directions move away. The ATM mechanism the edge cites (Banin 1998) acts on
 # Mdm2-*dependent* degradation, alpha_k here, so the citation supports the
@@ -233,8 +233,14 @@ def build_multi_hallmark_composite(
     ``dp14/``, ``gz06/`` and ``p07/``; apply hallmarks for the treated and
     control variants.
 
-    ``dose_window`` is the ``(t_start, t_end)`` damage pulse; ``None`` holds
-    ``Irradiation`` at its severity for the whole run instead of washing out.
+    ``dose_window`` is the ``(t_start, t_end)`` window of damage exposure;
+    ``t_end=None`` sustains it to the end of the run. The exposure level is
+    the Genomic Instability severity and starts at 0, so the composite as
+    built carries no damage until a handle sets it. ``dose_window=None``
+    builds no exposure at all, and Genomic Instability then has no target.
+    The driven rate is calibrated to the published two-day window, so a
+    longer window delivers proportionally more dose at the same severity;
+    ``drive_pulse`` warns by how much.
     ``validate`` covers topology only — semantic validation is configured per
     sub-composite and at the merge. Proctor 2007's ubiquitin–proteasome
     system is ``p07/``, its misfolding rate driven by DP14's ROS and its
@@ -313,7 +319,8 @@ def build_multi_hallmark_composite(
     # Etoposide exposure: a PulseSource ("irradiation_pulse") drives DP14's
     # Irradiation input over the dose window — composed from the general
     # port-coupling path, not a special-cased pulse. Its amplitude is the
-    # Genomic Instability exposure level (set per condition via the hallmark).
+    # Genomic Instability exposure level, set per condition by the handle;
+    # zero here, so no handle means no exposure.
     if dose_window is not None:
         drive_pulse(
             processes,
@@ -322,7 +329,7 @@ def build_multi_hallmark_composite(
             input_name=DP14_IRRADIATION_INPUT_NAME,
             t_start=dose_window[0],
             t_end=dose_window[1],
-            amplitude=1.0,
+            amplitude=0.0,
             source_name="irradiation_pulse",
             handle="Genomic Instability",
             driven_rate=(

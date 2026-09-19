@@ -539,3 +539,143 @@ class TestFetchGeoSeries:
         assert soft.endswith(
             "/GSE248nnn/GSE248823/soft/GSE248823_family.soft.gz"
         )
+
+
+class TestProbeGeneMap:
+    """The platform annotation is found by content, whatever the column is
+    called, and bare accessions are resolved."""
+
+    IDS = [f"p{i}" for i in range(8)]
+    SYMBOLS = [
+        "TP53",
+        "BRCA1",
+        "MDM2",
+        "CDKN1A",
+        "GLB1",
+        "DDB2",
+        "BNIP3",
+        "HSPA1A",
+    ]
+    REFSEQ = [f"NM_{i:06d}" for i in range(8)]
+
+    def test_symbol_column_wins_over_flags_sequences_and_accessions(self):
+        from hallsim.gene_reporters import choose_annotation, probe_gene_map
+
+        frame = pd.DataFrame(
+            {
+                "ID": ["A_23_P%d" % i for i in range(8)],
+                "CONTROL_TYPE": ["FALSE"] * 8,
+                "REFSEQ": self.REFSEQ,
+                "GENE_SYMBOL": self.SYMBOLS,
+                "SEQUENCE": ["ACGT" * 12] * 8,
+                "ENSEMBL_ID": [f"ENST{i:011d}" for i in range(8)],
+            }
+        )
+        assert choose_annotation(frame) == ("GENE_SYMBOL", "symbol")
+        assert probe_gene_map(frame) == dict(zip(frame["ID"], self.SYMBOLS))
+
+    def test_affymetrix_assignment_and_listed_symbols(self):
+        from hallsim.gene_reporters import probe_gene_map
+
+        assignment = [
+            f"{r} // {s} // a gene // 1p36 // {i} /// XR_1 // {s}-AS1 // x"
+            for i, (r, s) in enumerate(zip(self.REFSEQ, self.SYMBOLS))
+        ]
+        uniprot = [
+            "P04637",
+            "P38398",
+            "Q00987",
+            "P38936",
+            "P16278",
+            "Q92466",
+            "Q12983",
+            "P0DMV8",
+        ]
+        frame = pd.DataFrame(
+            {
+                "ID": self.IDS,
+                "gene_assignment": assignment,
+                # UniProt accessions read as symbols by shape; they must not win.
+                "swissprot": [
+                    f"{r} // {u}" for r, u in zip(self.REFSEQ, uniprot)
+                ],
+            }
+        )
+        assert probe_gene_map(frame) == dict(zip(self.IDS, self.SYMBOLS))
+        listed = pd.DataFrame(
+            {
+                "ID": self.IDS,
+                "Gene Symbol": [f"{s} /// MIR1" for s in self.SYMBOLS],
+            }
+        )
+        assert probe_gene_map(listed) == dict(zip(self.IDS, self.SYMBOLS))
+
+    def test_accessions_are_resolved_when_no_field_is_a_symbol(self):
+        from hallsim.gene_reporters import choose_annotation, probe_gene_map
+
+        clariom = pd.DataFrame(
+            {
+                "ID": self.IDS,
+                "SPOT_ID": ["Coding"] * 8,
+                "SPOT_ID.1": [
+                    f"{r} // RefSeq // Homo sapiens some gene ({s}), mRNA. "
+                    f"// chr1 // 100 /// ENST{i:011d} // ENSEMBL // a gene"
+                    for i, (r, s) in enumerate(zip(self.REFSEQ, self.SYMBOLS))
+                ],
+            }
+        )
+        clariom.loc[len(clariom)] = ["p_unannotated", "Coding", "---"]
+        assert choose_annotation(clariom) == ("SPOT_ID.1", "accession")
+        asked = {}
+
+        def resolve(accessions, *, taxid):
+            asked["taxid"] = taxid
+            assert accessions == self.REFSEQ
+            return dict(zip(self.REFSEQ, self.SYMBOLS))
+
+        assert probe_gene_map(clariom, taxid=9606, resolve=resolve) == dict(
+            zip(self.IDS, self.SYMBOLS)
+        )
+        assert asked["taxid"] == 9606
+        hugene = pd.DataFrame(
+            {
+                "ID": [str(16657436 + i) for i in range(8)],
+                "GB_ACC": self.REFSEQ,
+            }
+        )
+        assert choose_annotation(hugene) == ("GB_ACC", "accession")
+
+    def test_no_gene_annotation_raises(self):
+        from hallsim.gene_reporters import choose_annotation
+
+        frame = pd.DataFrame(
+            {"ID": self.IDS, "start": [str(i) for i in range(8)]}
+        )
+        with pytest.raises(ValueError, match="names genes"):
+            choose_annotation(frame)
+
+    def test_mygene_batches_are_cached(self, monkeypatch, tmp_path):
+        import io
+        import json
+
+        from hallsim import gene_reporters as gr
+
+        calls = []
+
+        def fake_urlopen(request, timeout):
+            calls.append(request.data)
+            body = [
+                {"query": "NM_000001", "symbol": "TP53"},
+                {"query": "NM_000002", "notfound": True},
+            ]
+            return io.BytesIO(json.dumps(body).encode())
+
+        monkeypatch.setattr(gr.urllib.request, "urlopen", fake_urlopen)
+        first = gr.symbols_for_accessions(
+            ["NM_000002", "NM_000001"], taxid=9606, cache_dir=tmp_path
+        )
+        again = gr.symbols_for_accessions(
+            ["NM_000001", "NM_000002"], taxid=9606, cache_dir=tmp_path
+        )
+        assert first == again == {"NM_000001": "TP53"}
+        assert len(calls) == 1 and b"species=9606" in calls[0]

@@ -114,7 +114,7 @@ GPU batching has a different tradeoff: the optional
 `hallsim.root_finders.StepChord` reuses a Jacobian across implicit stages
 while retaining Cauchy convergence. It improves the tested 256-cell GPU
 workload but is slower for small batches, so Newton remains the default.
-See [the Jacobian reuse profile](jacobian-reuse.md) for timings, accuracy,
+See the Jacobian reuse profile (working notes, not in the repository) for timings, accuracy,
 and CUDA dispatch costs. The historical measurements below are not a
 general statement that Jacobian reuse can never help.
 
