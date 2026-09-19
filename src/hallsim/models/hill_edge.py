@@ -32,7 +32,7 @@ from hallsim.tracing import is_traced
 class HillEdge(Process):
     """Hill-gated coupling edge; see module docstring for the rate law."""
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
 
     basal: float = calibratable(
         0.0, description="value at source→0; fit against the reporter."

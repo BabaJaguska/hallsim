@@ -5,12 +5,13 @@ import pytest
 
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process
+import equinox as eqx
 
 
 class Algebraic(Process):
     """Evolves x and publishes s = 2x, which its own derivative never reads."""
 
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {
@@ -28,7 +29,7 @@ class Algebraic(Process):
 class Reader(Process):
     """dz/dt = s - z through an INPUT port."""
 
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {
@@ -43,7 +44,7 @@ class Reader(Process):
 class Sweeper(Process):
     """Reads whatever it is given, by iteration."""
 
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {

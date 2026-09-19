@@ -17,6 +17,7 @@ from hallsim.models.clamp_edge import (
 from hallsim.models.forcing import PulseSource
 from hallsim.process import Port, PortRole, Process
 from hallsim.scheduler import Scheduler
+import equinox as eqx
 
 
 class LigandUptake(Process):
@@ -24,7 +25,7 @@ class LigandUptake(Process):
     ``with_param_input`` (constants) and ``drive_pulse`` (boundary inputs)
     cannot reach."""
 
-    timescale: float | None = 1.0
+    timescale: float | None = eqx.field(static=True, default=1.0)
     v_max: float = 0.5
     K_m: float = 1.0
 

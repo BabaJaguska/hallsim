@@ -8,11 +8,12 @@ from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
 from hallsim.composite import Composite
 from hallsim.gene_reporters import GeneReporter
 from hallsim.process import Port, PortRole, Process, calibratable
+import equinox as eqx
 
 
 class Decay(Process):
     rate: float = calibratable(0.5, description="decay rate")
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {"x": Port(role=PortRole.EVOLVED, default=1.0)}

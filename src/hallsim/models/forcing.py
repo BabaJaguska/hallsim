@@ -34,7 +34,7 @@ class PulseSource(Process):
     structural. Other shapes (ramp, decay) are sibling sources over the same
     port mechanism."""
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
     amplitude: float = calibratable(
         1.0, description="pulse height / exposure level; 0 = no exposure."
     )
@@ -191,7 +191,7 @@ class StepSource(Process):
     levels are calibratable; ``before == after`` is a constant drive.
     """
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
     after: float = calibratable(
         1.0, description="level from t_step onward (treated level)."
     )

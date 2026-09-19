@@ -1,5 +1,6 @@
 """The residual scale the verdicts rest on, and the set they recommend."""
 
+import equinox as eqx
 import numpy as np
 import pytest
 
@@ -124,7 +125,7 @@ def test_screen_fittable_pools_the_composite_s_own_surface():
     class Decay(Process):
         rate: float = calibratable(0.5, description="decay rate")
         scale: float = 1.0  # not declared fittable
-        timescale: float = 1.0
+        timescale: float = eqx.field(static=True, default=1.0)
 
         def ports_schema(self):
             return {"x": Port(role=PortRole.EVOLVED, default=1.0)}

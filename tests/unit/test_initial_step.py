@@ -5,6 +5,7 @@ import numpy as np
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process
 from hallsim.scheduler import Scheduler
+import equinox as eqx
 
 
 class StiffCubic(Process):
@@ -12,7 +13,7 @@ class StiffCubic(Process):
     fixed guess of the first step."""
 
     k: float = 1e6
-    timescale: float = 1e-6
+    timescale: float = eqx.field(static=True, default=1e-6)
 
     def ports_schema(self):
         return {"x": Port(role=PortRole.EVOLVED, default=10.0)}
@@ -22,7 +23,7 @@ class StiffCubic(Process):
 
 
 class Slow(Process):
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {"z": Port(role=PortRole.EVOLVED, default=1.0)}

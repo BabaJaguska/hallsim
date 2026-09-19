@@ -50,7 +50,7 @@ class SlowChain(Process):
     leak: float = 0.05
     period: float = 10.0
     feedback: float = 0.5
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {
@@ -79,7 +79,7 @@ class StiffRelax(Process):
 
     m: int = eqx.field(static=True, default=8)
     k: float = 1e4
-    timescale: float = 1e-4
+    timescale: float = eqx.field(static=True, default=1e-4)
 
     def ports_schema(self):
         return {

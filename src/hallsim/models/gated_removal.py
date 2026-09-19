@@ -28,7 +28,7 @@ from hallsim.process import Port, PortRole, Process, calibratable
 class GatedRemoval(Process):
     """Gated first-order removal; see module docstring for the rate law."""
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
 
     k_remove: float = calibratable(
         1.0, description="clearance rate while the gate is open (1/time)."

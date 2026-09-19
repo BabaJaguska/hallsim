@@ -15,12 +15,13 @@ from hallsim.composite import Composite
 from hallsim.models.kick_event import KickEvent
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.scheduler import Scheduler
+import equinox as eqx
 
 
 class Relax(Process):
     """dx/dt = -x."""
 
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
@@ -33,7 +34,7 @@ class Tick(Process):
     """Adds ``step`` to a latched counter every ``dt_step``."""
 
     kind: ProcessKind = ProcessKind.DISCRETE
-    dt_step: float = 0.5
+    dt_step: float = eqx.field(static=True, default=0.5)
     step: float = 1.0
 
     def ports_schema(self):

@@ -327,18 +327,18 @@ class Process(eqx.Module):
     """
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float | None = None
-    dt_step: float | None = None
+    # Read by the Scheduler in plain Python (grouping, update spacing), never
+    # inside the traced computation: structure, so static. A traced leaf here
+    # breaks grouping inside any jitted or differentiated function that
+    # carries a process pytree.
+    timescale: float | None = eqx.field(static=True, default=None)
+    dt_step: float | None = eqx.field(static=True, default=None)
 
     # Folded into metadata() when set. Plain class attributes, not fields, so
     # they add nothing to the traced pytree.
     handle = None
     reference = None
     description = None
-
-    # Read by the Scheduler in plain Python (grouping, update spacing), never
-    # inside the traced computation — structure, not dynamics.
-    _PYTHON_FIELDS = frozenset({"timescale", "dt_step"})
 
     def __check_init__(self):
         """Coerce float parameters to JAX arrays, dict and tuple fields
@@ -351,7 +351,9 @@ class Process(eqx.Module):
         always runs it and skips it on ``tree_unflatten``.
         """
         for f in dataclasses.fields(self):
-            if f.metadata.get("static") or f.name in self._PYTHON_FIELDS:
+            # A subclass that redeclares a grouping field as a plain leaf
+            # still gets a Python float, never an array a trace could carry.
+            if f.metadata.get("static") or f.name in ("timescale", "dt_step"):
                 continue
             value = getattr(self, f.name, None)
             coerced = _as_traced(value)

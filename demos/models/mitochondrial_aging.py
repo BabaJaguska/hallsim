@@ -251,7 +251,7 @@ class MtDNAPopulation(Process):
         "transcription-primed, ATP-controlled replication."
     )
 
-    timescale: float | None = 3600.0
+    timescale: float | None = eqx.field(static=True, default=3600.0)
 
     s_wt: float = MTDNA_S_WT_PER_DAY
     mut_advantage: float = calibratable(
@@ -383,7 +383,7 @@ class RespiratoryCompetence(Process):
         "functional/dysfunctional organelle split."
     )
 
-    timescale: float | None = 3600.0
+    timescale: float | None = eqx.field(static=True, default=3600.0)
     threshold: float = calibratable(
         0.8,
         clamp=(0.4, 0.98),
@@ -483,7 +483,7 @@ class MitoBioenergetics(Process):
         "NAD+/NADH from respiratory competence and proton leak."
     )
 
-    timescale: float | None = 3600.0
+    timescale: float | None = eqx.field(static=True, default=3600.0)
     coefficients: dict = eqx.field(
         default_factory=lambda: dict(BIOE_SURROGATE_DEFAULTS)
     )
@@ -586,7 +586,7 @@ class MitoRedox(Process):
         "FoxO3a-inducible SOD2/catalase capacity."
     )
 
-    timescale: float | None = 3600.0
+    timescale: float | None = eqx.field(static=True, default=3600.0)
 
     k_prod: float = calibratable(
         1.0,
@@ -731,7 +731,7 @@ class MitoQualityControl(Process):
         "AMPK/NAD+-driven, mTORC1-opposed PGC-1α biogenesis."
     )
 
-    timescale: float | None = 3600.0
+    timescale: float | None = eqx.field(static=True, default=3600.0)
 
     pink1_on: float = 4.0
     pink1_off: float = 4.0
@@ -884,7 +884,7 @@ class MitoMembranePotential(Process):
         "population's potential-per-unit-mass relative to young."
     )
 
-    timescale: float | None = 3600.0
+    timescale: float | None = eqx.field(static=True, default=3600.0)
     # DallePezze 2014 initial state: Mito_membr_pot_new / Mito_mass_new.
     reference_ratio: float = 12.12
     # Potential retained by the dysfunctional pool, as a fraction of the
@@ -972,7 +972,7 @@ class SenescentProtonLeak(Process):
     reference = "Passos et al. 2010, Mol Syst Biol 6:347"
     description = "SA-β-gal → proton-leak conductance (senescent uncoupling)."
 
-    timescale: float | None = 3600.0
+    timescale: float | None = eqx.field(static=True, default=3600.0)
     basal: float = 1.0
     senescent: float = calibratable(
         2.0,

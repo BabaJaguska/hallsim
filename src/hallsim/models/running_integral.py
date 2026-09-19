@@ -22,6 +22,7 @@ import sympy
 from hallsim.process import ReactionChannel
 
 from hallsim.process import Port, PortRole, Process
+import equinox as eqx
 
 
 class RunningIntegral(Process):
@@ -34,7 +35,7 @@ class RunningIntegral(Process):
         "calibration gradient."
     )
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
     # 2 → √⟨x²⟩, amplitude-aware: a buffered-mean oscillator (p53, mean
     # analytically damage-blind) is invisible to a plain mean. 1 → ∫x, for a
     # species whose DC level itself moves with the drive.

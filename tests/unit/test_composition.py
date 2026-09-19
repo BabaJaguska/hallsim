@@ -1265,3 +1265,34 @@ def test_a_pytree_round_trip_leaves_the_rhs_bit_identical():
     before = composite.build_rhs()[0](0.0, y0)
     after = round_tripped.build_rhs()[0](0.0, y0)
     assert jnp.array_equal(before, after)
+
+
+def test_grouping_fields_are_structure_not_pytree_leaves():
+    """``timescale`` and ``dt_step`` decide grouping in plain Python, so a
+    pytree transform over a process must leave them alone: only the rate is
+    a leaf, and a mapped process still groups."""
+    import jax
+
+    proc = Decay(rate=0.05, timescale=3.0)
+    numeric = [
+        float(x)
+        for x in jax.tree_util.tree_leaves(proc)
+        if hasattr(x, "shape")
+    ]
+    assert numeric == [pytest.approx(0.05)]
+    # Doubles every numeric leaf; before the fix the grouping field was a
+    # Python-float leaf and came out as 6.0.
+    doubled = jax.tree_util.tree_map(
+        lambda x: (
+            x * 2.0 if isinstance(x, float) or hasattr(x, "shape") else x
+        ),
+        proc,
+    )
+    assert float(doubled.rate) == pytest.approx(0.1)
+    assert doubled.timescale == 3.0 and isinstance(doubled.timescale, float)
+    comp = Composite(
+        processes={"d": doubled},
+        topology={"d": {"x": "pool/x"}},
+        semantic_validation=False,
+    )
+    assert ["d"] in [list(g) for g in comp.auto_groups().values()]

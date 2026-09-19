@@ -29,7 +29,7 @@ from hallsim.scheduler import Scheduler
 
 
 class Decay(Process):
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
     rate: float = 0.1
 
     def ports_schema(self):

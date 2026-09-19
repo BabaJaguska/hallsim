@@ -29,7 +29,7 @@ from hallsim.process import Port, PortRole, Process, calibratable
 class GainEdge(Process):
     """Linear coupling edge; see module docstring for the rate law."""
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
 
     offset: float = calibratable(0.0, description="value at source→0.")
     gain: float = calibratable(1.0, description="slope in target per source.")

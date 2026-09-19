@@ -695,3 +695,25 @@ def test_biomodels_search_drops_phrase_quotes(monkeypatch):
     monkeypatch.setattr(discovery, "_get_json", fake)
     discovery.search_biomodels('"Down syndrome" AND glutathione')
     assert sent["query"] == "Down syndrome AND glutathione"
+
+
+def test_sources_are_asked_in_parallel_and_kept_in_order(monkeypatch):
+    import time
+
+    from hallsim import discovery
+    from hallsim.discovery import ModelCandidate
+
+    def slow(tag):
+        def search(query, limit=25, **_):
+            time.sleep(0.4)
+            return [ModelCandidate(tag, f"{tag}-1", tag, "sbml", "", False)]
+
+        return search
+
+    monkeypatch.setattr(
+        discovery, "SOURCES", {"a": slow("a"), "b": slow("b"), "c": slow("c")}
+    )
+    started = time.perf_counter()
+    hits = discovery.search_for_model("x")
+    assert time.perf_counter() - started < 1.0  # not 3 x 0.4 s
+    assert [h.source for h in hits] == ["a", "b", "c"]

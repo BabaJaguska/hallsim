@@ -52,7 +52,7 @@ class ClampEdge(Process):
     clamped entity so the semantic checker sees an annotated writer.
     """
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
 
     k_clamp: float = calibratable(
         1.0,

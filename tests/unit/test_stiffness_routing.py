@@ -31,7 +31,7 @@ class StiffPair(Process):
     ~``k_fast`` stability-limited substeps, well past the analyzer's default
     threshold of 100, so the group is unambiguously stiff."""
 
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
     k_fast: float = 1.0e4
     k_slow: float = 1.0e-1
 
@@ -55,7 +55,7 @@ class StiffPair(Process):
 class MildDecay(Process):
     """Single slow decay — nothing for the analyzer to flag."""
 
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
     rate: float = 0.1
 
     def ports_schema(self):

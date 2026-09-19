@@ -911,19 +911,38 @@ def search_for_model(
     does not abort a swarm run. Returns candidates in source-registration
     order; ranking within a source is the repository's own.
     """
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
     names = sources if sources is not None else list(SOURCES)
-    found: list[ModelCandidate] = []
+    searches = {}
     for name in names:
         search = SOURCES.get(name)
         if search is None:
             raise KeyError(f"unknown source {name!r}; have {list(SOURCES)}")
+        searches[name] = search
+
+    def ask(name):
+        search = searches[name]
+        started = time.perf_counter()
         try:
-            found.extend(
-                search(query, limit=limit, **_accepted(search, kwargs))
-            )
+            hits = search(query, limit=limit, **_accepted(search, kwargs))
         except Exception as exc:  # a dead repository is not a failed run
             log.warning("source %r failed for '%s': %s", name, query, exc)
-    return found
+            hits = []
+        log.info(
+            "source %r: %d hits in %.1fs",
+            name,
+            len(hits),
+            time.perf_counter() - started,
+        )
+        return hits
+
+    # Repositories answer in parallel, so an unreachable one costs its own
+    # timeout rather than adding it to every other's; order is preserved.
+    with ThreadPoolExecutor(max_workers=max(1, len(names))) as pool:
+        results = list(pool.map(ask, names))
+    return [c for hits in results for c in hits]
 
 
 def _accepted(search, kwargs: dict) -> dict:

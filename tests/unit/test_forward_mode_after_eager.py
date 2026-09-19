@@ -7,10 +7,11 @@ import numpy as np
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process
 from hallsim.scheduler import Scheduler
+import equinox as eqx
 
 
 class Decay(Process):
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {"x": Port(role=PortRole.EVOLVED, default=1.0)}

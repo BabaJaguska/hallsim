@@ -23,6 +23,7 @@ from hallsim.handles import with_handles
 from demos.models.hallmarks import HALLMARK_REGISTRY
 from hallsim.process import Port, PortRole, Process
 from hallsim.scheduler import Scheduler
+import equinox as eqx
 
 logging.disable(logging.WARNING)
 
@@ -33,7 +34,7 @@ MULTI_HALLMARK_MACRO_DT = 5.0
 class _Osc(Process):
     """Minimal 2-state block; one per timescale group."""
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
     k: float = 1.0
 
     def ports_schema(self):

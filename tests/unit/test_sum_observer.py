@@ -5,10 +5,11 @@ import numpy as np
 from hallsim.composite import Composite
 from hallsim.models.observer import SumObserver
 from hallsim.process import Port, PortRole, Process
+import equinox as eqx
 
 
 class Two(Process):
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {

@@ -2,13 +2,14 @@
 
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process
+import equinox as eqx
 
 
 class Relax(Process):
     """dx/dt = (u - x) / tau, with a declared timescale."""
 
     tau: float = 1.0
-    timescale: float | None = 1.0
+    timescale: float | None = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {
@@ -23,7 +24,7 @@ class Relax(Process):
 class Edge(Process):
     """Reads a source, writes a target; declares no timescale."""
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
 
     def ports_schema(self):
         return {

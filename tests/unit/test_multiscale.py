@@ -45,7 +45,7 @@ class FastKinetics(Process):
     """Continuous process with explicit timescale."""
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
     rate: float = 0.1
 
     def ports_schema(self):
@@ -59,7 +59,7 @@ class SlowDrift(Process):
     """Continuous process with slow timescale."""
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float = 86400.0 * 30  # ~month
+    timescale: float = eqx.field(static=True, default=86400.0 * 30)  # ~month
     rate: float = 1e-7
 
     def ports_schema(self):
@@ -78,7 +78,7 @@ class DivisionCheck(Process):
     """Discrete process: checks if cell should divide."""
 
     kind: ProcessKind = ProcessKind.DISCRETE
-    dt_step: float = 86400.0  # once per day
+    dt_step: float = eqx.field(static=True, default=86400.0)  # once per day
 
     def ports_schema(self):
         return {
@@ -136,7 +136,7 @@ class BadDiscreteWithEvolved(Process):
     """Invalid: discrete process trying to write an EVOLVED port."""
 
     kind: ProcessKind = ProcessKind.DISCRETE
-    dt_step: float = 100.0
+    dt_step: float = eqx.field(static=True, default=100.0)
 
     def ports_schema(self):
         return {"x": Port(role=PortRole.EVOLVED, default=0.0)}
@@ -514,7 +514,7 @@ class ConstantProduction(Process):
     """Constant production: dx/dt = +rate. Abstains on the pool's value."""
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
     rate: float = 1.0
 
     def ports_schema(self):
@@ -528,7 +528,7 @@ class SimpleDecay(Process):
     """First-order decay: dx/dt = -rate * x."""
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
     rate: float = 0.1
 
     def ports_schema(self):
@@ -542,7 +542,7 @@ class SlowGrowth(Process):
     """Slow linear growth on a different variable."""
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float = 1000.0
+    timescale: float = eqx.field(static=True, default=1000.0)
     rate: float = 0.001
 
     def ports_schema(self):
@@ -581,7 +581,7 @@ class PeriodicCounter(Process):
     """Discrete: increments counter every dt_step."""
 
     kind: ProcessKind = ProcessKind.DISCRETE
-    dt_step: float = 10.0
+    dt_step: float = eqx.field(static=True, default=10.0)
 
     def ports_schema(self):
         return {
@@ -598,7 +598,7 @@ class ThresholdGate(Process):
     """Discrete: flag <- (x > threshold), written as a delta."""
 
     kind: ProcessKind = ProcessKind.DISCRETE
-    dt_step: float = 1.0
+    dt_step: float = eqx.field(static=True, default=1.0)
     threshold: float = 5.0
 
     def ports_schema(self):
@@ -620,7 +620,7 @@ class FlagDrivenProduction(Process):
     """Continuous: dy/dt = flag, reading a LATCHED path as input."""
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {
@@ -729,7 +729,7 @@ class TestAutoGroups:
         """
 
         class PureSource(Process):
-            timescale: float = 1.0e7
+            timescale: float = eqx.field(static=True, default=1.0e7)
             rate: float = 0.5
 
             def ports_schema(self):
@@ -745,7 +745,7 @@ class TestAutoGroups:
                 return {"out": self.rate}
 
         class DrivenPool(Process):
-            timescale: float = 1.0
+            timescale: float = eqx.field(static=True, default=1.0)
             k: float = 0.1
 
             def ports_schema(self):
@@ -1521,7 +1521,7 @@ class DampedOscillator(Process):
     ``ε`` decay keeps an explicit solver from anti-damping. Fixture for the
     Nyquist save-grid guardrail, which keys off the imaginary spectrum."""
 
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
     omega: float = _OMEGA
     damp: float = 1.0
 
@@ -1623,7 +1623,7 @@ class AlgebraicDouble(Process):
     guarantee (the historical stale-ASSIGNED footgun)."""
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
 
     def ports_schema(self):
         return {
@@ -2201,7 +2201,7 @@ def test_verify_plan_reports_a_moved_verdict():
 class _Osc2(Process):
     """Fast driver."""
 
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
     w: float = 6.0
 
     def ports_schema(self):
@@ -2217,7 +2217,7 @@ class _Osc2(Process):
 class _Inert2(Process):
     """Coupled to nothing — its only job is to sit between two groups."""
 
-    timescale: float = 10.0
+    timescale: float = eqx.field(static=True, default=10.0)
 
     def ports_schema(self):
         return {"z": Port(role=PortRole.EVOLVED, default=1.0)}
@@ -2229,7 +2229,7 @@ class _Inert2(Process):
 class _Driven2(Process):
     """Reads the driver, two group positions away."""
 
-    timescale: float = 100.0
+    timescale: float = eqx.field(static=True, default=100.0)
 
     def ports_schema(self):
         return {
@@ -2315,7 +2315,7 @@ def test_interpolated_beats_frozen_on_a_non_adjacent_edge():
 
 class _Ticker2(Process):
     kind: ProcessKind = ProcessKind.DISCRETE
-    dt_step: float = 1.0
+    dt_step: float = eqx.field(static=True, default=1.0)
 
     def ports_schema(self):
         return {"c": Port(role=PortRole.LATCHED, default=0.0)}
@@ -2332,7 +2332,7 @@ class _Ticker2(Process):
 class _CycleOsc(Process):
     """Oscillator pushed by the slow group — the loop's backward edge."""
 
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
     w: float = 6.0
     fb: float = 0.4
 
@@ -2351,7 +2351,7 @@ class _CycleOsc(Process):
 
 
 class _CycleDriven(Process):
-    timescale: float = 100.0
+    timescale: float = eqx.field(static=True, default=100.0)
 
     def ports_schema(self):
         return {

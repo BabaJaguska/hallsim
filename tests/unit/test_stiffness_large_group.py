@@ -5,6 +5,7 @@ import jax.numpy as jnp
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process
 from hallsim.stiffness import DENSE_JACOBIAN_MAX_DIM, analyze_groups
+import equinox as eqx
 
 
 class Ring(Process):
@@ -15,7 +16,7 @@ class Ring(Process):
 
     n: int = 1024
     tau: float = 1.0
-    timescale: float = 1.0
+    timescale: float = eqx.field(static=True, default=1.0)
     k: float = 1.0
 
     def ports_schema(self):

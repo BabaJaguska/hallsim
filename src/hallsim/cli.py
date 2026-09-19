@@ -2,6 +2,7 @@ import json
 import logging
 
 import click
+import equinox as eqx
 
 #: -q, none, -v, -vv. The default is WARNING because the framework's warnings
 #: are the ones a user must not miss; INFO carries the decisions it made
@@ -335,7 +336,7 @@ def multiscale(t1, macro_dt):
 
     class ROSProduction(Process):
         kind: ProcessKind = ProcessKind.CONTINUOUS
-        timescale: float = 1.0
+        timescale: float = eqx.field(static=True, default=1.0)
         rate: float = 0.5
 
         def ports_schema(self):
@@ -348,7 +349,7 @@ def multiscale(t1, macro_dt):
 
     class SlowDecay(Process):
         kind: ProcessKind = ProcessKind.CONTINUOUS
-        timescale: float = 100.0
+        timescale: float = eqx.field(static=True, default=100.0)
         rate: float = 0.01
 
         def ports_schema(self):
@@ -361,7 +362,7 @@ def multiscale(t1, macro_dt):
 
     class HeartbeatCounter(Process):
         kind: ProcessKind = ProcessKind.DISCRETE
-        dt_step: float = 20.0
+        dt_step: float = eqx.field(static=True, default=20.0)
 
         def ports_schema(self):
             return {

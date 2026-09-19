@@ -42,7 +42,7 @@ from hallsim.process import Port, PortRole, Process, calibratable
 class BistableLatch(Process):
     """Autocatalytic bistable state; see module docstring for the rate law."""
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
 
     k_trigger: float = calibratable(
         1.0,

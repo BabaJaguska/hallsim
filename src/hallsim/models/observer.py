@@ -24,7 +24,7 @@ class SumObserver(Process):
 
     description = "Sum of several store paths as one algebraic path."
 
-    timescale: float | None = None
+    timescale: float | None = eqx.field(static=True, default=None)
     elements: tuple = eqx.field(static=True, default=())
     units: str = eqx.field(static=True, default="")
     what: str = eqx.field(static=True, default="")

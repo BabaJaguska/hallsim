@@ -45,6 +45,7 @@ from hallsim.models.clamp_edge import (
 )
 from hallsim.process import Port, PortRole, Process
 from hallsim.scheduler import Scheduler
+import equinox as eqx
 
 log = logging.getLogger("clamp_setpoint")
 
@@ -70,7 +71,7 @@ class LigandUptake(Process):
     a clamp is the only way to sustain it.
     """
 
-    timescale: float | None = 1.0
+    timescale: float | None = eqx.field(static=True, default=1.0)
     v_max: float = 0.5
     K_m: float = 1.0
 
@@ -94,7 +95,7 @@ class ReceptorResponse(Process):
     """Leaky downstream readout: ``dR/dt = k_on·L − R/tau``. Plateaus under a
     held ligand, relaxes to baseline once the ligand is gone."""
 
-    timescale: float | None = 1.0
+    timescale: float | None = eqx.field(static=True, default=1.0)
     k_on: float = 1.0
     tau: float = 10.0
 

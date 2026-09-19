@@ -35,6 +35,7 @@ import matplotlib.pyplot as plt
 from hallsim.composite import Composite
 from hallsim.process import Port, PortRole, Process, ProcessKind
 from hallsim.scheduler import Scheduler
+import equinox as eqx
 
 # ── Processes ─────────────────────────────────────────────────────────
 
@@ -55,7 +56,9 @@ class FastOscillator(Process):
     """
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float = 0.5  # ~0.5 second characteristic period
+    timescale: float = eqx.field(
+        static=True, default=0.5
+    )  # ~0.5 second characteristic period
 
     omega: float = 4.0  # ~0.6 Hz natural frequency (period ~1.6s)
     zeta: float = 0.05  # very lightly damped — oscillations persist
@@ -109,9 +112,8 @@ class SlowIntegrator(Process):
     """
 
     kind: ProcessKind = ProcessKind.CONTINUOUS
-    timescale: float = (
-        10.0  # ~10 second time constant (closer to fast → more coupling)
-    )
+    # ~10 second time constant (closer to fast -> more coupling)
+    timescale: float = eqx.field(static=True, default=10.0)
 
     tau: float = 10.0  # time constant
     gain: float = 2.0  # strong coupling to make splitting error visible
