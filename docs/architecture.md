@@ -197,6 +197,16 @@ The demos' own models ship under
 [`demos/models/sbml/<author><year>/`](../demos/models/sbml/) and are loaded
 by path.
 
+When nothing is deposited, `simulate discover <topic>` (`hallsim.web_discovery`)
+searches Europe PMC for model papers, reads them and their linked PDFs for
+repository links, and classifies the repositories cited: `importable:<format>`,
+`source:<language>`, `organisation`, or `linked-unverified` for a pointer not
+inspected. `--alias` and `--mechanism` add queries verbatim; `--url` seeds a
+paper or repository; `--web` adds Brave Web Search from `BRAVE_SEARCH_API_KEY`,
+and any `provider` with `search(query, *, limit, timeout)` plugs in the same
+way. PDF text needs the `search` extra. A label describes filenames, not the
+model: screen anything selected with `simulate screen`.
+
 ### On-disk caches
 
 Three, all under `~/.cache/hallsim/`, all safe to delete:

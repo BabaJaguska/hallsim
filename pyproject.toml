@@ -40,6 +40,8 @@ dependencies    = [
 ]
 
 [project.optional-dependencies]
+search = ["pypdf>=5"]
+
 # GPU execution. Kept out of the base dependencies so a CPU-only install stays
 # small, but declared so `uv run`/`uv sync` do not strip the plugin: it must
 # track jaxlib's version exactly or PJRT refuses to load it.

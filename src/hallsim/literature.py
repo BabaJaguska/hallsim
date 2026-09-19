@@ -161,16 +161,16 @@ POINTER_PATTERNS = {
     # An owner alone is kept: a code-availability statement often names the
     # lab's organisation and leaves the repository to the reader.
     "github": re.compile(
-        r"github\.com/([\w.\-]+(?:/[\w.\-]+?)?)(?:\.git)?\b", re.I
+        r"github\.com/([\w.\-]+(?:/[\w.\-]+)?)(?=[^\w.\-]|$)", re.I
     ),
     "bitbucket": re.compile(
-        r"bitbucket\.org/([\w.\-]+(?:/[\w.\-]+?)?)(?:\.git)?\b", re.I
+        r"bitbucket\.org/([\w.\-]+(?:/[\w.\-]+)?)(?=[^\w.\-]|$)", re.I
     ),
     "gitlab": re.compile(
-        r"gitlab\.com/([\w.\-]+(?:/[\w.\-]+?)?)(?:\.git)?\b", re.I
+        r"gitlab\.com/([\w.\-]+(?:/[\w.\-]+)?)(?=[^\w.\-]|$)", re.I
     ),
     "zenodo": re.compile(
-        r"(?:zenodo\.org/record/|10\.5281/zenodo\.)(\d+)", re.I
+        r"(?:zenodo\.org/records?/|10\.5281/zenodo\.)(\d+)", re.I
     ),
     "biomodels": re.compile(r"\b((?:BIOMD|MODEL)\d{10})\b"),
     "figshare": re.compile(r"figshare\.com/[\w/.\-]+", re.I),
@@ -217,11 +217,14 @@ def model_pointers(pmcid: str, *, timeout: float = 60.0) -> dict:
 def pointers_in(text: str) -> dict:
     """``{kind: [identifier, ...]}`` for every repository, archive or
     accession ``text`` names, in order of first mention."""
+    text = re.sub(r"(?<=\S)(?=https?://)", "\n", text)
     out = {}
     for kind, pattern in POINTER_PATTERNS.items():
         seen = []
         for m in pattern.finditer(text):
             value = m.group(1) if m.groups() else m.group(0)
+            if kind in FORGE_URL:
+                value = value.rstrip(".").removesuffix(".git")
             if value not in seen:
                 seen.append(value)
         if seen:
@@ -415,6 +418,7 @@ def classify_repository(
         curated=False,
         kind=kind,
         description=f"{len(files)} files; " + ", ".join(listed[:12]),
+        files=tuple(listed),
     )
 
 

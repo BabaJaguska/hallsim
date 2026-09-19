@@ -617,6 +617,129 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
             click.echo(str(triage_sbml(r.model_id)))
 
 
+@simulate.command("discover")
+@click.argument("topic", required=False, default="")
+@click.option(
+    "--alias",
+    "aliases",
+    multiple=True,
+    help="Alternative disease or topic name.",
+)
+@click.option(
+    "--mechanism",
+    "mechanisms",
+    multiple=True,
+    help="Additional gene/pathway query.",
+)
+@click.option(
+    "--url",
+    "urls",
+    multiple=True,
+    help="Paper, PDF, or repository URL to inspect.",
+)
+@click.option(
+    "--web",
+    is_flag=True,
+    help="Also search Brave (BRAVE_SEARCH_API_KEY required).",
+)
+@click.option(
+    "--papers/--no-papers",
+    default=True,
+    help="Search Europe PMC without an API key.",
+)
+@click.option(
+    "--limit", type=click.IntRange(1, 20), default=10, show_default=True
+)
+@click.option(
+    "--max-documents", type=click.IntRange(0), default=20, show_default=True
+)
+@click.option(
+    "--max-repositories", type=click.IntRange(0), default=10, show_default=True
+)
+@click.option(
+    "--timeout", type=click.FloatRange(min=0, min_open=True), default=30.0
+)
+@click.option(
+    "--json-output",
+    type=click.File("w"),
+    help="Save the full evidence and error report.",
+)
+def discover(
+    topic,
+    aliases,
+    mechanisms,
+    urls,
+    web,
+    papers,
+    limit,
+    max_documents,
+    max_repositories,
+    timeout,
+    json_output,
+):
+    """Find model papers and follow their code links.
+
+    For a topic with no deposit: the papers, then the repositories they
+    cite, classified by what they hold. No output filter, unlike `find`.
+
+    simulate discover "Down syndrome" --alias "trisomy 21" --web
+
+    simulate discover --url https://example.org/paper --no-papers
+    """
+    from hallsim.web_discovery import BraveSearch, discover_models
+
+    if not topic and not urls:
+        raise click.UsageError("Supply a topic or --url.")
+    if topic and not papers and not web and not urls:
+        raise click.UsageError("Enable --papers or --web, or supply --url.")
+    try:
+        provider = BraveSearch() if web else None
+        report = discover_models(
+            topic,
+            aliases=aliases,
+            mechanisms=mechanisms,
+            urls=urls,
+            provider=provider,
+            europepmc=papers,
+            limit=limit,
+            max_documents=max_documents,
+            max_repositories=max_repositories,
+            timeout=timeout,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"{len(report.leads)} leads; {report.documents_read} documents read"
+    )
+    for lead in report.leads:
+        c = lead.candidate
+        click.echo(f"  [{c.kind}] {c.name}\n    {c.url}")
+        if c.description:
+            click.echo(f"    {c.description[:200]}")
+        for evidence in lead.evidence:
+            click.echo(f"    via {evidence.stage}: {evidence.url}")
+    click.echo(
+        "Repository inspection checks filenames, not model validity or biological relevance."
+    )
+    click.echo(
+        f"Deferred: {report.deferred_documents} documents, "
+        f"{report.deferred_repositories} repositories"
+    )
+    for error in report.errors:
+        click.echo(
+            f"  Failed {error['stage']}: "
+            f"{error.get('url', error.get('query', ''))}: {error['error']}",
+            err=True,
+        )
+    if json_output:
+        json.dump(report.to_dict(), json_output, indent=2)
+        json_output.write("\n")
+    if report.errors and not report.leads:
+        raise click.ClickException(
+            "Discovery failed; see retrieval errors above."
+        )
+
+
 @simulate.command("find-data")
 @click.argument("query", nargs=-1, required=True)
 @click.option("--limit", type=int, default=20)
