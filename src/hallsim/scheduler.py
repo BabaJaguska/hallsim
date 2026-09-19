@@ -1236,7 +1236,12 @@ class Scheduler:
                 event_times, event_fired, event_deltas, event_names = (
                     compiled_events
                 )
-                if event_fired.ndim == 2:
+                if isinstance(event_fired, jax.core.Tracer):
+                    # Under a trace (a jitted loss) the deltas were applied
+                    # inside the scan; the eager record needs concrete
+                    # values, so there is none to build here.
+                    pass
+                elif event_fired.ndim == 2:
                     for i, name in enumerate(event_names):
                         for j in range(event_fired.shape[0]):
                             if bool(event_fired[j, i]):
@@ -1448,8 +1453,15 @@ class Scheduler:
                                 if later in last_sweep:
                                     segs_y.append(last_sweep[later])
                                     segs_i.append(group_write_idxs[later])
+                            # Array bounds: a float here is baked into the
+                            # next group's compiled fill as a constant, and
+                            # every macro window would compile anew.
                             prev = (
-                                (t, t_next, jnp.concatenate(segs_y, axis=-1))
+                                (
+                                    jnp.asarray(t, dtype=float),
+                                    jnp.asarray(t_next, dtype=float),
+                                    jnp.concatenate(segs_y, axis=-1),
+                                )
                                 if segs_y
                                 else None
                             )
@@ -3054,6 +3066,9 @@ class Scheduler:
 
         state_before = jnp.asarray(state_vec) if self.debug else None
 
+        # Arrays, not Python floats: a float bound is baked into the traced
+        # solve as a constant, so every macro window would compile anew.
+        t0, t1 = jnp.asarray(t0, dtype=float), jnp.asarray(t1, dtype=float)
         final_vec, last_dt, result, n_steps_s, n_rej_s = self._group_step(
             rhs_fn,
             state_vec,
@@ -3164,7 +3179,15 @@ class Scheduler:
         Returns ``(final_state_vec, sample, last_dt, diag)``.
         """
         k = self.coupling_interp_points
-        grid = t0 + jnp.linspace(0.0, 1.0, k) * (t1 - t0)
+        if t1 > t0:
+            # Arrays for the same reason as in _solve_group; the empty-interval
+            # guard below still compares the Python values.
+            t0_arr, t1_arr = jnp.asarray(t0, dtype=float), jnp.asarray(
+                t1, dtype=float
+            )
+        else:
+            t0_arr, t1_arr = t0, t1
+        grid = t0_arr + jnp.linspace(0.0, 1.0, k) * (t1_arr - t0_arr)
         own_vec = state_vec[..., own]
         if t1 <= t0:
             ys_deg = jnp.broadcast_to(own_vec, (k,) + own_vec.shape)
@@ -3187,8 +3210,8 @@ class Scheduler:
             rhs_fn,
             state_vec,
             own,
-            t0,
-            t1,
+            t0_arr,
+            t1_arr,
             integ,
             adjoint,
             dfx.SaveAt(ts=grid),
@@ -3204,7 +3227,7 @@ class Scheduler:
             sol.stats["num_steps"],
             sol.stats["num_rejected_steps"],
         )
-        return final_vec, (t0, t1, sol.ys), last_dt, diag
+        return final_vec, (t0_arr, t1_arr, sol.ys), last_dt, diag
 
     @staticmethod
     def _is_due(t: float, t_next: float, dt_step: float) -> bool:

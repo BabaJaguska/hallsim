@@ -163,6 +163,19 @@ def write_param(proc, field: str, value):
             f"{type(proc).__name__} has no field {field!r}. Fittable and "
             f"settable fields: {sorted(_settable_fields(proc))}"
         )
+    static = {
+        f.name for f in dataclasses.fields(proc) if f.metadata.get("static")
+    }
+    if field in static:
+        # Structure, not a leaf: set it on a copy as the plain Python value
+        # it must stay (a grouping field as a float), never as an array.
+        import copy
+
+        new = copy.copy(proc)
+        if field in ("timescale", "dt_step") and value is not None:
+            value = float(value)
+        object.__setattr__(new, field, value)
+        return new
     return eqx.tree_at(lambda p, pn=field: getattr(p, pn), proc, value)
 
 
@@ -353,7 +366,14 @@ class Process(eqx.Module):
         for f in dataclasses.fields(self):
             # A subclass that redeclares a grouping field as a plain leaf
             # still gets a Python float, never an array a trace could carry.
-            if f.metadata.get("static") or f.name in ("timescale", "dt_step"):
+            if f.name in ("timescale", "dt_step"):
+                value = getattr(self, f.name, None)
+                if value is not None and not isinstance(value, float):
+                    # Static, so it must be a plain float: an array here
+                    # would be hashed into the treedef.
+                    object.__setattr__(self, f.name, float(value))
+                continue
+            if f.metadata.get("static"):
                 continue
             value = getattr(self, f.name, None)
             coerced = _as_traced(value)

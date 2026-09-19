@@ -1362,8 +1362,8 @@ def process_from_sbml(
         # day-scale model has day-scale dynamics) so auto_groups clusters
         # mixed-rate composites correctly. Never None for SBML processes, so
         # reconciled_to / tree_at can replace it without None-leaf ambiguity.
-        timescale=(
-            float(timescale) if timescale is not None else native_time_seconds
+        timescale=float(
+            timescale if timescale is not None else native_time_seconds
         ),
         _events=tuple(events),
     )

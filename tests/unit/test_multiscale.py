@@ -2461,3 +2461,42 @@ def test_sweeps_must_be_at_least_one():
 
     with pytest.raises(ValueError, match="must be >= 1"):
         Scheduler(waveform_sweeps=0)
+
+
+def test_an_event_composite_runs_inside_a_trace():
+    """A jitted loss over a composite with an EVENT process must not read
+    the compiled lane's event record eagerly; the deltas land inside the
+    scan and the trajectory is what the loss sees."""
+    import equinox as eqx
+
+    from hallsim.models.kick_event import KickEvent
+
+    class Decay(Process):
+        rate: float = 0.1
+
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def derivative(self, t, state):
+            return {"x": -self.rate * state["x"]}
+
+    comp = Composite(
+        processes={
+            "d": Decay(),
+            "kick": KickEvent(kick_time=5.0, deltas={"x": 3.0}),
+        },
+        topology={"d": {"x": "pool/x"}, "kick": {"x": "pool/x"}},
+        semantic_validation=False,
+    )
+
+    def final_x(comp):
+        res = Scheduler().run(
+            comp, t_span=(0.0, 10.0), macro_dt=1.0, save_dt=1.0
+        )
+        return res.get("pool/x")[-1]
+
+    eager = float(final_x(comp))
+    traced = float(eqx.filter_jit(final_x)(comp))
+    assert traced == pytest.approx(eager, rel=1e-6)
+    # the kick landed: more than a pure decay would leave at t = 10
+    assert eager > float(jnp.exp(-0.1 * 10.0)) + 0.5

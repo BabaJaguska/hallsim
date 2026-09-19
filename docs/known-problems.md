@@ -1047,40 +1047,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   artefact rather than a log line no handler is listening for (~2 h).
   (4) The structural fix is the equivalence test in P1.16.
 
-## P0.35 — the stop rule fired: the Scheduler is 2395× slower than the
-## hand-rolled path on an event composite
-
-- [ ] **P0.35 — `Scheduler` + `expand_events` costs 223.80 s where one jitted
-  `dfx.diffeqsolve` over the same RHS costs 0.0934 s warm — 2395×.** Measured
-  2026-09-04 on Kollarovic 2016 (BIOMD0000000632, 8 species, one event), both
-  sides same maths, same machine, reported in
-  `docs/review-kollarovic2016-maths.md` §7.
-  **This is the halt condition in CLAUDE.md**, not a performance note: a user
-  is 2395× better off bypassing the framework on this shape of problem, which
-  is the single most informative signal the repo can produce about itself.
-  The cost is **~1.2 s of fixed overhead per macro step, independent of span**,
-  so it scales with the number of sync points rather than with the work done.
-
-  **Narrowed 2026-09-04 — it is the event machinery, not macro stepping.**
-  Second data point on Kallenberger 2014, 16 species and *no events*: a
-  single-group composite takes the fast path and ignores `macro_dt` entirely
-  (endpoint difference identically 0 from `macro_dt` 240 down to 1), and
-  forcing two groups gives a warm wall of **4–7 ms total** for 1 to 60 macro
-  steps — **0.1–4.5 ms per macro step against 1.2 s**. Macro stepping is not
-  intrinsically expensive. The 2395x is specific to the event path, which is
-  where the fix should look.
-  An event composite is exactly the case that forces many macro steps, so the
-  overhead lands hardest on the feature that motivated the multi-rate design.
-  Note this is dispatch and orchestration cost, not solver cost — the same RHS
-  integrates in 93 ms.
-  *Fix:* find what costs 1.2 s per macro step and remove it. Candidates to
-  measure first: re-tracing the group solves per macro step (see the "tracing
-  is not compilation" invariant in CLAUDE.md — 0 recompiles is necessary, not
-  sufficient), rebuilding the store view or the port dicts per step, and
-  event-condition evaluation outside jit. Until this is closed, no timing
-  number from an event composite means anything, and the multi-rate path
-  cannot be recommended for the models it was built for.
-
 - [ ] **P0.52 — `single_process_composite` cannot run 4% of BioModels.**
   Found 2026-09-05 while building a Jacobian corpus. The shipped helper for
   running one Process alone (`composite.py:1006`) raises on **BIOMD 87, 265,
