@@ -387,22 +387,71 @@ class SBMLProcess(ImportedODEProcess):
                 if tgt == s
             }
         )
+        base = self
         if set_by_event:
-            raise ValueError(
-                f"{set_by_event} are assigned by an SBML event on "
-                f"{self._name!r}; an event cannot write a pool this model "
-                "no longer owns. Drop the events (without_events) or keep "
-                "the species."
+            # The model's own schedule for a pool it no longer owns yields
+            # to the driver. An event that also writes something else cannot
+            # be split, so it is the caller's call.
+            drop, mixed = [], []
+            for ev in self._events:
+                targets = {tgt for tgt, _ in ev._assignments}
+                if not targets & set(set_by_event):
+                    continue
+                (drop if targets <= set(species) else mixed).append(ev)
+            if mixed:
+                raise ValueError(
+                    f"{[ev._name for ev in mixed]} assign {set_by_event} "
+                    f"and other targets on {self._name!r}; an event cannot "
+                    "write a pool this model no longer owns, and these "
+                    "cannot be dropped alone. Drop them all "
+                    "(without_events) or keep the species."
+                )
+            from hallsim.sbml_events import describe_schedule, event_schedule
+
+            log.warning(
+                "%s: %s are now read from the store, so the events that set "
+                "them are dropped: %s. That schedule is the input the model "
+                "was calibrated under; hallsim.models.forcing.drive_pulse "
+                "reads its level as the default dose.",
+                self._name,
+                set_by_event,
+                describe_schedule(
+                    event_schedule(drop), float(self.native_time_seconds)
+                ),
             )
+            base = self.without_events(*(ev._name for ev in drop))
         import copy
 
-        new = copy.copy(self)
+        new = copy.copy(base)
         object.__setattr__(
             new,
             "_species_inputs",
-            tuple(dict.fromkeys(self._species_inputs + tuple(species))),
+            tuple(dict.fromkeys(base._species_inputs + tuple(species))),
         )
         return new
+
+    def _event_steps(self, name: str):
+        """``[(t_native, value), ...]`` for a target every event sets to a
+        number at a numeric time; ``None`` when any event setting it is not
+        of that form, or none does."""
+        steps = []
+        for e in self.protocol():
+            if name not in e["assigns"]:
+                continue
+            value = e["assigns"][name]
+            if e["time"] is None or not isinstance(value, float):
+                return None
+            steps.append((e["time"], value))
+        return sorted(steps) or None
+
+    def native_input_level(self, name: str):
+        """The level the model's own events set ``name`` to, the largest in
+        magnitude, or ``None`` when no event sets it to a number. This is
+        the dose the published protocol delivered."""
+        steps = self._event_steps(name)
+        if not steps:
+            return None
+        return max(steps, key=lambda s: abs(s[1]))[1]
 
     def native_input_exposure(self, input_name, t_start, t_end, *, n=8000):
         """``∫ native-drive dt`` for driveable quantity ``input_name`` over
@@ -411,9 +460,31 @@ class SBMLProcess(ImportedODEProcess):
         integrated exposure runs the model off that calibration;
         :func:`hallsim.models.forcing.drive_pulse` compares against this and
         warns. A constant's native drive is its published value held flat;
-        a boundary input's is its assignment rule integrated. Returns 0.0 if
-        the input has no time-dependent assignment rule."""
+        a boundary input's is its assignment rule integrated; a quantity the
+        model's events set is their schedule integrated. Returns 0.0 if
+        the input has no time-dependent drive."""
         if t_end <= t_start:
+            return 0.0
+        steps = self._event_steps(input_name)
+        if steps:
+            if input_name in self._species_names:
+                level = float(
+                    self._species_y0[self._species_names.index(input_name)]
+                )
+            else:
+                level = float((self.parameters or {}).get(input_name, 0.0))
+            t_prev, total = float(t_start), 0.0
+            for t_native, value in steps:
+                t_c = t_native / float(self.time_scale)
+                if t_c <= t_prev:
+                    level = value
+                    continue
+                if t_c >= float(t_end):
+                    break
+                total += level * (t_c - t_prev)
+                level, t_prev = value, t_c
+            return total + level * (float(t_end) - t_prev)
+        if input_name in self._species_names:
             return 0.0
         if input_name not in self._w_names:
             return float(self.parameters[input_name]) * (
@@ -1368,11 +1439,36 @@ def process_from_sbml(
         _events=tuple(events),
     )
     if events:
-        log.info(
-            "%s: imported %d SBML event(s); compose with "
-            "sbml_events.expand_events(proc).",
-            name,
-            len(events),
+        from hallsim.sbml_events import (
+            PLAUSIBLE_PROTOCOL_SECONDS,
+            describe_schedule,
+            duration_text,
+            event_schedule,
+            protocol_span_seconds,
         )
+
+        schedule = event_schedule(events)
+        text = describe_schedule(schedule, native_time_seconds)
+        span = protocol_span_seconds(schedule, native_time_seconds)
+        if span > PLAUSIBLE_PROTOCOL_SECONDS:
+            log.warning(
+                "%s: its protocol (%s) ends %s after t=0 on the %s clock "
+                "(native_time_seconds=%g). No cell protocol runs that long: "
+                "the clock is wrong, not the model. Pass the true "
+                "native_time_seconds.",
+                name,
+                text,
+                duration_text(span),
+                native_time_source,
+                native_time_seconds,
+            )
+        else:
+            log.info(
+                "%s: imported %d SBML event(s), the model's own protocol: "
+                "%s. A Composite expands them; without_events() drops them.",
+                name,
+                len(events),
+                text,
+            )
 
     return proc

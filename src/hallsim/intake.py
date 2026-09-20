@@ -605,6 +605,28 @@ def triage_process(
                 "no declared time unit — its clock is a guess, and "
                 "reconciling it onto a shared axis may be silently wrong"
             )
+        if getattr(process, "_events", ()):
+            from hallsim.sbml_events import (
+                PLAUSIBLE_PROTOCOL_SECONDS,
+                describe_schedule,
+                duration_text,
+                protocol_span_seconds,
+            )
+
+            native = float(process.native_time_seconds)
+            schedule = process.protocol()
+            text = (
+                f"protocol: {describe_schedule(schedule, native)} on the "
+                f"{process.native_time_source} clock"
+            )
+            span = protocol_span_seconds(schedule, native)
+            if span > PLAUSIBLE_PROTOCOL_SECONDS:
+                flags.append(
+                    f"clock likely wrong: the protocol ends "
+                    f"{duration_text(span)} after t=0 — {text}"
+                )
+            else:
+                flags.append(text)
         ontology = _extract_species_ontology(xml_path)
         if ontology:
             coverage = sum(bool(v) for v in ontology.values()) / len(ontology)

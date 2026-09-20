@@ -971,10 +971,11 @@ class CalibrationProblem:
                 pname, pref, composite.processes[pref.process_name]
             )
 
-        # Block fitting a severity *dial* (a transform that ignores `base`, so
-        # severity would overwrite the fitted value) but allow fitting the
-        # magnitude a dial scales. Probed with two distinct bases rather than
-        # by name, so it generalises to any handle.
+        # Block fitting a level a handle sets: severity writes it directly,
+        # so a fit would be overwritten per arm. A rate a handle scales stays
+        # fittable — it is the magnitude severity multiplies.
+        from hallsim.handles import is_level
+
         reg = {} if registry is None else registry
         handle_targets: dict[tuple[str, str], list[tuple[str, Any]]] = {}
         for hname, handle in reg.items():
@@ -982,20 +983,12 @@ class CalibrationProblem:
                 key = (mapping.process_name, mapping.param_name)
                 handle_targets.setdefault(key, []).append((hname, mapping))
 
-        def _ignores_base(mapping) -> bool:
-            try:
-                return float(mapping.value(0.5, 1.0)) == float(
-                    mapping.value(0.5, 2.0)
-                )
-            except Exception:
-                return False  # can't probe → don't block
-
         offenders = []
         for pname, pref in proc_params.items():
             entries = handle_targets.get((pref.process_name, pref.field))
             if not entries:
                 continue
-            if all(_ignores_base(m) for _, m in entries):
+            if is_level(composite.processes[pref.process_name], pref.field):
                 offenders.append((pname, pref, [h for h, _ in entries]))
             else:
                 log.info(
@@ -1058,11 +1051,10 @@ class CalibrationProblem:
             raise ValueError(
                 "Severity dials are not valid Calibrator inputs:\n"
                 + "\n".join(msgs)
-                + "\n\nThese parameters are set directly by "
-                "Condition.handles severity (the transform discards the "
-                "parameter's own value), so fitting them is degenerate — "
-                "severity would overwrite the fit. Fit the mechanism "
-                "magnitude the dial scales (e.g. a per-exposure potency) "
+                + "\n\nThese parameters are input levels set directly by "
+                "Condition.handles severity, so fitting them is degenerate "
+                "— severity would overwrite the fit. Fit the mechanism "
+                "magnitude the level drives (e.g. a per-exposure potency) "
                 "instead."
             )
 

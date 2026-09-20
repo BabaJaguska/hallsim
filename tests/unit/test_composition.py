@@ -429,7 +429,8 @@ class TestCalibrationTargets:
                     ParameterMapping(
                         process_name="k",
                         param_name="knob",
-                        transform=lambda h, base: base * h,
+                        floor=0.0,
+                        slope=1.0,
                     )
                 ],
             ),

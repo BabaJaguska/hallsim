@@ -337,3 +337,27 @@ class TestStructuralRedundancy:
         assert pair in [g.parameters for g in report.groups]
         group = next(g for g in report.groups if g.parameters == pair)
         assert group.ratios == ("1", "1")
+
+
+def test_a_confounded_group_reports_the_combination_the_data_sees():
+    """Four parameters entering one flux have identical Jacobian columns:
+    one group, the product seen, three degrees of freedom unseen, three
+    frozen, and the fifth parameter untouched."""
+    import numpy as np
+
+    from hallsim.identifiability import report_from_jacobian
+
+    col = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    other = np.array([5.0, -1.0, 2.0, 0.5, 1.0])
+    jac = np.stack([col, col, col, col, other], axis=1)
+    rep = report_from_jacobian(jac, ["k1", "k2", "k3", "k4", "g"])
+    (group,) = rep.groups
+    assert group.names == ["k1", "k2", "k3", "k4"]
+    assert group.seen == 1
+    assert group.combination_text == "k1·k2·k3·k4"
+    assert len(rep.recommended_freeze) == 3
+    assert set(rep.recommended_freeze) < {"k1", "k2", "k3", "k4"}
+    assert rep.verdict["g"] == "identifiable"
+    text = str(rep)
+    assert "the data sees k1·k2·k3·k4" in text
+    assert "3 degree(s) of freedom unseen" in text

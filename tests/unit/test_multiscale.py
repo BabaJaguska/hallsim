@@ -2500,3 +2500,50 @@ def test_an_event_composite_runs_inside_a_trace():
     assert traced == pytest.approx(eager, rel=1e-6)
     # the kick landed: more than a pure decay would leave at t = 10
     assert eager > float(jnp.exp(-0.1 * 10.0)) + 0.5
+
+
+def test_an_event_composite_with_two_groups_runs_inside_a_trace():
+    """Two timescale groups plus an EVENT process route through the eager
+    macro-step loop; under a trace the loop cannot ask whether the event
+    fired, so the masked delta lands unconditionally and the trajectory is
+    what the loss sees."""
+    import equinox as eqx
+
+    from hallsim.models.kick_event import KickEvent
+
+    class Decay(Process):
+        rate: float = 0.1
+        timescale: float | None = eqx.field(static=True, default=None)
+
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def derivative(self, t, state):
+            return {"x": -self.rate * state["x"]}
+
+    comp = Composite(
+        processes={
+            "fast": Decay(timescale=1.0),
+            "slow": Decay(rate=0.01, timescale=1000.0),
+            "kick": KickEvent(kick_time=5.0, deltas={"x": 3.0}),
+        },
+        topology={
+            "fast": {"x": "pool/x"},
+            "slow": {"x": "pool/y"},
+            "kick": {"x": "pool/x"},
+        },
+        semantic_validation=False,
+    )
+    assert len(comp.auto_groups()) == 2
+
+    def final_x(comp):
+        # Interpolated coupling with an event is the eager loop, not a scan.
+        res = Scheduler(coupling_mode="interpolated").run(
+            comp, t_span=(0.0, 10.0), macro_dt=1.0, save_dt=1.0
+        )
+        return res.get("pool/x")[-1]
+
+    eager = float(final_x(comp))
+    traced = float(eqx.filter_jit(final_x)(comp))
+    assert traced == pytest.approx(eager, rel=1e-6)
+    assert eager > float(jnp.exp(-0.1 * 10.0)) + 0.5

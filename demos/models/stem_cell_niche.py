@@ -16,7 +16,7 @@ severity=0 the niche contributes nothing.
 from __future__ import annotations
 
 
-from hallsim.process import Port, PortRole, Process
+from hallsim.process import Port, PortRole, Process, calibratable
 
 # Sivakumar2011 crosstalk model (BIOMD0000000398) species IDs
 # for the four niche ligands / receptors.
@@ -38,7 +38,9 @@ class StemCellNiche(Process):
         "and Notch signaling ligands/receptors."
     )
 
-    severity: float = 0.0
+    severity: float = calibratable(
+        0.0, level=True, description="niche deterioration, 0 healthy → 1."
+    )
     wnt_decay: float = 0.08
     egf_decay: float = 0.08
     shh_decay: float = 0.06

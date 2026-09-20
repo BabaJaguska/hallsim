@@ -111,6 +111,34 @@ def residual_scale(problem, params: dict, n_fitted: int | None = None):
 
 
 @dataclasses.dataclass
+class ConfoundedGroup:
+    """Parameters the data cannot tell apart, and what it sees of them.
+
+    ``combination`` is the leading direction of the group's Fisher block in
+    log10 space, as ``{name: exponent}`` scaled so the largest exponent is
+    1: exponents all 1 mean the data sees the product, ``1`` and ``-1`` a
+    ratio. ``seen`` is how many such directions the block resolves; with
+    ``len(names) - seen`` degrees of freedom unseen, only that many
+    combinations can be fitted."""
+
+    names: list[str]
+    combination: dict[str, float]
+    seen: int
+
+    @property
+    def combination_text(self) -> str:
+        parts = []
+        for name, c in self.combination.items():
+            if abs(c - 1.0) < 0.05:
+                parts.append(name)
+            elif abs(c + 1.0) < 0.05:
+                parts.append(f"{name}^-1")
+            else:
+                parts.append(f"{name}^{c:.2g}")
+        return "·".join(parts)
+
+
+@dataclasses.dataclass
 class IdentifiabilityReport:
     """Local identifiability of a fit, from the Fisher information ``JᵀJ``.
 
@@ -130,6 +158,7 @@ class IdentifiabilityReport:
     recommended_freeze: list[str]
     fisher_diag: dict[str, float] = dataclasses.field(default_factory=dict)
     sigma: float = 1.0  # residual scale the uncertainties are in
+    groups: list[ConfoundedGroup] = dataclasses.field(default_factory=list)
 
     @property
     def condition_number(self) -> float:
@@ -161,10 +190,28 @@ class IdentifiabilityReport:
             f"Fisher spectrum: λ ∈ [{self.eigenvalues[0]:.2e}, "
             f"{self.eigenvalues[-1]:.2e}], condition number {cond:.1e}"
         )
-        if self.confounded:
-            lines.append("Confounded pairs (|corr| ≥ threshold):")
-            for a, b, c in self.confounded:
-                lines.append(f"  {a} ~ {b}   corr={c:+.3f}")
+        for g in self.groups:
+            unseen = len(g.names) - g.seen
+            lines.append(
+                f"Confounded {{{', '.join(g.names)}}}: the data sees "
+                f"{g.combination_text}"
+                + (
+                    f" and {g.seen - 1} more combination(s)"
+                    if g.seen > 1
+                    else ""
+                )
+                + f", {unseen} degree(s) of freedom unseen. Fit it as one "
+                "quantity (free one member and freeze the rest, or a handle "
+                "coefficient), or add a condition that separates them."
+            )
+        structural = [n for n in self.names if self.verdict[n] == "structural"]
+        if structural:
+            lines.append(
+                f"Structural ({', '.join(structural)}): no reporter moves. "
+                "hallsim.attenuation.trace_path(composite, <parameter>, "
+                "<reporter path>, t_end=...) names the node where the "
+                "signal dies."
+            )
         practical = [n for n in self.names if self.verdict[n] == "practical"]
         if self.recommended_freeze:
             lines.append(
@@ -276,12 +323,12 @@ def report_from_jacobian(
         else:
             verdict[name] = "identifiable"
 
+    groups = _confounded_groups(names, confounded, fim, rel)
     freeze = [nm for nm in names if verdict[nm] == "structural"]
-    for a, b, _ in confounded:
-        ia, ib = names.index(a), names.index(b)
-        weaker = a if rel[ia] <= rel[ib] else b
-        if weaker not in freeze:
-            freeze.append(weaker)
+    for g in groups:
+        # Keep the most sensitive member; the rest are the same information.
+        keep = max(g.names, key=lambda nm: rel[names.index(nm)])
+        freeze.extend(nm for nm in g.names if nm != keep and nm not in freeze)
 
     return IdentifiabilityReport(
         names=names,
@@ -294,7 +341,36 @@ def report_from_jacobian(
         recommended_freeze=freeze,
         fisher_diag={names[i]: float(fim[i, i]) for i in range(n)},
         sigma=float(sigma),
+        groups=groups,
     )
+
+
+def _confounded_groups(names, confounded, fim, rel) -> list[ConfoundedGroup]:
+    """Connected components of the confounded pairs, each with the leading
+    direction of its Fisher block: the combination the data sees."""
+    import networkx as nx
+
+    g = nx.Graph()
+    g.add_edges_from((a, b) for a, b, _ in confounded)
+    out = []
+    for component in nx.connected_components(g):
+        members = [nm for nm in names if nm in component]
+        idx = [names.index(nm) for nm in members]
+        block = np.asarray(fim)[np.ix_(idx, idx)]
+        eigval, eigvec = np.linalg.eigh(block)
+        seen = int(np.sum(eigval > 1e-8 * max(eigval[-1], 1e-300)))
+        lead = eigvec[:, -1]
+        lead = lead / lead[np.argmax(np.abs(lead))]
+        out.append(
+            ConfoundedGroup(
+                names=members,
+                combination={
+                    nm: float(round(c, 2)) for nm, c in zip(members, lead)
+                },
+                seen=max(seen, 1),
+            )
+        )
+    return sorted(out, key=lambda grp: names.index(grp.names[0]))
 
 
 @dataclasses.dataclass

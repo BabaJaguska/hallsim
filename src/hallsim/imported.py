@@ -58,7 +58,8 @@ class ImportedODEProcess(Process):
     # shared axis is silently 60×/3600×/86400× wrong. Hand-built processes
     # declare their own.
     native_time_source: str = eqx.field(static=True, default="declared")
-    time_scale: float = 1.0
+    # Native time per composite time unit: a unit conversion, so structure.
+    time_scale: float = eqx.field(static=True, default=1.0)
     # The calibration surface — traced, so Calibrator/hallmarks differentiate
     # through it. Everything below is *structure*: names, index maps, port
     # defaults. Static, so ports_schema() stays concrete under a trace and
@@ -89,8 +90,9 @@ class ImportedODEProcess(Process):
             )
         )
 
-    def without_events(self):
-        """Copy carrying no events, so composing it discards them.
+    def without_events(self, *names: str):
+        """Copy carrying none of its events, or none of the ``names`` given,
+        so composing it discards them.
 
         A Composite expands a member process's events automatically, because
         forgetting to do so ran models with their input route removed while
@@ -101,12 +103,40 @@ class ImportedODEProcess(Process):
         method so the discard is visible where it is decided::
 
             Composite(processes={"dp14": dp14.without_events()}, ...)
+
+        A name is the SBML event id or the translated process name.
         """
         import copy
 
+        events = tuple(getattr(self, "_events", ()))
+        keep = ()
+        if names:
+
+            def matches(ev, n):
+                return ev._name in (n, f"{self._name}__{n}")
+
+            missing = [
+                n for n in names if not any(matches(ev, n) for ev in events)
+            ]
+            if missing:
+                raise KeyError(
+                    f"{missing} are not events on {self._name!r}; "
+                    f"available: {[ev._name for ev in events]}"
+                )
+            keep = tuple(
+                ev for ev in events if not any(matches(ev, n) for n in names)
+            )
         new = copy.copy(self)
-        object.__setattr__(new, "_events", ())
+        object.__setattr__(new, "_events", keep)
         return new
+
+    def protocol(self) -> list[dict]:
+        """The model's own timed inputs: every event it carries, with its
+        trigger time in native units and what it sets
+        (:func:`hallsim.sbml_events.event_schedule`)."""
+        from hallsim.sbml_events import event_schedule
+
+        return event_schedule(getattr(self, "_events", ()))
 
     def _check_param(self, param_name: str) -> str:
         if param_name not in self._param_names:
@@ -156,10 +186,10 @@ class ImportedODEProcess(Process):
         native rate law by ``canonical_time_seconds / native_time_seconds``.
         ``canonical_time_seconds`` is the real-world duration of one ``t_span``
         unit (86400 for a day axis); Scheduler grouping is separate."""
-        scale = canonical_time_seconds / self.native_time_seconds
-        # jnp, not float: tree_at skips __check_init__, and a float leaf is
-        # static — the clock ratio would recompile per factor.
-        return eqx.tree_at(lambda p: p.time_scale, self, jnp.asarray(scale))
+        from hallsim.process import write_param
+
+        scale = canonical_time_seconds / float(self.native_time_seconds)
+        return write_param(self, "time_scale", float(scale))
 
     def frozen_species(self) -> list[str]:
         """Species import holds at their initial value; none unless the
@@ -180,6 +210,7 @@ class ImportedODEProcess(Process):
             "native_time_seconds": self.native_time_seconds,
             "native_time_source": self.native_time_source,
             "time_scale": _scalar(self.time_scale),
+            "events": self.protocol(),
             "frozen_species": self.frozen_species(),
             "published_parameters": published,
             "modified_parameters": {

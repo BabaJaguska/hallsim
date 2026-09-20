@@ -24,20 +24,25 @@ log = logging.getLogger(__name__)
 
 
 class PulseSource(Process):
-    """Rectangular forcing signal — emits ``amplitude`` on ``[t_start, t_end)``,
-    else 0, to its ``signal`` ASSIGNED port. Wire ``signal`` to a boundary
-    input's driver port (:meth:`hallsim.sbml_import.SBMLProcess.with_input_driver`).
+    """Rectangular forcing signal — emits ``dose * amplitude`` on
+    ``[t_start, t_end)``, else 0, to its ``signal`` ASSIGNED port. Wire
+    ``signal`` to a boundary input's driver port
+    (:meth:`hallsim.sbml_import.SBMLProcess.with_input_driver`).
     ``t_end=None`` drops the washout edge, giving a sustained step — the
     setpoint source for a chronic exposure
-    (:func:`hallsim.models.clamp_edge.clamp_species`). ``amplitude`` is
-    calibratable (a fittable or severity-driven exposure level); the window is
-    structural. Other shapes (ramp, decay) are sibling sources over the same
-    port mechanism."""
+    (:func:`hallsim.models.clamp_edge.clamp_species`). ``dose`` is the
+    magnitude in the input's units, part of the protocol with the window;
+    ``amplitude`` is the exposure level as a fraction of it, an input level a
+    handle sets (0 = none, 1 = the full dose). Other shapes (ramp, decay) are
+    sibling sources over the same port mechanism."""
 
     timescale: float | None = eqx.field(static=True, default=None)
     amplitude: float = calibratable(
-        1.0, description="pulse height / exposure level; 0 = no exposure."
+        1.0,
+        level=True,
+        description="exposure level as a fraction of dose; 0 = no exposure.",
     )
+    dose: float = eqx.field(static=True, default=1.0)
     t_start: float = eqx.field(static=True, default=0.0)
     t_end: float | None = eqx.field(static=True, default=1.0)
     signal_units: str = eqx.field(static=True, default="dimensionless")
@@ -60,13 +65,15 @@ class PulseSource(Process):
         on = t >= self.t_start
         if self.t_end is not None:
             on = on & (t < self.t_end)
-        return {"signal": self.amplitude * jnp.where(on, 1.0, 0.0)}
+        return {"signal": self.dose * self.amplitude * jnp.where(on, 1.0, 0.0)}
 
     def assignment_rules(self):
         on = TIME >= float(self.t_start)
         if self.t_end is not None:
             on = sympy.And(on, TIME < float(self.t_end))
-        signal = sympy.Piecewise((sympy.Symbol("amplitude"), on), (0, True))
+        signal = sympy.Piecewise(
+            (float(self.dose) * sympy.Symbol("amplitude"), on), (0, True)
+        )
         return (("signal", signal),)
 
     def discontinuity_times(self):
@@ -75,21 +82,28 @@ class PulseSource(Process):
         return (self.t_start, self.t_end)
 
 
-def _attach_driver(proc, input_name, port):
-    """Expose ``input_name`` on ``proc`` as INPUT port ``port``, whichever half
-    of the driveable surface it lives in — a rule-defined boundary input
-    (``with_input_driver``) or a plain constant (``with_param_input``). Which
-    one is a fact about the source file, not a choice the caller made.
+def _attach_driver(proc, input_name):
+    """Expose ``input_name`` on ``proc`` as an INPUT port and return
+    ``(proc, port)``, whichever part of the driveable surface it lives in: a
+    rule-defined boundary input (``with_input_driver``) or a plain constant
+    (``with_param_input``) get a ``<name>_in`` port; a species the model
+    integrates is read from the store under its own name
+    (``with_species_input``). Which one is a fact about the source file,
+    not a choice the caller made.
     """
+    port = f"{input_name.lower()}_in"
     if input_name in getattr(proc, "_w_names", ()):
-        return proc.with_input_driver(input_name, port)
+        return proc.with_input_driver(input_name, port), port
     if input_name in getattr(proc, "_param_names", ()):
-        return proc.with_param_input(input_name, port)
+        return proc.with_param_input(input_name, port), port
+    if input_name in getattr(proc, "_species_names", ()):
+        return proc.with_species_input(input_name), input_name
     raise KeyError(
-        f"{input_name!r} is neither a boundary input nor a constant on "
-        f"{getattr(proc, '_name', proc)!r}; boundary inputs: "
+        f"{input_name!r} is neither a boundary input, a constant nor a "
+        f"species on {getattr(proc, '_name', proc)!r}; boundary inputs: "
         f"{sorted(getattr(proc, '_w_names', ()))}; constants: "
-        f"{sorted(getattr(proc, '_param_names', ()))}"
+        f"{sorted(getattr(proc, '_param_names', ()))}; species: "
+        f"{sorted(getattr(proc, '_species_names', ()))}"
     )
 
 
@@ -102,42 +116,60 @@ def drive_pulse(
     t_start,
     t_end,
     amplitude=1.0,
+    dose=None,
     source_name=None,
     signal_ontology=None,
     handle=None,
     driven_rate=None,
     warn_factor=3.0,
 ):
-    """Drive ``target``'s boundary input ``input_name`` with a rectangular
-    pulse on ``[t_start, t_end)``, composed from the general port path: adds a
-    :class:`PulseSource` to ``processes`` and wires it to the input via
-    :meth:`SBMLProcess.with_input_driver`. ``t_end=None`` sustains the drive
-    (no washout). Mutates ``processes``/``topology`` in place and returns
+    """Drive ``target``'s input ``input_name`` with a rectangular pulse on
+    ``[t_start, t_end)``, composed from the general port path: adds a
+    :class:`PulseSource` to ``processes`` and wires it to the input, a
+    boundary input, a constant or a species the model's own events set.
+    ``t_end=None`` sustains the drive (no washout). Mutates
+    ``processes``/``topology`` in place and returns
     ``(processes, topology, source_name)``.
 
+    ``dose`` is the level at full exposure in the input's units; ``None``
+    reads it from the model's own protocol when its events set the input
+    (:meth:`SBMLProcess.native_input_level`), else 1. ``amplitude`` is the
+    exposure fraction, the level a handle sets: pass 0 for a source that is
+    off until a handle turns it on.
+
     Warns when the dose the pulse would deliver **at full exposure**
-    (amplitude 1, the level a handle sets) differs from the model's native
-    one by more than ``warn_factor``×. Dose is exposure × the rate the input
-    drives, so a window change that is compensated by rescaling that rate is
-    not a mismatch. Pass ``driven_rate=(param_name, native_value)`` to be
-    scored on the product; without it only exposure is compared, which flags
-    a compensated setup as if it were off-calibration."""
+    differs from the model's native one by more than ``warn_factor``×. Dose
+    is exposure × the rate the input drives, so a window change that is
+    compensated by rescaling that rate is not a mismatch. Pass
+    ``driven_rate=(param_name, native_value)`` to be scored on the product;
+    without it only exposure is compared, which flags a compensated setup as
+    if it were off-calibration."""
     src = source_name or f"{input_name.lower()}_pulse"
-    port = f"{input_name.lower()}_in"
     path = f"{src}/signal"
 
+    if dose is None:
+        level = getattr(processes[target], "native_input_level", None)
+        dose = (level(input_name) if level is not None else None) or 1.0
+        if dose != 1.0:
+            log.info(
+                "%s/%s pulse: dose %g, the level the model's own events set.",
+                target,
+                input_name,
+                dose,
+            )
     processes[src] = PulseSource(
         # co-group with the target so the pulse is evaluated at every solver
         # substep (not frozen across a macro step) — a sub-macro-step window
         # would otherwise be under-sampled by the cross-group coupling.
         timescale=getattr(processes[target], "timescale", None),
         amplitude=amplitude,
+        dose=float(dose),
         t_start=float(t_start),
         t_end=None if t_end is None else float(t_end),
         signal_ontology=signal_ontology,
         handle=handle,
     )
-    processes[target] = _attach_driver(processes[target], input_name, port)
+    processes[target], port = _attach_driver(processes[target], input_name)
     topology[src] = {"signal": path}
     topology.setdefault(target, {})[port] = path
 
@@ -149,7 +181,7 @@ def drive_pulse(
     native = processes[target].native_input_exposure(
         input_name, t_start, t_end
     )
-    imposed = float(t_end) - float(t_start)
+    imposed = float(dose) * (float(t_end) - float(t_start))
     quantity = "exposure"
     if driven_rate is not None:
         rate_name, native_rate = driven_rate
@@ -256,7 +288,6 @@ def drive_step(
     an input at its native level is by construction on-calibration.
     """
     src = source_name or f"{input_name.lower()}_step"
-    port = f"{input_name.lower()}_in"
     path = f"{src}/signal"
 
     processes[src] = StepSource(
@@ -268,7 +299,7 @@ def drive_step(
         signal_ontology=signal_ontology,
         handle=handle,
     )
-    processes[target] = _attach_driver(processes[target], input_name, port)
+    processes[target], port = _attach_driver(processes[target], input_name)
     topology[src] = {"signal": path}
     topology.setdefault(target, {})[port] = path
     return processes, topology, src

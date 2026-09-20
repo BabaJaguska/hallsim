@@ -967,8 +967,9 @@ class OutputScreen:
     """
 
     model_id: str
-    #: ``produces`` | ``no-match`` | ``no-sbml`` | ``unreadable`` |
-    #: ``fetch-failed``
+    #: ``produces`` | ``no-match`` | ``qualitative`` (SBML-qual, a logical
+    #: model) | ``constraint-based`` (SBML-fbc) | ``no-reactions`` |
+    #: ``no-rate-laws`` | ``no-sbml`` | ``unreadable`` | ``fetch-failed``
     status: str
     produced: tuple[str, ...] = ()
     n_species: int = 0
@@ -1140,6 +1141,29 @@ def _sbml_paths_for(model_id: str, source: str, timeout: float) -> list[str]:
     raise LookupError(f"no SBML fetcher for source {source!r}")
 
 
+def _reactionless_formalism(model) -> tuple[str, str]:
+    """``(status, note)`` for a parsed SBML model with no reactions, from the
+    package it carries: SBML-qual is a logical model, SBML-fbc a
+    constraint-based one, and neither is a rate-law model to screen."""
+    if model.getPlugin("qual") is not None:
+        return (
+            "qualitative",
+            "SBML-qual: a logical model over discrete levels, with update "
+            "rules rather than rate laws; nothing to integrate or screen",
+        )
+    if model.getPlugin("fbc") is not None:
+        return (
+            "constraint-based",
+            "SBML-fbc: a constraint-based model with flux bounds and an "
+            "objective rather than rate laws; nothing to integrate or screen",
+        )
+    return (
+        "no-reactions",
+        "parsed, but declares no reactions and no qual or fbc package — "
+        "not a rate-law model",
+    )
+
+
 def screen_produced_species(
     candidates, pattern: str, *, timeout: float = 60.0
 ) -> list[OutputScreen]:
@@ -1229,14 +1253,15 @@ def screen_produced_species(
             # SBML-qual and other non-reaction formalisms parse fine and
             # present an empty core model. Reporting that as ``no-match`` is
             # indistinguishable from a deposit whose reactions were read and
-            # produced nothing, which is the opposite conclusion.
+            # produced nothing, which is the opposite conclusion. The
+            # package the file carries says which formalism it is.
+            status, note = _reactionless_formalism(model)
             out.append(
                 OutputScreen(
                     str(model_id),
-                    "no-reactions",
+                    status,
                     n_species=model.getNumSpecies(),
-                    note="parsed, but declares no reactions — a qualitative "
-                    "or constraint-based deposit, not a rate-law model",
+                    note=note,
                 )
             )
             continue

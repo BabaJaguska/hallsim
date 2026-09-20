@@ -35,7 +35,13 @@ import libsbml
 import sympy
 from sympy.core.relational import Relational
 
-from hallsim.process import Port, PortRole, Process, ProcessKind
+from hallsim.process import (
+    Port,
+    PortRole,
+    Process,
+    ProcessKind,
+    write_param,
+)
 from hallsim.sbml_math import (
     TIME,
     UnsupportedMathError,
@@ -182,6 +188,66 @@ def _references_time(expr) -> bool:
     return TIME in sympy.sympify(expr).free_symbols
 
 
+#: Longer than any cell protocol. A schedule that ends past this on the
+#: declared clock means the clock is wrong, not the model.
+PLAUSIBLE_PROTOCOL_SECONDS = 10 * 365.25 * 86400.0
+
+
+def event_schedule(events) -> list[dict]:
+    """``[{"event", "time", "assigns"}, ...]``, one per event: the trigger
+    time in native units when the event fires on ``time >= c``, else
+    ``None``, and each assignment as a number where it is one, else as text.
+    This is the model's own protocol, the input it was calibrated under."""
+    out = []
+    for ev in events:
+        time = None
+        for op, lhs, rhs in _relations(ev._trigger):
+            if lhs == TIME and rhs.is_number and op in ("geq", "gt"):
+                time = float(rhs)
+            elif rhs == TIME and lhs.is_number and op in ("leq", "lt"):
+                time = float(lhs)
+        assigns = {}
+        for tgt, expr in ev._assignments:
+            expr = sympy.sympify(expr)
+            assigns[tgt] = float(expr) if expr.is_number else str(expr)
+        out.append({"event": ev._name, "time": time, "assigns": assigns})
+    return out
+
+
+def duration_text(seconds: float) -> str:
+    """``seconds`` in the largest unit that reads naturally."""
+    for unit, size in (
+        ("y", 365.25 * 86400.0),
+        ("d", 86400.0),
+        ("h", 3600.0),
+        ("min", 60.0),
+    ):
+        if seconds >= size:
+            return f"{seconds / size:.3g} {unit}"
+    return f"{seconds:.3g} s"
+
+
+def describe_schedule(schedule, native_time_seconds: float) -> str:
+    """One clause per event: when it fires, in native units and on the
+    clock, and what it sets."""
+    parts = []
+    for e in schedule:
+        name = e["event"].split("__", 1)[-1]
+        sets = ", ".join(f"{k}={v}" for k, v in e["assigns"].items())
+        if e["time"] is None:
+            parts.append(f"{name} (state-triggered): {sets}")
+        else:
+            when = duration_text(e["time"] * float(native_time_seconds))
+            parts.append(f"{name} at {e['time']:g} ({when}): {sets}")
+    return "; ".join(parts)
+
+
+def protocol_span_seconds(schedule, native_time_seconds: float) -> float:
+    """When the last timed event fires, in seconds on the given clock."""
+    timed = [e["time"] for e in schedule if e["time"] is not None]
+    return max(timed) * float(native_time_seconds) if timed else 0.0
+
+
 def trigger_pathologies(events) -> list[str]:
     """Trigger defects that make a model's output round-off dependent.
 
@@ -271,8 +337,9 @@ class SBMLEvent(Process):
     # parameter target must start at its published value, not at zero, or the
     # model runs off a different constant until the event first fires.
     _target_defaults: tuple = eqx.field(static=True, default=())
-    #: The owner's native time per composite time unit.
-    time_scale: float = 1.0
+    #: The owner's native time per composite time unit; structure, so two
+    #: imports of one file are the same pytree.
+    time_scale: float = eqx.field(static=True, default=1.0)
 
     @property
     def _reads(self) -> tuple:
@@ -468,9 +535,7 @@ def expand_events(proc, name: str | None = None) -> tuple[dict, dict]:
     topo: dict = {}
     owner_wiring: dict = {}
     for ev in events:
-        ev = eqx.tree_at(
-            lambda e: e.time_scale, ev, jnp.asarray(proc.time_scale)
-        )
+        ev = write_param(ev, "time_scale", float(proc.time_scale))
         procs[ev._name] = ev
         wiring = {s: f"{owner}/{s}" for s in ev._read_species}
         wiring.update({t: f"{owner}/{t}" for t in ev._param_targets})

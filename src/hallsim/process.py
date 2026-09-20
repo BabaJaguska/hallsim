@@ -76,6 +76,7 @@ def calibratable(
     *,
     clamp: "tuple[float, float] | None" = None,
     description: str = "",
+    level: bool = False,
 ):
     """Declare a Process field as a fittable mechanism parameter::
 
@@ -85,6 +86,10 @@ def calibratable(
     Marked fields surface through :meth:`Composite.calibration_targets`; plain
     defaults stay out of the calibration surface. Set ``clamp`` only for a real
     bound — a fit runs in log space, so positivity needs no rail.
+
+    ``level=True`` declares an input level rather than a rate: it has no
+    reference value, rests at 0, and a perturbation handle sets it directly
+    instead of scaling it (:class:`hallsim.handles.ParameterMapping`).
     """
     return eqx.field(
         default=default,
@@ -92,6 +97,7 @@ def calibratable(
             "calibratable": True,
             "clamp": clamp,
             "description": description,
+            "level": level,
         },
     )
 
@@ -172,7 +178,10 @@ def write_param(proc, field: str, value):
         import copy
 
         new = copy.copy(proc)
-        if field in ("timescale", "dt_step") and value is not None:
+        if (
+            field in ("timescale", "dt_step", "time_scale")
+            and value is not None
+        ):
             value = float(value)
         object.__setattr__(new, field, value)
         return new

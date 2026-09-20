@@ -1570,12 +1570,17 @@ class Scheduler:
                 # condition just turned True, and only their deltas land.
                 cond = jnp.asarray(proc.condition(t_next, view), dtype=bool)
                 fire = cond & ~jnp.asarray(was_active[proc_name], dtype=bool)
-                if bool(jnp.any(fire)):
+                # Under a trace the verdict is not concrete: the masked delta
+                # lands every window (zero where nothing fired) and no record
+                # is kept; the record needs concrete values.
+                traced = is_traced(fire)
+                if traced or bool(jnp.any(fire)):
                     delta = {
                         port: jnp.where(fire, v, 0.0)
                         for port, v in proc.handler(t_next, view).items()
                     }
                     state = _apply_delta(state, delta, write_pairs)
+                if not traced and bool(jnp.any(fire)):
                     routed = {
                         keys[idx]: delta[port]
                         for port, idx in write_pairs

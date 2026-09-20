@@ -62,12 +62,12 @@ HALLMARK_REGISTRY: dict[str, Handle] = {
             "Sivakumar et al. 2011 (BIOMD0000000398)",
         ],
         mappings=[
-            # Stem-cell niche severity is the direct knob (no calibrated
-            # base behind it) — base is ignored.
+            # The niche's severity is a level: 0 at rest, set by the handle.
             ParameterMapping(
                 process_name="niche",
                 param_name="severity",
-                transform=lambda h, base: h,
+                floor=0.0,
+                slope=1.0,
                 description="Niche deterioration severity — scales decay of all ligands",
             ),
         ],
@@ -176,19 +176,19 @@ HALLMARK_REGISTRY: dict[str, Handle] = {
                 slope=4.0,
                 description="Damage production rate scales 1x→5x with instability (ERiQ-based composites)",
             ),
-            # DP14-based composites: severity IS the exogenous-exposure
-            # level — an identity dial (0 = no exposure, 1 = full DDIS dose).
-            # It sets the amplitude of the forcing source (`forcing.drive_pulse`
-            # adds a PulseSource named "irradiation_pulse" driving DP14's
-            # Irradiation input over the dose window). The damage *potency* per
-            # unit exposure (`DNA_damaged_by_irradiation`) is a separate
-            # mechanism parameter Calibrator fits; severity never touches it.
-            # Skipped for composites without the pulse source (apply() ignores
-            # mappings whose process is absent).
+            # DP14-based composites: severity is the exposure level of the
+            # forcing source `forcing.drive_pulse` adds as "irradiation_pulse"
+            # (0 = no exposure, 1 = the full DDIS dose; the source's `dose`
+            # carries the magnitude). The damage *potency* per unit exposure
+            # (`DNA_damaged_by_irradiation`) is a separate mechanism parameter
+            # Calibrator fits; severity never touches it. Skipped for
+            # composites without the pulse source (apply() ignores mappings
+            # whose process is absent).
             ParameterMapping(
                 process_name="irradiation_pulse",
                 param_name="amplitude",
-                transform=lambda h, base: h,
+                floor=0.0,
+                slope=1.0,
                 description=(
                     "Exogenous-exposure level (irradiation PulseSource "
                     "amplitude): 0 at severity=0 (no exposure), full at "

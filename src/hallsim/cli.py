@@ -541,8 +541,9 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
         simulate find NFkB inflammation --produces '\bIL6\b|\bCXCL8\b'
 
     Every candidate yields a row, including the ones that could not be
-    screened: `no-reactions` is a qualitative deposit, `no-rate-laws` a drawn
-    pathway map, and neither is a screened negative.
+    screened: `qualitative` is an SBML-qual logical model,
+    `constraint-based` an SBML-fbc one, `no-rate-laws` a drawn pathway map,
+    and none of them is a screened negative.
     """
     import re
     from collections import Counter

@@ -224,11 +224,14 @@ disable it — which is what you want when timing a cold compile.
 ## Perturbation handles
 
 A handle is a named severity that moves parameters across one or more
-processes, differentiable end-to-end (`hallsim.handles`). Transforms are
-**multiplicative of the current calibrated base value** — a transform gets
-`(severity, base)` and returns `base * f(severity)` — so `Calibrator` can fit
-mechanism parameters and then apply severities without the handle
-clobbering the fit. A registry is a plain `{name: Handle}` dict and every
+processes, differentiable end-to-end (`hallsim.handles`). Each mapping is
+`floor + slope * severity`, read against the parameter's kind: a **rate**
+is scaled relative to its current value, so `Calibrator` can fit mechanism
+parameters and then apply severities without the handle clobbering the
+fit; an **input level** (`calibratable(..., level=True)`, as a forcing
+source's amplitude is) rests at 0 and is set by severity, with the
+magnitude on the source as its `dose`. Severity 0 is neutral for both, and
+a composite with no handle applied is at neutral. A registry is a plain `{name: Handle}` dict and every
 call names the one it uses. The demos ship the hallmarks of aging as one,
 `demos.models.hallmarks.HALLMARK_REGISTRY`, mapped onto the demo models; a
 drug, a gene dosage or any other perturbation is another `Handle` in a
@@ -258,7 +261,7 @@ treated = with_handles(base, {"Deregulated Nutrient Sensing": -1.0},
 ```
 
 `with_handles` keeps the topology; `apply_handles(processes, {...})` is
-the same transform on a bare process dict.
+the same operation on a bare process dict.
 
 **Pharmacological interventions belong on the handle layer they perturb**,
 not as separate Processes. **Cross-model coupling is mediated at the
@@ -352,3 +355,4 @@ Small modules a model author needs early, each importable on its own:
 | `hallsim.stiffness` | `analyze_groups(composite, *, y0, groups, t0, dt)` — per-group spectral abscissa, Jacobian condition number and state-scale spread, with the solver verdict. Keyword-only. |
 | `hallsim.structure` | What the declared symbolic forms (`reaction_channels`, `assignment_rules`, `rate_rules`) imply for a whole composite: `composite_stoichiometry` / `composite_moieties` (exact `N` and its integer moieties over store paths), `jacobian_pattern` + `compressed_jacobian` (the Jacobian in as many forward passes as its sparsity has colours; dense only on an undeclared process's own block), `check_pattern` (the pattern against the composite's derivative), `symbolic_field` (the field as sympy, over path and `<process>.<field>` parameter symbols). `steady_state` and `identifiability.structural_redundancy` are built on it. |
 | `hallsim.diagnostics` | `screen_process` / `screen_composite` (the constituents-first pre-flight), `screen_sensitivity`, and `recommend_coupling_source`. |
+| `hallsim.attenuation` | `trace_path(composite, control, reporter, ...)` — follows a handle or a parameter to a reporter through the wiring, runs the composite at two settings of it, and reports the relative change at every store path on the route, naming the node where it collapses and the reactions that carry that step. The diagnosis behind a flat reporter or a structural verdict; the identifiability report points here. |

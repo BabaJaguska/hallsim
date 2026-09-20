@@ -238,10 +238,9 @@ class TestCalibrationProblemValidation:
             )
 
     def test_pure_dial_param_is_blocked(self):
-        """Guard rail: fitting a parameter whose hallmark transform IGNORES
-        the base value (severity replaces it — a pure dial, e.g. an
-        exposure level set directly to the severity) is degenerate and
-        raises, naming the hallmark."""
+        """Guard rail: fitting an input level a handle sets (severity
+        replaces it — an exposure level) is degenerate and raises, naming
+        the handle."""
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
@@ -250,11 +249,11 @@ class TestCalibrationProblemValidation:
         from hallsim.composite import Composite
         from hallsim.gene_reporters import GeneReporter
         from hallsim.handles import Handle, ParameterMapping
-        from hallsim.process import Port, PortRole, Process
+        from hallsim.process import Port, PortRole, Process, calibratable
         import pandas as pd
 
         class Knob(Process):
-            knob: float = 1.0
+            knob: float = calibratable(1.0, level=True)
 
             def ports_schema(self):
                 return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
@@ -269,7 +268,7 @@ class TestCalibrationProblemValidation:
             semantic_validation=False,
         )
 
-        # Transform ignores `base` — severity IS the value (a pure dial).
+        # A level: severity IS the value.
         custom_reg = {
             "Test Hallmark": Handle(
                 name="Test Hallmark",
@@ -277,7 +276,8 @@ class TestCalibrationProblemValidation:
                     ParameterMapping(
                         process_name="k",
                         param_name="knob",
-                        transform=lambda h, base: h,
+                        floor=0.0,
+                        slope=1.0,
                     ),
                 ],
             ),
@@ -299,11 +299,10 @@ class TestCalibrationProblemValidation:
             )
 
     def test_scaled_magnitude_param_is_fittable(self):
-        """A parameter scaled by a multiplicative hallmark transform
-        (``base * f(severity)``) is the magnitude that full severity maps
-        to — legitimately fittable (severity keeps its 0→1 meaning), so
-        construction does NOT raise. This is the case the dial-only guard
-        rail must let through."""
+        """A rate a handle scales (``base * (floor + slope * severity)``) is
+        the magnitude that full severity maps to — legitimately fittable
+        (severity keeps its 0→1 meaning), so construction does NOT raise.
+        This is the case the level-only guard rail must let through."""
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
@@ -330,7 +329,8 @@ class TestCalibrationProblemValidation:
             validate=False,
             semantic_validation=False,
         )
-        # Transform depends on `base` — fitting it calibrates the magnitude.
+        # A rate: the mapping scales `base`, so fitting it calibrates the
+        # magnitude.
         custom_reg = {
             "Test": Handle(
                 name="Test",
@@ -338,7 +338,8 @@ class TestCalibrationProblemValidation:
                     ParameterMapping(
                         process_name="k",
                         param_name="knob",
-                        transform=lambda h, base: base * h,
+                        floor=0.0,
+                        slope=1.0,
                     )
                 ],
             ),

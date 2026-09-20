@@ -3,9 +3,11 @@ processes.
 
 A :class:`Handle` carries a list of :class:`ParameterMapping`, each naming a
 process, a parameter and how that parameter moves with severity. Applying a
-handle builds *new* processes (they are immutable); the transform is
-**multiplicative of the current base**, ``base * f(severity)``, so a
-calibrated value is scaled, never overwritten. Severity is JAX-traceable and
+handle builds *new* processes (they are immutable). A rate is **scaled
+relative to its current value**, so a calibrated value is moved, never
+overwritten; an input level (``calibratable(..., level=True)``) rests at 0
+and is **set** by severity. Severity 0 is neutral for both, and a composite
+with no handle applied is at neutral. Severity is JAX-traceable and
 ``jax.grad`` flows through it, for sensitivity analysis and sweeps.
 
 **Severity is an experimental-design knob, not a fittable parameter.** Set it
@@ -23,12 +25,15 @@ any other perturbation is another :class:`Handle` in a registry of its own.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import equinox as eqx
+import jax.numpy as jnp
 
 from hallsim.process import Process
+from hallsim.tracing import is_traced
 
 
 @dataclass(frozen=True)
@@ -49,19 +54,33 @@ class FittableCoeff:
     description: str = ""
 
 
+def is_level(proc, param_name: str) -> bool:
+    """Whether ``param_name`` on ``proc`` is declared an input level
+    (``calibratable(..., level=True)``) rather than a rate. A dotted
+    parameters entry is always a rate."""
+    if "." in param_name:
+        return False
+    for f in dataclasses.fields(proc):
+        if f.name == param_name:
+            return bool(f.metadata.get("level", False))
+    return False
+
+
 @dataclass
 class ParameterMapping:
-    """Maps a handle's severity to a process parameter value, two forms:
+    """Maps a handle's severity to one parameter as ``floor + slope *
+    severity``, read against the parameter's kind:
 
-    - **Affine** (``floor`` set): ``base * (floor + slope * severity)``. Use
-      ``floor=1`` for a modifier that leaves ``base`` untouched at neutral,
-      ``floor=0`` for an input that is off there. ``slope`` is the signed gain
-      per unit severity and is required — the neutral point is fixed at
-      severity=0, not at either end. Either coefficient may be a
-      :class:`FittableCoeff`.
-    - **Custom** (``transform`` set): ``transform(severity, base)``, for a dial
-      that sets the value directly and ignores ``base`` (``lambda h, _: h``).
+    - a **rate** (the default) has a published or calibrated value, so the
+      move is relative: ``base * (floor + slope * severity)``. ``floor=1``
+      leaves the base untouched at severity 0.
+    - a **level** (``calibratable(..., level=True)``, as the forcing sources
+      declare their amplitudes) has no reference value and rests at 0, so
+      severity sets it: ``floor + slope * severity``; ``floor=0, slope=1``
+      is the exposure fraction.
 
+    Neutral is severity 0 in both. ``slope`` is the signed gain per unit
+    severity; either coefficient may be a :class:`FittableCoeff`.
     ``process_name`` keys into the composite; ``param_name`` is an attribute
     (``"alpha"``) or dotted path (``"parameters.<key>"``). ``base`` is read
     fresh on each application, so an earlier calibration flows through.
@@ -70,8 +89,7 @@ class ParameterMapping:
     process_name: str
     param_name: str
     floor: "float | FittableCoeff | None" = None
-    slope: float | None = None
-    transform: Callable[[Any, Any], Any] | None = None
+    slope: "float | FittableCoeff | None" = None
     description: str = ""
 
     @property
@@ -84,23 +102,27 @@ class ParameterMapping:
         s = self.slope
         return s.init if isinstance(s, FittableCoeff) else s
 
-    def value(self, severity, base):
-        """Resolve the parameter value at ``severity`` given current ``base``."""
-        if self.transform is not None:
-            return self.transform(severity, base)
-        if self.floor is None:
+    def value(self, severity, base, *, level: bool = False):
+        """The parameter at ``severity`` given its current ``base``."""
+        floor, slope = self.floor_value, self.slope_value
+        if floor is None or slope is None:
             raise ValueError(
                 f"ParameterMapping {self.process_name}.{self.param_name} "
-                "needs either an affine `floor` or a `transform`."
+                "needs both `floor` and `slope` (neutral is fixed at "
+                "severity=0)."
             )
-        slope = self.slope_value
-        if slope is None:
+        moved = floor + slope * severity
+        if level:
+            return moved
+        if not is_traced(base) and bool(jnp.all(jnp.asarray(base) == 0.0)):
             raise ValueError(
-                f"ParameterMapping {self.process_name}.{self.param_name} "
-                "is affine but has no `slope`; the signed severity gain is "
-                "required (neutral is fixed at severity=0)."
+                f"{self.process_name}.{self.param_name} is 0, and a handle "
+                "moves a rate relative to its value, so this mapping can "
+                "never move it. If it is an input level, declare it "
+                "calibratable(..., level=True) so severity sets it directly; "
+                "otherwise map a parameter that has a value."
             )
-        return base * (self.floor_value + slope * severity)
+        return base * moved
 
 
 @dataclass
@@ -180,7 +202,9 @@ class Handle:
                 )
             else:
                 base = getattr(proc, mapping.param_name)
-                new_val = mapping.value(severity, base)
+                new_val = mapping.value(
+                    severity, base, level=is_level(proc, mapping.param_name)
+                )
                 result[pname] = eqx.tree_at(
                     lambda p, pn=mapping.param_name: getattr(p, pn),
                     proc,
@@ -195,10 +219,11 @@ class Handle:
     ) -> dict[str, Any]:
         """What each mapping resolves to at ``severity``. With ``processes``,
         reads each target's real base; without, uses ``base=1.0``, which shows
-        the transform's shape but not the absolute value."""
+        the mapping's shape but not the absolute value."""
         out: dict[str, Any] = {}
         for m in self.mappings:
             base: Any = 1.0
+            level = False
             if processes is not None and m.process_name in processes:
                 proc = processes[m.process_name]
                 if "." in m.param_name:
@@ -206,7 +231,10 @@ class Handle:
                     base = getattr(proc, field_name)[key]
                 else:
                     base = getattr(proc, m.param_name)
-            out[f"{m.process_name}.{m.param_name}"] = m.value(severity, base)
+                    level = is_level(proc, m.param_name)
+            out[f"{m.process_name}.{m.param_name}"] = m.value(
+                severity, base, level=level
+            )
         return out
 
 

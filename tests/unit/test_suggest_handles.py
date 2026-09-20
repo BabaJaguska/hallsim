@@ -89,3 +89,43 @@ def test_suggestions_are_mappings_that_apply():
         Intent("x", targets=[IntentTarget({"go": "GO:9"})]), comp
     )
     assert nothing.mappings == []
+
+
+def test_a_level_is_set_by_severity_and_a_zero_rate_is_refused():
+    """An input level rests at 0 and severity sets it; a rate at 0 cannot be
+    scaled, and the mapping says which declaration would fix that."""
+    import pytest
+
+    from hallsim.handles import Handle, ParameterMapping, apply_handles
+    from hallsim.models.forcing import PulseSource
+    from hallsim.process import Port, PortRole, Process
+
+    class Rate(Process):
+        k: float = 0.0
+
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def derivative(self, t, state):
+            return {"x": -self.k * state["x"]}
+
+    registry = {
+        "Exposure": Handle(
+            name="Exposure",
+            mappings=[
+                ParameterMapping("pulse", "amplitude", floor=0.0, slope=1.0)
+            ],
+        ),
+        "Broken": Handle(
+            name="Broken",
+            mappings=[ParameterMapping("rate", "k", floor=1.0, slope=1.0)],
+        ),
+    }
+    procs = {"pulse": PulseSource(amplitude=0.0, dose=200.0), "rate": Rate()}
+    assert float(apply_handles(procs, {}, registry)["pulse"].amplitude) == 0.0
+    on = apply_handles(procs, {"Exposure": 0.5}, registry)
+    assert float(on["pulse"].amplitude) == 0.5
+    assert float(on["pulse"].assign(0.5, {})["signal"]) == 100.0
+    assert registry["Exposure"].summary(0.5, procs) == {"pulse.amplitude": 0.5}
+    with pytest.raises(ValueError, match="level=True"):
+        apply_handles(procs, {"Broken": 1.0}, registry)

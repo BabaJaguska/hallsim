@@ -558,13 +558,17 @@ class TestBioModelsSearchFilters:
 
 class TestProducedSpeciesScreen:
     class _Model:
-        def __init__(self, n_species=0, reactions=(), names=None):
+        def __init__(self, n_species=0, reactions=(), names=None, packages=()):
             self._n, self._rx = n_species, reactions
             if names is None:
                 # No display names declared: id is the label, as in a
                 # hand-written or COPASI-exported deposit.
                 names = {p: p for r in reactions for p in getattr(r, "_p", ())}
             self._names = names
+            self._packages = set(packages)
+
+        def getPlugin(self, name):
+            return object() if name in self._packages else None
 
         def getNumSpecies(self):
             return len(self._names) or self._n
@@ -623,6 +627,19 @@ class TestProducedSpeciesScreen:
         (row,) = discovery.screen_produced_species(["MODEL1"], "IL6")
         assert row.status == "no-reactions"
         assert "no reactions" in row.note
+
+    def test_the_package_names_the_formalism(self, monkeypatch):
+        """A reactionless deposit carrying the qual package is a logical
+        model and one carrying fbc is constraint-based; each is reported as
+        what it is, not lumped under an absence."""
+        self._patch(monkeypatch, self._Model(n_species=3, packages=["qual"]))
+        (row,) = discovery.screen_produced_species(["MODEL1"], "IL6")
+        assert row.status == "qualitative"
+        assert "SBML-qual" in row.note and row.n_species == 3
+        self._patch(monkeypatch, self._Model(n_species=3, packages=["fbc"]))
+        (row,) = discovery.screen_produced_species(["MODEL1"], "IL6")
+        assert row.status == "constraint-based"
+        assert "SBML-fbc" in row.note
 
     def test_no_match_still_means_read_and_absent(self, monkeypatch):
         self._patch(

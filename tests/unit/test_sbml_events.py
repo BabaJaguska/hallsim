@@ -175,3 +175,115 @@ def test_a_nested_composite_expands_each_event_once(tmp_path):
     outer = Composite({"o": inner}, semantic_validation=False, validate=False)
     events = [n for n, p in outer.processes.items() if p.kind is p.kind.EVENT]
     assert events == ["o.m__pulse"], events
+
+
+def test_an_import_with_events_is_one_structure(tmp_path):
+    """No static field on an imported process or its events may hold a JAX
+    array: the array would hash by identity, so two imports of one file
+    would be different pytrees and every structure-keyed cache would miss."""
+    import dataclasses
+
+    import jax
+
+    from hallsim.sbml_import import process_from_sbml
+
+    path = tmp_path / "ev.xml"
+    path.write_text(EVENT_MODEL)
+
+    def static_arrays(proc):
+        return [
+            f.name
+            for f in dataclasses.fields(proc)
+            if f.metadata.get("static")
+            and any(
+                isinstance(leaf, jax.Array)
+                for leaf in jax.tree_util.tree_leaves(getattr(proc, f.name))
+            )
+        ]
+
+    a = process_from_sbml(str(path), name="m").reconciled_to(3600.0)
+    b = process_from_sbml(str(path), name="m").reconciled_to(3600.0)
+    assert static_arrays(a) == []
+    assert isinstance(a.time_scale, float)
+    assert all(isinstance(ev.time_scale, float) for ev in a._events)
+    assert jax.tree_util.tree_structure(a) == jax.tree_util.tree_structure(b)
+
+
+def _species_only_event_model():
+    """EVENT_MODEL with the parameter assignment removed: the event sets X
+    alone."""
+    head, rest = EVENT_MODEL.split('<eventAssignment variable="k">')
+    return head + rest.split("</eventAssignment>", 1)[1]
+
+
+def test_the_protocol_is_readable_and_priced_on_the_clock(tmp_path):
+    import pytest
+
+    from hallsim.sbml_events import describe_schedule
+    from hallsim.sbml_import import process_from_sbml
+
+    path = tmp_path / "ev.xml"
+    path.write_text(EVENT_MODEL)
+    proc = process_from_sbml(str(path), name="m")
+    (entry,) = proc.protocol()
+    assert entry["time"] == 2.0
+    assert entry["assigns"] == {"X": 2.0, "k": 3.0}
+    assert describe_schedule(proc.protocol(), 1.0) == (
+        "pulse at 2 (2 s): X=2.0, k=3.0"
+    )
+    assert proc.native_input_level("X") == 2.0
+    # y0 = 1 until the event at t = 2, then 2: over [0, 10] that is 2 + 16.
+    assert proc.native_input_exposure("X", 0.0, 10.0) == pytest.approx(18.0)
+    assert proc.provenance()["events"] == proc.protocol()
+
+
+def test_a_protocol_that_spans_decades_names_the_clock(tmp_path, caplog):
+    import logging
+
+    from hallsim.sbml_import import process_from_sbml
+
+    path = tmp_path / "ev.xml"
+    path.write_text(EVENT_MODEL)
+    with caplog.at_level(logging.WARNING, logger="hallsim.sbml_import"):
+        process_from_sbml(str(path), name="m", native_time_seconds=1e9)
+    assert "the clock is wrong" in caplog.text
+
+
+def test_reading_an_event_set_species_drops_only_its_events(tmp_path, caplog):
+    import logging
+
+    import pytest
+
+    from hallsim.sbml_import import process_from_sbml
+
+    path = tmp_path / "ev.xml"
+    path.write_text(EVENT_MODEL)
+    mixed = process_from_sbml(str(path), name="m")
+    with pytest.raises(ValueError, match="cannot be dropped alone"):
+        mixed.with_species_input("X")
+
+    path.write_text(_species_only_event_model())
+    proc = process_from_sbml(str(path), name="m")
+    with caplog.at_level(logging.WARNING, logger="hallsim.sbml_import"):
+        read = proc.with_species_input("X")
+    assert read.protocol() == [] and len(proc.protocol()) == 1
+    assert "X=2.0" in caplog.text
+    with pytest.raises(KeyError):
+        proc.without_events("nope")
+    assert proc.without_events("pulse").protocol() == []
+
+
+def test_a_pulse_on_an_event_set_species_takes_the_protocol_dose(tmp_path):
+    from hallsim.models.forcing import drive_pulse
+    from hallsim.sbml_import import process_from_sbml
+
+    path = tmp_path / "ev.xml"
+    path.write_text(_species_only_event_model())
+    processes = {"m": process_from_sbml(str(path), name="m")}
+    topology = {"m": {"X": "m/X"}}
+    _, _, src = drive_pulse(
+        processes, topology, target="m", input_name="X", t_start=1.0, t_end=3.0
+    )
+    assert processes[src].dose == 2.0
+    assert topology["m"]["X"] == f"{src}/signal"
+    assert processes["m"].protocol() == []
