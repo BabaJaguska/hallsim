@@ -261,14 +261,10 @@ def fig_schematic(args):
             "that silently omits a constituent is worse than no schematic."
         )
 
-    reporters = problem.reporters
+    reporters = problem.readouts
 
     def readouts_for(namespace):
-        genes = [
-            r.gene_symbol
-            for r in reporters
-            if r.observable.split("/")[0] == namespace
-        ]
+        genes = [r.key for r in reporters if r.path.split("/")[0] == namespace]
         return "readouts:  " + " · ".join(genes)
 
     fig, ax = plt.subplots(figsize=(12.8, 5.9))
@@ -396,8 +392,8 @@ def fig_trajectories(args):
     # The run's own reporter set; plot the raw underlying state for
     # integral-based readouts (the cumulative ∫ path isn't a trajectory).
     panels = [
-        (r.observable.replace("_integral", ""), r.gene_symbol)
-        for r in _problem(args).reporters
+        (r.path.replace("_integral", ""), r.key)
+        for r in _problem(args).readouts
     ]
 
     def run(gi, dns):
@@ -484,8 +480,8 @@ def fig_reporter_levels(args):
     problem = _problem(args)
     fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
     qt = jnp.arange(0.5, t_end + 1e-6, 0.5)
-    genes = [r.gene_symbol for r in problem.reporters]
-    obs = [r.observable for r in problem.reporters]
+    genes = [r.key for r in problem.readouts]
+    obs = [r.path for r in problem.readouts]
     lv = {c: levels(problem, fit, c, qt) for c in conds}
     qt = np.asarray(qt)
     fig, axes = plt.subplots(2, 3, figsize=(11, 6.6), sharex=True)
@@ -574,7 +570,7 @@ def fig_concordance(args):
         n = len(sorted(problem.data[a]))
         spans.append((i, i + n))
         i += n
-    order = [r.gene_symbol for r in problem.reporters]
+    order = [r.key for r in problem.readouts]
     nC = len(cond)
 
     def render(params, subtitle, stem):
@@ -716,17 +712,17 @@ def fig_temporal(args):
 
     def figure_for_arm(problem, init, fit, arm, subtitle):
         data_times = sorted(problem.data[arm])
-        genes = [r.gene_symbol for r in problem.reporters]
+        genes = [r.key for r in problem.readouts]
         n = len(genes)
         ncol = 3
         nrow = -(-n // ncol)  # ceil
-        # model_readout reproduces exactly what the loss fits: within-arm
+        # predicted reproduces exactly what the loss fits: within-arm
         # (X_t/X_0) fold change. Start at t>0: at exactly t=0 a window-mean
         # reporter reads a zero-width window (→0, log2 floors), a plotting-only
         # degeneracy; the fold-change is 0 as t→0⁺ by construction.
         qt = np.arange(0.1, t_end + 1e-6, 0.1)
-        lfc_oob = np.asarray(problem.model_readout(init, arm, jnp.asarray(qt)))
-        lfc_fit = np.asarray(problem.model_readout(fit, arm, jnp.asarray(qt)))
+        lfc_oob = np.asarray(problem.predicted(init, arm, jnp.asarray(qt)))
+        lfc_fit = np.asarray(problem.predicted(fit, arm, jnp.asarray(qt)))
         fig, axes = plt.subplots(
             nrow, ncol, figsize=(11, 3.2 * nrow), sharex=True, squeeze=False
         )
@@ -831,11 +827,11 @@ CONSTITUENT_LABELS = {
 
 def _reaction_level_reporters(problem):
     """Indices of the reporters whose observable a reaction-level member
-    owns, in ``problem.reporters`` order."""
+    owns, in ``problem.readouts`` order."""
     return [
         i
-        for i, r in enumerate(problem.reporters)
-        if r.observable.split("/")[0] in REACTION_LEVEL
+        for i, r in enumerate(problem.readouts)
+        if r.path.split("/")[0] in REACTION_LEVEL
     ]
 
 
@@ -911,13 +907,13 @@ def fig_temporal_compare(args):
     arms = {a: ARM_STYLE.get(a, (a, "#6b7280")) for a in problem.data}
     init = problem.initial_params()
     fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
-    genes = [r.gene_symbol for r in problem.reporters]
+    genes = [r.key for r in problem.readouts]
     lfc_fit = {
-        arm: np.asarray(problem.model_readout(fit, arm, jnp.asarray(qt)))
+        arm: np.asarray(problem.predicted(fit, arm, jnp.asarray(qt)))
         for arm in arms
     }
     lfc_oob = {
-        arm: np.asarray(problem.model_readout(init, arm, jnp.asarray(qt)))
+        arm: np.asarray(problem.predicted(init, arm, jnp.asarray(qt)))
         for arm in arms
     }
     # Reporters of reaction-level members come from a population on the
@@ -950,8 +946,8 @@ def fig_temporal_compare(args):
     # panel. The legend is a row of its own underneath.
     ncol = 3
     groups: list[tuple[str, list[int]]] = []
-    for i, r in enumerate(problem.reporters):
-        ns = r.observable.split("/")[0]
+    for i, r in enumerate(problem.readouts):
+        ns = r.path.split("/")[0]
         if not groups or groups[-1][0] != ns:
             groups.append((ns, []))
         groups[-1][1].append(i)
@@ -1020,7 +1016,7 @@ def fig_temporal_compare(args):
             )
             ax.set_title(gene, fontsize=11, fontweight="bold", loc="left")
             ax.set_title(
-                problem.reporters[i].observable.replace("_integral", ""),
+                problem.readouts[i].path.replace("_integral", ""),
                 fontsize=9,
                 color="#777",
                 loc="right",
@@ -1138,12 +1134,11 @@ def fig_state_arms(args):
     grid_c = "#e6e6e2"
     problem = _problem(args)
     fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
-    runs = problem.simulate_all_conditions(fit, n_save=1401)
+    runs = problem.trajectories(fit, n_save=1401)
     comp = problem.composite
     units = canonical_units(comp.processes, comp.topology)
     panels = [
-        (r.observable.replace("_integral", ""), r.gene_symbol)
-        for r in problem.reporters
+        (r.path.replace("_integral", ""), r.key) for r in problem.readouts
     ]
     # Reaction-level members are drawn as the reporter figure draws them:
     # a population of cells on the same trajectory, its 10–90 % band and
@@ -1548,7 +1543,7 @@ def fig_coupling_ablation(args):
 
     problem = _problem(args)
     fitted = load_fit()
-    genes = [r.gene_symbol for r in problem.reporters]
+    genes = [r.key for r in problem.readouts]
     days = sorted({d for arm in problem.data.values() for d in arm})
     qt = jnp.asarray(days)
 
@@ -1567,7 +1562,7 @@ def fig_coupling_ablation(args):
     levels = trajectory_levels(problem.composite, ctrl)
     null = build_problem(
         composite=freeze_coupling(problem.composite, levels),
-        fitted=tuple(problem.param_refs),
+        fitted=tuple(problem.fittables),
     )
 
     rows, labels = [], []
@@ -1576,9 +1571,7 @@ def fig_coupling_ablation(args):
             measured = np.array([problem.data[arm][day][g] for g in genes])
             scores = []
             for pr in (problem, null):
-                sim = np.asarray(pr.model_readout(fitted, arm, qt), float)[
-                    :, j
-                ]
+                sim = np.asarray(pr.predicted(fitted, arm, qt), float)[:, j]
                 scores.append(
                     (
                         float(spearmanr(sim, measured).statistic),
@@ -1738,13 +1731,13 @@ def fig_proteostasis_population(args):
     seed = int(getattr(args, "seed", 0))
     arms = list(problem.arm_pairs)
     rep_idx = _reaction_level_reporters(problem)
-    genes = [problem.reporters[i].gene_symbol for i in rep_idx]
+    genes = [problem.readouts[i].key for i in rep_idx]
 
     rows = {}
     for arm in arms:
         days = sorted(float(t) for t in problem.data[arm])
         mean_field = np.asarray(
-            problem.model_readout(params, arm, jnp.asarray(days))
+            problem.predicted(params, arm, jnp.asarray(days))
         )[rep_idx]
         cells, pooled = _population_lfc(
             problem, params, arm, days, n_cells, seed

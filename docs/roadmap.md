@@ -62,11 +62,11 @@ a summary plus a data key, and a trajectory observation is the same thing
 with the identity summary and the path as its key. The rest are options.
 
 Done: `Arm(condition, reference)`, reference `"t0"` | a condition | `None`,
-the last comparing values in the data's units through `GeneReporter.scale`
+the last comparing values in the data's units through `Readout.scale`
 (P3.24). `Condition(start=, window=)`: a condition from its own state over
 its own span, a batched start running one member per initial state through
 the Scheduler's batch axis, a timepoint's data then a frame with one row per
-member; `trajectory_reporters(*paths)` reads store paths as reporters, so an
+member; `trajectory_readouts(*paths)` reads store paths as reporters, so an
 observed trajectory is one condition, one arm with no reference and the
 paths as data columns. `shooting_conditions(ts, ys, paths, segments=,
 match=)` cuts a trajectory set into such conditions, consecutive windows
@@ -76,18 +76,23 @@ of the arms to `data_loss` being the active windows. `Collocation(ts, ys,
 paths, condition=, weight=)`: the composite's field at the observed states
 against their central-difference slopes, each path scaled by its slope's
 spread, no solve; `collocation_loss` alone is a pretraining stage, and
-`loss` adds it at `weight`. `LearnedRef(process_name, frozen=)`: a
+`loss` adds it at `weight`. `FitBlock(process_name, frozen=)`: a
 learned block's trainable leaves as one flat fittable, linear space, no
-prior, no clamp, outside the identifiability report (`scalar_refs` is what
+prior, no clamp, outside the identifiability report (`scalar_fittables` is what
 that report and the log transform cover), `fit` switching to reverse mode
-when one is present; the Calibrator is unchanged. Not built: minibatches
-through a PRNG key, since a batched condition runs every member in one
-vmapped solve and only memory would ask for it. Remaining:
-
-* [ ] **The NeuralODE trainers become wrappers** over the above with their
-  signatures kept, which closes P0.85. Regression guard: the hybrid demo's
-  provenance records the held-out amplitude error across the alpha grid
-  and both Hopf points; run its stages before and after on one seed.
+when one is present. Minibatches are a PRNG key the Calibrator threads
+into the loss (`minibatch_seed`): `Collocation.batch` samples,
+`member_batch` members of a batched condition; iterates are ranked on the
+whole objective, or `eval_loss_fn`, every `eval_every` steps.
+`fit_neuralode_derivative` and `fit_neuralode_shooting` are wrappers over
+all of this (P0.85 closed 2026-09-20). Regression guard, the hybrid demo's
+held-out amplitude error: old loop 0.0097 derivative / 0.0101 shooting,
+wrappers 0.0167 / 0.0317; the derivative difference is inside the
+three-seed spread of the new path (0.045, 0.017, 0.021 in-sample against
+the old loop's 0.027), the shooting block is one run each side. The
+derivative stage runs in 68 s against 1,012 s. Open: a second shooting
+seed to attribute that block's gap, and the shooting stage's ranking
+evaluations (25 per stage) are the remaining tunable cost.
 
 Where a learned component belongs, in the order an agent meets it: a
 model that exists only as code (train on trajectories the original code

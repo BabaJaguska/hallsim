@@ -220,7 +220,7 @@ def classify_ontology(ont: dict) -> ObservableKind:
 @dataclass(frozen=True)
 class ReporterVerdict:
     gene: str
-    observable: str
+    path: str
     resolved_path: str
     kind: ObservableKind
     status: str  # ok | category-error | self-map | sign-conflict | proxy |
@@ -249,7 +249,7 @@ def _branch_hint(gene: str) -> str:
 def classify_reporter(reporter, composite, ontmap=None) -> ReporterVerdict:
     """Objective verdict for one reporter against a composite + CollecTRI."""
     tf_set, edges, _ = _collectri()
-    obs, gene = reporter.observable, reporter.gene_symbol
+    obs, gene = reporter.path, reporter.key
     ont, resolved = resolve_ontology(obs, composite, ontmap)
     kind = classify_ontology(ont)
     notes: list[str] = []
@@ -378,7 +378,7 @@ def validate_reporter_mappings(reporters, composite):
     for rep in reporters:
         # No gene_symbol means no transcript is being claimed — an
         # ActivityBinding names a regulator, not a readout gene.
-        if not getattr(rep, "gene_symbol", None):
+        if not getattr(rep, "key", None):
             continue
         v = classify_reporter(rep, composite, ontmap)
         msg = v.message + (" [" + "; ".join(v.notes) + "]" if v.notes else "")

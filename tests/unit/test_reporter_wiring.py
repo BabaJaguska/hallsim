@@ -99,7 +99,7 @@ def test_multi_hallmark_reporter_verdicts(composite):
     }
     ontmap = store_ontology_map(composite)
     status = {
-        r.gene_symbol: classify_reporter(r, composite, ontmap).status
+        r.key: classify_reporter(r, composite, ontmap).status
         for r in MULTI_HALLMARK_REPORTERS
     }
     # Central: every demo reporter classifies to a known status.

@@ -80,10 +80,10 @@ def _toy_problem():
     from hallsim.calibration import (
         CalibrationProblem,
         Condition,
-        ParameterRef,
+        FitParam,
     )
     from hallsim.composite import Composite
-    from hallsim.gene_reporters import GeneReporter
+    from hallsim.gene_reporters import Readout
     from hallsim.process import Port, PortRole, Process
 
     class Decay(Process):
@@ -103,15 +103,15 @@ def _toy_problem():
     )
     return CalibrationProblem(
         composite=comp,
-        reporters=[
-            GeneReporter(observable="pool/x", gene_symbol="GX", sign=+1),
-            GeneReporter(observable="pool/x", gene_symbol="GY", sign=-1),
+        readouts=[
+            Readout(path="pool/x", key="GX", sign=+1),
+            Readout(path="pool/x", key="GY", sign=-1),
         ],
         conditions={"ctrl": Condition("ctrl", {}), "hi": Condition("hi", {})},
         data={"hi_vs_ctrl": pd.Series({"GX": -0.5, "GY": +0.5})},
         arms={"hi_vs_ctrl": "hi"},
         params={
-            "rate": ParameterRef(
+            "rate": FitParam(
                 process_name="decay", field="rate", clamp=(1e-3, 5.0)
             )
         },
@@ -237,14 +237,14 @@ class TestStructuralRedundancy:
         assert "redundant: m.parameters.k1, m.parameters.k2" in str(report)
 
     def test_restricting_to_fitted_parameters(self, tmp_path):
-        from hallsim.calibration import ParameterRef
+        from hallsim.calibration import FitParam
         from hallsim.identifiability import structural_redundancy
 
         report = structural_redundancy(
             self._composite(tmp_path),
             params=[
-                ParameterRef("m", "parameters.k1"),
-                ParameterRef("m", "parameters.k3"),
+                FitParam("m", "parameters.k1"),
+                FitParam("m", "parameters.k3"),
                 "m.parameters.k6",
             ],
         )
@@ -266,10 +266,10 @@ class TestStructuralRedundancy:
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter
+        from hallsim.gene_reporters import Readout
         from hallsim.identifiability import structural_redundancy
         from hallsim.models.clamp_edge import ClampEdge
 
@@ -293,11 +293,7 @@ class TestStructuralRedundancy:
         with caplog.at_level(logging.WARNING, logger="hallsim.calibration"):
             CalibrationProblem(
                 composite=comp,
-                reporters=[
-                    GeneReporter(
-                        observable="p/x", gene_symbol="GENE_X", sign=1
-                    )
-                ],
+                readouts=[Readout(path="p/x", key="GENE_X", sign=1)],
                 conditions={
                     "ctrl": Condition("ctrl", {}),
                     "high": Condition("high", {}),
@@ -305,8 +301,8 @@ class TestStructuralRedundancy:
                 data={"high_vs_ctrl": pd.Series({"GENE_X": -0.5})},
                 arms={"high_vs_ctrl": "high"},
                 params={
-                    "k1": ParameterRef(process_name="h1", field="k_clamp"),
-                    "k2": ParameterRef(process_name="h2", field="k_clamp"),
+                    "k1": FitParam(process_name="h1", field="k_clamp"),
+                    "k2": FitParam(process_name="h2", field="k_clamp"),
                 },
                 fit_arms=["high_vs_ctrl"],
                 t_end=5.0,

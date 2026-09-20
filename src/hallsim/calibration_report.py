@@ -47,14 +47,14 @@ def save_outputs(
     final = history.best_params or init
 
     # Densely-sampled trajectories at the fitted parameters, for the JSON.
-    post_runs = problem.simulate_all_conditions(final, n_save=n_save_plot)
+    post_runs = problem.trajectories(final, n_save=n_save_plot)
 
     # Concordance — uses the standard n_save path (matches the numbers the
     # demo prints) so the JSON tallies with stdout.
     results_pre = problem.evaluate(init)
     results_post = problem.evaluate(final)
 
-    reporter_paths = [r.observable for r in problem.reporters]
+    reporter_paths = [r.path for r in problem.readouts]
 
     # 1. Topology
     draw_composite_graph(
@@ -131,10 +131,10 @@ def save_outputs(
         "macro_dt": problem.macro_dt,
         "concordance_pre": _conc_to_dict(results_pre),
         "concordance_post": _conc_to_dict(results_post),
-        "reporters": [
+        "readouts": [
             {
-                "gene_symbol": r.gene_symbol,
-                "observable": r.observable,
+                "key": r.key,
+                "path": r.path,
                 "sign": r.sign,
                 "summary": (
                     r.summary.__name__
@@ -142,7 +142,7 @@ def save_outputs(
                     else type(r.summary).__name__
                 ),
             }
-            for r in problem.reporters
+            for r in problem.readouts
         ],
     }
     with open(out / "summary.json", "w") as f:
@@ -170,7 +170,7 @@ def save_outputs(
 
 def rows_by_gene(result):
     """``{gene_symbol: row}`` for one concordance result."""
-    return {r.reporter.gene_symbol: r for r in result.rows}
+    return {r.reporter.key: r for r in result.rows}
 
 
 def format_table(pre, post, fit_arms=()) -> str:
@@ -256,7 +256,7 @@ def plot_history(problem, history, path) -> None:
 
     # `clamp` is optional, so an unclamped parameter is normalized against
     # its own travelled range instead, dashed to keep the scales distinct.
-    for name, ref in problem.scalar_refs.items():
+    for name, ref in problem.scalar_fittables.items():
         vals = np.asarray([float(ph[name]) for ph in history.param_history])
         clamped = ref.clamp is not None
         lo, hi = ref.clamp if clamped else (vals.min(), vals.max())
@@ -293,8 +293,8 @@ def _conc_to_dict(results_dict: dict) -> dict:
                 "n_compared": r.n_compared,
                 "rows": [
                     {
-                        "gene": row.reporter.gene_symbol,
-                        "observable": row.reporter.observable,
+                        "gene": row.reporter.key,
+                        "path": row.reporter.path,
                         "delta_sim_signed": float(row.delta_sim),
                         "delta_data": float(row.delta_data),
                         "sign_match": bool(row.sign_match),

@@ -335,10 +335,10 @@ def cycle_average(fraction: float = 0.25):
 
 
 @dataclass(frozen=True)
-class GeneReporter:
+class Readout:
     """One mechanistic observable ↔ one canonical reporter gene.
 
-    ``observable`` is a store path, ``gene_symbol`` its HGNC reporter, ``sign``
+    ``path`` is a store path, ``key`` its HGNC reporter, ``sign``
     ``+1`` when both move together and ``-1`` when inverse, with ``description``
     and ``reference`` carrying the rationale and its literature anchor.
 
@@ -349,8 +349,8 @@ class GeneReporter:
     oscillating state.
     """
 
-    observable: str
-    gene_symbol: str
+    path: str
+    key: str
     sign: int = 1
     description: str = ""
     reference: str = ""
@@ -360,24 +360,19 @@ class GeneReporter:
     scale: float = 1.0
 
 
-def trajectory_reporters(
-    *paths: str, scale: float = 1.0
-) -> list[GeneReporter]:
+def trajectory_readouts(*paths: str, scale: float = 1.0) -> list[Readout]:
     """One reporter per store path, read as the value at each query time and
     keyed by the path itself: an observed trajectory as a reporter set, for
     an :class:`~hallsim.calibration.Arm` with no reference whose data
     columns are the paths."""
     return [
-        GeneReporter(
-            observable=p, gene_symbol=p, summary=last_value, scale=scale
-        )
-        for p in paths
+        Readout(path=p, key=p, summary=last_value, scale=scale) for p in paths
     ]
 
 
-def oscillating_reporter(
-    observable: str,
-    gene_symbol: str,
+def oscillating_readout(
+    path: str,
+    key: str,
     *,
     sign: int = 1,
     readout: str = "rms",
@@ -385,7 +380,7 @@ def oscillating_reporter(
     tau: float | None = None,
     description: str = "",
     reference: str = "",
-) -> GeneReporter:
+) -> Readout:
     """Phase-insensitive reporter for an OSCILLATING model species.
 
     Readouts pair ``_rms`` (pulse amplitude √⟨x²⟩, over a ``power=2`` integral)
@@ -404,7 +399,7 @@ def oscillating_reporter(
       lag-free, so a timepoint query reads *at* that time. Requires ``tau``.
 
     ``window`` is the trailing averaging duration (trajectory time unit), sized
-    to a few oscillation periods. ``observable`` must be the matching
+    to a few oscillation periods. ``path`` must be the matching
     :class:`~hallsim.models.running_integral.RunningIntegral` path — ∫x² (its
     default ``power=2``) for rms/zerophase, ∫x (``power=1``) for mean.
     """
@@ -432,9 +427,9 @@ def oscillating_reporter(
         summary = window_rms(window)
     else:
         summary = window_mean(window)
-    return GeneReporter(
-        observable=observable,
-        gene_symbol=gene_symbol,
+    return Readout(
+        path=path,
+        key=key,
         sign=sign,
         description=description,
         reference=reference,
@@ -442,10 +437,10 @@ def oscillating_reporter(
     )
 
 
-CANONICAL_REPORTERS: list[GeneReporter] = [
-    GeneReporter(
-        observable="p53_activity",
-        gene_symbol="CDKN1A",
+CANONICAL_REPORTERS: list[Readout] = [
+    Readout(
+        path="p53_activity",
+        key="CDKN1A",
         sign=+1,
         description=(
             "p21/CIP1/WAF1 — direct p53 transcriptional target via a "
@@ -454,9 +449,9 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
         ),
         reference="el-Deiry et al. 1993, Cell 75:817–825",
     ),
-    GeneReporter(
-        observable="mito_damage",
-        gene_symbol="DDB2",
+    Readout(
+        path="mito_damage",
+        key="DDB2",
         sign=+1,
         description=(
             "Damage-specific DNA Binding Protein 2 — direct p53 target "
@@ -471,9 +466,9 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
         reference="Hwang, Ford, Hanawalt & Chu 1999, PNAS 96:424–428",
         summary=cycle_average(0.25),
     ),
-    GeneReporter(
-        observable="ROS_algebraic",
-        gene_symbol="HMOX1",
+    Readout(
+        path="ROS_algebraic",
+        key="HMOX1",
         sign=+1,
         description=(
             "Heme oxygenase 1 — canonical Nrf2/ARE-driven antioxidant "
@@ -482,9 +477,9 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
         ),
         reference="Alam & Cook 2007, Antioxid Redox Signal 9:2499–2511",
     ),
-    GeneReporter(
-        observable="NFKB_algebraic",
-        gene_symbol="NFKBIA",
+    Readout(
+        path="NFKB_algebraic",
+        key="NFKBIA",
         sign=+1,
         description=(
             "IκBα — direct NF-κB target via the autoregulatory negative "
@@ -493,9 +488,9 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
         ),
         reference="Sun et al. 1993, Science 259:1912–1915",
     ),
-    GeneReporter(
-        observable="mito_function",
-        gene_symbol="CYCS",
+    Readout(
+        path="mito_function",
+        key="CYCS",
         sign=+1,
         description=(
             "Cytochrome c — nuclear-encoded OXPHOS component whose "
@@ -504,9 +499,9 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
         ),
         reference="Scarpulla 2008, Physiol Rev 88:611–638",
     ),
-    GeneReporter(
-        observable="mTOR_activity_algebraic",
-        gene_symbol="EIF4EBP1",
+    Readout(
+        path="mTOR_activity_algebraic",
+        key="EIF4EBP1",
         sign=+1,
         description=(
             "4E-BP1 — mTORC1 substrate and mTOR-target gene. Gene-level "
@@ -523,10 +518,10 @@ CANONICAL_REPORTERS: list[GeneReporter] = [
 # These map directly to store paths in the DP14 + GZ06 composite,
 # unlike CANONICAL_REPORTERS which routes through ERiQ algebraic helpers.
 
-MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
-    GeneReporter(
-        observable="dp14/CDKN1A",
-        gene_symbol="CDKN1A",
+MULTI_HALLMARK_REPORTERS: list[Readout] = [
+    Readout(
+        path="dp14/CDKN1A",
+        key="CDKN1A",
         sign=+1,
         summary=zerophase_mean(tau=2.0),
         description=(
@@ -538,9 +533,9 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         ),
         reference="el-Deiry et al. 1993, Cell 75:817–825",
     ),
-    GeneReporter(
-        observable="dp14/SA_beta_gal",
-        gene_symbol="GLB1",
+    Readout(
+        path="dp14/SA_beta_gal",
+        key="GLB1",
         sign=+1,
         summary=zerophase_mean(tau=2.0),
         description=(
@@ -550,9 +545,9 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         ),
         reference="Dimri et al. 1995, PNAS 92:9363–9367",
     ),
-    GeneReporter(
-        observable="dp14/FoxO3a",
-        gene_symbol="BNIP3",
+    Readout(
+        path="dp14/FoxO3a",
+        key="BNIP3",
         sign=+1,
         summary=zerophase_mean(tau=2.0),
         description=(
@@ -564,9 +559,9 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         ),
         reference="Mammucari et al. 2007, Cell Metab 6:458–471",
     ),
-    GeneReporter(
-        observable="gz06/x",
-        gene_symbol="DDB2",
+    Readout(
+        path="gz06/x",
+        key="DDB2",
         sign=+1,
         summary=zerophase_rms_raw(tau=0.75),
         description=(
@@ -579,9 +574,9 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
         ),
         reference="Hwang, Ford, Hanawalt & Chu 1999, PNAS 96:424–428",
     ),
-    GeneReporter(
-        observable="gz06/y0",
-        gene_symbol="MDM2",
+    Readout(
+        path="gz06/y0",
+        key="MDM2",
         sign=+1,
         summary=zerophase_rms_raw(tau=0.75),
         description=(
@@ -599,10 +594,10 @@ MULTI_HALLMARK_REPORTERS: list[GeneReporter] = [
     ),
 ]
 
-PROTEOSTASIS_REPORTERS: list[GeneReporter] = [
-    GeneReporter(
-        observable="p07/MisP",
-        gene_symbol="HSPA1A",
+PROTEOSTASIS_REPORTERS: list[Readout] = [
+    Readout(
+        path="p07/MisP",
+        key="HSPA1A",
         sign=+1,
         summary=zerophase_mean(tau=2.0),
         description=(
@@ -620,9 +615,9 @@ PROTEOSTASIS_REPORTERS: list[GeneReporter] = [
 #: day-0 reference the transcript would read the model's own filling of an
 #: empty pool (+1.7 log2 in every arm), not a response. Usable with a
 #: time-matched control (an arm referencing it) or an aged starting state.
-SQSTM1_REPORTER = GeneReporter(
-    observable="p07/aggregates",
-    gene_symbol="SQSTM1",
+SQSTM1_REPORTER = Readout(
+    path="p07/aggregates",
+    key="SQSTM1",
     sign=+1,
     summary=zerophase_mean(tau=2.0),
     description=(
@@ -642,9 +637,9 @@ SQSTM1_REPORTER = GeneReporter(
 #: degradation returns it, nothing makes it), so a treatment that lowers
 #: misfolding drains the free pool by bookkeeping, and a UBB transcript
 #: cannot track that.
-UBB_REPORTER = GeneReporter(
-    observable="p07/Ub",
-    gene_symbol="UBB",
+UBB_REPORTER = Readout(
+    path="p07/Ub",
+    key="UBB",
     sign=-1,
     summary=zerophase_mean(tau=2.0),
     description=(
@@ -658,7 +653,7 @@ UBB_REPORTER = GeneReporter(
 def summarize_reporters(
     ts,
     state_trajectory: dict,
-    reporters: list[GeneReporter],
+    reporters: list[Readout],
     derive: Callable[[dict], dict] | None = None,
 ) -> dict[str, Any]:
     """Each reporter's ``summary`` applied to its trajectory →
@@ -676,9 +671,9 @@ def summarize_reporters(
     """
     source = derive(state_trajectory) if derive else state_trajectory
     return {
-        rep.observable: rep.summary(ts, source[rep.observable])
+        rep.path: rep.summary(ts, source[rep.path])
         for rep in reporters
-        if rep.observable in source
+        if rep.path in source
     }
 
 
@@ -1180,7 +1175,7 @@ class GeneExpressionDataset:
 class ReporterRow:
     """Per-reporter outcome for one condition comparison."""
 
-    reporter: GeneReporter
+    reporter: Readout
     delta_sim: float
     delta_data: float
     sign_match: bool
@@ -1213,8 +1208,8 @@ class ConcordanceResult:
         for r in self.rows:
             mk = "OK" if r.sign_match else "X"
             lines.append(
-                f"  {r.reporter.observable:<28}  "
-                f"{r.reporter.gene_symbol:<10}  "
+                f"  {r.reporter.path:<28}  "
+                f"{r.reporter.key:<10}  "
                 f"{r.delta_sim:>+12.4f}  {r.delta_data:>+10.4f}  {mk}"
             )
         return "\n".join(lines)
@@ -1225,7 +1220,7 @@ def compute_concordance(
     delta_observables: dict[str, float],
     delta_gene_expression: pd.Series,
     condition_name: str = "",
-    reporters: list[GeneReporter] | None = None,
+    reporters: list[Readout] | None = None,
 ) -> ConcordanceResult:
     """Compare simulated observable changes to measured gene-expression
     changes one reporter at a time.
@@ -1249,13 +1244,13 @@ def compute_concordance(
     sims: list[float] = []
     datas: list[float] = []
     for rep in reporters:
-        if rep.observable not in delta_observables:
+        if rep.path not in delta_observables:
             continue
-        if rep.gene_symbol not in delta_gene_expression.index:
+        if rep.key not in delta_gene_expression.index:
             continue
-        ds_raw = float(delta_observables[rep.observable])
+        ds_raw = float(delta_observables[rep.path])
         ds_signed = float(rep.sign) * ds_raw
-        dd = float(delta_gene_expression[rep.gene_symbol])
+        dd = float(delta_gene_expression[rep.key])
         sign_match = (ds_signed * dd > 0) or (
             abs(ds_signed) < 1e-12 and abs(dd) < 1e-12
         )

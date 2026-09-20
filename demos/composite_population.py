@@ -51,7 +51,7 @@ def _reporters():
     Ihekwaba was removed, so the demo could not run)."""
     from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
 
-    return {r.gene_symbol: r.observable for r in MULTI_HALLMARK_REPORTERS}
+    return {r.key: r.path for r in MULTI_HALLMARK_REPORTERS}
 
 
 REPORTERS = _reporters()

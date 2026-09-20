@@ -44,7 +44,7 @@ from hallsim.calibration import (  # noqa: E402
     Arm,
     CalibrationProblem,
     Condition,
-    ParameterRef,
+    FitParam,
     load_checkpoint,
 )
 from hallsim.calibration_report import (  # noqa: E402
@@ -180,13 +180,13 @@ def _default_fit_params(composite, published, clamp: bool = True) -> dict:
     degradation into :func:`oscillatory_window`; off, the fit may leave
     the oscillatory regime and the run's ``config.json`` records no clamp."""
     params = {
-        "sa_beta_gal_decay": ParameterRef(
+        "sa_beta_gal_decay": FitParam(
             "dp14",
             "parameters.sen_ass_beta_gal_dec",
             prior=0.1548,
             prior_sigma=0.5,
         ),
-        "CDKN1A_transcr": ParameterRef(
+        "CDKN1A_transcr": FitParam(
             "dp14",
             "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
             prior=0.085,
@@ -194,7 +194,7 @@ def _default_fit_params(composite, published, clamp: bool = True) -> dict:
         ),
         # GZ06's Mdm2 degradation: the only knob on MDM2's own path, and
         # the most identifiable parameter in the fit.
-        "mdm2_degradation": ParameterRef(
+        "mdm2_degradation": FitParam(
             "gz06",
             "parameters.alpha_y",
             prior=published("gz06", "alpha_y"),
@@ -204,13 +204,13 @@ def _default_fit_params(composite, published, clamp: bool = True) -> dict:
         # DallePezze's DNA repair: how long the etoposide damage, and with
         # it p53's pulsing, persists. The whole-composite screen added it
         # to the hypothesis set (2026-09-12).
-        "dna_repair": ParameterRef(
+        "dna_repair": FitParam(
             "dp14",
             "parameters.DNA_repair",
             prior=published("dp14", "DNA_repair"),
             prior_sigma=0.5,
         ),
-        "alpha_x_control": ParameterRef(
+        "alpha_x_control": FitParam(
             "damage_bridge",
             "basal",
             prior=GZ06_ALPHA_X_CONTROL,
@@ -224,7 +224,7 @@ def _default_fit_params(composite, published, clamp: bool = True) -> dict:
     }
     # k69 (proteasome activity) is left out: at the fit it moves no
     # reporter (structural, per the fit's identifiability check).
-    params["mtor_synthesis_gain"] = ParameterRef(
+    params["mtor_synthesis_gain"] = FitParam(
         "mtor_synthesis",
         "gain",
         prior=float(composite.processes["mtor_synthesis"].gain),
@@ -262,7 +262,7 @@ def _registry_with_intensity(intensity: float) -> dict:
 
 def build_problem(
     composite=None,
-    reporters=None,
+    readouts=None,
     equilibrate: bool = False,
     parameters=None,
     fitted: tuple | None = None,
@@ -286,8 +286,8 @@ def build_problem(
     )
     if composite is None:
         composite = build_multi_hallmark_composite()
-    if reporters is None:
-        reporters = list(MULTI_HALLMARK_REPORTERS) + PROTEOSTASIS_REPORTERS
+    if readouts is None:
+        readouts = list(MULTI_HALLMARK_REPORTERS) + PROTEOSTASIS_REPORTERS
 
     def published(process: str, field: str) -> float:
         """The deposit's own value, as the MAP prior centre."""
@@ -325,7 +325,7 @@ def build_problem(
                 if isinstance(table, dict) and key in table
                 else key
             )
-            params[name] = ParameterRef(
+            params[name] = FitParam(
                 proc_name,
                 field,
                 prior=float(read_param(proc, field)),
@@ -340,7 +340,7 @@ def build_problem(
 
     return CalibrationProblem(
         composite=composite,
-        reporters=reporters,
+        readouts=readouts,
         conditions={
             "ctrl": Condition(
                 "ctrl",
@@ -753,15 +753,15 @@ def fig_oob_overview(
 ) -> None:
     """Per reporter, every arm's model trajectory (from ``params``) + its data —
     all conditions in one figure, so there is something to read while the fit
-    trains. Reuses the loss's own ``model_readout`` (starts at t>0; the t=0
+    trains. Reuses the loss's own ``predicted`` (starts at t>0; the t=0
     window-mean degeneracy is a plotting-only artifact)."""
-    genes = [r.gene_symbol for r in problem.reporters]
+    genes = [r.key for r in problem.readouts]
     n, ncol = len(genes), 3
     nrow = -(-n // ncol)
     qt = np.arange(0.1, problem.t_end + 1e-6, 0.1)
     line_arms = list(_ARM_STYLE)
     lfc = {
-        a: np.asarray(problem.model_readout(params, a, jnp.asarray(qt)))
+        a: np.asarray(problem.predicted(params, a, jnp.asarray(qt)))
         for a in line_arms
     }
     fig, axes = plt.subplots(
@@ -872,8 +872,8 @@ def fig_constituents(
 ) -> None:
     """Constituent internal states, pre- vs post-fit, for one condition — the
     dynamics behind the reporters (not a fit quantity)."""
-    pre = problem.simulate_all_conditions(init, n_save=200)[cond]
-    post = problem.simulate_all_conditions(final, n_save=200)[cond]
+    pre = problem.trajectories(init, n_save=200)[cond]
+    post = problem.trajectories(final, n_save=200)[cond]
     states = [
         (p, lbl) for p, lbl in _CONSTITUENT_STATES if pre.get(p) is not None
     ]
@@ -973,7 +973,7 @@ def run_unscored(equilibrate: bool, out_dir: Path):
     """
     problem = build_problem(equilibrate=equilibrate)
     params = problem.initial_params()
-    print(f"[unscored] reporters : {len(problem.reporters)}")
+    print(f"[unscored] reporters : {len(problem.readouts)}")
     print(f"[unscored] arms      : {list(_ARM_STYLE)}")
     fig_oob_overview(
         problem,
@@ -1014,7 +1014,7 @@ def cmd_run(args) -> None:
         clamp=clamp,
     )
     print(
-        f"[run] equilibrate={equilibrate} fit={sorted(problem.param_refs)}",
+        f"[run] equilibrate={equilibrate} fit={sorted(problem.fittables)}",
         flush=True,
     )
     init = problem.initial_params()
@@ -1070,7 +1070,7 @@ def cmd_run(args) -> None:
 
     print(format_table(pre, post, fit_arms=problem.fit_arms))
     print("\nfitted parameters (init → fit):")
-    for k in problem.param_refs:
+    for k in problem.fittables:
         print(
             f"  {k:<20}{float(init[k]):>12.5g} → "
             f"{float(history.best_params[k]):>12.5g}"

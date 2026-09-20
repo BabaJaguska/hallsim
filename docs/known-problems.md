@@ -1208,18 +1208,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   `simulate_conditioned` then either inherits that or, until it lands,
   returns `(ts, ys, us)` instead of `(ys, us)`.
 
-- [ ] **P0.85 — `fit_neuralode_shooting` returns the last iterate, not the
-  best one.** Filed 2026-09-12. The loop tracks no best-so-far, so a fine-tune
-  that converges and then drifts hands back the drifted weights. Measured on
-  the §3.3 block, 250 steps: 0.1196 at step 0, 0.0320 at 124, 0.0355 at 186,
-  0.0524 at 248 — the returned block is ~1.6× worse than the one the run
-  passed through. Keeping the argmin is not a one-liner, because the logged
-  loss is on a resampled minibatch and ranking on it would chase sampling
-  noise; it needs a fixed evaluation batch held aside for the purpose. Until
-  then, callers that care must score the stage against something external —
-  which is what the demo does, and why the drift was visible rather than
-  merely shipped.
-
 - [ ] **P0.88 — A block port forfeits the Jacobian sparsity the equivalent
   process spelling declares.** Filed 2026-09-12. The same maths written as one
   block-ported process declares a **100% dense** Jacobian (400 colours) where

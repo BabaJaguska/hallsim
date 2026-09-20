@@ -45,11 +45,11 @@ a window's worth of lag.
 
 [`hallsim.calibration`](../src/hallsim/calibration.py) provides `Calibrator`
 (the low-level autodiff loop) plus a declarative layer —
-`CalibrationProblem` + `Condition` + `ParameterRef` + `GeneExpressionDataset` —
+`CalibrationProblem` + `Condition` + `FitParam` + `GeneExpressionDataset` —
 for wiring any composite to any held-out gene-expression dataset:
 
 ```python
-from hallsim.calibration import Arm, CalibrationProblem, Condition, ParameterRef
+from hallsim.calibration import Arm, CalibrationProblem, Condition, FitParam
 from hallsim.gene_reporters import GeneExpressionDataset, MULTI_HALLMARK_REPORTERS
 from demos.models.hallmarks import HALLMARK_REGISTRY
 from demos.models.multi_hallmark import build_multi_hallmark_composite
@@ -70,7 +70,7 @@ ds = GeneExpressionDataset.from_series_matrix(
 
 problem = CalibrationProblem(
     composite=composite,
-    reporters=MULTI_HALLMARK_REPORTERS,
+    readouts=MULTI_HALLMARK_REPORTERS,
     conditions={
         "ctrl": Condition("ctrl", {"Genomic Instability": 0.0}),
         "DDIS": Condition("DDIS", {"Genomic Instability": 1.0}),
@@ -98,10 +98,10 @@ problem = CalibrationProblem(
     params={
         # No starting value: the fit begins at the composite's own value for
         # the field, so there is nowhere to declare one that could disagree.
-        "CDKN1A_transcr": ParameterRef(
+        "CDKN1A_transcr": FitParam(
             "dp14", "parameters.CDKN1A_transcr_by_FoxO3a_n_DNA_damage",
             clamp=(0.001, 5.0), prior=0.085, prior_sigma=0.5),
-        "alpha_y": ParameterRef(
+        "alpha_y": FitParam(
             "gz06", "parameters.alpha_y", clamp=(0.01, 10.0),
             prior=0.8, prior_sigma=0.5),
     },
@@ -163,17 +163,17 @@ tracking and the identifiability gate.
 
 ```python
 import pandas as pd
-from hallsim.gene_reporters import trajectory_reporters
+from hallsim.gene_reporters import trajectory_readouts
 
 ts = jnp.linspace(0.0, T_END, 51)
 k1_problem = CalibrationProblem(
     composite=base,
-    reporters=trajectory_reporters("p07/NatP"),
+    readouts=trajectory_readouts("p07/NatP"),
     conditions={"obs": Condition("obs", {})},
     data={"obs": {float(t): pd.Series({"p07/NatP": float(v)})
                   for t, v in zip(ts, target)}},
     arms={"obs": Arm("obs", reference=None)},
-    params={"k1": ParameterRef("p07", "parameters.k1", clamp=(1e-4, 1e-1))},
+    params={"k1": FitParam("p07", "parameters.k1", clamp=(1e-4, 1e-1))},
     fit_arms=["obs"],
     t_end=T_END, macro_dt=T_END, n_save=51,
 )
@@ -197,7 +197,7 @@ central-difference slope, each path scaled by its slope's spread. Passed as
 `collocation=` it enters `loss` at its `weight`; `collocation_loss` on its
 own is a pretraining stage, cheap and free of phase drift, for a stiff or
 oscillating field before the shooting fit. A learned block in the composite
-is fitted the same way: `LearnedRef("m")` in `params` makes the block's
+is fitted the same way: `FitBlock("m")` in `params` makes the block's
 trainable leaves one flat fittable, in linear space with no prior, outside
 the identifiability report, and `fit` runs in reverse mode when one is
 present. Mechanism constants and the block then descend one loss together.
@@ -206,6 +206,11 @@ The two NeuralODE trainers, `fit_neuralode_derivative` and
 fittable: derivative matching is the collocation term alone, and shooting is
 `shooting_conditions` over the trajectory set, one stage per curriculum
 step, each warm-started from the previous stage's best iterate.
+Minibatching is a PRNG key the `Calibrator` threads into the loss each
+step (`minibatch_seed`): a `Collocation` draws `batch` samples from it and
+a batched condition `member_batch` members. Iterates are then ranked on the
+whole objective, or on `eval_loss_fn` where that is too costly, every
+`eval_every` steps, so the best iterate is not the luckiest batch.
 
 ### Principles the API enforces
 
@@ -265,7 +270,7 @@ ablated = off.evaluate(history.best_params)
 
 A key names either a fittable (whatever `params` calls it) or a process field
 in dotted form — `"p53_cdkn1a.hi"` and `"dp14.parameters.k"` address the same
-places `ParameterRef` does. Both spellings reach the same field, so which list a
+places `FitParam` does. Both spellings reach the same field, so which list a
 parameter happens to be in is not something you have to know. The call returns a
 new problem and leaves the original alone; overrides compose.
 
@@ -307,7 +312,7 @@ condition). An arm with a single timepoint is the degenerate endpoint case.
 ### Priors (MAP regularization)
 
 With few data points a fit is under-constrained and a parameter can run to an
-unphysical rail. `ParameterRef.prior` / `prior_sigma` (log10) plus
+unphysical rail. `FitParam.prior` / `prior_sigma` (log10) plus
 `CalibrationProblem.prior_weight` add a log-normal MAP penalty
 `Σ((log10 p − log10 prior)/σ)²` — anchoring each parameter to its
 literature/derived value. Coupling-edge strengths, which have no direct

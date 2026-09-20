@@ -39,7 +39,7 @@ import numpy as np
 def _prediction_fn(problem, base_params: dict, names: list[str]):
     """Map a log10-parameter vector (in ``names`` order) to the concatenated
     reporter predictions over every fit arm — the residual vector the loss
-    squares, built from the same :meth:`CalibrationProblem.model_readout`."""
+    squares, built from the same :meth:`CalibrationProblem.predicted`."""
     arms = list(problem.fit_arms)
     qts = {a: jnp.asarray(sorted(problem.data[a]), dtype=float) for a in arms}
 
@@ -48,7 +48,7 @@ def _prediction_fn(problem, base_params: dict, names: list[str]):
         for i, n in enumerate(names):
             p[n] = 10.0 ** theta_log[i]
         return jnp.concatenate(
-            [problem.model_readout(p, a, qts[a]).reshape(-1) for a in arms]
+            [problem.predicted(p, a, qts[a]).reshape(-1) for a in arms]
         )
 
     return preds
@@ -62,7 +62,7 @@ def sensitivity_jacobian(problem, params: dict | None = None):
     of ``n_reporter × n_timepoint``. Forward-mode (``jacfwd``): parameters are
     few, residuals many."""
     params = dict(params if params is not None else problem.initial_params())
-    names = list(problem.scalar_refs)
+    names = list(problem.scalar_fittables)
     theta0 = jnp.asarray(
         [jnp.log10(jnp.asarray(float(params[n]))) for n in names]
     )
@@ -92,18 +92,17 @@ def residual_scale(problem, params: dict, n_fitted: int | None = None):
     ``n_fitted`` defaults to the number of fitted references.
     """
     if n_fitted is None:
-        n_fitted = len(problem.scalar_refs)
+        n_fitted = len(problem.scalar_fittables)
     res = []
     for arm in problem.fit_arms:
         times = sorted(problem.data[arm])
         sim = np.asarray(
-            problem.model_readout(params, arm, jnp.asarray(times, dtype=float))
+            problem.predicted(params, arm, jnp.asarray(times, dtype=float))
         )
-        for i, rep in enumerate(problem.reporters):
+        for i, rep in enumerate(problem.readouts):
             for j, t in enumerate(times):
                 res.append(
-                    float(sim[i, j])
-                    - float(problem.data[arm][t][rep.gene_symbol])
+                    float(sim[i, j]) - float(problem.data[arm][t][rep.key])
                 )
     res = np.asarray(res, dtype=float)
     dof = max(res.size - int(n_fitted), 1)
@@ -563,7 +562,7 @@ def screen_fittable(
     kept set with each member's 1σ in decades and the reason every other
     candidate was dropped.
     """
-    from hallsim.calibration import ParameterRef
+    from hallsim.calibration import FitParam
 
     pool = (
         problem.composite.calibration_targets()
@@ -572,7 +571,7 @@ def screen_fittable(
     )
     refs = {
         f"{item.process_name}.{item.field.partition('.')[2] or item.field}": (
-            ParameterRef(item.process_name, item.field)
+            FitParam(item.process_name, item.field)
         )
         for item in pool
     }
@@ -716,7 +715,7 @@ def structural_redundancy(composite, params=None) -> StructuralReport:
 
     ``params`` restricts the analysis to those parameters, each a
     ``"<process>.<field>"`` address or a
-    :class:`~hallsim.calibration.ParameterRef`; by default every parameter
+    :class:`~hallsim.calibration.FitParam`; by default every parameter
     some symbolic form reads is assessed. Distinct from
     :func:`identifiability_report`, which needs a fit and finds *practical*
     confounding in the data.

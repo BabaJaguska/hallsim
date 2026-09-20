@@ -1129,7 +1129,7 @@ def screen_sensitivity(
         )
         return jnp.stack(
             [
-                jnp.atleast_1d(r.summary(res.ts, res.get(r.observable), qt))[0]
+                jnp.atleast_1d(r.summary(res.ts, res.get(r.path), qt))[0]
                 for r in reporters
             ]
         )
@@ -1153,7 +1153,7 @@ def screen_sensitivity(
             rel = abs(sens) / (abs(val) + 1e-12)
             reports.append(
                 SensitivityReport(
-                    reporter=getattr(r, "gene_symbol", r.observable),
+                    reporter=getattr(r, "key", r.path),
                     control=h,
                     value=val,
                     sensitivity=sens,

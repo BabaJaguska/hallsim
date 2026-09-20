@@ -4,9 +4,9 @@ import json
 
 import pandas as pd
 
-from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
+from hallsim.calibration import CalibrationProblem, Condition, FitParam
 from hallsim.composite import Composite
-from hallsim.gene_reporters import GeneReporter
+from hallsim.gene_reporters import Readout
 from hallsim.process import Port, PortRole, Process, calibratable
 import equinox as eqx
 
@@ -31,11 +31,11 @@ def _problem():
     )
     return CalibrationProblem(
         composite=comp,
-        reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
+        readouts=[Readout(path="pool/x", key="GX")],
         conditions={"a": Condition("a", {}), "b": Condition("b", {})},
         data={"b_vs_a": pd.Series({"GX": -0.5})},
         arms={"b_vs_a": "a"},
-        params={"r": ParameterRef("d", "rate", prior=0.5, prior_sigma=0.5)},
+        params={"r": FitParam("d", "rate", prior=0.5, prior_sigma=0.5)},
         fit_arms=["b_vs_a"],
         t_end=2.0,
         n_save=3,

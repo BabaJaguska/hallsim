@@ -58,14 +58,14 @@ def load_collectri(path: Path | None = None) -> pd.DataFrame:
 class ActivityBinding:
     """One store path ↔ the regulator whose regulon that activity drives.
 
-    Distinct from :class:`~hallsim.gene_reporters.GeneReporter`, which claims
+    Distinct from :class:`~hallsim.gene_reporters.Readout`, which claims
     an observable predicts one *transcript*. This claims an observable **is** a
     regulator's activity, and the transcripts follow from the prior. Carries
-    ``.observable`` / ``.summary`` / ``.sign`` so it feeds the same trajectory-
+    ``.path`` / ``.summary`` / ``.sign`` so it feeds the same trajectory-
     summary path a reporter does.
     """
 
-    observable: str
+    path: str
     tf: str
     summary: Callable
     description: str = ""
@@ -73,7 +73,7 @@ class ActivityBinding:
     sign: int = +1
     #: Empty by declaration — no transcript is claimed, so the reporter
     #: validator skips it and its data column is absent rather than wrong.
-    gene_symbol: str = ""
+    key: str = ""
 
 
 @dataclass(frozen=True)

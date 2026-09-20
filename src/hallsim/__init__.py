@@ -39,7 +39,7 @@ from hallsim.calibration import (
     CalibrationProblem,
     Calibrator,
     Condition,
-    ParameterRef,
+    FitParam,
 )
 from hallsim.composite import Composite
 from hallsim.handles import Handle, ParameterMapping, apply_handles
@@ -63,7 +63,7 @@ __all__ = [
     "Handle",
     "OverlapMatch",
     "ParameterMapping",
-    "ParameterRef",
+    "FitParam",
     "Port",
     "PortRole",
     "Process",

@@ -24,7 +24,7 @@ from hallsim.gene_reporters import (
     MULTI_HALLMARK_REPORTERS,
     PROTEOSTASIS_REPORTERS,
     GeneExpressionDataset,
-    GeneReporter,
+    Readout,
     compute_concordance,
     cycle_average,
     last_value,
@@ -79,21 +79,21 @@ class TestReporterTable:
             assert r.sign in (
                 +1,
                 -1,
-            ), f"{r.observable}: sign {r.sign} must be ±1"
+            ), f"{r.path}: sign {r.sign} must be ±1"
 
     def test_all_reporters_have_references(self):
         for r in CANONICAL_REPORTERS:
-            assert r.reference, f"{r.observable} missing literature ref"
-            assert r.description, f"{r.observable} missing description"
+            assert r.reference, f"{r.path} missing literature ref"
+            assert r.description, f"{r.path} missing description"
 
     def test_observables_unique(self):
-        obs = [r.observable for r in CANONICAL_REPORTERS]
+        obs = [r.path for r in CANONICAL_REPORTERS]
         assert len(obs) == len(
             set(obs)
         ), "duplicate observable in reporter table"
 
     def test_genes_unique(self):
-        genes = [r.gene_symbol for r in CANONICAL_REPORTERS]
+        genes = [r.key for r in CANONICAL_REPORTERS]
         assert len(genes) == len(
             set(genes)
         ), "duplicate gene symbol in reporter table"
@@ -122,9 +122,9 @@ class TestDeriveObservables:
     def test_keys_cover_all_reporter_observables(self):
         obs = derive_observables(_stub_eriq_state())
         for r in CANONICAL_REPORTERS:
-            assert r.observable in obs, (
-                f"derive_observables missing key '{r.observable}' "
-                f"required by reporter {r.gene_symbol}"
+            assert r.path in obs, (
+                f"derive_observables missing key '{r.path}' "
+                f"required by reporter {r.key}"
             )
 
     def test_values_are_finite(self):
@@ -227,9 +227,7 @@ class TestComputeConcordance:
     def test_inverse_sign_applied(self):
         """A reporter with sign=-1 should treat Δ_sim and -Δ_sim as
         equivalent for matching."""
-        inverse_rep = GeneReporter(
-            observable="x", gene_symbol="GENE_X", sign=-1
-        )
+        inverse_rep = Readout(path="x", key="GENE_X", sign=-1)
         # Δ_sim positive, Δ_data positive → with sign=-1, Δ_sim_signed is
         # negative ⇒ mismatch
         result = compute_concordance(
@@ -322,8 +320,8 @@ class TestTrajectorySummaries:
             ts, state_traj, CANONICAL_REPORTERS, derive=derive_observables
         )
         for r in CANONICAL_REPORTERS:
-            assert r.observable in out
-            assert jnp.isfinite(out[r.observable])
+            assert r.path in out
+            assert jnp.isfinite(out[r.path])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -338,15 +336,13 @@ class TestMultiHallmarkReporters:
         # All entries have a store-path observable, a gene symbol, ±1 sign,
         # and a literature anchor.
         for r in MULTI_HALLMARK_REPORTERS:
-            assert (
-                "/" in r.observable
-            ), f"{r.gene_symbol}: observable should be a store path"
+            assert "/" in r.path, f"{r.key}: observable should be a store path"
             assert r.sign in (+1, -1)
-            assert r.gene_symbol
+            assert r.key
             assert r.reference
 
     def test_unique_gene_symbols(self):
-        genes = [r.gene_symbol for r in MULTI_HALLMARK_REPORTERS]
+        genes = [r.key for r in MULTI_HALLMARK_REPORTERS]
         assert len(genes) == len(set(genes))
 
     def test_derive_multi_hallmark_summaries(self):
@@ -355,13 +351,13 @@ class TestMultiHallmarkReporters:
         n_time = 20
         ts = jnp.linspace(0.0, 25.0, n_time)
         traj = {
-            r.observable: jnp.linspace(0, 10, n_time)
+            r.path: jnp.linspace(0, 10, n_time)
             for r in MULTI_HALLMARK_REPORTERS
         }
         out = summarize_reporters(ts, traj, MULTI_HALLMARK_REPORTERS)
         for r in MULTI_HALLMARK_REPORTERS:
-            assert r.observable in out
-            assert jnp.isfinite(out[r.observable])
+            assert r.path in out
+            assert jnp.isfinite(out[r.path])
         # CDKN1A low-passes the level (zerophase_mean), so a monotone ramp's
         # smoothed endpoint sits below the raw endpoint (10.0).
         assert float(out["dp14/CDKN1A"]) < 10.0
@@ -443,7 +439,7 @@ class TestPublishedReporterTable:
 
     def _live(self):
         return {
-            (r.gene_symbol, r.observable)
+            (r.key, r.path)
             for r in MULTI_HALLMARK_REPORTERS + PROTEOSTASIS_REPORTERS
         }
 

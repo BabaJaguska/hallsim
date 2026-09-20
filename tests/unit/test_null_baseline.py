@@ -3,13 +3,13 @@
 import pandas as pd
 import pytest
 
-from hallsim.gene_reporters import GeneReporter, compute_concordance
+from hallsim.gene_reporters import Readout, compute_concordance
 
 
 def test_the_no_change_predictor_is_scored_beside_the_model():
     reporters = [
-        GeneReporter(observable="a", gene_symbol="A", sign=+1),
-        GeneReporter(observable="b", gene_symbol="B", sign=+1),
+        Readout(path="a", key="A", sign=+1),
+        Readout(path="b", key="B", sign=+1),
     ]
     result = compute_concordance(
         delta_observables={"a": 0.9, "b": -0.1},

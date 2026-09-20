@@ -15,10 +15,10 @@ calibration); ``"reverse"`` is one VJP and wins for many parameters
 
     problem = CalibrationProblem(
         composite=my_composite,
-        reporters=MULTI_HALLMARK_REPORTERS,
+        readouts=MULTI_HALLMARK_REPORTERS,
         conditions={"ctrl": Condition(...), "DDIS": Condition(...)},
         data={"DDIS_vs_ctrl": ds.delta(...)},
-        params={"rate": ParameterRef("dp14", "parameters.k")},
+        params={"rate": FitParam("dp14", "parameters.k")},
         fit_arms=["DDIS_vs_ctrl"],
     )
     history = problem.fit(steps=40)
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from hallsim.composite import Composite
-    from hallsim.gene_reporters import GeneReporter
+    from hallsim.gene_reporters import Readout
 
 
 log = logging.getLogger(__name__)
@@ -165,6 +165,10 @@ class Calibrator:
     eval_every:
         With a minibatch, how often (in steps) the whole objective is
         evaluated for that ranking; the last step always is.
+    eval_loss_fn:
+        What ranks the iterates instead of the whole objective, when that
+        is too costly per evaluation: the loss on one fixed, larger draw,
+        for instance. Takes the parameters alone.
     """
 
     def __init__(
@@ -191,6 +195,7 @@ class Calibrator:
         log_every: int = 1,
         minibatch_seed: int | None = None,
         eval_every: int = 1,
+        eval_loss_fn: Callable | None = None,
     ) -> None:
         if mode not in ("forward", "reverse"):
             raise ValueError(
@@ -201,6 +206,7 @@ class Calibrator:
         self._log_keys = _log_keys(init_params, log_params)
         self.minibatch_seed = minibatch_seed
         self.eval_every = max(1, int(eval_every))
+        self.eval_loss_fn = eval_loss_fn
         self.loss_fn = self._in_linear(loss_fn)
         self.init_params = self._to_opt(init_params)
         self.clamps = {
@@ -410,7 +416,12 @@ class Calibrator:
         key = exact_fn = None
         if self.minibatch_seed is not None:
             key = jax.random.PRNGKey(self.minibatch_seed)
-            exact_fn = eqx.filter_jit(lambda p: self.loss_fn(p))
+            ranker = (
+                self._in_linear(self.eval_loss_fn)
+                if self.eval_loss_fn is not None
+                else (lambda p: self.loss_fn(p))
+            )
+            exact_fn = eqx.filter_jit(ranker)
         history = CalibrationHistory()
         best_loss = float("inf")
         best_params = self._to_model(params)
@@ -576,7 +587,7 @@ class Calibrator:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# High-level framework: Condition, ParameterRef, CalibrationProblem
+# High-level framework: Condition, FitParam, CalibrationProblem
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -593,7 +604,7 @@ class CalibratableParam:
         Filled in by the Composite-level aggregator, so Processes can return
         self-contained descriptions.
     field:
-        Plain attribute or ``"parameters.<key>"``, as in :class:`ParameterRef`.
+        Plain attribute or ``"parameters.<key>"``, as in :class:`FitParam`.
     default:
         The Process's current value — typically the published rate constant.
     clamp:
@@ -808,7 +819,7 @@ class Collocation:
 
 
 @dataclass(frozen=True)
-class ParameterRef:
+class FitParam:
     """Declarative pointer to a fittable parameter inside a composite.
 
     ``field`` follows the dotted convention of
@@ -845,13 +856,13 @@ class ParameterRef:
 
 
 @dataclass(frozen=True)
-class HandleCoeffRef:
+class FitCoefficient:
     """Declarative pointer to a fittable coefficient of a handle mapping.
 
     Points at an affine coefficient (``floor`` or ``slope``) of the
     :class:`hallsim.handles.ParameterMapping` identified by
     ``(handle, param_name)``. The Calibrator fits it exactly like a
-    :class:`ParameterRef` (same ``clamp`` / ``prior`` / ``prior_sigma``
+    :class:`FitParam` (same ``clamp`` / ``prior`` / ``prior_sigma``
     surface, and the same read-from-the-model start), but instead of substituting into a process it
     overrides the coefficient in a per-evaluation handle registry — so the
     severity map ``base * (floor + slope * h)`` calibrates end to end. This is
@@ -859,7 +870,7 @@ class HandleCoeffRef:
     rapamycin suppression gain, say): it lives on the handle edge, not a
     process, so it rides the registry rather than ``eqx.tree_at``.
 
-    Attributes mirror :class:`ParameterRef`; ``handle`` + ``param_name``
+    Attributes mirror :class:`FitParam`; ``handle`` + ``param_name``
     together select the mapping, and ``coeff`` names which affine coefficient
     to fit (``"floor"`` or ``"slope"``).
     """
@@ -874,7 +885,7 @@ class HandleCoeffRef:
 
 
 @dataclass(frozen=True)
-class LearnedRef:
+class FitBlock:
     """A learned block's trainable partition as one fittable.
 
     Every inexact-array leaf of ``composite.processes[process_name]`` whose
@@ -964,8 +975,8 @@ def _jsonable(value):
     return repr(value)
 
 
-def _validate_parameter_ref(pname: str, pref, proc) -> None:
-    """The field a :class:`ParameterRef` names must exist on the process,
+def _validate_fit_param(pname: str, pref, proc) -> None:
+    """The field a :class:`FitParam` names must exist on the process,
     must not be static, and must hold a scalar — checked once when the
     problem is wired, where the failure can name the field, instead of
     inside a derivative several frames from anything the user wrote."""
@@ -1009,7 +1020,7 @@ def _validate_parameter_ref(pname: str, pref, proc) -> None:
             f"params[{pname!r}] fits {address}, which holds a "
             f"{type(value).__name__} of shape {tuple(np.shape(value))}, not "
             "a scalar. A tuple-valued field such as a Hill edge's K or n is "
-            "not fittable through a ParameterRef."
+            "not fittable through a FitParam."
         )
 
 
@@ -1067,7 +1078,7 @@ class CalibrationProblem:
 
     Each arm is a ``(condition, baseline)`` pair; for every arm in
     ``fit_arms`` the loss compares the model's sign-aligned log2 fold-change
-    ``sign·log2(cond/base)`` against the measured one on the reporters —
+    ``sign·log2(cond/base)`` against the measured one on the readouts —
     commensurable units, so every reporter contributes its O(1) fold-change
     regardless of the observable's absolute scale. Held-out arms are scored in
     :meth:`evaluate` but excluded from the fit.
@@ -1077,9 +1088,9 @@ class CalibrationProblem:
     composite:
         Base composite; its ``processes`` get per-iteration substitution,
         topology is reused unchanged.
-    reporters:
-        :class:`GeneReporter` instances — each maps a store path
-        (``observable``) through a ``summary`` to a scalar.
+    readouts:
+        :class:`Readout` instances — each maps a store path
+        (``path``) through a ``summary`` to a scalar.
     conditions:
         ``{arm_name: Condition}`` — severities applied per iteration. A
         condition with its own ``start`` or ``window`` runs from that state
@@ -1097,7 +1108,7 @@ class CalibrationProblem:
         ``{arm_name: Arm}``; a plain condition name stands for
         ``Arm(name)``, read against its own start.
     params:
-        ``{param_name: ParameterRef | HandleCoeffRef}``.
+        ``{param_name: FitParam | FitCoefficient}``.
     fit_arms, held_out_arms:
         Subsets of ``arms`` included in / excluded from the loss.
     equilibrate:
@@ -1133,11 +1144,11 @@ class CalibrationProblem:
         self,
         *,
         composite: "Composite",
-        reporters: list["GeneReporter"],
+        readouts: list["Readout"],
         conditions: dict[str, Condition],
         data: dict[str, "pd.Series"],
         arms: dict[str, "Arm | str"],
-        params: dict[str, "ParameterRef | HandleCoeffRef"],
+        params: dict[str, "FitParam | FitCoefficient"],
         fit_arms: list[str],
         held_out_arms: list[str] | None = None,
         equilibrate: bool = False,
@@ -1166,15 +1177,15 @@ class CalibrationProblem:
                 "pass registry={name: Handle} (the demos' hallmarks are "
                 "demos.models.hallmarks.HALLMARK_REGISTRY)"
             )
-        # A ParameterRef substitutes into a process (`eqx.tree_at`); a
-        # HandleCoeffRef overrides a handle-mapping coefficient in a
+        # A FitParam substitutes into a process (`eqx.tree_at`); a
+        # FitCoefficient overrides a handle-mapping coefficient in a
         # per-eval registry. Both share the optimizer surface (init / clamp /
         # prior); only the application path differs.
         proc_params = {
-            k: v for k, v in params.items() if isinstance(v, ParameterRef)
+            k: v for k, v in params.items() if isinstance(v, FitParam)
         }
         coeff_params = {
-            k: v for k, v in params.items() if isinstance(v, HandleCoeffRef)
+            k: v for k, v in params.items() if isinstance(v, FitCoefficient)
         }
 
         # Validation pass over the wiring — catch typos early so the
@@ -1237,7 +1248,7 @@ class CalibrationProblem:
                     f"not in composite.processes "
                     f"(have {sorted(composite.processes.keys())})"
                 )
-            _validate_parameter_ref(
+            _validate_fit_param(
                 pname, pref, composite.processes[pref.process_name]
             )
 
@@ -1271,7 +1282,7 @@ class CalibrationProblem:
                     ", ".join(h for h, _ in entries),
                 )
 
-        # Validate each HandleCoeffRef resolves to a real affine mapping
+        # Validate each FitCoefficient resolves to a real affine mapping
         # with a fittable floor — fail early on a typo, not mid-trace — and
         # record the mapping's own value as the optimizer's start.
         coeff_baseline: dict = {}
@@ -1329,10 +1340,10 @@ class CalibrationProblem:
             )
 
         self.composite = composite
-        self.reporters = reporters
+        self.readouts = readouts
         from hallsim.reporter_wiring import validate_reporter_mappings
 
-        self.reporter_wiring = validate_reporter_mappings(reporters, composite)
+        self.reporter_wiring = validate_reporter_mappings(readouts, composite)
         for r in self.reporter_wiring.warnings:
             log.warning("reporter wiring: %s", r.message)
         self.conditions = conditions
@@ -1402,7 +1413,7 @@ class CalibrationProblem:
         self._learned: dict[str, tuple] = {}
         self._learned_baseline: dict[str, jnp.ndarray] = {}
         for lname, lref in params.items():
-            if not isinstance(lref, LearnedRef):
+            if not isinstance(lref, FitBlock):
                 continue
             if lref.process_name not in composite.processes:
                 raise KeyError(
@@ -1436,7 +1447,7 @@ class CalibrationProblem:
         self._store_idx = {k: i for i, k in enumerate(composite.store_keys())}
         # Precompute reporter target indices.
         self._reporter_indices = tuple(
-            self._store_idx[r.observable] for r in reporters
+            self._store_idx[r.path] for r in readouts
         )
         self.collocation = collocation
         self.member_batch = member_batch
@@ -1501,7 +1512,7 @@ class CalibrationProblem:
         # Per-arm query-time and Δ_data matrices, precomputed once. The
         # timepoint axis is vectorized, not looped: 2 or 200 timepoints trace
         # to the same graph size. A Python loop would unroll under JIT into
-        # O(n_reporters × n_timepoints) nodes.
+        # O(n_readouts × n_timepoints) nodes.
         self.likelihood = (
             likelihood if likelihood is not None else gaussian_nll
         )
@@ -1532,7 +1543,7 @@ class CalibrationProblem:
                 if arm in self.arms
                 else 0
             )
-            # (n_reporters, n_timepoints[, n_batch]); NaN marks a gene
+            # (n_readouts, n_timepoints[, n_batch]); NaN marks a gene
             # absent at a time.
             self._arm_data_matrix[arm] = self._observed_block(
                 arm, per_t, times, n_batch, default=float("nan")
@@ -1561,9 +1572,9 @@ class CalibrationProblem:
     # ── Internal: per-condition simulation ────────────────────────
 
     @property
-    def param_refs(self) -> dict:
-        """All fittable references — process params (:class:`ParameterRef`)
-        plus hallmark coefficients (:class:`HandleCoeffRef`) — in
+    def fittables(self) -> dict:
+        """All fittable references — process params (:class:`FitParam`)
+        plus hallmark coefficients (:class:`FitCoefficient`) — in
         declaration order. The optimizer's full surface; iterate this, not
         ``params`` (process-only), when you need every fitted quantity."""
         return self._all_refs
@@ -1572,8 +1583,8 @@ class CalibrationProblem:
         """``{name: value}`` for every fittable reference — the optimizer's
         starting vector, exactly what :meth:`fit` packs internally.
 
-        Read from the model, never declared: a :class:`ParameterRef` starts at
-        the composite's value for its field, a :class:`HandleCoeffRef` at its
+        Read from the model, never declared: a :class:`FitParam` starts at
+        the composite's value for its field, a :class:`FitCoefficient` at its
         mapping's coefficient. There is nowhere to write a starting value that
         the model would then contradict.
         """
@@ -1591,14 +1602,14 @@ class CalibrationProblem:
         }
 
     @property
-    def scalar_refs(self) -> dict:
+    def scalar_fittables(self) -> dict:
         """The fittables that are single positive constants, every
-        :class:`ParameterRef` and :class:`HandleCoeffRef`: what the
+        :class:`FitParam` and :class:`FitCoefficient`: what the
         identifiability report and the log-space transform cover."""
         return {
             k: v
             for k, v in self._all_refs.items()
-            if not isinstance(v, LearnedRef)
+            if not isinstance(v, FitBlock)
         }
 
     @property
@@ -1608,7 +1619,7 @@ class CalibrationProblem:
 
     def describe(self) -> dict:
         """Everything that defines this problem, as plain JSON: the composite
-        and its processes, the reporters, the conditions and arms, the data
+        and its processes, the readouts, the conditions and arms, the data
         being fitted, every fittable with its prior and clamp, the loss and
         solver settings, the hallmark mappings the conditions exercise, the
         library versions, and any ``notes`` the caller attached (a dataset
@@ -1669,17 +1680,17 @@ class CalibrationProblem:
                     },
                     "fingerprint": comp.structural_fingerprint(),
                 },
-                "reporters": [
+                "readouts": [
                     {
-                        "gene_symbol": r.gene_symbol,
-                        "observable": r.observable,
+                        "key": r.key,
+                        "path": r.path,
                         "sign": r.sign,
                         "summary": getattr(
                             r.summary, "__name__", type(r.summary).__name__
                         ),
                         "reference": r.reference,
                     }
-                    for r in kw["reporters"]
+                    for r in kw["readouts"]
                 ],
                 "conditions": {
                     n: {
@@ -1747,7 +1758,7 @@ class CalibrationProblem:
 
     def with_params(self, params: dict) -> "CalibrationProblem":
         """The same problem over a different fitted set — same composite,
-        reporters, arms, data and settings — for a screen that asks which
+        readouts, arms, data and settings — for a screen that asks which
         of a wider pool the data can fit, or a fit that then fits them."""
         return CalibrationProblem(**{**self._ctor_kwargs, "params": params})
 
@@ -1839,7 +1850,7 @@ class CalibrationProblem:
 
     def _registry(self, param_values: dict):
         """The hallmark registry for this evaluation, with each fitted affine
-        coefficient (:class:`HandleCoeffRef`, ``floor`` or ``slope``)
+        coefficient (:class:`FitCoefficient`, ``floor`` or ``slope``)
         overridden by its current value from ``param_values``. Returns the base
         registry unchanged when no coefficients are fitted, so the affine
         coefficients stay at their ``init``."""
@@ -1949,22 +1960,22 @@ class CalibrationProblem:
                 col = np.asarray(
                     [
                         (
-                            entry[r.gene_symbol].to_numpy(dtype=float)
-                            if r.gene_symbol in entry.columns
+                            entry[r.key].to_numpy(dtype=float)
+                            if r.key in entry.columns
                             else np.full(n_batch, default)
                         )
-                        for r in self.reporters
+                        for r in self.readouts
                     ]
                 )
             else:
                 vals = np.asarray(
                     [
                         (
-                            float(entry.get(r.gene_symbol, default))
+                            float(entry.get(r.key, default))
                             if entry is not None
                             else default
                         )
-                        for r in self.reporters
+                        for r in self.readouts
                     ]
                 )
                 col = (
@@ -2038,8 +2049,8 @@ class CalibrationProblem:
         const_ts = jnp.linspace(self.t_start, self.t_end, 16)
         obs = jnp.stack(
             [
-                jnp.full((const_ts.size,), y0[self._store_idx[r.observable]])
-                for r in self.reporters
+                jnp.full((const_ts.size,), y0[self._store_idx[r.path]])
+                for r in self.readouts
             ]
         )
         ref_readout = self._reporter_summaries(
@@ -2058,7 +2069,7 @@ class CalibrationProblem:
     ):
         """Apply hallmarks + run Scheduler for one condition. Returns the
         full ``(ts, reporter_trajectories)`` — ``ts`` shape ``(n_save,)``
-        and ``reporter_trajectories`` shape ``(n_reporters, n_save)`` — so
+        and ``reporter_trajectories`` shape ``(n_readouts, n_save)`` — so
         the loss can read each reporter at arbitrary query times. ``y0``
         overrides the initial state (the shared equilibrated baseline).
 
@@ -2085,7 +2096,7 @@ class CalibrationProblem:
             adjoint=adjoint,
         )
         # res.ys is (n_save, ..., n_vars). Trailing-axis convention, so a
-        # batched condition reads as (n_reporters, n_save, n_batch).
+        # batched condition reads as (n_readouts, n_save, n_batch).
         trajs = jnp.stack([res.ys[..., idx] for idx in self._reporter_indices])
         return res.ts, trajs
 
@@ -2093,7 +2104,7 @@ class CalibrationProblem:
         """Each reporter's summary at every query time → ``(n_rep, n_t)``.
 
         Summaries take ``(ts, y, query_times)`` and return one value per
-        query time in a single vectorized interp — so this is O(n_reporters)
+        query time in a single vectorized interp — so this is O(n_readouts)
         traced work, independent of how many timepoints are queried. Only
         the reporter axis is a Python loop (small, fixed); the timepoint
         axis rides inside each summary as an array.
@@ -2110,7 +2121,7 @@ class CalibrationProblem:
             return jnp.atleast_1d(rep.summary(ts, y, qt))
 
         return jnp.stack(
-            [one(rep, trajs[i]) for i, rep in enumerate(self.reporters)]
+            [one(rep, trajs[i]) for i, rep in enumerate(self.readouts)]
         )
 
     def _run_condition_set(
@@ -2122,8 +2133,8 @@ class CalibrationProblem:
         equilibrates the shared baseline, then returns
         ``(run_for, y0, baseline)`` where ``run_for(cond_name) -> (ts,
         reporter_trajs)`` solves each condition once and caches it. The one
-        prologue shared by :meth:`model_readout`, :meth:`data_loss`,
-        :meth:`evaluate`, and :meth:`simulate_reporters`; ``adjoint``
+        prologue shared by :meth:`predicted`, :meth:`data_loss`,
+        :meth:`evaluate`, and :meth:`readout_trajectories`; ``adjoint``
         threads the autodiff mode through to each solve (see
         :meth:`_simulate_condition`)."""
         substituted = self._substitute(self.composite.processes, param_values)
@@ -2145,15 +2156,15 @@ class CalibrationProblem:
 
         return run_for, y0, baseline
 
-    def simulate_reporters(
+    def readout_trajectories(
         self, param_values: dict, cond_name: str, query_times=None
     ):
         """Reporter trajectories for one condition at ``param_values``.
 
         The public post-fit / figure path — returns ``(ts, reporter_trajs)``
-        (``reporter_trajs`` shape ``(n_reporters, n_save)``), or, when
+        (``reporter_trajs`` shape ``(n_readouts, n_save)``), or, when
         ``query_times`` is given, each reporter's summary at those times
-        (``(n_reporters, n_t)``). Uses the Scheduler default adjoint (no
+        (``(n_readouts, n_t)``). Uses the Scheduler default adjoint (no
         forward-mode unfold), so callers don't reach into the private
         substitute/run/reporter internals to draw a trajectory."""
         run_for, _, _ = self._run_condition_set(param_values, adjoint=None)
@@ -2187,7 +2198,7 @@ class CalibrationProblem:
         """``(arm_readout, ref_readout)`` for one arm: the reporter summaries
         of its condition at ``qt`` and of its reference, ``None`` when the
         arm has none. The one place the reference is resolved, shared by
-        :meth:`data_loss`, :meth:`model_readout` and :meth:`evaluate`.
+        :meth:`data_loss`, :meth:`predicted` and :meth:`evaluate`.
         ``run_for(cond_name) -> (ts, reporter_trajs)`` is a (usually caching)
         condition solver.
 
@@ -2224,21 +2235,21 @@ class CalibrationProblem:
         """One arm's model readout at ``qt`` in the data's terms: the
         sign-aligned log2 fold change against its reference, or, with no
         reference, the summary itself times each reporter's ``scale``.
-        Shared by :meth:`data_loss` and :meth:`model_readout` so figures plot
+        Shared by :meth:`data_loss` and :meth:`predicted` so figures plot
         exactly what the loss fits."""
         arm_readout, ref_readout = self._arm_reference(
             run_for, arm, qt, baseline
         )
         if ref_readout is None:
             scales = jnp.asarray(
-                [getattr(r, "scale", 1.0) for r in self.reporters], dtype=float
+                [getattr(r, "scale", 1.0) for r in self.readouts], dtype=float
             )
             return arm_readout * scales.reshape(
                 scales.shape + (1,) * (jnp.ndim(arm_readout) - 1)
             )
         return self._log2_fold_change(arm_readout, ref_readout)
 
-    def model_readout(
+    def predicted(
         self, param_values: dict[str, jnp.ndarray], arm: str, query_times
     ) -> jnp.ndarray:
         """The model's readout for ``arm`` at ``query_times`` in the data's
@@ -2426,7 +2437,7 @@ class CalibrationProblem:
     def _note_stochastic_members(self, refs) -> None:
         """A stochastic member is a sampled forcing in the gradient: its
         jump process has no tangent, so a parameter whose effect reaches the
-        reporters only through it gets a zero gradient and shows as
+        readouts only through it gets a zero gradient and shows as
         *structural* in the post-fit identifiability report."""
         members = list(self.composite.stochastic_processes())
         if not members:
@@ -2436,7 +2447,7 @@ class CalibrationProblem:
         )
         log.warning(
             "calibration: %s run at reaction level; gradients do not pass "
-            "through them, so a fitted parameter reaching the reporters only "
+            "through them, so a fitted parameter reaching the readouts only "
             "through one of them cannot move%s. Fit such parameters on the "
             "mean field.",
             members,
@@ -2470,7 +2481,7 @@ class CalibrationProblem:
                 )
 
     def _check_param_targets(self, refs) -> None:
-        """Reject a ParameterRef whose field cannot carry a fitted scalar."""
+        """Reject a FitParam whose field cannot carry a fitted scalar."""
         for name, pref in refs.items():
             process_name = pref.process_name
             proc = self.composite.processes.get(process_name)
@@ -2507,7 +2518,7 @@ class CalibrationProblem:
         """
         from hallsim.identifiability import identifiability_report
 
-        if not self.scalar_refs:
+        if not self.scalar_fittables:
             return
         report = identifiability_report(self)
         self._warn_inoperative_priors(report.fisher_diag)
@@ -2587,7 +2598,7 @@ class CalibrationProblem:
         broadcasts over any trailing timepoint axis.
         """
         eps = 1e-12
-        signs = jnp.asarray([r.sign for r in self.reporters], dtype=float)
+        signs = jnp.asarray([r.sign for r in self.readouts], dtype=float)
         signs = signs.reshape(signs.shape + (1,) * (jnp.ndim(cond) - 1))
         log_cond = jnp.log2(jnp.clip(cond, eps, None))
         log_base = jnp.log2(jnp.clip(base, eps, None))
@@ -2713,7 +2724,7 @@ class CalibrationProblem:
                 **calibrator_kwargs,
             }
         )
-        if identifiability and self.scalar_refs:
+        if identifiability and self.scalar_fittables:
             # Post-fit local identifiability at the optimum — a warn-by-default
             # diagnostic (like the composite's validation layer), never blocks.
             # Lazy import: identifiability imports from this module.
@@ -2779,8 +2790,8 @@ class CalibrationProblem:
             per_t: dict[float, Any] = {}
             for j, t in enumerate(times):
                 delta_sim_named = {
-                    r.observable: float(lfc[i, j])
-                    for i, r in enumerate(self.reporters)
+                    r.path: float(lfc[i, j])
+                    for i, r in enumerate(self.readouts)
                 }
                 observed = self.data[arm][t]
                 if isinstance(observed, pd.DataFrame):
@@ -2789,14 +2800,14 @@ class CalibrationProblem:
                     delta_observables=delta_sim_named,
                     delta_gene_expression=observed,
                     condition_name=f"{arm}@t{float(t):g}",
-                    reporters=self.reporters,
+                    reporters=self.readouts,
                 )
             results[arm] = per_t
         return results
 
     # ── Output bundle: trajectories + topology + concordance JSON ──
 
-    def simulate_all_conditions(
+    def trajectories(
         self,
         param_values: dict,
         n_save: int | None = None,
@@ -2807,7 +2818,7 @@ class CalibrationProblem:
         Scheduler's default adjoint (no forward-mode JVP), so wall-time is
         fast — the public path for post-fit visualisation, not loss
         evaluation. For reporter-only trajectories use
-        :meth:`simulate_reporters`."""
+        :meth:`readout_trajectories`."""
         substituted = self._substitute(self.composite.processes, param_values)
         registry = self._registry(param_values)
         y0, _ = self._equilibrate(substituted, registry=registry)
@@ -2849,9 +2860,7 @@ class CalibrationProblem:
 
         # Operating ranges read slow states (min/mean/max); no reason to pay the
         # oscillator-grade fine grid the auto-reducer would impose.
-        sims = self.simulate_all_conditions(
-            param_values, n_save=n_save, antialias=False
-        )
+        sims = self.trajectories(param_values, n_save=n_save, antialias=False)
         out: dict = {}
         for cond, res in sims.items():
             row: dict = {}

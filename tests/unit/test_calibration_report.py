@@ -18,7 +18,7 @@ from hallsim.calibration_report import (  # noqa: E402
 )
 from hallsim.gene_reporters import (  # noqa: E402
     ConcordanceResult,
-    GeneReporter,
+    Readout,
     ReporterRow,
     last_value,
 )
@@ -26,9 +26,9 @@ from hallsim.io import make_run_dir  # noqa: E402
 
 
 def _result(gene, delta_sim, delta_data):
-    reporter = GeneReporter(
-        observable="pool/x",
-        gene_symbol=gene,
+    reporter = Readout(
+        path="pool/x",
+        key=gene,
         sign=1,
         summary=last_value,
     )

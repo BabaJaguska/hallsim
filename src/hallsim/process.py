@@ -105,7 +105,7 @@ def calibratable(
 def read_param(proc, field: str):
     """Current value at ``field`` on ``proc``, in the dotted convention shared
     by :attr:`hallsim.handles.ParameterMapping.param_name` and
-    :class:`hallsim.calibration.ParameterRef`: ``"alpha"`` reads ``proc.alpha``,
+    :class:`hallsim.calibration.FitParam`: ``"alpha"`` reads ``proc.alpha``,
     ``"parameters.<key>"`` one entry of a parameters dict."""
     if "." in field:
         field_name, key = field.split(".", 1)

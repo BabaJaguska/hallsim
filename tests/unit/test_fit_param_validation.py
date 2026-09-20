@@ -5,9 +5,9 @@ import equinox as eqx
 import pandas as pd
 import pytest
 
-from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
+from hallsim.calibration import CalibrationProblem, Condition, FitParam
 from hallsim.composite import Composite
-from hallsim.gene_reporters import GeneReporter
+from hallsim.gene_reporters import Readout
 from hallsim.process import Port, PortRole, Process
 
 
@@ -34,11 +34,11 @@ def _problem(field):
     )
     return CalibrationProblem(
         composite=comp,
-        reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
+        readouts=[Readout(path="pool/x", key="GX")],
         conditions={"a": Condition("a", {}), "b": Condition("b", {})},
         data={"b_vs_a": pd.Series({"GX": 0.0})},
         arms={"b_vs_a": "a"},
-        params={"p": ParameterRef(process_name="g", field=field)},
+        params={"p": FitParam(process_name="g", field=field)},
         fit_arms=["b_vs_a"],
     )
 
@@ -75,12 +75,10 @@ def test_a_compartment_size_of_an_imported_model_is_refused():
     ):
         CalibrationProblem(
             composite=comp,
-            reporters=[
-                GeneReporter(observable="dp14/CDKN1A", gene_symbol="CDKN1A")
-            ],
+            readouts=[Readout(path="dp14/CDKN1A", key="CDKN1A")],
             conditions={"a": Condition("a", {}), "b": Condition("b", {})},
             data={"b_vs_a": pd.Series({"CDKN1A": 0.0})},
             arms={"b_vs_a": "a"},
-            params={"vol": ParameterRef("dp14", "parameters.Cell")},
+            params={"vol": FitParam("dp14", "parameters.Cell")},
             fit_arms=["b_vs_a"],
         )

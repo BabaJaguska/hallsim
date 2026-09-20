@@ -44,13 +44,13 @@ class _Problem:
         self._jac, self._names = jac, names
         self.fit_arms = ["arm"]
         self.data = {"arm": {7.0: {"G": 0.0}}}
-        self.reporters = [type("R", (), {"gene_symbol": "G"})()]
-        self.param_refs = {n: None for n in names}
+        self.readouts = [type("R", (), {"key": "G"})()]
+        self.fittables = {n: None for n in names}
 
     def initial_params(self):
         return {n: 1.0 for n in self._names}
 
-    def model_readout(self, params, arm, times):
+    def predicted(self, params, arm, times):
         return np.zeros((1, len(times)))
 
 
@@ -116,9 +116,9 @@ def test_screen_fittable_pools_the_composite_s_own_surface():
     problem is rebuilt over it without the caller naming anything."""
     import pandas as pd
 
-    from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
+    from hallsim.calibration import CalibrationProblem, Condition, FitParam
     from hallsim.composite import Composite
-    from hallsim.gene_reporters import GeneReporter
+    from hallsim.gene_reporters import Readout
     from hallsim.identifiability import screen_fittable
     from hallsim.process import Port, PortRole, Process, calibratable
 
@@ -141,11 +141,11 @@ def test_screen_fittable_pools_the_composite_s_own_surface():
     )
     problem = CalibrationProblem(
         composite=comp,
-        reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
+        readouts=[Readout(path="pool/x", key="GX")],
         conditions={"a": Condition("a", {}), "b": Condition("b", {})},
         data={"b_vs_a": pd.Series({"GX": -0.5})},
         arms={"b_vs_a": "a"},
-        params={"r": ParameterRef("d", "rate")},
+        params={"r": FitParam("d", "rate")},
         fit_arms=["b_vs_a"],
         t_end=2.0,
         n_save=3,

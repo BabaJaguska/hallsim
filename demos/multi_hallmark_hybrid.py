@@ -161,7 +161,7 @@ TRAIN = dict(
 DDB2 = next(
     r
     for r in MULTI_HALLMARK_REPORTERS
-    if r.gene_symbol == "DDB2" and r.observable == "gz06/x"
+    if r.key == "DDB2" and r.path == "gz06/x"
 )
 
 _gz = process_from_sbml(str(GZ06_SBML_PATH), name="gz06").reconciled_to(
@@ -604,8 +604,8 @@ def _ddb2_for_severity(comp_processes, severity):
     )
     # The reporter names the species; where that species sits depends on
     # which block is in place, so resolve it the same way the topology does.
-    proc_name, field = DDB2.observable.split("/", 1)
-    obs = _gz_path(procs, field) if proc_name == "gz06" else DDB2.observable
+    proc_name, field = DDB2.path.split("/", 1)
+    obs = _gz_path(procs, field) if proc_name == "gz06" else DDB2.path
     return DDB2.summary(r.ts, r.get(obs), jnp.array([DDB2_READ_DAY]))[0]
 
 

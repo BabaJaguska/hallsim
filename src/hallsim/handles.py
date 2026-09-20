@@ -41,9 +41,9 @@ class FittableCoeff:
     """A mapping coefficient the Calibrator may fit.
 
     Stands in for a plain float in a mapping's ``floor``. The Calibrator
-    discovers it via a :class:`hallsim.calibration.HandleCoeffRef` and
+    discovers it via a :class:`hallsim.calibration.FitCoefficient` and
     substitutes a fitted value per loss evaluation (clamp / prior handled
-    like any :class:`hallsim.calibration.ParameterRef`). Outside calibration
+    like any :class:`hallsim.calibration.FitParam`). Outside calibration
     the mapping evaluates at ``init``.
     """
 

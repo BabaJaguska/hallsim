@@ -467,7 +467,7 @@ def check_pattern(fn, y, pattern: JacobianPattern, keys=None, *, rtol=1e-6):
 
 def parameter_field(proc, name: str) -> str:
     """The dotted field naming parameter symbol ``name`` on ``proc``, in the
-    convention of :class:`~hallsim.calibration.ParameterRef`:
+    convention of :class:`~hallsim.calibration.FitParam`:
     ``parameters.<name>`` for an imported model's constant, else the field
     itself."""
     params = getattr(proc, "parameters", None)
@@ -484,7 +484,7 @@ class SymbolicField:
     assigned path substituted by its rule, ``assigned`` maps each ASSIGNED
     path to that resolved rule. State enters as ``Symbol(path)``, a
     parameter as ``Symbol("<process>.<field>")`` in the dotted form
-    :class:`~hallsim.calibration.ParameterRef` uses, time as
+    :class:`~hallsim.calibration.FitParam` uses, time as
     :data:`~hallsim.sbml_math.TIME` on the composite clock. A process with
     no symbolic form contributes an undefined function ``<process>__<port>``
     of the paths it reads. ``parameters`` holds each parameter's value.

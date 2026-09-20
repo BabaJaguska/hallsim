@@ -138,10 +138,10 @@ class TestTheFittedSetIsOneList:
         return build_problem(**kw)
 
     def test_fitted_names_exactly_the_set(self):
-        full = set(self._build().param_refs)
+        full = set(self._build().fittables)
         chosen = ("CDKN1A_transcr", "alpha_x_control")
         assert set(chosen) < full
-        assert set(self._build(fitted=chosen).param_refs) == set(chosen)
+        assert set(self._build(fitted=chosen).fittables) == set(chosen)
 
     def test_a_name_outside_the_default_set_is_refused(self):
         with pytest.raises(KeyError, match="not in the fitted set"):

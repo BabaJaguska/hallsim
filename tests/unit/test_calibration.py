@@ -166,9 +166,9 @@ class TestCalibrationProblemValidation:
         """
         import pandas as pd
 
-        from hallsim.calibration import Condition, ParameterRef
+        from hallsim.calibration import Condition, FitParam
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter
+        from hallsim.gene_reporters import Readout
         from hallsim.process import Port, PortRole, Process
 
         class Decay(Process):
@@ -190,9 +190,9 @@ class TestCalibrationProblemValidation:
         )
 
         reporters = [
-            GeneReporter(
-                observable="pool/x",
-                gene_symbol="GENE_X",
+            Readout(
+                path="pool/x",
+                key="GENE_X",
                 sign=+1,
             ),
         ]
@@ -203,7 +203,7 @@ class TestCalibrationProblemValidation:
         arms = {"DDIS_vs_ctrl": "DDIS"}
         data = {"DDIS_vs_ctrl": pd.Series({"GENE_X": -0.5})}
         params = {
-            "rate": ParameterRef(process_name="decay", field="rate"),
+            "rate": FitParam(process_name="decay", field="rate"),
         }
         return comp, reporters, conditions, data, arms, params
 
@@ -214,7 +214,7 @@ class TestCalibrationProblemValidation:
         with pytest.raises(KeyError, match="unknown condition"):
             CalibrationProblem(
                 composite=comp,
-                reporters=reporters,
+                readouts=reporters,
                 conditions=conds,
                 data=data,
                 arms={"bad": Arm("DDIS", reference="NONEXISTENT")},
@@ -229,7 +229,7 @@ class TestCalibrationProblemValidation:
         with pytest.raises(KeyError, match="not in arms"):
             CalibrationProblem(
                 composite=comp,
-                reporters=reporters,
+                readouts=reporters,
                 conditions=conds,
                 data=data,
                 arms=arms,
@@ -244,10 +244,10 @@ class TestCalibrationProblemValidation:
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter
+        from hallsim.gene_reporters import Readout
         from hallsim.handles import Handle, ParameterMapping
         from hallsim.process import Port, PortRole, Process, calibratable
         import pandas as pd
@@ -285,14 +285,12 @@ class TestCalibrationProblemValidation:
         with pytest.raises(ValueError, match="'Test Hallmark'"):
             CalibrationProblem(
                 composite=comp,
-                reporters=[
-                    GeneReporter(observable="pool/x", gene_symbol="GX")
-                ],
+                readouts=[Readout(path="pool/x", key="GX")],
                 conditions={"a": Condition("a", {})},
                 data={"a_vs_a": pd.Series({"GX": 0.0})},
                 arms={"a_vs_a": "a"},
                 params={
-                    "dial": ParameterRef(process_name="k", field="knob"),
+                    "dial": FitParam(process_name="k", field="knob"),
                 },
                 fit_arms=["a_vs_a"],
                 registry=custom_reg,
@@ -306,10 +304,10 @@ class TestCalibrationProblemValidation:
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter
+        from hallsim.gene_reporters import Readout
         from hallsim.handles import Handle, ParameterMapping
         from hallsim.process import Port, PortRole, Process
         import pandas as pd
@@ -347,12 +345,12 @@ class TestCalibrationProblemValidation:
         # Should construct without raising:
         CalibrationProblem(
             composite=comp,
-            reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
+            readouts=[Readout(path="pool/x", key="GX")],
             conditions={"a": Condition("a", {})},
             data={"a_vs_a": pd.Series({"GX": 0.0})},
             arms={"a_vs_a": "a"},
             params={
-                "magnitude": ParameterRef(process_name="k", field="knob"),
+                "magnitude": FitParam(process_name="k", field="knob"),
             },
             fit_arms=["a_vs_a"],
             registry=custom_reg,
@@ -361,19 +359,19 @@ class TestCalibrationProblemValidation:
     def test_params_reference_unknown_process_raises(self):
         from hallsim.calibration import (
             CalibrationProblem,
-            ParameterRef,
+            FitParam,
         )
 
         comp, reporters, conds, data, arms, _params = self._toy_setup()
         with pytest.raises(KeyError, match="not in composite.processes"):
             CalibrationProblem(
                 composite=comp,
-                reporters=reporters,
+                readouts=reporters,
                 conditions=conds,
                 data=data,
                 arms=arms,
                 params={
-                    "bad": ParameterRef(
+                    "bad": FitParam(
                         process_name="nonexistent",
                         field="rate",
                     ),
@@ -393,10 +391,10 @@ class TestCalibrationProblemEndToEnd:
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter
+        from hallsim.gene_reporters import Readout
         from hallsim.process import Port, PortRole, Process
 
         class Decay(Process):
@@ -417,20 +415,20 @@ class TestCalibrationProblemEndToEnd:
             semantic_validation=False,
         )
         reporters = [
-            GeneReporter(
-                observable="pool/x",
-                gene_symbol="GENE_X",
+            Readout(
+                path="pool/x",
+                key="GENE_X",
                 sign=+1,
             ),
-            GeneReporter(
-                observable="pool/x",
-                gene_symbol="GENE_Y",
+            Readout(
+                path="pool/x",
+                key="GENE_Y",
                 sign=-1,
             ),
         ]
         return CalibrationProblem(
             composite=comp,
-            reporters=reporters,
+            readouts=reporters,
             conditions={
                 "ctrl": Condition("ctrl", {}),
                 "high": Condition("high", {}),
@@ -440,7 +438,7 @@ class TestCalibrationProblemEndToEnd:
             },
             arms={"high_vs_ctrl": "high"},
             params={
-                "rate": ParameterRef(
+                "rate": FitParam(
                     process_name="decay",
                     field="rate",
                     clamp=(0.001, 5.0),
@@ -487,10 +485,10 @@ class TestCalibrationProblemEndToEnd:
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter
+        from hallsim.gene_reporters import Readout
         from hallsim.process import Port, PortRole, Process
 
         class Decay(Process):
@@ -510,10 +508,10 @@ class TestCalibrationProblemEndToEnd:
             validate=False,
             semantic_validation=False,
         )
-        reporters = [GeneReporter(observable="pool/x", gene_symbol="GENE_X")]
+        reporters = [Readout(path="pool/x", key="GENE_X")]
         problem = CalibrationProblem(
             composite=comp,
-            reporters=reporters,
+            readouts=reporters,
             conditions={
                 "ctrl": Condition("ctrl", {}),
                 "high": Condition("high", {}),
@@ -526,7 +524,7 @@ class TestCalibrationProblemEndToEnd:
             },
             arms={"high_vs_ctrl": "high"},
             params={
-                "rate": ParameterRef(process_name="decay", field="rate"),
+                "rate": FitParam(process_name="decay", field="rate"),
             },
             fit_arms=["high_vs_ctrl"],
             t_end=5.0,
@@ -551,10 +549,10 @@ class TestParameterOverrides:
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter
+        from hallsim.gene_reporters import Readout
         from hallsim.process import Port, PortRole, Process
 
         class Decay(Process):
@@ -576,16 +574,14 @@ class TestParameterOverrides:
                 validate=False,
                 semantic_validation=False,
             ),
-            reporters=[
-                GeneReporter(observable="pool/x", gene_symbol="GENE_X", sign=1)
-            ],
+            readouts=[Readout(path="pool/x", key="GENE_X", sign=1)],
             conditions={
                 "ctrl": Condition("ctrl", {}),
                 "high": Condition("high", {}),
             },
             data={"high_vs_ctrl": pd.Series({"GENE_X": -0.5})},
             arms={"high_vs_ctrl": "high"},
-            params={"rate": ParameterRef(process_name="decay", field="rate")},
+            params={"rate": FitParam(process_name="decay", field="rate")},
             fit_arms=["high_vs_ctrl"],
             t_end=5.0,
             macro_dt=1.0,
@@ -600,17 +596,17 @@ class TestParameterOverrides:
             jnp.asarray(0.0),
         )
         with pytest.raises(ValueError, match="no effect"):
-            problem.simulate_reporters({"rate": jnp.asarray(0.2)}, "ctrl")
+            problem.readout_trajectories({"rate": jnp.asarray(0.2)}, "ctrl")
 
     def test_override_pins_a_fitted_parameter(self):
         """The route the raise points at: same answer as passing the value in
         by hand, without the caller knowing the field is fitted."""
         problem = self._problem()
-        by_hand = problem.simulate_reporters(
+        by_hand = problem.readout_trajectories(
             {"rate": jnp.asarray(0.0)}, "ctrl"
         )
         pinned = problem.with_overrides({"rate": 0.0})
-        by_override = pinned.simulate_reporters(
+        by_override = pinned.readout_trajectories(
             {"rate": jnp.asarray(0.2)}, "ctrl"
         )
         assert jnp.array_equal(by_hand[1], by_override[1])
@@ -624,8 +620,8 @@ class TestParameterOverrides:
         by_name = problem.with_overrides({"rate": 0.0})
         by_address = problem.with_overrides({"decay.rate": 0.0})
         assert jnp.array_equal(
-            by_name.simulate_reporters(params, "ctrl")[1],
-            by_address.simulate_reporters(params, "ctrl")[1],
+            by_name.readout_trajectories(params, "ctrl")[1],
+            by_address.readout_trajectories(params, "ctrl")[1],
         )
 
     def test_override_pins_an_unfitted_field(self):
@@ -641,8 +637,8 @@ class TestParameterOverrides:
         by_edit.composite = edited
         pinned = problem.with_overrides({"decay.scale": 3.0})
         assert jnp.array_equal(
-            by_edit.simulate_reporters(params, "ctrl")[1],
-            pinned.simulate_reporters(params, "ctrl")[1],
+            by_edit.readout_trajectories(params, "ctrl")[1],
+            pinned.readout_trajectories(params, "ctrl")[1],
         )
 
     def test_unknown_override_key_raises(self):
@@ -661,20 +657,20 @@ class TestParameterOverrides:
         assert both._override_params and both._override_fields
         assert not problem._override_params and not problem._override_fields
         assert not jnp.array_equal(
-            problem.simulate_reporters(params, "ctrl")[1],
-            both.simulate_reporters(params, "ctrl")[1],
+            problem.readout_trajectories(params, "ctrl")[1],
+            both.readout_trajectories(params, "ctrl")[1],
         )
 
     def test_editing_an_unfitted_field_reaches_the_solver(self):
         problem = self._problem()
         params = {"rate": jnp.asarray(0.2)}
-        _, base = problem.simulate_reporters(params, "ctrl")
+        _, base = problem.readout_trajectories(params, "ctrl")
         problem.composite = eqx.tree_at(
             lambda c: c.processes["decay"].scale,
             problem.composite,
             jnp.asarray(3.0),
         )
-        _, edited = problem.simulate_reporters(params, "ctrl")
+        _, edited = problem.readout_trajectories(params, "ctrl")
         assert not jnp.allclose(base, edited)
 
 
@@ -690,10 +686,10 @@ class TestArmReferences:
             Arm,
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter
+        from hallsim.gene_reporters import Readout
         from hallsim.process import Port, PortRole, Process
 
         class Decay(Process):
@@ -715,21 +711,17 @@ class TestArmReferences:
             validate=False,
             semantic_validation=False,
         )
-        reporters = [
-            GeneReporter(
-                observable="pool/x", gene_symbol="GENE_X", scale=scale
-            )
-        ]
+        reporters = [Readout(path="pool/x", key="GENE_X", scale=scale)]
         return CalibrationProblem(
             composite=comp,
-            reporters=reporters,
+            readouts=reporters,
             conditions={
                 "ctrl": Condition("ctrl", {}),
                 "high": Condition("high", {}),
             },
             data={"high_vs_ctrl": {5.0: pd.Series({"GENE_X": -0.5})}},
             arms={"high_vs_ctrl": Arm("high", reference=reference)},
-            params={"rate": ParameterRef(process_name="decay", field="rate")},
+            params={"rate": FitParam(process_name="decay", field="rate")},
             fit_arms=["high_vs_ctrl"],
             t_end=5.0,
             macro_dt=1.0,
@@ -755,8 +747,8 @@ class TestArmReferences:
         p = {"rate": jnp.asarray(0.2)}
         # x(0) = 2 decaying at 0.2: the value at t = 5 is 2e^-1, and with no
         # reference the readout is that value times the reporter's scale.
-        one = self._problem(None).model_readout(p, "high_vs_ctrl", [5.0])
-        two = self._problem(None, scale=2.0).model_readout(
+        one = self._problem(None).predicted(p, "high_vs_ctrl", [5.0])
+        two = self._problem(None, scale=2.0).predicted(
             p, "high_vs_ctrl", [5.0]
         )
         assert float(one[0, 0]) == pytest.approx(2 * np.exp(-1.0), rel=1e-3)
@@ -786,10 +778,10 @@ class TestEquilibrationBaselineMatchesReadout:
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter, oscillating_reporter
+        from hallsim.gene_reporters import Readout, oscillating_readout
         from hallsim.models.running_integral import RunningIntegral
         from hallsim.process import Port, PortRole, Process
 
@@ -819,14 +811,14 @@ class TestEquilibrationBaselineMatchesReadout:
             semantic_validation=False,
         )
         reporters = [
-            oscillating_reporter(  # RMS √⟨x²⟩ over ∫x² → x_fp at steady state
-                observable="s/x2",
-                gene_symbol="RMS_GENE",
+            oscillating_readout(  # RMS √⟨x²⟩ over ∫x² → x_fp at steady state
+                path="s/x2",
+                key="RMS_GENE",
                 readout="zerophase_rms",
                 tau=2.0,
                 sign=+1,
             ),
-            GeneReporter(observable="s/x", gene_symbol="LEVEL_GENE", sign=+1),
+            Readout(path="s/x", key="LEVEL_GENE", sign=+1),
         ]
         conditions = {
             "ctrl": Condition("ctrl", {}),
@@ -837,11 +829,11 @@ class TestEquilibrationBaselineMatchesReadout:
         }
         return CalibrationProblem(
             composite=comp,
-            reporters=reporters,
+            readouts=reporters,
             conditions=conditions,
             data=data,
             arms={"DDIS_vs_ctrl": "DDIS"},
-            params={"k": ParameterRef(process_name="sp", field="k")},
+            params={"k": FitParam(process_name="sp", field="k")},
             fit_arms=["DDIS_vs_ctrl"],
             equilibrate=True,
             equilibration_condition="ctrl",
@@ -882,10 +874,10 @@ class TestPriorStrength:
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter
+        from hallsim.gene_reporters import Readout
         from hallsim.process import Port, PortRole, Process
 
         class Knob(Process):
@@ -904,12 +896,12 @@ class TestPriorStrength:
                 validate=False,
                 semantic_validation=False,
             ),
-            reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
+            readouts=[Readout(path="pool/x", key="GX")],
             conditions={"a": Condition("a", {})},
             data={"a_vs_a": pd.Series({"GX": 0.0})},
             arms={"a_vs_a": "a"},
             params={
-                "knob": ParameterRef(
+                "knob": FitParam(
                     process_name="k",
                     field="knob",
                     clamp=clamp,
@@ -928,7 +920,7 @@ class TestPriorStrength:
 
     def test_a_prior_is_judged_against_the_data(self):
         problem = self._problem(0.5, (0.01, 100.0))
-        name = next(iter(problem.param_refs))
+        name = next(iter(problem.fittables))
         assert problem.prior_report({name: 1e9})[0]["operative"] is False
         assert problem.prior_report({name: 1e-9})[0]["operative"] is True
 
@@ -936,7 +928,7 @@ class TestPriorStrength:
         import logging
 
         problem = self._problem(9000.0, (0.01, 100.0))
-        name = next(iter(problem.param_refs))
+        name = next(iter(problem.fittables))
         with caplog.at_level(logging.WARNING, logger="hallsim.calibration"):
             problem._warn_inoperative_priors({name: 1.0})
         assert problem.prior_report({name: 1.0})[0]["operative"] is False
@@ -953,10 +945,10 @@ class TestStartingValueComesFromTheModel:
         from hallsim.calibration import (
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import GeneReporter
+        from hallsim.gene_reporters import Readout
         from hallsim.process import Port, PortRole, Process
 
         class Decay(Process):
@@ -978,13 +970,11 @@ class TestStartingValueComesFromTheModel:
         )
         return CalibrationProblem(
             composite=comp,
-            reporters=[
-                GeneReporter(observable="pool/x", gene_symbol="GX", sign=+1)
-            ],
+            readouts=[Readout(path="pool/x", key="GX", sign=+1)],
             conditions={"ctrl": Condition("ctrl", {})},
             data={"ctrl_vs_ctrl": pd.Series({"GX": 0.0})},
             arms={"ctrl_vs_ctrl": "ctrl"},
-            params={"rate": ParameterRef(process_name="decay", field="rate")},
+            params={"rate": FitParam(process_name="decay", field="rate")},
             fit_arms=["ctrl_vs_ctrl"],
         )
 
@@ -1003,9 +993,9 @@ class TestStartingValueComesFromTheModel:
         """There is nowhere to write a start that could contradict the model."""
         import dataclasses
 
-        from hallsim.calibration import HandleCoeffRef, ParameterRef
+        from hallsim.calibration import FitCoefficient, FitParam
 
-        for cls in (ParameterRef, HandleCoeffRef):
+        for cls in (FitParam, FitCoefficient):
             assert "init" not in {
                 f.name for f in dataclasses.fields(cls)
             }, f"{cls.__name__} regained a declared starting value"
@@ -1023,10 +1013,10 @@ class TestConditionStartAndWindow:
             Arm,
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import trajectory_reporters
+        from hallsim.gene_reporters import trajectory_readouts
         from hallsim.process import Port, PortRole, Process
 
         class Decay(Process):
@@ -1048,14 +1038,14 @@ class TestConditionStartAndWindow:
         )
         return CalibrationProblem(
             composite=comp,
-            reporters=trajectory_reporters("pool/x"),
+            readouts=trajectory_readouts("pool/x"),
             conditions={
                 "obs": Condition("obs", {}, start=start, window=window),
                 "ctrl": Condition("ctrl", {}),
             },
             data={"obs": data},
             arms={"obs": Arm("obs", reference=reference)},
-            params={"rate": ParameterRef(process_name="decay", field="rate")},
+            params={"rate": FitParam(process_name="decay", field="rate")},
             fit_arms=["obs"],
             t_end=5.0,
             macro_dt=1.0,
@@ -1078,7 +1068,7 @@ class TestConditionStartAndWindow:
         import numpy as np
 
         problem, x0 = self._batched()
-        out = problem.model_readout(
+        out = problem.predicted(
             {"rate": jnp.asarray(self.RATE)}, "obs", [3.0, 4.0]
         )
         assert out.shape == (1, 2, 3)
@@ -1170,10 +1160,10 @@ class TestConditionStartAndWindow:
             Arm,
             CalibrationProblem,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import trajectory_reporters
+        from hallsim.gene_reporters import trajectory_readouts
         from hallsim.process import Port, PortRole, Process
 
         class TwoDecay(Process):
@@ -1199,7 +1189,7 @@ class TestConditionStartAndWindow:
         )
         return CalibrationProblem(
             composite=comp,
-            reporters=trajectory_reporters("pool/x"),
+            readouts=trajectory_readouts("pool/x"),
             conditions={
                 "obs": Condition(
                     "obs",
@@ -1212,7 +1202,7 @@ class TestConditionStartAndWindow:
             },
             data={"obs": data},
             arms={"obs": Arm("obs", reference=None)},
-            params={"rate": ParameterRef(process_name="decay", field="rate")},
+            params={"rate": FitParam(process_name="decay", field="rate")},
             fit_arms=["obs"],
             t_end=5.0,
             macro_dt=1.0,
@@ -1243,9 +1233,9 @@ class TestShootingConditions:
         return ts, ys
 
     def _problem(self, conditions, data, arms):
-        from hallsim.calibration import CalibrationProblem, ParameterRef
+        from hallsim.calibration import CalibrationProblem, FitParam
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import trajectory_reporters
+        from hallsim.gene_reporters import trajectory_readouts
         from hallsim.process import Port, PortRole, Process
 
         class Decay(Process):
@@ -1267,11 +1257,11 @@ class TestShootingConditions:
         )
         return CalibrationProblem(
             composite=comp,
-            reporters=trajectory_reporters("pool/x"),
+            readouts=trajectory_readouts("pool/x"),
             conditions=conditions,
             data=data,
             arms=arms,
-            params={"rate": ParameterRef(process_name="decay", field="rate")},
+            params={"rate": FitParam(process_name="decay", field="rate")},
             fit_arms=list(arms),
             macro_dt=1.0,
             n_save=11,
@@ -1407,7 +1397,7 @@ class TestCollocation:
             self._with(condition="nope")
 
 
-class TestLearnedRef:
+class TestFitBlock:
     """A learned block's trainable partition is one flat fittable: linear
     space, outside the identifiability report, fitted in reverse mode."""
 
@@ -1416,11 +1406,11 @@ class TestLearnedRef:
 
         from hallsim.calibration import (
             CalibrationProblem,
-            LearnedRef,
+            FitBlock,
             shooting_conditions,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import trajectory_reporters
+        from hallsim.gene_reporters import trajectory_readouts
         from hallsim.models.neuralode import NeuralODEProcess
 
         ts = np.linspace(0.0, 5.0, 11)
@@ -1435,11 +1425,11 @@ class TestLearnedRef:
         )
         return CalibrationProblem(
             composite=comp,
-            reporters=trajectory_reporters("pool/x"),
+            readouts=trajectory_readouts("pool/x"),
             conditions=conds,
             data=data,
             arms=arms,
-            params={"net": LearnedRef("m")},
+            params={"net": FitBlock("m")},
             fit_arms=list(arms),
             macro_dt=1.0,
             n_save=11,
@@ -1451,7 +1441,7 @@ class TestLearnedRef:
         problem = self._problem()
         init = problem.initial_params()
         assert init["net"].ndim == 1 and init["net"].size > 8
-        assert problem.scalar_refs == {}
+        assert problem.scalar_fittables == {}
         block = problem.composite.processes["m"]
         same = problem._substitute(problem.composite.processes, init)["m"]
         shifted = problem._substitute(
@@ -1483,12 +1473,12 @@ class TestLearnedRef:
         )
 
     def test_unknown_process_rejected(self):
-        from hallsim.calibration import CalibrationProblem, LearnedRef
+        from hallsim.calibration import CalibrationProblem, FitBlock
 
         problem = self._problem()
         with pytest.raises(KeyError, match="not in composite.processes"):
             CalibrationProblem(
-                **{**problem._ctor_kwargs, "params": {"net": LearnedRef("z")}}
+                **{**problem._ctor_kwargs, "params": {"net": FitBlock("z")}}
             )
 
 
@@ -1545,10 +1535,10 @@ class TestCollocationMatchedAndBatch:
             CalibrationProblem,
             Collocation,
             Condition,
-            ParameterRef,
+            FitParam,
         )
         from hallsim.composite import Composite
-        from hallsim.gene_reporters import trajectory_reporters
+        from hallsim.gene_reporters import trajectory_readouts
         from hallsim.process import Port, PortRole, Process
 
         class Driven(Process):
@@ -1578,11 +1568,11 @@ class TestCollocationMatchedAndBatch:
         ys = np.stack([x, np.broadcast_to(u[:, None], x.shape)], axis=-1)
         return CalibrationProblem(
             composite=comp,
-            reporters=trajectory_reporters("pool/x"),
+            readouts=trajectory_readouts("pool/x"),
             conditions={"c": Condition("c", {})},
             data={},
             arms={},
-            params={"rate": ParameterRef(process_name="d", field="rate")},
+            params={"rate": FitParam(process_name="d", field="rate")},
             fit_arms=[],
             collocation=Collocation(
                 ts,
@@ -1647,3 +1637,21 @@ class TestMemberMinibatch(TestConditionStartAndWindow):
             float(mini.data_loss(p, ["obs"], k_data))
         )
         assert mini.describe()["member_batch"] == 2
+
+    def test_a_separate_ranking_function_selects_the_best(self):
+        from hallsim.calibration import Calibrator
+
+        hist = Calibrator(
+            loss_fn=lambda p, key=None: (p["a"] - 1.0) ** 2,
+            eval_loss_fn=lambda p: (p["a"] - 0.5) ** 2,
+            init_params={"a": jnp.asarray(0.0)},
+            mode="reverse",
+            learning_rate=0.1,
+            minibatch_seed=1,
+            verbose=False,
+        ).fit(steps=20)
+        # Descent goes to 1; the ranking function prefers the pass by 0.5.
+        assert float(hist.best_params["a"]) == pytest.approx(0.5, abs=0.1)
+        assert hist.best_loss == pytest.approx(
+            (float(hist.best_params["a"]) - 0.5) ** 2
+        )

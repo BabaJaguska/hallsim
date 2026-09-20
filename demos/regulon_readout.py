@@ -56,14 +56,14 @@ ROOT = Path(__file__).resolve().parent.parent
 # activity delta is collapsed the same way the validated readout collapses it.
 TF_BINDINGS = [
     ActivityBinding(
-        observable="gz06/x",
+        path="gz06/x",
         tf="TP53",
         summary=zerophase_rms_raw(tau=0.75),
         description="p53 (Geva-Zatorsky x) — oscillates, read as envelope.",
         reference="Geva-Zatorsky et al. 2006, Mol Syst Biol 2:2006.0033",
     ),
     ActivityBinding(
-        observable="dp14/FoxO3a",
+        path="dp14/FoxO3a",
         tf="FOXO3",
         summary=zerophase_mean(tau=2.0),
         description="Unphosphorylated FoxO3a — the transcriptionally active pool.",
@@ -92,7 +92,7 @@ def model_activity_deltas(problem, arms, normalization: str = "paired"):
     params = problem.initial_params()
     if normalization == "baseline":
         rows = [
-            np.asarray(problem.model_readout(params, arm, list(QUERY_DAYS))).T
+            np.asarray(problem.predicted(params, arm, list(QUERY_DAYS))).T
             for arm in arms
         ]
         return np.concatenate(rows, axis=0)
@@ -100,7 +100,7 @@ def model_activity_deltas(problem, arms, normalization: str = "paired"):
     qt = jnp.asarray(QUERY_DAYS)
     summaries = {}
     for cond in ("ctrl", *(ARM_CONDITIONS[a] for a in arms)):
-        ts, trajs = problem.simulate_reporters(params, cond)
+        ts, trajs = problem.readout_trajectories(params, cond)
         summaries[cond] = np.asarray(
             problem._reporter_summaries(ts, trajs, qt)
         )
@@ -143,7 +143,7 @@ def permutation_null(head, activity, observed, n: int = 200, seed: int = 0):
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    problem = build_problem(reporters=TF_BINDINGS)
+    problem = build_problem(readouts=TF_BINDINGS)
     dataset = GeneExpressionDataset.from_series_matrix(
         SERIES_MATRIX,
         PLATFORM,

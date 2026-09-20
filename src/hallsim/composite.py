@@ -1376,7 +1376,7 @@ class Composite(eqx.Module):
         calibratable. Set ``include_handle_targets`` to keep them.
 
         Returns :class:`~hallsim.calibration.CalibratableParam` entries — pass
-        one through ``ParameterRef(...)`` to wire it into a
+        one through ``FitParam(...)`` to wire it into a
         :class:`~hallsim.calibration.CalibrationProblem`.
         """
         from hallsim.calibration import CalibratableParam

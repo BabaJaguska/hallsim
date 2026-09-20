@@ -724,16 +724,16 @@ def _prepared(ts, ys, us, fields, input_fields, width, depth, seed, init):
 
 def _problem(block, fld, inp, paths, conditions, data, arms, **kw):
     """The calibration problem whose one fittable is the block."""
-    from hallsim.calibration import CalibrationProblem, LearnedRef
-    from hallsim.gene_reporters import trajectory_reporters
+    from hallsim.calibration import CalibrationProblem, FitBlock
+    from hallsim.gene_reporters import trajectory_readouts
 
     return CalibrationProblem(
         composite=_wrap_composite(block, fld, inp),
-        reporters=trajectory_reporters(*paths),
+        readouts=trajectory_readouts(*paths),
         conditions=conditions,
         data=data,
         arms=arms,
-        params={"block": LearnedRef("m")},
+        params={"block": FitBlock("m")},
         fit_arms=list(arms),
         **kw,
     )
@@ -931,12 +931,36 @@ def fit_neuralode_shooting(
                 scheduler_kwargs=sched_kw or None,
                 member_batch=batch_size,
             )
+            # Iterates are ranked on one fixed draw of more trajectories
+            # than a step sees, a fixed evaluation batch: the whole set
+            # costs minutes per evaluation at thousands of trajectories.
+            ranking = _problem(
+                block,
+                fld,
+                inp,
+                paths,
+                conds,
+                data,
+                arms,
+                collocation=colloc,
+                likelihood=likelihood,
+                t_end=float(ts[n_active - 1]),
+                macro_dt=float(ts[n_active - 1] - ts[0]),
+                n_save=max(len(d) for d in data.values()) + 1,
+                scheduler_kwargs=sched_kw or None,
+                member_batch=min(8 * batch_size, ys.shape[0]),
+            )
+            eval_key = jax.random.PRNGKey(seed + 2)
+            # Its solver routing is measured here, with concrete values,
+            # since the ranking loss is traced without a fit of its own.
+            ranking.warm_up(problem.initial_params())
             hist = problem.fit(
                 steps=stage_steps,
                 mode="reverse",
                 learning_rate=lr,
                 minibatch_seed=seed + 1,
-                eval_every=max(1, stage_steps // 10),
+                eval_loss_fn=lambda p: ranking.loss(p, eval_key),
+                eval_every=max(1, stage_steps // 25),
                 identifiability=False,
                 log_every=max(1, stage_steps // 4),
             )
