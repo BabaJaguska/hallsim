@@ -155,6 +155,58 @@ even steps; `clamps` is the box; `mode="reverse"` is the adjoint through the
 solve. The block runs as written. There is no CLI for this yet; the gap is
 filed.
 
+The same fit through the problem: an observed trajectory is a reporter set
+that reads store paths as values, one condition, and one arm with no
+reference, its data the paths' values at each sampled time. It then has
+what the hand-written loss lacks: priors, held-out arms, best-iterate
+tracking and the identifiability gate.
+
+```python
+import pandas as pd
+from hallsim.gene_reporters import trajectory_reporters
+
+ts = jnp.linspace(0.0, T_END, 51)
+k1_problem = CalibrationProblem(
+    composite=base,
+    reporters=trajectory_reporters("p07/NatP"),
+    conditions={"obs": Condition("obs", {})},
+    data={"obs": {float(t): pd.Series({"p07/NatP": float(v)})
+                  for t, v in zip(ts, target)}},
+    arms={"obs": Arm("obs", reference=None)},
+    params={"k1": ParameterRef("p07", "parameters.k1", clamp=(1e-4, 1e-1))},
+    fit_arms=["obs"],
+    t_end=T_END, macro_dt=T_END, n_save=51,
+)
+hist = k1_problem.fit(steps=60, mode="reverse", learning_rate=0.05)
+hist.best_params["k1"]
+```
+
+A condition may also carry its own `start` state, `{path: value}` over the
+shared start, and `window`, its own `(t_start, t_end)`, for an observation
+that begins from a measured state partway through. A `start` value with a
+leading axis runs one member per initial state through the Scheduler's batch
+axis; a timepoint's data is then a `DataFrame` with one row per member.
+`shooting_conditions(ts, ys, paths, segments=4)` builds exactly these from a
+trajectory set, `(n_traj, n_t, len(paths))`: one batched condition per
+window, consecutive windows sharing their boundary sample so a window's end
+is fitted to the next window's start. Multiple shooting is then the same
+loss over more arms, and a curriculum is the subset of arms passed to
+`data_loss`. `Collocation(ts, ys, paths)` is the term without a solve: the
+composite's field at each observed state against the trajectory's
+central-difference slope, each path scaled by its slope's spread. Passed as
+`collocation=` it enters `loss` at its `weight`; `collocation_loss` on its
+own is a pretraining stage, cheap and free of phase drift, for a stiff or
+oscillating field before the shooting fit. A learned block in the composite
+is fitted the same way: `LearnedRef("m")` in `params` makes the block's
+trainable leaves one flat fittable, in linear space with no prior, outside
+the identifiability report, and `fit` runs in reverse mode when one is
+present. Mechanism constants and the block then descend one loss together.
+The two NeuralODE trainers, `fit_neuralode_derivative` and
+`fit_neuralode_shooting`, are this path with the block as the only
+fittable: derivative matching is the collocation term alone, and shooting is
+`shooting_conditions` over the trajectory set, one stage per curriculum
+step, each warm-started from the previous stage's best iterate.
+
 ### Principles the API enforces
 
 - **Handle targets aren't fittable by default** — a guard rail raises if you

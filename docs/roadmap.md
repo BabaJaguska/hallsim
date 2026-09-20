@@ -63,24 +63,27 @@ with the identity summary and the path as its key. The rest are options.
 
 Done: `Arm(condition, reference)`, reference `"t0"` | a condition | `None`,
 the last comparing values in the data's units through `GeneReporter.scale`
-(P3.24). Remaining, each additive:
+(P3.24). `Condition(start=, window=)`: a condition from its own state over
+its own span, a batched start running one member per initial state through
+the Scheduler's batch axis, a timepoint's data then a frame with one row per
+member; `trajectory_reporters(*paths)` reads store paths as reporters, so an
+observed trajectory is one condition, one arm with no reference and the
+paths as data columns. `shooting_conditions(ts, ys, paths, segments=,
+match=)` cuts a trajectory set into such conditions, consecutive windows
+sharing their boundary sample (the continuity term, inside the same loss),
+`match` keeping a prefix of each window for a curriculum stage and a subset
+of the arms to `data_loss` being the active windows. `Collocation(ts, ys,
+paths, condition=, weight=)`: the composite's field at the observed states
+against their central-difference slopes, each path scaled by its slope's
+spread, no solve; `collocation_loss` alone is a pretraining stage, and
+`loss` adds it at `weight`. `LearnedRef(process_name, frozen=)`: a
+learned block's trainable leaves as one flat fittable, linear space, no
+prior, no clamp, outside the identifiability report (`scalar_refs` is what
+that report and the log transform cover), `fit` switching to reverse mode
+when one is present; the Calibrator is unchanged. Not built: minibatches
+through a PRNG key, since a batched condition runs every member in one
+vmapped solve and only memory would ask for it. Remaining:
 
-* [ ] **A condition with its own start state and window**, batched over
-  initial states through the scheduler's batch axis, beside the shared
-  equilibrated start every condition uses today.
-* [ ] **Shooting as generated conditions**: a helper turns a trajectory set
-  into windows that start from the observed state, with a continuity term
-  between a window's end and the next start, and a curriculum over which
-  windows are active. No new loss.
-* [ ] **A collocation term**: the composite's own field at observed states
-  against finite-difference slopes, as a pretraining stage or regularizer
-  (the physics-informed item below, for mechanism parameters too).
-* [ ] **A learned block as a parameter key**: its trainable partition as one
-  flat array, linear space, no prior, no clamp, excluded from the Fisher
-  report (capacity is judged on held-out trajectories), `mode="reverse"`
-  forced since forward mode costs one solve per weight. The calibrator is
-  unchanged; the problem unflattens in `_substitute`. Minibatches: the loss
-  takes a PRNG key the calibrator threads per step.
 * [ ] **The NeuralODE trainers become wrappers** over the above with their
   signatures kept, which closes P0.85. Regression guard: the hybrid demo's
   provenance records the held-out amplitude error across the alpha grid

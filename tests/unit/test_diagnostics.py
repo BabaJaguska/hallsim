@@ -403,3 +403,23 @@ def test_agreement_treats_sub_floor_noise_as_a_level():
     noise = 1e-12 * np.sin(20 * ts)
     a = trajectory_agreement(ts, noise, 0.9 * noise, floor=1e-6)
     assert a.kind == "level" and a.rel_dev < 1e-6, a
+
+
+def test_screen_takes_an_absolute_tolerance():
+    """A caller's ``atol`` reaches every run of the screen, including the
+    tunability check, instead of colliding with the default."""
+    from hallsim.diagnostics import screen_process
+    from hallsim.process import Port, PortRole, Process
+
+    class MolarDecay(Process):
+        rate: float = 0.5
+
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=1e-12, units="M")}
+
+        def derivative(self, t, state):
+            return {"x": -self.rate * state["x"]}
+
+    report = screen_process(MolarDecay(), 5.0, atol=1e-18, n_save=50)
+    assert report.ok, report.detail
+    assert report.tunes is not False

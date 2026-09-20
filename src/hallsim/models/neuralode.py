@@ -288,13 +288,6 @@ class NeuralODEProcess(Process):
 # other, e.g. derivative-fit then a short shooting fine-tune.
 
 
-def _field_normalized(mlp, in_scale, out_scale, xb):
-    """Normalised vector-field prediction ``out_scale ⊙ tanh(in_scale·MLP(xb))``
-    for a batch of normalised inputs — the quantity the collocation/derivative
-    losses compare against normalised slopes."""
-    return out_scale * jnp.tanh(in_scale * jax.vmap(mlp)(xb))
-
-
 # Fields that must NOT be gradient-trained: the normalisation stats are fixed
 # from the data, not learned. Named once here so both fits stay correct.
 _FROZEN_FIELDS = ("in_mean", "in_std", "out_mean", "out_std")
@@ -682,6 +675,70 @@ def _new_process(fields, input_fields, width, depth, seed, init):
     )
 
 
+def _wrap_composite(block, fld, inp):
+    from hallsim.composite import Composite
+
+    return Composite(
+        {"m": _ShootWrap(block=block, fld=fld, inp=inp)},
+        topology={},
+        validate=False,
+        semantic_validation={"check_semantics": False},
+    )
+
+
+def _prepared(ts, ys, us, fields, input_fields, width, depth, seed, init):
+    """The block with its normalisation set from the data, its field and
+    input names, their store paths inside the wrapping composite, the
+    trajectories with each input as a constant column beside the states,
+    and the inputs themselves, ``(n_traj, n_inputs)``."""
+    ts = jnp.asarray(ts)
+    ys = jnp.asarray(ys)
+    states, inputs, slopes = _dataset_arrays(ts, ys, us, len(input_fields))
+    im, isd, om, osd = _norm_stats(states, inputs, slopes)
+    proc = _new_process(fields, input_fields, width, depth, seed, init)
+    proc = eqx.tree_at(
+        lambda p: (p.in_mean, p.in_std, p.out_mean, p.out_std),
+        proc,
+        (im, isd, om, osd),
+    )
+    if init is None:
+        # A fresh block's output scale covers the normalised slope range so
+        # tanh does not start clipped; a warm-started one keeps its own.
+        yn = (slopes - om) / osd
+        proc = eqx.tree_at(
+            lambda p: p.out_scale,
+            proc,
+            jnp.maximum(1.0, jnp.max(jnp.abs(yn), axis=0) * 1.2),
+        )
+    fld, inp = tuple(fields), tuple(input_fields)
+    paths = tuple(f"m/{f}" for f in fld)
+    in_paths = tuple(f"m/{f}" for f in inp)
+    n, t = ys.shape[:2]
+    us_arr = jnp.zeros((n, 0)) if us is None else jnp.asarray(us)
+    full = jnp.concatenate(
+        [ys, jnp.broadcast_to(us_arr[:, None, :], (n, t, us_arr.shape[1]))],
+        axis=-1,
+    )
+    return proc, fld, inp, paths, in_paths, full, us_arr
+
+
+def _problem(block, fld, inp, paths, conditions, data, arms, **kw):
+    """The calibration problem whose one fittable is the block."""
+    from hallsim.calibration import CalibrationProblem, LearnedRef
+    from hallsim.gene_reporters import trajectory_reporters
+
+    return CalibrationProblem(
+        composite=_wrap_composite(block, fld, inp),
+        reporters=trajectory_reporters(*paths),
+        conditions=conditions,
+        data=data,
+        arms=arms,
+        params={"block": LearnedRef("m")},
+        fit_arms=list(arms),
+        **kw,
+    )
+
+
 def fit_neuralode_derivative(
     ts: jnp.ndarray,
     ys: jnp.ndarray,
@@ -697,61 +754,50 @@ def fit_neuralode_derivative(
     init: NeuralODEProcess | None = None,
     seed: int = 0,
 ) -> NeuralODEProcess:
-    """Fit by **derivative matching**: regress the network onto the vector
-    field (central-difference slopes of the trajectories). No ODE solver in
-    the training loop, so it is robust for stiff / oscillatory dynamics; the
-    solver reappears only when the returned Process is integrated or
-    differentiated inside a Composite. Verify by integrating afterward.
+    """Fit by **derivative matching**: the block's field against the
+    trajectories' central-difference slopes, which is the calibrator's
+    collocation term on its own, ``batch_size`` samples a step. No ODE solve
+    in the loop, so it is robust for stiff / oscillatory dynamics; the solver
+    reappears when the returned block is integrated. Returns the best
+    iterate, scored on one fixed draw. Verify by integrating afterward.
     """
-    import optax
+    from hallsim.calibration import Collocation, Condition
 
-    states, inputs, slopes = _dataset_arrays(ts, ys, us, len(input_fields))
-    im, isd, om, osd = _norm_stats(states, inputs, slopes)
-    proc = _new_process(fields, input_fields, width, depth, seed, init)
-    proc = eqx.tree_at(
-        lambda p: (p.in_mean, p.in_std, p.out_mean, p.out_std),
-        proc,
-        (im, isd, om, osd),
+    block, fld, inp, paths, in_paths, full, _ = _prepared(
+        ts, ys, us, fields, input_fields, width, depth, seed, init
     )
-    xn = (jnp.concatenate([states, inputs], -1) - im) / isd
-    yn = (slopes - om) / osd
-    # Seed the output scale to cover the normalised slope range (a fresh block;
-    # a warm-started one keeps its learned scale) so tanh doesn't start clipped.
-    if init is None:
-        proc = eqx.tree_at(
-            lambda p: p.out_scale,
-            proc,
-            jnp.maximum(1.0, jnp.max(jnp.abs(yn), axis=0) * 1.2),
-        )
-
-    # Optimise the field (MLP + scales + any fittable parameters); the
-    # normalisation buffers stay frozen. See :func:`_trainable_partition`.
-    opt = optax.adam(lr)
-    train, frozen = _trainable_partition(proc)
-    opt_state = opt.init(train)
-
-    @eqx.filter_jit
-    def stepf(train, opt_state, xb, yb):
-        def loss(tr):
-            p = eqx.combine(tr, frozen)
-            return jnp.mean(
-                (_field_normalized(p.mlp, p.in_scale, p.out_scale, xb) - yb)
-                ** 2
-            )
-
-        lv, g = eqx.filter_value_and_grad(loss)(train)
-        upd, opt_state = opt.update(g, opt_state)
-        return eqx.apply_updates(train, upd), opt_state, lv
-
-    key = jax.random.PRNGKey(seed + 1)
-    n = xn.shape[0]
-    for s in range(steps):
-        key, kb = jax.random.split(key)
-        idx = jax.random.choice(kb, n, (min(batch_size, n),), replace=False)
-        train, opt_state, lv = stepf(train, opt_state, xn[idx], yn[idx])
-        if s % max(1, steps // 8) == 0:
-            log.info("derivative-fit step %d, loss %.6f", s, float(lv))
-    return eqx.combine(train, frozen)
+    ts = jnp.asarray(ts)
+    problem = _problem(
+        block,
+        fld,
+        inp,
+        paths,
+        {"train": Condition("train", {})},
+        {},
+        {},
+        collocation=Collocation(
+            ts, full, paths + in_paths, matched=paths, batch=batch_size
+        ),
+        t_end=float(ts[-1]),
+        macro_dt=float(ts[-1] - ts[0]),
+        n_save=2,
+    )
+    hist = problem.fit(
+        steps=steps,
+        mode="reverse",
+        learning_rate=lr,
+        minibatch_seed=seed + 1,
+        eval_every=max(1, steps // 30),
+        identifiability=False,
+        log_every=max(1, steps // 8),
+    )
+    log.info(
+        "derivative fit: loss %.6f -> best %.6f in %.1fs",
+        hist.losses[0],
+        hist.best_loss,
+        hist.wall_time_s,
+    )
+    return problem.processes_at(hist.best_params)["m"].block
 
 
 def fit_neuralode_shooting(
@@ -765,227 +811,144 @@ def fit_neuralode_shooting(
     curriculum: int = 1,
     length_strategy: tuple = (1.0,),
     physics_weight: float = 0.0,
-    continuity_weight: float = 0.0,
+    physics_batch: int = 512,
+    batch_size: int = 32,
     dtw_weight: float = 0.0,
     dtw_gamma: float = 0.1,
     width: int = 96,
     depth: int = 3,
     lr: float = 1e-3,
     steps: int = 800,
-    batch_size: int = 32,
     init: NeuralODEProcess | None = None,
     seed: int = 0,
     rtol: float | None = None,
     atol: float | None = None,
 ) -> NeuralODEProcess:
-    """Fit by **trajectory shooting**: integrate the learned field and match
-    the trajectory, backpropagating through the solve.
+    """Fit by **trajectory shooting** through the calibrator: every window of
+    every trajectory is a condition starting from the observed state
+    (:func:`hallsim.calibration.shooting_conditions`), matched along the
+    window and, through the boundary sample it shares with the next, to that
+    window's start; the block is the problem's one fittable, and
+    ``batch_size`` trajectories, drawn afresh each step, run in one batched
+    solve.
 
     Plain single shooting over many periods of an oscillator collapses the
     learned trajectory to a fixed point: a small period error drifts the
     prediction out of phase, and full-horizon MSE is then lower for a flat
     line at the mean than for a phase-shifted oscillation, so the optimizer
-    damps the amplitude away. The three knobs below are independent,
-    combinable stabilizers against that:
+    damps the amplitude away. The knobs below are independent, combinable
+    stabilizers against that:
 
-    - ``segments`` — **multiple shooting**: cut each trajectory into
-      ``segments`` contiguous windows and integrate each from its own
-      observed start state. Shorter windows accrue less phase drift, so the
-      flat optimum stops winning. Slope-free — safe for noisy real data.
-    - ``curriculum`` — grow the matched horizon *within each window*: over
-      ``curriculum`` stages match a progressively longer prefix of each window
-      (short→full), so the field is anchored on the easy near-term dynamics
-      before the hard long-horizon phase. Slope-free.
-    - ``length_strategy`` — grow the *global* horizon (Kidger's Diffrax trick):
-      a tuple of fractions like ``(0.1, 1.0)`` trains on the first 10% of each
-      trajectory first, then the full length, splitting ``steps`` across the
-      stages. Fitting the short-horizon dynamics first is the standard way to
-      avoid the flat-line local minimum. Distinct from ``curriculum``: this
-      shortens the whole trajectory (fewer, shorter windows), not the matched
-      prefix of a fixed window.
-    - ``physics_weight`` — **collocation regularizer**
-      ``λ·‖f_θ(z) − ż‖²`` on the data's finite-difference slopes (the same
-      residual :func:`fit_neuralode_derivative` minimizes). Supplies the
-      absolute vector-field magnitude constraint pure shooting lacks — the
-      strongest stabilizer, but slope quality degrades with noise/sparsity.
-    - ``continuity_weight`` — tie each window's integrated endpoint to the
-      next window's observed start, for global consistency across boundaries.
-    - ``dtw_weight`` — **soft-DTW divergence** on each window, a
-      time-warp-invariant trajectory distance (``dtw_gamma`` sets the
-      softmin temperature). Where MSE punishes a phase-shifted-but-correct
-      oscillation harder than a flat line — the collapse driver — soft-DTW
-      scores the two sequences under their best differentiable alignment, so
-      a prediction with the right shape but slightly wrong period is no
-      longer penalised into flatness. The divergence form is ≥0 and zero
-      only at equality, so it cannot be gamed by damping.
+    - ``segments`` — **multiple shooting**: windows per trajectory, each
+      integrated from its own observed start. Shorter windows accrue less
+      phase drift, so the flat optimum stops winning.
+    - ``curriculum`` — over that many stages match a progressively longer
+      prefix of each window, anchoring the field on the near-term dynamics
+      before the long-horizon phase.
+    - ``length_strategy`` — grow the global horizon: fractions like
+      ``(0.1, 1.0)`` train on the first 10% of each trajectory first, then
+      the whole, splitting ``steps`` across the stages.
+    - ``physics_weight`` — the collocation term
+      (:class:`hallsim.calibration.Collocation`) at that weight,
+      ``physics_batch`` samples a step: the vector-field magnitude constraint
+      pure shooting lacks, the strongest stabilizer, degrading with noisy or
+      sparse slopes.
+    - ``dtw_weight`` — a soft-DTW divergence (``dtw_gamma`` the softmin
+      temperature) added to each window's likelihood, so a prediction with
+      the right shape but slightly wrong period is not penalised into
+      flatness.
 
-    ``segments=1, curriculum=1, physics_weight=0`` is classic single
-    shooting. Warm-start via ``init=`` from a derivative fit for stiff
-    dynamics. See MPINeuralODE (arXiv:2605.13305) for the combined recipe.
-
-    Integration runs through the Scheduler; ``rtol``/``atol`` are forwarded to
-    it (default = the Scheduler's production tolerances). Loosening them trades
-    accuracy for speed — but note that a loose tolerance corrupts oscillator
-    integration (numerical anti-damping), so keep it tight for periodic
-    dynamics.
+    Each stage warm-starts from the previous stage's best iterate, and the
+    last stage's best iterate is returned. ``rtol``/``atol`` reach the
+    Scheduler; keep them tight for periodic dynamics. Warm-start via
+    ``init=`` from a derivative fit for stiff dynamics. See MPINeuralODE
+    (arXiv:2605.13305) for the combined recipe.
     """
-    import optax
+    from hallsim.calibration import (
+        Collocation,
+        gaussian_nll,
+        shooting_conditions,
+    )
 
-    from hallsim.composite import Composite
-    from hallsim.scheduler import Scheduler
-
+    block, fld, inp, paths, in_paths, full, us_arr = _prepared(
+        ts, ys, us, fields, input_fields, width, depth, seed, init
+    )
     ts = jnp.asarray(ts)
     ys = jnp.asarray(ys)
-    states, inputs, slopes = _dataset_arrays(ts, ys, us, len(input_fields))
-    im, isd, om, osd = _norm_stats(states, inputs, slopes)
-    proc = _new_process(fields, input_fields, width, depth, seed, init)
-    proc = eqx.tree_at(
-        lambda p: (p.in_mean, p.in_std, p.out_mean, p.out_std),
-        proc,
-        (im, isd, om, osd),
+    held = {p: us_arr[:, j] for j, p in enumerate(in_paths)}
+    sched_kw = {
+        k: v for k, v in (("rtol", rtol), ("atol", atol)) if v is not None
+    }
+    colloc = (
+        Collocation(
+            ts,
+            full,
+            paths + in_paths,
+            matched=paths,
+            weight=physics_weight,
+            batch=physics_batch,
+        )
+        if physics_weight
+        else None
     )
-    us_arr = jnp.zeros((ys.shape[0], 0)) if us is None else jnp.asarray(us)
-    fld, inp = tuple(fields), tuple(input_fields)
-    xn = (jnp.concatenate([states, inputs], -1) - im) / isd
-    yn = (slopes - om) / osd
+
+    def dtw_likelihood(model, data, weight):
+        # (n_fields, n_t, n_traj) -> (n_traj, n_t, n_fields)
+        pred = jnp.transpose(model, (2, 1, 0))
+        targ = jnp.transpose(data, (2, 1, 0))
+        return gaussian_nll(
+            model, data, weight
+        ) + dtw_weight * _soft_dtw_divergence(pred, targ, dtw_gamma)
+
+    likelihood = dtw_likelihood if dtw_weight else None
 
     n_t = ys.shape[1]
-    dt = float(ts[1] - ts[0])
-
-    # Integrate the block through the Scheduler (its inputs frozen as constant
-    # states), so shooting reuses the same runner as deployment — no
-    # hand-rolled solver, and auto-stiffness is available if the field is stiff.
-    comp0 = Composite(
-        {"m": _ShootWrap(block=proc, fld=fld, inp=inp)},
-        topology={},
-        validate=False,
-        semantic_validation={"check_semantics": False},
-    )
-    _keys = comp0.store_keys()
-    _sidx = jnp.asarray([_keys.index(f"m/{f}") for f in fld])
-    _iidx = jnp.asarray([_keys.index(f"m/{f}") for f in inp]) if inp else None
-    _base = comp0.initial_state_vec()
-    _sched_kw = {}
-    if rtol is not None:
-        _sched_kw["rtol"] = rtol
-    if atol is not None:
-        _sched_kw["atol"] = atol
-    _sched = Scheduler(**_sched_kw)
-
-    # Window start times are concrete; the end is derived from ``dt`` and the
-    # point count so the Scheduler's uniform save grid lands exactly on the
-    # last sample (no floating-point overshoot past t1).
-    def integrate(bk, y0, u, t0, n_pts):
-        c = eqx.tree_at(lambda cc: cc.processes["m"].block, comp0, bk)
-        y0f = _base.at[_sidx].set(y0)
-        if _iidx is not None:
-            y0f = y0f.at[_iidx].set(u)
-        span = dt * (n_pts - 1)
-        res = _sched.run(
-            c, t_span=(t0, t0 + span), y0=y0f, macro_dt=span, save_dt=dt
-        )
-        return jnp.stack([res.get(f"m/{f}") for f in fld], axis=-1)
-
-    def make_loss(match_len, starts, seg_len):
-        t0s = [float(ts[s]) for s in starts]
-        # The verdict is cached per macro_dt, and every step below
-        # differentiates through _sched.run, where the eigenvalues it would
-        # need are tracers. Resolve it here instead, at the widths this stage
-        # integrates over: the match window, plus the segment window when the
-        # continuity term also integrates.
-        widths = {match_len}
-        if continuity_weight and segments > 1:
-            widths.add(seg_len)
-        for w in widths:
-            span = dt * (w - 1)
-            _sched.warm_up(
-                comp0, (t0s[0], t0s[0] + span), macro_dt=span, y0=_base
-            )
-
-        @eqx.filter_value_and_grad
-        def loss_fn(train, yb, ub, xb, tb):
-            bk = eqx.combine(train, frozen)
-            wins, dtws = [], []
-            for s, t0 in zip(starts, t0s):
-                pred = jax.vmap(
-                    lambda a, u: integrate(bk, a, u, t0, match_len)
-                )(yb[:, s], ub)
-                targ = yb[:, s : s + match_len]
-                wins.append(jnp.mean((pred - targ) ** 2))
-                if dtw_weight:
-                    dtws.append(_soft_dtw_divergence(pred, targ, dtw_gamma))
-            total = jnp.mean(jnp.stack(wins))
-            if dtw_weight:
-                total = total + dtw_weight * jnp.mean(jnp.stack(dtws))
-            if physics_weight:
-                total = total + physics_weight * jnp.mean(
-                    (
-                        _field_normalized(
-                            bk.mlp, bk.in_scale, bk.out_scale, xb
-                        )
-                        - tb
-                    )
-                    ** 2
-                )
-            if continuity_weight and segments > 1:
-                gaps = []
-                for s, t0 in zip(starts[:-1], t0s[:-1]):
-                    end = jax.vmap(
-                        lambda a, u: integrate(bk, a, u, t0, seg_len)[-1]
-                    )(yb[:, s], ub)
-                    gaps.append(jnp.mean((end - yb[:, s + seg_len]) ** 2))
-                total = total + continuity_weight * jnp.mean(jnp.stack(gaps))
-            return total
-
-        return loss_fn
-
-    opt = optax.adam(lr)
-    train, frozen = _trainable_partition(proc)
-    opt_state = opt.init(train)
-    key = jax.random.PRNGKey(seed + 1)
-    n, m = ys.shape[0], xn.shape[0]
-    length_steps = max(1, steps // len(length_strategy))
-    stage_steps = max(1, length_steps // curriculum)
-
+    stage_steps = max(1, steps // len(length_strategy) // curriculum)
     for frac in length_strategy:
-        # Restrict to the first `frac` of the horizon, re-segment within it.
         n_active = min(n_t, max(segments * 2, int(round(frac * n_t))))
-        seg_l = max(2, n_active // segments)
-        seg_starts = [i * seg_l for i in range(segments)]
-
         for stage in range(curriculum):
-            match_len = int(
-                min(
-                    seg_l,
-                    max(2, int(jnp.ceil(seg_l * (stage + 1) / curriculum))),
-                )
+            conds, data, arms = shooting_conditions(
+                ts[:n_active],
+                ys[:, :n_active],
+                paths,
+                segments=segments,
+                match=(stage + 1) / curriculum,
+                held=held,
             )
-            loss_fn = make_loss(match_len, seg_starts, seg_l)
-
-            @eqx.filter_jit
-            def stepf(train, opt_state, yb, ub, xb, tb, loss_fn=loss_fn):
-                lv, g = loss_fn(train, yb, ub, xb, tb)
-                upd, opt_state = opt.update(g, opt_state)
-                return eqx.apply_updates(train, upd), opt_state, lv
-
-            for s in range(stage_steps):
-                key, k1, k2 = jax.random.split(key, 3)
-                bi = jax.random.choice(
-                    k1, n, (min(batch_size, n),), replace=False
-                )
-                pi = jax.random.choice(k2, m, (min(512, m),), replace=False)
-                train, opt_state, lv = stepf(
-                    train, opt_state, ys[bi], us_arr[bi], xn[pi], yn[pi]
-                )
-                if s % max(1, stage_steps // 4) == 0:
-                    log.info(
-                        "shooting length=%.2f stage %d/%d (match_len=%d) "
-                        "step %d, loss %.6f",
-                        frac,
-                        stage + 1,
-                        curriculum,
-                        match_len,
-                        s,
-                        float(lv),
-                    )
-    return eqx.combine(train, frozen)
+            problem = _problem(
+                block,
+                fld,
+                inp,
+                paths,
+                conds,
+                data,
+                arms,
+                collocation=colloc,
+                likelihood=likelihood,
+                t_end=float(ts[n_active - 1]),
+                macro_dt=float(ts[n_active - 1] - ts[0]),
+                n_save=max(len(d) for d in data.values()) + 1,
+                scheduler_kwargs=sched_kw or None,
+                member_batch=batch_size,
+            )
+            hist = problem.fit(
+                steps=stage_steps,
+                mode="reverse",
+                learning_rate=lr,
+                minibatch_seed=seed + 1,
+                eval_every=max(1, stage_steps // 10),
+                identifiability=False,
+                log_every=max(1, stage_steps // 4),
+            )
+            block = problem.processes_at(hist.best_params)["m"].block
+            log.info(
+                "shooting length=%.2f stage %d/%d: loss %.6f -> best %.6f "
+                "in %.1fs",
+                frac,
+                stage + 1,
+                curriculum,
+                hist.losses[0],
+                hist.best_loss,
+                hist.wall_time_s,
+            )
+    return block

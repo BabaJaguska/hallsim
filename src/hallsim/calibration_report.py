@@ -256,7 +256,7 @@ def plot_history(problem, history, path) -> None:
 
     # `clamp` is optional, so an unclamped parameter is normalized against
     # its own travelled range instead, dashed to keep the scales distinct.
-    for name, ref in problem.param_refs.items():
+    for name, ref in problem.scalar_refs.items():
         vals = np.asarray([float(ph[name]) for ph in history.param_history])
         clamped = ref.clamp is not None
         lo, hi = ref.clamp if clamped else (vals.min(), vals.max())

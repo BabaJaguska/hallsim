@@ -360,6 +360,21 @@ class GeneReporter:
     scale: float = 1.0
 
 
+def trajectory_reporters(
+    *paths: str, scale: float = 1.0
+) -> list[GeneReporter]:
+    """One reporter per store path, read as the value at each query time and
+    keyed by the path itself: an observed trajectory as a reporter set, for
+    an :class:`~hallsim.calibration.Arm` with no reference whose data
+    columns are the paths."""
+    return [
+        GeneReporter(
+            observable=p, gene_symbol=p, summary=last_value, scale=scale
+        )
+        for p in paths
+    ]
+
+
 def oscillating_reporter(
     observable: str,
     gene_symbol: str,

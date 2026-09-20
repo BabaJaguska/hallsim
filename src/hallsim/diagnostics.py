@@ -351,6 +351,7 @@ def _verdict(
     tol_rel_threshold,
     rtol_loose,
     rtol_tight,
+    atol: float = DEFAULT_ATOL,
 ) -> _Verdict:
     finite = bool(np.all(np.isfinite(y_tight)))
     peak = float(np.nanmax(np.abs(y_tight))) if y_tight.size else 0.0
@@ -368,7 +369,12 @@ def _verdict(
     exploding = (not finite) or (
         peak > growth_threshold * init_scale and final_peak > 2.0 * mid_peak
     )
-    vanishing = finite and bool(np.all(np.abs(y_tight[-1]) < 1e-9))
+    # Collapsed to nothing on its own scale, or below what the solver can
+    # resolve: an absolute floor alone would call every molar-scale model
+    # dead.
+    vanishing = finite and bool(
+        np.all(np.abs(y_tight[-1]) < max(atol, 1e-6 * peak))
+    )
 
     # Domain violation: a state that starts non-negative but dips materially
     # below zero during the run — a concentration/activity that went negative.
@@ -414,7 +420,9 @@ def _verdict(
     )
 
 
-def _native_finite(process, t_end: float, n_steps: int):
+def _native_finite(
+    process, t_end: float, n_steps: int, atol: float = DEFAULT_ATOL
+):
     """Integrate an SBML-imported process with an independent explicit
     adaptive integrator (``jax.experimental.ode.odeint``, Dormand–Prince).
 
@@ -444,7 +452,7 @@ def _native_finite(process, t_end: float, n_steps: int):
                 y,
                 jnp.array([t, t + dt]),
                 w,
-                atol=1e-6,
+                atol=atol,
                 rtol=1e-12,
                 mxstep=5_000_000,
             )[-1]
@@ -464,7 +472,12 @@ def _native_finite(process, t_end: float, n_steps: int):
 
 
 def _tunes(
-    process, t_end: float, n_probe: int = 2, sched_kwargs=None, probe=None
+    process,
+    t_end: float,
+    n_probe: int = 2,
+    sched_kwargs=None,
+    probe=None,
+    atol: float = DEFAULT_ATOL,
 ):
     """Forward-mode gradient finiteness — the 'tunes' half of the rule.
 
@@ -518,7 +531,7 @@ def _tunes(
     # the first probe too: cold, it falls back to Tsit5 for every group,
     # which warns on a model that passes and grinds on a stiff one.
     comp_solo = single_process_composite(process)
-    s_first = Scheduler(**sched_kwargs)
+    s_first = Scheduler(atol=atol, **sched_kwargs)
     try:
         s_first.warm_up(comp_solo, t_span=(0.0, t_end), macro_dt=t_end)
     except Exception:
@@ -526,7 +539,7 @@ def _tunes(
     if all_finite(s_first):
         return True, False
 
-    s_imp = Scheduler(auto_stiffness=True)
+    s_imp = Scheduler(auto_stiffness=True, atol=atol)
     try:
         s_imp.warm_up(comp_solo, t_span=(0.0, t_end), macro_dt=t_end)
     except Exception:
@@ -542,6 +555,7 @@ def screen_process(
     *,
     rtol_loose: float = 1e-3,
     rtol_tight: float = 1e-7,
+    atol: float = DEFAULT_ATOL,
     tol_rel_threshold: float = 0.05,
     growth_threshold: float = 1e3,
     n_save: int = 400,
@@ -567,6 +581,11 @@ def screen_process(
     unfed INPUT paths held at ``input_probe`` — if that wakes it the report is
     ``undriven`` (not a defect) and every flag describes the driven run.
 
+    ``atol`` is the absolute tolerance every run here integrates at, the
+    production default unless given; a model whose concentrations sit far
+    below it (molar units) needs a smaller one, the same one it will be
+    simulated at.
+
     ``check_tunability`` (default) also verifies the *tunes* half of the
     constituents-first rule via a finite forward-mode gradient through
     ``Scheduler.run``.
@@ -579,15 +598,14 @@ def screen_process(
     name = getattr(proc, "_name", type(proc).__name__)
 
     def tight_and_loose(probe=None):
-        # atol is held at the production default across both runs so the
-        # loose-vs-tight comparison isolates rtol sensitivity (and the
-        # screen integrates exactly what the Scheduler does in production).
+        # atol is the same across both runs so the loose-vs-tight comparison
+        # isolates rtol sensitivity.
         return tuple(
             _solo_run(
                 proc,
                 t_end,
                 rtol,
-                DEFAULT_ATOL,
+                atol,
                 n_save,
                 max_steps,
                 sched_kwargs,
@@ -619,7 +637,7 @@ def screen_process(
     except TypeError:  # bad sched_kwargs, not an unintegrable model
         raise
     except Exception as exc:  # max_steps / non-finite blow the solve up
-        native = _native_finite(proc, t_end, n_save)
+        native = _native_finite(proc, t_end, n_save, atol)
         suspect = native is not None and native[1]
         detail = f"solver failed: {type(exc).__name__}"
         if suspect:
@@ -647,6 +665,7 @@ def screen_process(
         tol_rel_threshold,
         rtol_loose,
         rtol_tight,
+        atol=atol,
     )
 
     # A component that only moves when driven (coupling edge, clamp,
@@ -662,6 +681,7 @@ def screen_process(
                 tol_rel_threshold,
                 rtol_loose,
                 rtol_tight,
+                atol=atol,
             )
         except Exception:
             v_driven = None
@@ -675,7 +695,7 @@ def screen_process(
 
     framework_suspect = False
     if v.exploding:
-        native = _native_finite(proc, t_end, n_save)
+        native = _native_finite(proc, t_end, n_save, atol)
         if native is not None and native[1]:
             framework_suspect = True
             v.detail = _and(
@@ -691,6 +711,7 @@ def screen_process(
             t_end,
             sched_kwargs=sched_kwargs,
             probe=input_probe if undriven else None,
+            atol=atol,
         )
         if tunes is False:
             v.detail = _and(v.detail, "non-finite gradient")

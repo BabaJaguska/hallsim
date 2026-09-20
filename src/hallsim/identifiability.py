@@ -62,7 +62,7 @@ def sensitivity_jacobian(problem, params: dict | None = None):
     of ``n_reporter × n_timepoint``. Forward-mode (``jacfwd``): parameters are
     few, residuals many."""
     params = dict(params if params is not None else problem.initial_params())
-    names = list(problem.param_refs.keys())
+    names = list(problem.scalar_refs)
     theta0 = jnp.asarray(
         [jnp.log10(jnp.asarray(float(params[n]))) for n in names]
     )
@@ -92,7 +92,7 @@ def residual_scale(problem, params: dict, n_fitted: int | None = None):
     ``n_fitted`` defaults to the number of fitted references.
     """
     if n_fitted is None:
-        n_fitted = len(problem.param_refs)
+        n_fitted = len(problem.scalar_refs)
     res = []
     for arm in problem.fit_arms:
         times = sorted(problem.data[arm])

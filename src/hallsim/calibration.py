@@ -33,7 +33,7 @@ import math
 import time
 from dataclasses import dataclass, field, replace as dc_replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
 
 import equinox as eqx
 import jax
@@ -62,6 +62,9 @@ _MAX_PRIOR_SHARE = 0.99
 # Fisher condition number above which a fit is refused. float64 carries ~16
 # digits, so past this the flat directions are numerical noise.
 MAX_FIT_CONDITION_NUMBER = 1e12
+#: Leaves larger than this (a learned block's weights) are not recorded in
+#: the per-step parameter history; the best iterate is kept in full.
+SNAPSHOT_MAX_SIZE = 1024
 
 ParamPytree = Any  # PyTree of jnp.ndarrays / scalars
 
@@ -154,6 +157,14 @@ class Calibrator:
         Print per-step loss every ``log_every`` steps.
     log_every:
         Logging interval.
+    minibatch_seed:
+        When set, ``loss_fn(params, key)`` is called with a fresh PRNG key
+        each step, for a loss that draws a minibatch from it. The iterates
+        are then ranked on ``loss_fn(params)``, the whole objective, since
+        a draw cannot rank thousands of them. Adam only.
+    eval_every:
+        With a minibatch, how often (in steps) the whole objective is
+        evaluated for that ranking; the last step always is.
     """
 
     def __init__(
@@ -178,6 +189,8 @@ class Calibrator:
         early_stop_tol: float = 1e-4,
         verbose: bool = True,
         log_every: int = 1,
+        minibatch_seed: int | None = None,
+        eval_every: int = 1,
     ) -> None:
         if mode not in ("forward", "reverse"):
             raise ValueError(
@@ -186,6 +199,8 @@ class Calibrator:
         # log10 inside; everything outside this class stays linear — the
         # loss's argument, history, best params, checkpoints.
         self._log_keys = _log_keys(init_params, log_params)
+        self.minibatch_seed = minibatch_seed
+        self.eval_every = max(1, int(eval_every))
         self.loss_fn = self._in_linear(loss_fn)
         self.init_params = self._to_opt(init_params)
         self.clamps = {
@@ -263,11 +278,11 @@ class Calibrator:
             vg = jax.value_and_grad(self.loss_fn)
         else:
 
-            def vg(params):
+            def vg(params, *args):
                 flat, unravel = jax.flatten_util.ravel_pytree(params)
 
                 def f_flat(flat_x):
-                    return self.loss_fn(unravel(flat_x))
+                    return self.loss_fn(unravel(flat_x), *args)
 
                 primal = f_flat(flat)
                 eye = jnp.eye(flat.shape[0], dtype=flat.dtype)
@@ -290,6 +305,19 @@ class Calibrator:
             for k, v in params.items()
         }
 
+    def _snapshot(self, params: ParamPytree) -> ParamPytree:
+        """The step's parameters for the history, in model space, with any
+        leaf above ``SNAPSHOT_MAX_SIZE`` elements (a learned block) recorded
+        as ``None``: a history of every weight vector would hold the whole
+        run in memory, and ``best_params`` keeps the one that matters."""
+        model = self._to_model(params)
+        if not isinstance(model, dict):
+            return model
+        return {
+            k: (None if jnp.size(v) > SNAPSHOT_MAX_SIZE else v)
+            for k, v in model.items()
+        }
+
     def _to_model(self, params: ParamPytree) -> ParamPytree:
         """Optimizer space → linear. Everything a caller sees goes through
         here: the loss's argument, history, best params, checkpoints."""
@@ -304,7 +332,7 @@ class Calibrator:
         params. Gradients flow through the transform."""
         if not self._log_keys:
             return fn
-        return lambda p: fn(self._to_model(p))
+        return lambda p, *args: fn(self._to_model(p), *args)
 
     # ── Clamping ───────────────────────────────────────────────
 
@@ -366,39 +394,62 @@ class Calibrator:
         parameter snapshots.
         """
         if self.method == "lbfgs":
+            if self.minibatch_seed is not None:
+                raise ValueError(
+                    "L-BFGS needs the whole loss each step; minibatch_seed "
+                    "is for adam"
+                )
             return self._fit_lbfgs(steps)
         params = self.init_params
         opt_state = self.optimizer.init(params)
         value_and_grad = self._value_and_grad_fn()
         val_fn = eqx.filter_jit(self.val_loss_fn) if self.val_loss_fn else None
+        # A minibatched loss ranks its iterates on the whole objective
+        # (no key), every `eval_every` steps: a draw cannot rank thousands
+        # of iterates, it picks the one that happens to fit the draw.
+        key = exact_fn = None
+        if self.minibatch_seed is not None:
+            key = jax.random.PRNGKey(self.minibatch_seed)
+            exact_fn = eqx.filter_jit(lambda p: self.loss_fn(p))
         history = CalibrationHistory()
         best_loss = float("inf")
         best_params = self._to_model(params)
         no_improve = 0
         t0 = time.time()
         for s in range(steps):
-            loss, grad = value_and_grad(params)
+            if key is None:
+                loss, grad = value_and_grad(params)
+            else:
+                key, sub = jax.random.split(key)
+                loss, grad = value_and_grad(params, sub)
             lf = float(loss)
             # `loss`/`grad` are evaluated at `params` (before this step's
             # update), so `params` is the point that achieved `lf`. Record and
             # log this evaluated point — loss and params correspond — then take
             # the step. With a validation loss, that held-out score, not the
             # training loss, is the selection criterion.
-            monitored = float(val_fn(params)) if val_fn else lf
             if val_fn:
+                monitored = float(val_fn(params))
                 history.val_losses.append(monitored)
+            elif exact_fn is not None:
+                due = s % self.eval_every == 0 or s == steps - 1
+                monitored = float(exact_fn(params)) if due else None
+            else:
+                monitored = lf
             # Relative improvement: patience accumulates once the loss stops
             # dropping by more than `early_stop_tol` *fraction* per step —
             # scale-invariant, so it can't fire mid-descent regardless of the
             # loss magnitude (an absolute gradient threshold could).
-            if monitored < best_loss * (1.0 - self.early_stop_tol):
+            if monitored is None:
+                pass  # between evaluations of the whole objective
+            elif monitored < best_loss * (1.0 - self.early_stop_tol):
                 best_loss, no_improve = monitored, 0
                 best_params = self._to_model(params)
                 self._save_checkpoint(best_params, best_loss, s)
             else:
                 no_improve += 1
             history.losses.append(lf)
-            history.param_history.append(self._to_model(params))
+            history.param_history.append(self._snapshot(params))
             gnorm = float(optax.global_norm(grad))
             scale = self._plateau_scale(opt_state)
             lr_base = (
@@ -494,7 +545,7 @@ class Calibrator:
             else:
                 no_improve += 1
             history.losses.append(lf)
-            history.param_history.append(self._to_model(params))
+            history.param_history.append(self._snapshot(params))
             if self.verbose and (s % self.log_every == 0 or s == steps - 1):
                 msg = f"  [{s+1:3d}/{steps}] loss = {lf:.4g}"
                 if isinstance(params, dict):
@@ -620,12 +671,23 @@ class Condition:
     ``interventions`` are timed :class:`ParamStep` effects applied *after* the
     severities — a drug that starts partway through the trajectory rather than
     a severity held for its whole duration.
+
+    ``start`` overrides the shared start state on the store paths it names,
+    ``{path: value}``; a value with a leading axis, ``(n_batch,)``, runs the
+    condition once per member through the Scheduler's batch axis, and every
+    array-valued path must have the same length. Paths it leaves out keep the
+    shared start (the equilibrated baseline when equilibrating). ``window``
+    is the condition's own ``(t_start, t_end)``, in place of the problem's.
+    Together they express a trajectory observed from a measured state, and a
+    shooting window is one such condition per segment.
     """
 
     name: str
     handles: dict[str, float]
     interventions: tuple = ()
     description: str = ""
+    start: dict[str, Any] | None = None
+    window: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -642,6 +704,107 @@ class Arm:
 
     condition: str
     reference: str | None = "t0"
+
+
+def shooting_conditions(
+    ts,
+    ys,
+    paths: Sequence[str],
+    *,
+    segments: int = 1,
+    match: float = 1.0,
+    prefix: str = "shoot",
+    held: dict[str, Any] | None = None,
+) -> tuple[dict[str, Condition], dict[str, dict], dict[str, Arm]]:
+    """Multiple shooting as conditions.
+
+    ``ys`` is ``(n_traj, n_t, len(paths))`` sampled at ``ts`` (a single
+    trajectory may be ``(n_t, len(paths))``). It is cut into ``segments``
+    windows; each is one condition starting from every trajectory's observed
+    state at the window's opening, run over the window, with the samples
+    along it as one arm with no reference. Consecutive windows share their
+    boundary sample, so a window's end is fitted to the next window's start:
+    the continuity term, inside the same loss. ``match`` below 1 keeps the
+    first fraction of each window's samples, the curriculum's shorter
+    prefix; build one set per stage. ``held`` writes constant values into
+    every window's start, ``{path: value | (n_traj,)}``: a conditioning
+    input each trajectory carries.
+
+    Returns ``(conditions, data, arms)`` keyed ``f"{prefix}{k}"``, to pass to
+    :class:`CalibrationProblem`; a subset of the arm names to
+    :meth:`CalibrationProblem.data_loss` is the active windows.
+    """
+    import pandas as pd
+
+    ts = np.asarray(ts, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    if ys.ndim == 2:
+        ys = ys[None]
+    if ys.ndim != 3 or ys.shape[2] != len(paths):
+        raise ValueError(
+            f"ys must be (n_traj, n_t, {len(paths)}) for paths {list(paths)}; "
+            f"got shape {ys.shape}"
+        )
+    n_t = ys.shape[1]
+    if ts.shape != (n_t,):
+        raise ValueError(f"ts has {ts.shape}, ys has {n_t} samples")
+    if not 0.0 < match <= 1.0:
+        raise ValueError(f"match must be in (0, 1], got {match!r}")
+    segments = max(1, min(int(segments), n_t - 1))
+    seg_len = (n_t - 1) // segments
+    conditions: dict[str, Condition] = {}
+    data: dict[str, dict] = {}
+    arms: dict[str, Arm] = {}
+    for k in range(segments):
+        s = k * seg_len
+        end = n_t - 1 if k == segments - 1 else s + seg_len
+        end = s + max(1, int(np.ceil(match * (end - s))))
+        name = f"{prefix}{k}"
+        conditions[name] = Condition(
+            name,
+            {},
+            start={
+                **(held or {}),
+                **{p: ys[:, s, j] for j, p in enumerate(paths)},
+            },
+            window=(float(ts[s]), float(ts[end])),
+        )
+        data[name] = {
+            float(ts[i]): pd.DataFrame(
+                {p: ys[:, i, j] for j, p in enumerate(paths)}
+            )
+            for i in range(s + 1, end + 1)
+        }
+        arms[name] = Arm(name, reference=None)
+    return conditions, data, arms
+
+
+@dataclass(frozen=True)
+class Collocation:
+    """Observed states with their finite-difference slopes, for the
+    composite's field to match without a solve.
+
+    ``ys`` is ``(n_traj, n_t, len(paths))`` sampled at ``ts`` (a single
+    trajectory may be ``(n_t, len(paths))``); the slopes are central
+    differences along ``ts``. The field is evaluated under ``condition``
+    (the first condition when ``None``) at each sample, the unobserved paths
+    held at the shared start, and its components on ``paths`` are compared
+    to the slopes, each scaled by that slope's spread. ``weight`` scales the
+    term in :meth:`CalibrationProblem.loss`; ``0`` keeps it out of the loss
+    while :meth:`CalibrationProblem.collocation_loss` stays available as a
+    pretraining stage of its own. ``matched`` narrows the comparison to some
+    of ``paths``, the others only setting the state (a constant input beside
+    the observed states). ``batch`` draws that many samples per evaluation
+    from the PRNG key the loss is given, every sample without one.
+    """
+
+    ts: Any
+    ys: Any
+    paths: tuple[str, ...]
+    condition: str | None = None
+    weight: float = 1.0
+    matched: tuple[str, ...] | None = None
+    batch: int | None = None
 
 
 @dataclass(frozen=True)
@@ -708,6 +871,50 @@ class HandleCoeffRef:
     prior_sigma: float = 0.5
     coeff: str = "floor"
     description: str = ""
+
+
+@dataclass(frozen=True)
+class LearnedRef:
+    """A learned block's trainable partition as one fittable.
+
+    Every inexact-array leaf of ``composite.processes[process_name]`` whose
+    field is not in ``frozen`` (normalisation buffers, by default) is
+    flattened into one array: linear space, no prior, no clamp, and outside
+    the identifiability report, whose Fisher block over weights says nothing
+    a held-out arm does not say better. :meth:`CalibrationProblem.fit` runs
+    it in reverse mode, one VJP per step, where forward mode would cost a
+    solve per weight.
+    """
+
+    process_name: str
+    frozen: tuple[str, ...] = ("in_mean", "in_std", "out_mean", "out_std")
+    description: str = ""
+    prior = None
+    prior_sigma = 0.5
+    clamp = None
+
+
+def _learned_partition(proc, frozen: Sequence[str]):
+    """``(flat, unravel, fixed)``: the trainable leaves of ``proc`` as one
+    vector, the map back to their tree, and the leaves left as they are."""
+    from jax.flatten_util import ravel_pytree
+
+    frozen_tree = jax.tree_util.tree_map(lambda _: False, proc)
+    present = [f for f in frozen if hasattr(proc, f)]
+    if present:
+        frozen_tree = eqx.tree_at(
+            lambda p: tuple(getattr(p, f) for f in present),
+            frozen_tree,
+            tuple(True for _ in present),
+        )
+    spec = jax.tree_util.tree_map(
+        lambda leaf, fr: eqx.is_inexact_array(leaf) and not fr,
+        proc,
+        frozen_tree,
+    )
+    train, fixed = eqx.partition(proc, spec)
+    flat, unravel = ravel_pytree(train)
+    return flat, unravel, fixed
 
 
 def _substitute_param(proc, field: str, value: Any):
@@ -874,14 +1081,18 @@ class CalibrationProblem:
         :class:`GeneReporter` instances — each maps a store path
         (``observable``) through a ``summary`` to a scalar.
     conditions:
-        ``{arm_name: Condition}`` — severities applied per iteration.
+        ``{arm_name: Condition}`` — severities applied per iteration. A
+        condition with its own ``start`` or ``window`` runs from that state
+        over that span instead of the shared start and ``(t_start, t_end)``.
     data:
         ``{arm_name: {timepoint: pd.Series}}``, each Series indexed by gene
         symbol with the measured value in the arm's terms: a log2 fold change
         against the arm's reference, or the value itself for an arm with no
         reference. A plain Series is accepted as the single-timepoint case.
         The loss sums one term per (arm, timepoint), so the model fits the
-        *trajectory*.
+        *trajectory*. For a batched condition a timepoint's entry may be a
+        DataFrame, one row per member, columns the gene symbols; a Series
+        there is the same target for every member.
     arms:
         ``{arm_name: Arm}``; a plain condition name stands for
         ``Arm(name)``, read against its own start.
@@ -907,6 +1118,15 @@ class CalibrationProblem:
         Forwarded to ``Scheduler.run``.
     n_save:
         Save points retained for trajectory summaries.
+    collocation:
+        A :class:`Collocation`: observed states whose finite-difference
+        slopes the composite's field is matched to without a solve, added to
+        the loss at its ``weight``.
+    member_batch:
+        Members of a batched condition to run per loss evaluation, drawn
+        afresh from the PRNG key the loss is given (see
+        ``Calibrator(minibatch_seed=...)``); every member without a key.
+        Memory and time of a solve scale with it.
     """
 
     def __init__(
@@ -932,6 +1152,8 @@ class CalibrationProblem:
         scheduler_kwargs: dict | None = None,
         registry: dict | None = None,
         notes: dict | None = None,
+        collocation: "Collocation | None" = None,
+        member_batch: int | None = None,
     ) -> None:
         self._ctor_kwargs = {
             k: v for k, v in locals().items() if k not in ("self", "__class__")
@@ -975,6 +1197,30 @@ class CalibrationProblem:
                     f"arms[{name!r}] references unknown condition "
                     f"{a.reference!r} (a reference is 't0', a condition name, "
                     "or None)"
+                )
+        store_keys = set(composite.store_keys())
+        for cname, cond in conditions.items():
+            if cond.window is not None:
+                lo, hi = (float(v) for v in cond.window)
+                if not hi > lo:
+                    raise ValueError(
+                        f"conditions[{cname!r}].window={cond.window!r} must "
+                        "be (t_start, t_end) with t_end > t_start"
+                    )
+            lengths = set()
+            for path, value in (cond.start or {}).items():
+                if path not in store_keys:
+                    raise KeyError(
+                        f"conditions[{cname!r}].start names {path!r}, not a "
+                        "store path of the composite"
+                    )
+                if np.ndim(value) > 0:
+                    lengths.add(int(np.shape(value)[0]))
+            if len(lengths) > 1:
+                raise ValueError(
+                    f"conditions[{cname!r}].start mixes batch lengths "
+                    f"{sorted(lengths)}; every array-valued path is one "
+                    "value per member"
                 )
         for arm in fit_arms:
             if arm not in self.arms:
@@ -1090,17 +1336,37 @@ class CalibrationProblem:
         for r in self.reporter_wiring.warnings:
             log.warning("reporter wiring: %s", r.message)
         self.conditions = conditions
+        self.t_end = t_end
+        # Negative = pre-roll: sources are off before 0, so query time 0 is
+        # read from a settled state rather than the IC.
+        self.t_start = t_start
         # Trajectory-native: each arm's Δ_data is a {timepoint: Δseries}
         # map. A plain Series is the degenerate single-timepoint case —
-        # normalized to {t_end: series} so endpoint fits keep working.
+        # normalized to {t_end: series} so endpoint fits keep working, the
+        # end being the arm's condition's own when it has a window.
         self.data = {
             arm: (
                 {float(t): s for t, s in d.items()}
                 if isinstance(d, dict)
-                else {float(t_end): d}
+                else {self._arm_window(arm)[1]: d}
             )
             for arm, d in data.items()
         }
+        for arm, per_t in self.data.items():
+            if arm not in self.arms:
+                continue
+            lo, hi = self._arm_window(arm)
+            outside = [t for t in per_t if t < lo - 1e-9 or t > hi + 1e-9]
+            if outside:
+                log.warning(
+                    "data[%r] has timepoints %s outside the condition's "
+                    "window (%g, %g); the readout there is the nearest "
+                    "simulated value.",
+                    arm,
+                    outside,
+                    lo,
+                    hi,
+                )
         if equilibrate and equilibration_condition not in conditions:
             raise KeyError(
                 "equilibrate=True needs equilibration_condition to name a "
@@ -1131,15 +1397,34 @@ class CalibrationProblem:
         self._override_fields: dict = {}
         self._coeffs = coeff_params
         self._coeff_baseline = coeff_baseline
+        # A learned block: its trainable leaves as one flat vector, the map
+        # back, and the leaves that stay fixed.
+        self._learned: dict[str, tuple] = {}
+        self._learned_baseline: dict[str, jnp.ndarray] = {}
+        for lname, lref in params.items():
+            if not isinstance(lref, LearnedRef):
+                continue
+            if lref.process_name not in composite.processes:
+                raise KeyError(
+                    f"params[{lname!r}].process_name={lref.process_name!r} "
+                    f"not in composite.processes "
+                    f"(have {sorted(composite.processes)})"
+                )
+            flat, unravel, fixed = _learned_partition(
+                composite.processes[lref.process_name], lref.frozen
+            )
+            if flat.size == 0:
+                raise ValueError(
+                    f"params[{lname!r}]: {lref.process_name!r} has no "
+                    "trainable array leaf outside its frozen fields"
+                )
+            self._learned[lname] = (lref.process_name, unravel, fixed)
+            self._learned_baseline[lname] = flat
         self._all_refs = params
         self._base_registry = reg
         self.prior_weight = prior_weight
         self.fit_arms = fit_arms
         self.held_out_arms = held_out_arms or []
-        self.t_end = t_end
-        # Negative = pre-roll: sources are off before 0, so query time 0 is
-        # read from a settled state rather than the IC.
-        self.t_start = t_start
         self.macro_dt = macro_dt
         self.n_save = n_save
         # Stiffness routing is a Scheduler default, and `warm_up` below
@@ -1153,6 +1438,66 @@ class CalibrationProblem:
         self._reporter_indices = tuple(
             self._store_idx[r.observable] for r in reporters
         )
+        self.collocation = collocation
+        self.member_batch = member_batch
+        if collocation is not None:
+            missing = [
+                p for p in collocation.paths if p not in self._store_idx
+            ]
+            if missing:
+                raise KeyError(
+                    f"collocation.paths {missing} are not store paths of the "
+                    "composite"
+                )
+            if (
+                collocation.condition is not None
+                and collocation.condition not in conditions
+            ):
+                raise KeyError(
+                    f"collocation.condition={collocation.condition!r} not in "
+                    f"conditions {sorted(conditions)}"
+                )
+            c_ts = np.asarray(collocation.ts, dtype=float)
+            c_ys = np.asarray(collocation.ys, dtype=float)
+            if c_ys.ndim == 2:
+                c_ys = c_ys[None]
+            if c_ys.ndim != 3 or c_ys.shape[2] != len(collocation.paths):
+                raise ValueError(
+                    "collocation.ys must be (n_traj, n_t, len(paths)); got "
+                    f"shape {c_ys.shape} for {len(collocation.paths)} paths"
+                )
+            if c_ts.shape != (c_ys.shape[1],):
+                raise ValueError(
+                    f"collocation.ts has {c_ts.shape}, ys has "
+                    f"{c_ys.shape[1]} samples"
+                )
+            matched = (
+                tuple(collocation.paths)
+                if collocation.matched is None
+                else tuple(collocation.matched)
+            )
+            unknown = [p for p in matched if p not in collocation.paths]
+            if unknown:
+                raise KeyError(
+                    f"collocation.matched {unknown} are not among "
+                    "collocation.paths"
+                )
+            cols = [list(collocation.paths).index(p) for p in matched]
+            slopes = np.gradient(c_ys, c_ts, axis=1)[..., cols]
+            n_traj, n_t, n_paths = c_ys.shape
+            self._colloc_idx = jnp.asarray(
+                [self._store_idx[p] for p in collocation.paths]
+            )
+            self._colloc_out = jnp.asarray(
+                [self._store_idx[p] for p in matched]
+            )
+            self._colloc_times = jnp.asarray(np.tile(c_ts, n_traj))
+            self._colloc_states = jnp.asarray(
+                c_ys.reshape(n_traj * n_t, n_paths)
+            )
+            flat_slopes = slopes.reshape(n_traj * n_t, len(cols))
+            self._colloc_slopes = jnp.asarray(flat_slopes)
+            self._colloc_scale = jnp.asarray(flat_slopes.std(axis=0) + 1e-8)
         # Per-arm query-time and Δ_data matrices, precomputed once. The
         # timepoint axis is vectorized, not looped: 2 or 200 timepoints trace
         # to the same graph size. A Python loop would unroll under JIT into
@@ -1180,25 +1525,20 @@ class CalibrationProblem:
             times = sorted(per_t.keys())
             self._arm_times[arm] = times
             self._arm_query_times[arm] = jnp.asarray(times, dtype=float)
-            # (n_reporters, n_timepoints); NaN marks a gene absent at a time.
-            self._arm_data_matrix[arm] = jnp.asarray(
-                [
-                    [
-                        float(per_t[t].get(r.gene_symbol, jnp.nan))
-                        for t in times
-                    ]
-                    for r in reporters
-                ]
+            n_batch = (
+                self._condition_batch(
+                    self.conditions[self.arms[arm].condition]
+                )
+                if arm in self.arms
+                else 0
             )
-            per_w = weights.get(arm, {})
-            self._arm_weight_matrix[arm] = jnp.asarray(
-                [
-                    [
-                        float(per_w.get(t, {}).get(r.gene_symbol, 1.0))
-                        for t in times
-                    ]
-                    for r in reporters
-                ]
+            # (n_reporters, n_timepoints[, n_batch]); NaN marks a gene
+            # absent at a time.
+            self._arm_data_matrix[arm] = self._observed_block(
+                arm, per_t, times, n_batch, default=float("nan")
+            )
+            self._arm_weight_matrix[arm] = self._observed_block(
+                arm, weights.get(arm, {}), times, n_batch, default=1.0
             )
         # Reuse the Composite type for re-construction in the loss.
         self._Composite = Composite
@@ -1241,9 +1581,24 @@ class CalibrationProblem:
             k: jnp.asarray(
                 self._param_baseline[k]
                 if k in self._param_baseline
-                else self._coeff_baseline[k]
+                else (
+                    self._learned_baseline[k]
+                    if k in self._learned_baseline
+                    else self._coeff_baseline[k]
+                )
             )
             for k in self._all_refs
+        }
+
+    @property
+    def scalar_refs(self) -> dict:
+        """The fittables that are single positive constants, every
+        :class:`ParameterRef` and :class:`HandleCoeffRef`: what the
+        identifiability report and the log-space transform cover."""
+        return {
+            k: v
+            for k, v in self._all_refs.items()
+            if not isinstance(v, LearnedRef)
         }
 
     @property
@@ -1331,6 +1686,8 @@ class CalibrationProblem:
                         "handles": dict(c.handles),
                         "interventions": c.interventions,
                         "description": c.description,
+                        "start": c.start,
+                        "window": c.window,
                     }
                     for n, c in kw["conditions"].items()
                 },
@@ -1338,6 +1695,17 @@ class CalibrationProblem:
                     name: {"condition": a.condition, "reference": a.reference}
                     for name, a in self.arms.items()
                 },
+                "member_batch": self.member_batch,
+                "collocation": (
+                    None
+                    if self.collocation is None
+                    else {
+                        "paths": list(self.collocation.paths),
+                        "condition": self.collocation.condition,
+                        "weight": self.collocation.weight,
+                        "n_samples": int(self._colloc_states.shape[0]),
+                    }
+                ),
                 "fit_arms": kw["fit_arms"],
                 "held_out_arms": kw.get("held_out_arms") or [],
                 "data": kw["data"],
@@ -1440,6 +1808,12 @@ class CalibrationProblem:
             return param_values
         return {**param_values, **self._override_params}
 
+    def processes_at(self, param_values: dict) -> dict:
+        """The composite's processes with ``param_values`` written in: every
+        fitted scalar and learned block at the given values, plus any
+        override. What a fitted block is read back from."""
+        return self._substitute(self.composite.processes, param_values)
+
     def _substitute(self, processes: dict, param_values: dict) -> dict:
         param_values = self._pinned(param_values)
         new = dict(processes)
@@ -1455,6 +1829,8 @@ class CalibrationProblem:
                 pref.field,
                 param_values[pname],
             )
+        for lname, (proc_name, unravel, fixed) in self._learned.items():
+            new[proc_name] = eqx.combine(unravel(param_values[lname]), fixed)
         # Last, so an override outranks the fitted iterate whichever way the
         # caller spelled it.
         for (proc_name, path), value in self._override_fields.items():
@@ -1490,6 +1866,114 @@ class CalibrationProblem:
                 ],
             )
         return reg
+
+    def _condition_window(self, condition: Condition) -> tuple[float, float]:
+        """The condition's own ``(t_start, t_end)``, else the problem's."""
+        if condition.window is None:
+            return float(self.t_start), float(self.t_end)
+        lo, hi = condition.window
+        return float(lo), float(hi)
+
+    def _arm_window(self, arm: str) -> tuple[float, float]:
+        return self._condition_window(
+            self.conditions[self.arms[arm].condition]
+        )
+
+    @staticmethod
+    def _condition_batch(condition: Condition) -> int:
+        """Members in the condition's ``start``, ``0`` when unbatched."""
+        for value in (condition.start or {}).values():
+            if np.ndim(value) > 0:
+                return int(np.shape(value)[0])
+        return 0
+
+    def _start_state(
+        self, condition: Condition, y0: jnp.ndarray, members=None
+    ):
+        """``y0`` with the condition's ``start`` written over it, gaining a
+        leading batch axis when the start is batched; ``members`` (from
+        :meth:`_member_draws`) selects which members run."""
+        if not condition.start:
+            return y0
+        n_batch = self._condition_batch(condition)
+        idx = None if not n_batch or not members else members.get(n_batch)
+        if n_batch:
+            rows = n_batch if idx is None else idx.shape[0]
+            y0 = jnp.broadcast_to(y0, (rows,) + tuple(y0.shape))
+        for path, value in condition.start.items():
+            value = jnp.asarray(value, dtype=y0.dtype)
+            if idx is not None and value.ndim > 0:
+                value = jnp.take(value, idx, axis=0)
+            y0 = y0.at[..., self._store_idx[path]].set(value)
+        return y0
+
+    def _member_draws(self, key) -> dict[int, jnp.ndarray] | None:
+        """One draw of ``member_batch`` member indices per distinct member
+        count among the conditions, so windows cut from the same
+        trajectories select the same ones; ``None`` when not minibatching."""
+        if self.member_batch is None or key is None:
+            return None
+        counts = sorted(
+            {self._condition_batch(c) for c in self.conditions.values()} - {0}
+        )
+        draws = {}
+        for n, sub in zip(counts, jax.random.split(key, max(1, len(counts)))):
+            draws[n] = jax.random.randint(
+                sub, (min(int(self.member_batch), n),), 0, n
+            )
+        return draws
+
+    def _observed_block(
+        self, arm: str, per_t: dict, times, n_batch: int, default: float
+    ) -> jnp.ndarray:
+        """One arm's values as ``(n_rep, n_t)``, or ``(n_rep, n_t, n_batch)``
+        for a batched condition: a DataFrame's rows are the members, a Series
+        is broadcast over them. ``default`` fills a reporter a timepoint does
+        not carry."""
+        import pandas as pd
+
+        cols = []
+        for t in times:
+            entry = per_t.get(t)
+            if isinstance(entry, pd.DataFrame):
+                if not n_batch:
+                    raise ValueError(
+                        f"data[{arm!r}][{t!r}] is a frame of members, but the "
+                        "arm's condition has no batched start"
+                    )
+                if len(entry) != n_batch:
+                    raise ValueError(
+                        f"data[{arm!r}][{t!r}] has {len(entry)} rows; the "
+                        f"condition's start has {n_batch} members"
+                    )
+                col = np.asarray(
+                    [
+                        (
+                            entry[r.gene_symbol].to_numpy(dtype=float)
+                            if r.gene_symbol in entry.columns
+                            else np.full(n_batch, default)
+                        )
+                        for r in self.reporters
+                    ]
+                )
+            else:
+                vals = np.asarray(
+                    [
+                        (
+                            float(entry.get(r.gene_symbol, default))
+                            if entry is not None
+                            else default
+                        )
+                        for r in self.reporters
+                    ]
+                )
+                col = (
+                    np.repeat(vals[:, None], n_batch, axis=1)
+                    if n_batch
+                    else vals
+                )
+            cols.append(col)
+        return jnp.asarray(np.stack(cols, axis=1), dtype=float)
 
     def _condition_composite(
         self, processes: dict, condition: Condition, registry=None
@@ -1570,6 +2054,7 @@ class CalibrationProblem:
         y0=None,
         registry=None,
         adjoint=None,
+        members=None,
     ):
         """Apply hallmarks + run Scheduler for one condition. Returns the
         full ``(ts, reporter_trajectories)`` — ``ts`` shape ``(n_save,)``
@@ -1587,17 +2072,20 @@ class CalibrationProblem:
         )
         if y0 is None:
             y0 = comp.initial_state_vec()
-        span = self.t_end - self.t_start
+        y0 = self._start_state(condition, y0, members)
+        t0, t1 = self._condition_window(condition)
+        span = t1 - t0
         save_dt = max(1e-6, span / max(1, self.n_save - 1))
         res = self._scheduler.run(
             comp,
-            t_span=(self.t_start, self.t_end),
-            macro_dt=self.macro_dt,
+            t_span=(t0, t1),
+            macro_dt=min(self.macro_dt, span),
             y0=y0,
             save_dt=save_dt,
             adjoint=adjoint,
         )
-        # res.ys is (n_save, ..., n_vars). Trailing-axis convention.
+        # res.ys is (n_save, ..., n_vars). Trailing-axis convention, so a
+        # batched condition reads as (n_reporters, n_save, n_batch).
         trajs = jnp.stack([res.ys[..., idx] for idx in self._reporter_indices])
         return res.ts, trajs
 
@@ -1611,14 +2099,23 @@ class CalibrationProblem:
         axis rides inside each summary as an array.
         """
         qt = jnp.atleast_1d(jnp.asarray(query_times))
+
+        def one(rep, y):
+            if jnp.ndim(y) == 2:  # (n_save, n_batch): a summary per member
+                return jax.vmap(
+                    lambda yy: jnp.atleast_1d(rep.summary(ts, yy, qt)),
+                    in_axes=1,
+                    out_axes=-1,
+                )(y)
+            return jnp.atleast_1d(rep.summary(ts, y, qt))
+
         return jnp.stack(
-            [
-                jnp.atleast_1d(rep.summary(ts, trajs[i], qt))
-                for i, rep in enumerate(self.reporters)
-            ]
+            [one(rep, trajs[i]) for i, rep in enumerate(self.reporters)]
         )
 
-    def _run_condition_set(self, param_values: dict, *, adjoint=None):
+    def _run_condition_set(
+        self, param_values: dict, *, adjoint=None, members=None
+    ):
         """Set up one evaluation over the condition set.
 
         Substitutes the fitted params, resolves the hallmark registry, and
@@ -1642,6 +2139,7 @@ class CalibrationProblem:
                     y0=y0,
                     registry=registry,
                     adjoint=adjoint,
+                    members=members,
                 )
             return cache[cond_name]
 
@@ -1705,12 +2203,17 @@ class CalibrationProblem:
         if a.reference is None:
             return arm_readout, None
         if a.reference == "t0":
-            if baseline is not None:
+            cond = self.conditions[a.condition]
+            if baseline is not None and not cond.start:
                 return arm_readout, jnp.broadcast_to(
                     baseline, arm_readout.shape
                 )
+            # A condition with its own start is read against that start,
+            # at its window's opening; otherwise at time 0, after any
+            # pre-roll.
+            t0 = self._condition_window(cond)[0] if cond.window else 0.0
             return arm_readout, self._reporter_summaries(
-                ts_c, trajs_c, jnp.zeros_like(qt)
+                ts_c, trajs_c, jnp.full_like(qt, t0)
             )
         ts_b, trajs_b = run_for(a.reference)
         return arm_readout, self._reporter_summaries(ts_b, trajs_b, qt)
@@ -1747,7 +2250,7 @@ class CalibrationProblem:
         )
 
     def data_loss(
-        self, param_values: dict[str, jnp.ndarray], arms: list[str]
+        self, param_values: dict[str, jnp.ndarray], arms: list[str], key=None
     ) -> jnp.ndarray:
         """Mean per-arm MSE of the sign-aligned log2 fold-change over ``arms``.
 
@@ -1760,7 +2263,12 @@ class CalibrationProblem:
         # read at each arm's measured timepoints — so a condition that is
         # both a condition and a reference in different arms still runs
         # once, and every timepoint reuses the same solve.
-        run_for, _, baseline = self._run_condition_set(param_values)
+        if not arms:
+            return jnp.asarray(0.0)
+        members = self._member_draws(key)
+        run_for, _, baseline = self._run_condition_set(
+            param_values, members=members
+        )
 
         # One arm loss = mean squared error over the whole (reporter ×
         # timepoint) block: the model fits the *trajectory* of the log2
@@ -1778,15 +2286,77 @@ class CalibrationProblem:
             # reporter then weighs by its O(1) log ratio regardless of the
             # observable's absolute scale. Without one it compares values in
             # the data's units.
-            delta_data = self._arm_data_matrix[arm]  # (n_rep, n_t)
-            weight = self._arm_weight_matrix[arm]  # (n_rep, n_t)
+            delta_data = self._arm_data_matrix[arm]  # (n_rep, n_t[, n_b])
+            weight = self._arm_weight_matrix[arm]
+            if members and jnp.ndim(delta_data) == 3:
+                idx = members.get(delta_data.shape[-1])
+                if idx is not None:
+                    delta_data = jnp.take(delta_data, idx, axis=-1)
+                    weight = jnp.take(weight, idx, axis=-1)
             arm_losses.append(self.likelihood(lfc_sim, delta_data, weight))
         return jnp.mean(jnp.stack(arm_losses))
 
-    def loss(self, param_values: dict[str, jnp.ndarray]) -> jnp.ndarray:
-        return self.data_loss(
-            param_values, self.fit_arms
+    def collocation_loss(
+        self, param_values: dict[str, jnp.ndarray], key=None
+    ) -> jnp.ndarray:
+        """Mean squared residual of the composite's field at the observed
+        states against their finite-difference slopes, on the collocation's
+        matched paths, each scaled by that slope's spread. No solve, so it is
+        cheap and free of phase drift: a pretraining stage on its own, or the
+        physics term :meth:`loss` adds at the collocation's ``weight``.
+        ``key`` draws the collocation's ``batch`` of samples; without one
+        every sample is used."""
+        c = self.collocation
+        if c is None:
+            raise ValueError("the problem was built without a collocation")
+        substituted = self._substitute(self.composite.processes, param_values)
+        registry = self._registry(param_values)
+        y0, _ = self._equilibrate(substituted, registry=registry)
+        cond = self.conditions[
+            (
+                c.condition
+                if c.condition is not None
+                else next(iter(self.conditions))
+            )
+        ]
+        comp = self._condition_composite(substituted, cond, registry=registry)
+        rhs, _ = comp.build_rhs()
+        times, obs, slopes = (
+            self._colloc_times,
+            self._colloc_states,
+            self._colloc_slopes,
+        )
+        if c.batch is not None and key is not None:
+            # With replacement: a draw without one permutes every sample
+            # (140 ms at 4e5 samples) for a duplicate rate of batch/n.
+            idx = jax.random.randint(
+                key, (min(int(c.batch), obs.shape[0]),), 0, obs.shape[0]
+            )
+            times, obs, slopes = times[idx], obs[idx], slopes[idx]
+        n = obs.shape[0]
+        states = jnp.broadcast_to(y0, (n,) + tuple(y0.shape))
+        states = states.at[:, self._colloc_idx].set(obs)
+        field = jax.vmap(rhs)(times, states)[:, self._colloc_out]
+        resid = (field - slopes) / self._colloc_scale
+        return jnp.mean(resid**2)
+
+    def loss(
+        self, param_values: dict[str, jnp.ndarray], key=None
+    ) -> jnp.ndarray:
+        """The objective: the data term over the fit arms, the prior
+        penalty, and the collocation term at its weight. ``key`` reaches the
+        member and collocation minibatch draws."""
+        k_data = k_colloc = None
+        if key is not None:
+            k_data, k_colloc = jax.random.split(key)
+        total = self.data_loss(
+            param_values, self.fit_arms, k_data
         ) + self._prior_penalty(param_values)
+        if self.collocation is not None and self.collocation.weight:
+            total = total + self.collocation.weight * self.collocation_loss(
+                param_values, k_colloc
+            )
+        return total
 
     def prior_report(self, fisher_diag: dict | None = None) -> list[dict]:
         """How much of each parameter's posterior precision its prior supplies.
@@ -1937,6 +2507,8 @@ class CalibrationProblem:
         """
         from hallsim.identifiability import identifiability_report
 
+        if not self.scalar_refs:
+            return
         report = identifiability_report(self)
         self._warn_inoperative_priors(report.fisher_diag)
         cond = report.condition_number
@@ -2035,13 +2607,19 @@ class CalibrationProblem:
             return
         substituted = self._substitute(self.composite.processes, param_values)
         registry = self._registry(param_values)
-        any_cond = next(iter(self.conditions.values()))
-        comp = self._condition_composite(
-            substituted, any_cond, registry=registry
-        )
-        self._scheduler.warm_up(
-            comp, (self.t_start, self.t_end), macro_dt=self.macro_dt
-        )
+        # The verdict is cached per span and macro step, so every distinct
+        # window among the conditions is resolved once.
+        seen: set = set()
+        for cond in self.conditions.values():
+            t0, t1 = self._condition_window(cond)
+            macro = min(self.macro_dt, t1 - t0)
+            if (t0, t1, macro) in seen:
+                continue
+            seen.add((t0, t1, macro))
+            comp = self._condition_composite(
+                substituted, cond, registry=registry
+            )
+            self._scheduler.warm_up(comp, (t0, t1), macro_dt=macro)
         # Conservation laws (structural) are computed eagerly here — they can't
         # be recovered from tracers once the loss is under autodiff.
         if self.equilibrate and self._laws is None:
@@ -2082,6 +2660,13 @@ class CalibrationProblem:
         """
         if not allow_unidentifiable:
             self._require_identifiable()
+        if self._learned and mode != "reverse":
+            log.info(
+                "mode=%r replaced by 'reverse': a learned block's gradient "
+                "is one VJP, where forward mode costs a solve per weight.",
+                mode,
+            )
+            mode = "reverse"
         init = self.initial_params()
         clamps = {
             k: p.clamp
@@ -2103,7 +2688,9 @@ class CalibrationProblem:
         cal = Calibrator(
             loss_fn=self.loss,
             init_params=init,
-            log_params=True,  # every fittable here is a positive constant
+            # Every scalar fittable is a positive constant; a learned block
+            # stays in linear space.
+            log_params=[k for k in init if k not in self._learned],
             clamps=clamps or None,
             val_loss_fn=val_loss_fn,
             mode=mode,
@@ -2121,12 +2708,12 @@ class CalibrationProblem:
                 "validation_arms": list(validation_arms or []),
                 "identifiability": identifiability,
                 "allow_unidentifiable": allow_unidentifiable,
-                "log_params": True,
+                "log_params": [k for k in init if k not in self._learned],
                 "clamps": clamps,
                 **calibrator_kwargs,
             }
         )
-        if identifiability:
+        if identifiability and self.scalar_refs:
             # Post-fit local identifiability at the optimum — a warn-by-default
             # diagnostic (like the composite's validation layer), never blocks.
             # Lazy import: identifiability imports from this module.
@@ -2158,6 +2745,8 @@ class CalibrationProblem:
         wall-time is faster (no forward-mode unfold). Each condition is
         solved once and read at every measured timepoint.
         """
+        import pandas as pd
+
         from hallsim.gene_reporters import compute_concordance
 
         # Default adjoint (no forward-mode unfold): evaluate is not
@@ -2183,15 +2772,22 @@ class CalibrationProblem:
                 lfc = jnp.log2(jnp.maximum(arm_readout, eps)) - jnp.log2(
                     jnp.maximum(ref_readout, eps)
                 )  # (n_rep, n_t), unsigned; compute_concordance applies sign
+            if jnp.ndim(lfc) == 3:
+                # A batched condition: the concordance table reads the
+                # member mean, model and data alike.
+                lfc = jnp.mean(lfc, axis=-1)
             per_t: dict[float, Any] = {}
             for j, t in enumerate(times):
                 delta_sim_named = {
                     r.observable: float(lfc[i, j])
                     for i, r in enumerate(self.reporters)
                 }
+                observed = self.data[arm][t]
+                if isinstance(observed, pd.DataFrame):
+                    observed = observed.mean(axis=0)
                 per_t[float(t)] = compute_concordance(
                     delta_observables=delta_sim_named,
-                    delta_gene_expression=self.data[arm][t],
+                    delta_gene_expression=observed,
                     condition_name=f"{arm}@t{float(t):g}",
                     reporters=self.reporters,
                 )
@@ -2216,18 +2812,18 @@ class CalibrationProblem:
         registry = self._registry(param_values)
         y0, _ = self._equilibrate(substituted, registry=registry)
         n = n_save if n_save is not None else self.n_save
-        save_dt = max(1e-6, (self.t_end - self.t_start) / max(1, n - 1))
         results: dict = {}
         for cond_name, cond in self.conditions.items():
             comp = self._condition_composite(
                 substituted, cond, registry=registry
             )
+            t0, t1 = self._condition_window(cond)
             results[cond_name] = self._scheduler.run(
                 comp,
-                t_span=(self.t_start, self.t_end),
-                macro_dt=self.macro_dt,
-                y0=y0,
-                save_dt=save_dt,
+                t_span=(t0, t1),
+                macro_dt=min(self.macro_dt, t1 - t0),
+                y0=self._start_state(cond, y0),
+                save_dt=max(1e-6, (t1 - t0) / max(1, n - 1)),
                 antialias=antialias,
             )
         return results

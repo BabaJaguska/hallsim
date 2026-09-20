@@ -168,11 +168,11 @@ class TestNeuralODEProcess:
 
 @pytest.mark.slow
 def test_shooting_stabilizer_knobs_run_and_stay_finite():
-    """Multiple shooting, curriculum, collocation, and continuity each run and
-    combine, producing a finite field. Guards the shape handling of the new
-    code paths (curriculum's growing match window, per-segment vmap, the
-    physics and continuity terms). The anti-collapse behavior itself is a
-    property of delicate oscillators (verified on GZ06 in the hybrid demo)."""
+    """Multiple shooting, curriculum, collocation and soft-DTW each run and
+    combine, producing a finite field. Guards the wiring of each stage into
+    the calibrator (windows as batched conditions, the physics term, the
+    DTW likelihood). The anti-collapse behavior itself is a property of
+    delicate oscillators (verified on GZ06 in the hybrid demo)."""
     import jax
     from hallsim.models.neuralode import (
         simulate_conditioned,
@@ -196,13 +196,8 @@ def test_shooting_stabilizer_knobs_run_and_stay_finite():
         dict(segments=6),
         dict(segments=6, curriculum=3),
         dict(segments=6, physics_weight=10.0),
-        dict(segments=6, continuity_weight=1.0),
-        dict(
-            segments=6,
-            curriculum=3,
-            physics_weight=10.0,
-            continuity_weight=1.0,
-        ),
+        dict(segments=6, dtw_weight=0.5),
+        dict(segments=6, curriculum=3, physics_weight=10.0),
     ]
     for kw in combos:
         proc = fit_neuralode_shooting(
@@ -211,12 +206,11 @@ def test_shooting_stabilizer_knobs_run_and_stay_finite():
             fields=("x", "y"),
             width=32,
             depth=1,
-            steps=20,
-            batch_size=8,
+            steps=6,
             **kw,
         )
-        d = proc.derivative(0.0, {"x": jnp.array(0.5), "y": jnp.array(0.5)})
-        assert jnp.isfinite(d["x"]) and jnp.isfinite(d["y"]), kw
+        d = proc.derivative(0.0, {"state": jnp.array([0.5, 0.5])})["state"]
+        assert jnp.all(jnp.isfinite(d)), kw
 
 
 # ── Hallmark Handles ────────────────────────────────────────────────────
