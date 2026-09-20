@@ -720,13 +720,13 @@ def fig_temporal(args):
         n = len(genes)
         ncol = 3
         nrow = -(-n // ncol)  # ceil
-        # model_lfc reproduces exactly what the loss fits: within-arm
+        # model_readout reproduces exactly what the loss fits: within-arm
         # (X_t/X_0) fold change. Start at t>0: at exactly t=0 a window-mean
         # reporter reads a zero-width window (→0, log2 floors), a plotting-only
         # degeneracy; the fold-change is 0 as t→0⁺ by construction.
         qt = np.arange(0.1, t_end + 1e-6, 0.1)
-        lfc_oob = np.asarray(problem.model_lfc(init, arm, jnp.asarray(qt)))
-        lfc_fit = np.asarray(problem.model_lfc(fit, arm, jnp.asarray(qt)))
+        lfc_oob = np.asarray(problem.model_readout(init, arm, jnp.asarray(qt)))
+        lfc_fit = np.asarray(problem.model_readout(fit, arm, jnp.asarray(qt)))
         fig, axes = plt.subplots(
             nrow, ncol, figsize=(11, 3.2 * nrow), sharex=True, squeeze=False
         )
@@ -913,11 +913,11 @@ def fig_temporal_compare(args):
     fit = {k: jnp.asarray(v) for k, v in load_fit().items()}
     genes = [r.gene_symbol for r in problem.reporters]
     lfc_fit = {
-        arm: np.asarray(problem.model_lfc(fit, arm, jnp.asarray(qt)))
+        arm: np.asarray(problem.model_readout(fit, arm, jnp.asarray(qt)))
         for arm in arms
     }
     lfc_oob = {
-        arm: np.asarray(problem.model_lfc(init, arm, jnp.asarray(qt)))
+        arm: np.asarray(problem.model_readout(init, arm, jnp.asarray(qt)))
         for arm in arms
     }
     # Reporters of reaction-level members come from a population on the
@@ -1576,7 +1576,9 @@ def fig_coupling_ablation(args):
             measured = np.array([problem.data[arm][day][g] for g in genes])
             scores = []
             for pr in (problem, null):
-                sim = np.asarray(pr.model_lfc(fitted, arm, qt), float)[:, j]
+                sim = np.asarray(pr.model_readout(fitted, arm, qt), float)[
+                    :, j
+                ]
                 scores.append(
                     (
                         float(spearmanr(sim, measured).statistic),
@@ -1742,7 +1744,7 @@ def fig_proteostasis_population(args):
     for arm in arms:
         days = sorted(float(t) for t in problem.data[arm])
         mean_field = np.asarray(
-            problem.model_lfc(params, arm, jnp.asarray(days))
+            problem.model_readout(params, arm, jnp.asarray(days))
         )[rep_idx]
         cells, pooled = _population_lfc(
             problem, params, arm, days, n_cells, seed

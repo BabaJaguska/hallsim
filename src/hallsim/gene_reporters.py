@@ -355,6 +355,9 @@ class GeneReporter:
     description: str = ""
     reference: str = ""
     summary: Callable[[Any], Any] = field(default=last_value)
+    #: Model units to data units, used only by an arm with no reference; a
+    #: fold change cancels it. A fixed conversion, never fitted here.
+    scale: float = 1.0
 
 
 def oscillating_reporter(
@@ -601,7 +604,7 @@ PROTEOSTASIS_REPORTERS: list[GeneReporter] = [
 #: with no aggregates and accumulates them without clearance, so against a
 #: day-0 reference the transcript would read the model's own filling of an
 #: empty pool (+1.7 log2 in every arm), not a response. Usable with a
-#: time-matched control ("paired" normalization) or an aged starting state.
+#: time-matched control (an arm referencing it) or an aged starting state.
 SQSTM1_REPORTER = GeneReporter(
     observable="p07/aggregates",
     gene_symbol="SQSTM1",
@@ -1086,49 +1089,44 @@ class GeneExpressionDataset:
     def arm_deltas(
         self,
         samples: dict[str, dict[float, str]],
-        normalization: str,
-        arm_pairs: dict[str, tuple[str, str]] | None = None,
-        arm_conditions: dict[str, str] | None = None,
+        arms: dict,
     ) -> dict[str, dict[float, pd.Series]]:
-        """Δ_data time courses whose reference matches ``normalization``.
+        """Log2 fold-change time courses whose reference matches each arm's.
 
         ``samples`` names the sample group for each arm at each day, e.g.
-        ``{"DDIS_vs_ctrl": {0.0: "ETOPOSIDE_D00", 7.0: "ETOPOSIDE_D07"}}``.
-        The reference is then chosen, not hand-paired:
-
-        ``baseline`` divides each arm by its own day-0 group; ``paired``
-        divides by the arm's reference condition at the *same* day, taken from
-        ``arm_pairs`` and mapped back to an arm through ``arm_conditions``.
-        Day 0 is the reference under ``baseline`` and carries no data point.
+        ``{"DDIS_vs_ctrl": {0.0: "ETOPOSIDE_D00", 7.0: "ETOPOSIDE_D07"}}``;
+        ``arms`` is the ``{name: Arm}`` the calibration problem takes, so the
+        data contrast tracks the model's. An arm read against its own start
+        is divided by its day-0 group, which then carries no data point; an
+        arm read against another condition is divided by that condition's
+        arm at the same day. An arm with no reference is not a fold change
+        and is not built here.
         """
-        if normalization not in ("baseline", "paired"):
-            raise ValueError(
-                f"arm_deltas supports 'baseline' and 'paired'; got "
-                f"{normalization!r}"
-            )
-        arm_of_condition = {
-            cond: arm for arm, cond in (arm_conditions or {}).items()
-        }
+        arm_of_condition = {a.condition: name for name, a in arms.items()}
         out: dict[str, dict[float, pd.Series]] = {}
         for arm, by_day in samples.items():
-            if normalization == "baseline":
+            reference = arms[arm].reference
+            if reference is None:
+                raise ValueError(
+                    f"arm {arm!r} has no reference, so its data are values, "
+                    "not fold changes; read them from the sample groups "
+                    "directly."
+                )
+            if reference == "t0":
                 if 0.0 not in by_day:
                     raise ValueError(
-                        f"arm {arm!r} has no day-0 group, which "
-                        f"normalization='baseline' divides by. Give it one, "
-                        f"or use normalization='paired'."
+                        f"arm {arm!r} reads against its own start but has "
+                        "no day-0 group. Give it one, or reference another "
+                        "condition."
                     )
                 ref_for = {t: by_day[0.0] for t in by_day}
             else:
-                _, base_cond = (arm_pairs or {}).get(arm, (None, None))
-                base_arm = arm_of_condition.get(base_cond)
+                base_arm = arm_of_condition.get(reference)
                 if base_arm is None or base_arm not in samples:
                     raise ValueError(
-                        f"normalization='paired' needs a reference arm for "
-                        f"{arm!r}: arm_pairs names condition "
-                        f"{base_cond!r}, which no arm in `samples` supplies. "
-                        f"A single-arm dataset cannot be paired — use "
-                        f"normalization='baseline'."
+                        f"arm {arm!r} references condition {reference!r}, "
+                        "which no arm in `samples` supplies. A single-arm "
+                        "dataset reads against its own start."
                     )
                 ref_for = {
                     t: samples[base_arm][t]
@@ -1138,8 +1136,7 @@ class GeneExpressionDataset:
             out[arm] = {
                 t: self.delta(by_day[t], ref_for[t])
                 for t in sorted(by_day)
-                if t in ref_for
-                and not (normalization == "baseline" and t == 0.0)
+                if t in ref_for and not (reference == "t0" and t == 0.0)
             }
         return out
 

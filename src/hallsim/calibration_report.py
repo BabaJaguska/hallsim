@@ -118,7 +118,10 @@ def save_outputs(
             }
             for name, c in problem.conditions.items()
         },
-        "arm_pairs": dict(problem.arm_pairs),
+        "arms": {
+            name: {"condition": a.condition, "reference": a.reference}
+            for name, a in problem.arms.items()
+        },
         # Which composite this fit was run on, so a consumer scores it on
         # the same one rather than on whatever a flag re-describes.
         "processes": sorted(problem.composite.processes),

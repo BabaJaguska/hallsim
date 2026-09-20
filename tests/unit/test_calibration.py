@@ -200,39 +200,39 @@ class TestCalibrationProblemValidation:
             "ctrl": Condition("ctrl", {}),
             "DDIS": Condition("DDIS", {}),
         }
-        arm_pairs = {"DDIS_vs_ctrl": ("DDIS", "ctrl")}
+        arms = {"DDIS_vs_ctrl": "DDIS"}
         data = {"DDIS_vs_ctrl": pd.Series({"GENE_X": -0.5})}
         params = {
             "rate": ParameterRef(process_name="decay", field="rate"),
         }
-        return comp, reporters, conditions, data, arm_pairs, params
+        return comp, reporters, conditions, data, arms, params
 
-    def test_arm_pairs_reference_unknown_condition_raises(self):
-        from hallsim.calibration import CalibrationProblem
+    def test_arm_reference_unknown_condition_raises(self):
+        from hallsim.calibration import Arm, CalibrationProblem
 
-        comp, reporters, conds, data, arm_pairs, params = self._toy_setup()
+        comp, reporters, conds, data, arms, params = self._toy_setup()
         with pytest.raises(KeyError, match="unknown condition"):
             CalibrationProblem(
                 composite=comp,
                 reporters=reporters,
                 conditions=conds,
                 data=data,
-                arm_pairs={"bad": ("DDIS", "NONEXISTENT")},
+                arms={"bad": Arm("DDIS", reference="NONEXISTENT")},
                 params=params,
                 fit_arms=[],
             )
 
-    def test_fit_arms_must_be_in_arm_pairs(self):
+    def test_fit_arms_must_be_in_arms(self):
         from hallsim.calibration import CalibrationProblem
 
-        comp, reporters, conds, data, arm_pairs, params = self._toy_setup()
-        with pytest.raises(KeyError, match="not in arm_pairs"):
+        comp, reporters, conds, data, arms, params = self._toy_setup()
+        with pytest.raises(KeyError, match="not in arms"):
             CalibrationProblem(
                 composite=comp,
                 reporters=reporters,
                 conditions=conds,
                 data=data,
-                arm_pairs=arm_pairs,
+                arms=arms,
                 params=params,
                 fit_arms=["NONEXISTENT"],
             )
@@ -290,7 +290,7 @@ class TestCalibrationProblemValidation:
                 ],
                 conditions={"a": Condition("a", {})},
                 data={"a_vs_a": pd.Series({"GX": 0.0})},
-                arm_pairs={"a_vs_a": ("a", "a")},
+                arms={"a_vs_a": "a"},
                 params={
                     "dial": ParameterRef(process_name="k", field="knob"),
                 },
@@ -350,7 +350,7 @@ class TestCalibrationProblemValidation:
             reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
             conditions={"a": Condition("a", {})},
             data={"a_vs_a": pd.Series({"GX": 0.0})},
-            arm_pairs={"a_vs_a": ("a", "a")},
+            arms={"a_vs_a": "a"},
             params={
                 "magnitude": ParameterRef(process_name="k", field="knob"),
             },
@@ -364,14 +364,14 @@ class TestCalibrationProblemValidation:
             ParameterRef,
         )
 
-        comp, reporters, conds, data, arm_pairs, _params = self._toy_setup()
+        comp, reporters, conds, data, arms, _params = self._toy_setup()
         with pytest.raises(KeyError, match="not in composite.processes"):
             CalibrationProblem(
                 composite=comp,
                 reporters=reporters,
                 conditions=conds,
                 data=data,
-                arm_pairs=arm_pairs,
+                arms=arms,
                 params={
                     "bad": ParameterRef(
                         process_name="nonexistent",
@@ -438,7 +438,7 @@ class TestCalibrationProblemEndToEnd:
             data={
                 "high_vs_ctrl": pd.Series({"GENE_X": -0.5, "GENE_Y": +0.5}),
             },
-            arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
+            arms={"high_vs_ctrl": "high"},
             params={
                 "rate": ParameterRef(
                     process_name="decay",
@@ -524,7 +524,7 @@ class TestCalibrationProblemEndToEnd:
                     5.0: pd.Series({"GENE_X": -0.5}),
                 },
             },
-            arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
+            arms={"high_vs_ctrl": "high"},
             params={
                 "rate": ParameterRef(process_name="decay", field="rate"),
             },
@@ -584,7 +584,7 @@ class TestParameterOverrides:
                 "high": Condition("high", {}),
             },
             data={"high_vs_ctrl": pd.Series({"GENE_X": -0.5})},
-            arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
+            arms={"high_vs_ctrl": "high"},
             params={"rate": ParameterRef(process_name="decay", field="rate")},
             fit_arms=["high_vs_ctrl"],
             t_end=5.0,
@@ -678,14 +678,16 @@ class TestParameterOverrides:
         assert not jnp.allclose(base, edited)
 
 
-class TestNormalizationModes:
-    """The three loss-reference modes: baseline (X_t/X_0), paired
-    (X_cond,t/X_base,t), raw (X_t, no reference)."""
+class TestArmReferences:
+    """An arm reads against its own start (X_t/X_0), another condition at
+    the matched time (X_cond,t/X_ref,t), or nothing (the value itself, in
+    the data's units through the reporter's scale)."""
 
-    def _problem(self, normalization):
+    def _problem(self, reference, scale=1.0):
         import pandas as pd
 
         from hallsim.calibration import (
+            Arm,
             CalibrationProblem,
             Condition,
             ParameterRef,
@@ -713,7 +715,11 @@ class TestNormalizationModes:
             validate=False,
             semantic_validation=False,
         )
-        reporters = [GeneReporter(observable="pool/x", gene_symbol="GENE_X")]
+        reporters = [
+            GeneReporter(
+                observable="pool/x", gene_symbol="GENE_X", scale=scale
+            )
+        ]
         return CalibrationProblem(
             composite=comp,
             reporters=reporters,
@@ -722,30 +728,48 @@ class TestNormalizationModes:
                 "high": Condition("high", {}),
             },
             data={"high_vs_ctrl": {5.0: pd.Series({"GENE_X": -0.5})}},
-            arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
+            arms={"high_vs_ctrl": Arm("high", reference=reference)},
             params={"rate": ParameterRef(process_name="decay", field="rate")},
             fit_arms=["high_vs_ctrl"],
-            normalization=normalization,
             t_end=5.0,
             macro_dt=1.0,
             n_save=6,
         )
 
-    def test_modes_are_distinct(self):
-        # ctrl and high share dynamics (no hallmarks), so paired's ratio is
-        # exactly 1 (lfc 0) while baseline (÷ t=0) and raw (no ÷) are not — the
-        # three branches must produce different losses.
+    def test_references_are_distinct(self):
+        # ctrl and high share dynamics (no hallmarks), so the contrast
+        # against ctrl is exactly 1 (readout 0) while own-start (÷ t=0) and
+        # no reference are not — the three must produce different losses.
         p = {"rate": jnp.asarray(0.2)}
         vals = {
-            m: float(self._problem(m).loss(p))
-            for m in ("baseline", "paired", "raw")
+            ref: float(self._problem(ref).loss(p))
+            for ref in ("t0", "ctrl", None)
         }
-        assert vals["paired"] != vals["baseline"]
-        assert vals["paired"] != vals["raw"]
-        assert vals["baseline"] != vals["raw"]
+        assert vals["ctrl"] != vals["t0"]
+        assert vals["ctrl"] != vals[None]
+        assert vals["t0"] != vals[None]
 
-    def test_invalid_mode_rejected(self):
-        with pytest.raises(ValueError, match="normalization must be"):
+    def test_no_reference_is_the_value_through_the_scale(self):
+        import numpy as np
+
+        p = {"rate": jnp.asarray(0.2)}
+        # x(0) = 2 decaying at 0.2: the value at t = 5 is 2e^-1, and with no
+        # reference the readout is that value times the reporter's scale.
+        one = self._problem(None).model_readout(p, "high_vs_ctrl", [5.0])
+        two = self._problem(None, scale=2.0).model_readout(
+            p, "high_vs_ctrl", [5.0]
+        )
+        assert float(one[0, 0]) == pytest.approx(2 * np.exp(-1.0), rel=1e-3)
+        assert float(two[0, 0]) == pytest.approx(2 * float(one[0, 0]))
+        assert self._problem(None).arm_pairs == {
+            "high_vs_ctrl": ("high", "high")
+        }
+        assert self._problem("ctrl").arm_pairs == {
+            "high_vs_ctrl": ("high", "ctrl")
+        }
+
+    def test_unknown_reference_rejected(self):
+        with pytest.raises(KeyError, match="unknown condition"):
             self._problem("cross_arm")
 
 
@@ -816,10 +840,9 @@ class TestEquilibrationBaselineMatchesReadout:
             reporters=reporters,
             conditions=conditions,
             data=data,
-            arm_pairs={"DDIS_vs_ctrl": ("DDIS", "ctrl")},
+            arms={"DDIS_vs_ctrl": "DDIS"},
             params={"k": ParameterRef(process_name="sp", field="k")},
             fit_arms=["DDIS_vs_ctrl"],
-            normalization="baseline",
             equilibrate=True,
             equilibration_condition="ctrl",
             t_end=30.0,
@@ -884,7 +907,7 @@ class TestPriorStrength:
             reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
             conditions={"a": Condition("a", {})},
             data={"a_vs_a": pd.Series({"GX": 0.0})},
-            arm_pairs={"a_vs_a": ("a", "a")},
+            arms={"a_vs_a": "a"},
             params={
                 "knob": ParameterRef(
                     process_name="k",
@@ -960,7 +983,7 @@ class TestStartingValueComesFromTheModel:
             ],
             conditions={"ctrl": Condition("ctrl", {})},
             data={"ctrl_vs_ctrl": pd.Series({"GX": 0.0})},
-            arm_pairs={"ctrl_vs_ctrl": ("ctrl", "ctrl")},
+            arms={"ctrl_vs_ctrl": "ctrl"},
             params={"rate": ParameterRef(process_name="decay", field="rate")},
             fit_arms=["ctrl_vs_ctrl"],
         )

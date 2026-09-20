@@ -49,7 +49,7 @@ a window's worth of lag.
 for wiring any composite to any held-out gene-expression dataset:
 
 ```python
-from hallsim.calibration import CalibrationProblem, Condition, ParameterRef
+from hallsim.calibration import Arm, CalibrationProblem, Condition, ParameterRef
 from hallsim.gene_reporters import GeneExpressionDataset, MULTI_HALLMARK_REPORTERS
 from demos.models.hallmarks import HALLMARK_REGISTRY
 from demos.models.multi_hallmark import build_multi_hallmark_composite
@@ -79,8 +79,10 @@ problem = CalibrationProblem(
         "RAPA": Condition("RAPA", {"Genomic Instability": 1.0,
                                    "Deregulated Nutrient Sensing": -1.0}),
     },
-    arm_pairs={"DDIS_vs_ctrl": ("DDIS", "ctrl"),
-               "RAPA_vs_ctrl": ("RAPA", "DDIS")},
+    # Each arm reads against a reference: its own day 0 (the default), another
+    # condition at the matched time, or None for values in the data's units.
+    # A single arm needs no pair.
+    arms={"DDIS_vs_ctrl": Arm("DDIS"), "RAPA_vs_ctrl": Arm("RAPA")},
     # Trajectory-native: each arm is a {day: Δlog2FC} time course (model time
     # units). A plain `ds.delta(...)` Series is the degenerate single-point
     # case, auto-normalized to {t_end: series}.
@@ -227,12 +229,15 @@ gradient for it.
 
 ### Loss
 
-MSE on **log2 fold-change**: the model emits `sign · (log2 cond − log2 base)`
-per reporter, compared to the measured log2 fold-change. Because the data is
-already a log ratio, the two are commensurable and every reporter contributes
-its O(1) fold-change regardless of the observable's absolute scale (a 1e-4
-pool and a 1e1 pool weigh equally — a plain mean or unit-norm loss lets the
-big reporters dominate and makes small ones invisible).
+MSE on each arm's readout against its data. With a reference the model emits
+`sign · (log2 cond − log2 ref)` per reporter, compared to the measured log2
+fold-change: the two are commensurable and every reporter contributes its
+O(1) fold-change regardless of the observable's absolute scale (a 1e-4 pool
+and a 1e1 pool weigh equally — a plain mean or unit-norm loss lets the big
+reporters dominate and makes small ones invisible). An arm with no reference
+compares the summary itself, in the data's units through the reporter's
+`scale`, which is what a simulator-generated trajectory or a state measured
+in the model's units needs.
 
 **Trajectory, not endpoint.** The loss fits the fold-change *time course*: it
 sums one MSE term per `(arm, timepoint)`, reading each reporter at every
@@ -295,9 +300,9 @@ mechanism parameters spread across independently-published SBML models.
    `(model − data)²` over `(reporter × timepoint)`, plus the MAP prior penalty.
 
 Every step — including the solve — has a VJP, so `loss: θ ↦ ℝ` is
-differentiable. The data is a handful of fold-change points per arm, not a
-dense trajectory: the loss reads the model *at those query days* (via the
-interpolating summaries) and compares fold-changes, not raw trajectories.
+differentiable. The loss reads the model *at the measured times* (via the
+interpolating summaries), three points per arm or three hundred, and
+compares each arm's readout in its own terms.
 
 ### Backward — reverse-mode through the solve
 

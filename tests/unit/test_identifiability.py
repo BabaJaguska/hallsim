@@ -109,7 +109,7 @@ def _toy_problem():
         ],
         conditions={"ctrl": Condition("ctrl", {}), "hi": Condition("hi", {})},
         data={"hi_vs_ctrl": pd.Series({"GX": -0.5, "GY": +0.5})},
-        arm_pairs={"hi_vs_ctrl": ("hi", "ctrl")},
+        arms={"hi_vs_ctrl": "hi"},
         params={
             "rate": ParameterRef(
                 process_name="decay", field="rate", clamp=(1e-3, 5.0)
@@ -303,7 +303,7 @@ class TestStructuralRedundancy:
                     "high": Condition("high", {}),
                 },
                 data={"high_vs_ctrl": pd.Series({"GENE_X": -0.5})},
-                arm_pairs={"high_vs_ctrl": ("high", "ctrl")},
+                arms={"high_vs_ctrl": "high"},
                 params={
                     "k1": ParameterRef(process_name="h1", field="k_clamp"),
                     "k2": ParameterRef(process_name="h2", field="k_clamp"),

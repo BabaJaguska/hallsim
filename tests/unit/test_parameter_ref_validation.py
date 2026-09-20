@@ -37,7 +37,7 @@ def _problem(field):
         reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
         conditions={"a": Condition("a", {}), "b": Condition("b", {})},
         data={"b_vs_a": pd.Series({"GX": 0.0})},
-        arm_pairs={"b_vs_a": ("a", "b")},
+        arms={"b_vs_a": "a"},
         params={"p": ParameterRef(process_name="g", field=field)},
         fit_arms=["b_vs_a"],
     )
@@ -80,7 +80,7 @@ def test_a_compartment_size_of_an_imported_model_is_refused():
             ],
             conditions={"a": Condition("a", {}), "b": Condition("b", {})},
             data={"b_vs_a": pd.Series({"CDKN1A": 0.0})},
-            arm_pairs={"b_vs_a": ("a", "b")},
+            arms={"b_vs_a": "a"},
             params={"vol": ParameterRef("dp14", "parameters.Cell")},
             fit_arms=["b_vs_a"],
         )

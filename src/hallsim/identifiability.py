@@ -39,7 +39,7 @@ import numpy as np
 def _prediction_fn(problem, base_params: dict, names: list[str]):
     """Map a log10-parameter vector (in ``names`` order) to the concatenated
     reporter predictions over every fit arm — the residual vector the loss
-    squares, built from the same :meth:`CalibrationProblem.model_lfc`."""
+    squares, built from the same :meth:`CalibrationProblem.model_readout`."""
     arms = list(problem.fit_arms)
     qts = {a: jnp.asarray(sorted(problem.data[a]), dtype=float) for a in arms}
 
@@ -48,7 +48,7 @@ def _prediction_fn(problem, base_params: dict, names: list[str]):
         for i, n in enumerate(names):
             p[n] = 10.0 ** theta_log[i]
         return jnp.concatenate(
-            [problem.model_lfc(p, a, qts[a]).reshape(-1) for a in arms]
+            [problem.model_readout(p, a, qts[a]).reshape(-1) for a in arms]
         )
 
     return preds
@@ -97,7 +97,7 @@ def residual_scale(problem, params: dict, n_fitted: int | None = None):
     for arm in problem.fit_arms:
         times = sorted(problem.data[arm])
         sim = np.asarray(
-            problem.model_lfc(params, arm, jnp.asarray(times, dtype=float))
+            problem.model_readout(params, arm, jnp.asarray(times, dtype=float))
         )
         for i, rep in enumerate(problem.reporters):
             for j, t in enumerate(times):

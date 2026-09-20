@@ -41,6 +41,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from hallsim.process import read_param, split_param_address
 from hallsim.calibration import (  # noqa: E402
+    Arm,
     CalibrationProblem,
     Condition,
     ParameterRef,
@@ -137,15 +138,10 @@ ARMS = ["DDIS_vs_ctrl", "RAPA_vs_ctrl"]
 # GZ06 starts at p53 x=0; without this the day-0 reference sits in its startup.
 PREROLL_DAYS = 1.0
 
-# "baseline" = each arm vs its own day 0; "paired" = vs its reference arm at
-# the same day, which needs that arm to exist in the data.
-NORMALIZATION = "baseline"
-
-ARM_PAIRS = {
-    "DDIS_vs_ctrl": ("DDIS", "ctrl"),
-    "RAPA_vs_ctrl": ("RAPA", "DDIS"),
-}
-ARM_CONDITIONS = {arm: cond for arm, (cond, _) in ARM_PAIRS.items()}
+# Each arm reads against its own day 0; the rapamycin culture's day 0 is the
+# etoposide day 0, since the drug goes in on day 2.
+ARM_SPECS = {"DDIS_vs_ctrl": Arm("DDIS"), "RAPA_vs_ctrl": Arm("RAPA")}
+ARM_CONDITIONS = {arm: a.condition for arm, a in ARM_SPECS.items()}
 
 
 # What `calibrate` fits unless `--fit` names otherwise: one parameter on
@@ -368,8 +364,8 @@ def build_problem(
                 },
             ),
         },
-        # Samples per arm per day. `arm_deltas` picks the reference from
-        # NORMALIZATION, so the data contrast tracks the model's. The
+        # Samples per arm per day. `arm_deltas` takes each arm's reference
+        # from ARM_SPECS, so the data contrast tracks the model's. The
         # rapamycin culture's day-0 is the shared etoposide D00.
         # Empty when the dataset is absent: the composite, its conditions and
         # its reporters stand on their own, so everything except scoring works.
@@ -387,17 +383,14 @@ def build_problem(
                         14.0: "ETOPOSIDE_RAPA_D14",
                     },
                 },
-                NORMALIZATION,
-                arm_pairs=ARM_PAIRS,
-                arm_conditions=ARM_CONDITIONS,
+                ARM_SPECS,
             )
             if ds is not None
             else {a: {} for a in ARMS}
         ),
-        normalization=NORMALIZATION,
         equilibrate=equilibrate,
         equilibration_condition="ctrl",
-        arm_pairs=ARM_PAIRS,
+        arms=ARM_SPECS,
         params=params,
         notes={
             "dataset": "GSE248823 (bulk microarray, day 0/7/14, two replicates)",
@@ -760,7 +753,7 @@ def fig_oob_overview(
 ) -> None:
     """Per reporter, every arm's model trajectory (from ``params``) + its data —
     all conditions in one figure, so there is something to read while the fit
-    trains. Reuses the loss's own ``model_lfc`` (starts at t>0; the t=0
+    trains. Reuses the loss's own ``model_readout`` (starts at t>0; the t=0
     window-mean degeneracy is a plotting-only artifact)."""
     genes = [r.gene_symbol for r in problem.reporters]
     n, ncol = len(genes), 3
@@ -768,7 +761,7 @@ def fig_oob_overview(
     qt = np.arange(0.1, problem.t_end + 1e-6, 0.1)
     line_arms = list(_ARM_STYLE)
     lfc = {
-        a: np.asarray(problem.model_lfc(params, a, jnp.asarray(qt)))
+        a: np.asarray(problem.model_readout(params, a, jnp.asarray(qt)))
         for a in line_arms
     }
     fig, axes = plt.subplots(

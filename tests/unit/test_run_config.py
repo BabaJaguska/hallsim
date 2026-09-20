@@ -34,7 +34,7 @@ def _problem():
         reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
         conditions={"a": Condition("a", {}), "b": Condition("b", {})},
         data={"b_vs_a": pd.Series({"GX": -0.5})},
-        arm_pairs={"b_vs_a": ("a", "b")},
+        arms={"b_vs_a": "a"},
         params={"r": ParameterRef("d", "rate", prior=0.5, prior_sigma=0.5)},
         fit_arms=["b_vs_a"],
         t_end=2.0,

@@ -46,6 +46,66 @@ step is the prerequisite for the next.
   to measure how wrong the Laplace ellipse is on a real posterior. Not on a
   composite — one gradient is 26 s there, so a chain is ~40 days.
 
+### One calibration path for mechanism and learned components
+
+Agreed 2026-09-19. The paper says mechanistic and neural components are
+fitted jointly; the code has two training loops. `CalibrationProblem` fits
+named scalars in log space with priors, held-out arms, best-iterate
+tracking, checkpoints and the Fisher gate. The NeuralODE trainers in
+`hallsim.models.neuralode` run their own Adam loop and carry the three
+things the calibrator lacks: an objective over observed states, derivative
+matching without a solve, and multiple shooting with curriculum,
+continuity and soft-DTW. None of the three is neural, and P0.85 (the
+shooting fit returns its last iterate) is what a loop outside the
+calibrator costs. It is **one objective**: a reporter is a store path plus
+a summary plus a data key, and a trajectory observation is the same thing
+with the identity summary and the path as its key. The rest are options.
+
+Done: `Arm(condition, reference)`, reference `"t0"` | a condition | `None`,
+the last comparing values in the data's units through `GeneReporter.scale`
+(P3.24). Remaining, each additive:
+
+* [ ] **A condition with its own start state and window**, batched over
+  initial states through the scheduler's batch axis, beside the shared
+  equilibrated start every condition uses today.
+* [ ] **Shooting as generated conditions**: a helper turns a trajectory set
+  into windows that start from the observed state, with a continuity term
+  between a window's end and the next start, and a curriculum over which
+  windows are active. No new loss.
+* [ ] **A collocation term**: the composite's own field at observed states
+  against finite-difference slopes, as a pretraining stage or regularizer
+  (the physics-informed item below, for mechanism parameters too).
+* [ ] **A learned block as a parameter key**: its trainable partition as one
+  flat array, linear space, no prior, no clamp, excluded from the Fisher
+  report (capacity is judged on held-out trajectories), `mode="reverse"`
+  forced since forward mode costs one solve per weight. The calibrator is
+  unchanged; the problem unflattens in `_substitute`. Minibatches: the loss
+  takes a PRNG key the calibrator threads per step.
+* [ ] **The NeuralODE trainers become wrappers** over the above with their
+  signatures kept, which closes P0.85. Regression guard: the hybrid demo's
+  provenance records the held-out amplitude error across the alpha grid
+  and both Hopf points; run its stages before and after on one seed.
+
+Where a learned component belongs, in the order an agent meets it: a
+model that exists only as code (train on trajectories the original code
+produces, declare its ports with the original annotations; `discover`'s
+`source:matlab` candidates stop being dead ends); the coupling between
+published blocks, which is where the demo's four hand-anchored edges are;
+the readout from mechanistic state to the transcriptome; and a module with
+no published rate laws, the secretory response downstream of NF-κB. The
+§3.3 surrogate trained on the block it replaces is none of these, and the
+data an agent reaches for first, three timepoints of bulk arrays, cannot
+constrain a learned block, which the Fisher gate will say.
+
+jaxkineticmodel (PLOS Comput Biol 2025), checked from source: its package
+fits scalars in log2 space by masked MSE on states at the data's times,
+single shooting, last iterate returned, serial Latin-hypercube multi-start,
+no networks. Its hybrid example lives in a rebuttal script outside the
+package: an `eqx.nn.MLP` added to the whole vector field, kinetic
+parameters frozen, trajectory MSE with a negativity penalty, Adam with the
+global norm clipped at 1, trained on noisy trajectories simulated from the
+full model. The same two-loop split this section removes.
+
 ## Models & Validation
 
 * [ ] **`place_dose` — pick a stimulus level by measured contrast.** The

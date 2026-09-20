@@ -629,6 +629,22 @@ class Condition:
 
 
 @dataclass(frozen=True)
+class Arm:
+    """One comparison the loss fits: a condition read against a reference.
+
+    ``reference`` is ``"t0"`` (the default) for the arm's own start, giving
+    the fold change ``log2(X_t / X_0)`` a single time course supplies; the
+    name of another condition, read at the matched time, for a contrast
+    between arms; or ``None`` for no reference, in which case the value
+    itself is compared, in the data's units through each reporter's
+    ``scale``. A single arm therefore needs no pair.
+    """
+
+    condition: str
+    reference: str | None = "t0"
+
+
+@dataclass(frozen=True)
 class ParameterRef:
     """Declarative pointer to a fittable parameter inside a composite.
 
@@ -860,20 +876,19 @@ class CalibrationProblem:
     conditions:
         ``{arm_name: Condition}`` — severities applied per iteration.
     data:
-        ``{arm_pair_name: {timepoint: pd.Series}}``, each Series indexed by
-        gene symbol with a measured log2 fold-change. A plain Series is
-        accepted as the single-timepoint case. The loss sums one term per
-        (arm, timepoint), so the model fits the fold-change *trajectory*.
-    arm_pairs:
-        ``{arm_pair_name: (condition_name, baseline_name)}``.
+        ``{arm_name: {timepoint: pd.Series}}``, each Series indexed by gene
+        symbol with the measured value in the arm's terms: a log2 fold change
+        against the arm's reference, or the value itself for an arm with no
+        reference. A plain Series is accepted as the single-timepoint case.
+        The loss sums one term per (arm, timepoint), so the model fits the
+        *trajectory*.
+    arms:
+        ``{arm_name: Arm}``; a plain condition name stands for
+        ``Arm(name)``, read against its own start.
     params:
         ``{param_name: ParameterRef | HandleCoeffRef}``.
     fit_arms, held_out_arms:
-        Subsets of ``arm_pairs`` included in / excluded from the loss.
-    normalization:
-        What each reporter is compared against. ``"baseline"`` (default) — the
-        arm's own t=0 (supply ``data`` as log2(X_t/X_0)); ``"paired"`` — the
-        paired baseline at matched t; ``"raw"`` — no reference.
+        Subsets of ``arms`` included in / excluded from the loss.
     equilibrate:
         Start every arm from the shared pre-perturbation fixed point rather
         than ``initial_state_vec()``, so a fold-change is measured against the
@@ -901,11 +916,10 @@ class CalibrationProblem:
         reporters: list["GeneReporter"],
         conditions: dict[str, Condition],
         data: dict[str, "pd.Series"],
-        arm_pairs: dict[str, tuple[str, str]],
+        arms: dict[str, "Arm | str"],
         params: dict[str, "ParameterRef | HandleCoeffRef"],
         fit_arms: list[str],
         held_out_arms: list[str] | None = None,
-        normalization: str = "baseline",
         equilibrate: bool = False,
         equilibration_condition: str | None = None,
         t_end: float = 25.0,
@@ -943,23 +957,33 @@ class CalibrationProblem:
 
         # Validation pass over the wiring — catch typos early so the
         # JIT trace doesn't fail with a confusing message later.
-        for arm, (c, b) in arm_pairs.items():
-            if c not in conditions:
+        self.arms = {
+            name: a if isinstance(a, Arm) else Arm(a)
+            for name, a in arms.items()
+        }
+        for name, a in self.arms.items():
+            if a.condition not in conditions:
                 raise KeyError(
-                    f"arm_pairs[{arm!r}] references unknown condition {c!r}"
+                    f"arms[{name!r}] references unknown condition "
+                    f"{a.condition!r}"
                 )
-            if b not in conditions:
+            if (
+                a.reference not in (None, "t0")
+                and a.reference not in conditions
+            ):
                 raise KeyError(
-                    f"arm_pairs[{arm!r}] references unknown condition {b!r}"
+                    f"arms[{name!r}] references unknown condition "
+                    f"{a.reference!r} (a reference is 't0', a condition name, "
+                    "or None)"
                 )
         for arm in fit_arms:
-            if arm not in arm_pairs:
-                raise KeyError(f"fit_arms entry {arm!r} not in arm_pairs")
+            if arm not in self.arms:
+                raise KeyError(f"fit_arms entry {arm!r} not in arms")
             if arm not in data:
-                raise KeyError(f"fit arm {arm!r} has no Δ_data entry")
+                raise KeyError(f"fit arm {arm!r} has no data entry")
         for arm in held_out_arms or []:
-            if arm not in arm_pairs:
-                raise KeyError(f"held_out_arms entry {arm!r} not in arm_pairs")
+            if arm not in self.arms:
+                raise KeyError(f"held_out_arms entry {arm!r} not in arms")
         for pname, pref in proc_params.items():
             if pref.process_name not in composite.processes:
                 raise KeyError(
@@ -1077,13 +1101,6 @@ class CalibrationProblem:
             )
             for arm, d in data.items()
         }
-        self.arm_pairs = arm_pairs
-        if normalization not in ("baseline", "paired", "raw"):
-            raise ValueError(
-                "normalization must be 'baseline', 'paired', or 'raw'; "
-                f"got {normalization!r}"
-            )
-        self.normalization = normalization
         if equilibrate and equilibration_condition not in conditions:
             raise KeyError(
                 "equilibrate=True needs equilibration_condition to name a "
@@ -1317,7 +1334,10 @@ class CalibrationProblem:
                     }
                     for n, c in kw["conditions"].items()
                 },
-                "arm_pairs": kw["arm_pairs"],
+                "arms": {
+                    name: {"condition": a.condition, "reference": a.reference}
+                    for name, a in self.arms.items()
+                },
                 "fit_arms": kw["fit_arms"],
                 "held_out_arms": kw.get("held_out_arms") or [],
                 "data": kw["data"],
@@ -1329,7 +1349,6 @@ class CalibrationProblem:
                     or "gaussian_nll",
                     "weights": kw.get("weights"),
                     "prior_weight": kw["prior_weight"],
-                    "normalization": kw["normalization"],
                     "equilibrate": kw["equilibrate"],
                     "equilibration_condition": kw.get(
                         "equilibration_condition"
@@ -1606,7 +1625,7 @@ class CalibrationProblem:
         equilibrates the shared baseline, then returns
         ``(run_for, y0, baseline)`` where ``run_for(cond_name) -> (ts,
         reporter_trajs)`` solves each condition once and caches it. The one
-        prologue shared by :meth:`model_lfc`, :meth:`data_loss`,
+        prologue shared by :meth:`model_readout`, :meth:`data_loss`,
         :meth:`evaluate`, and :meth:`simulate_reporters`; ``adjoint``
         threads the autodiff mode through to each solve (see
         :meth:`_simulate_condition`)."""
@@ -1649,58 +1668,81 @@ class CalibrationProblem:
 
     # ── Loss / fit / evaluate ─────────────────────────────────────
 
+    @property
+    def arm_pairs(self) -> dict[str, tuple[str, str]]:
+        """``{arm: (condition, reference condition)}``, the reference being
+        the condition itself when the arm reads against its own start or
+        nothing. For consumers that only need each arm's condition."""
+        return {
+            name: (
+                a.condition,
+                (
+                    a.reference
+                    if a.reference not in (None, "t0")
+                    else a.condition
+                ),
+            )
+            for name, a in self.arms.items()
+        }
+
     def _arm_reference(self, run_for, arm: str, qt, baseline=None):
-        """``(arm_readout, ref_readout)`` for one arm under the configured
-        ``normalization`` — the two reporter summaries whose log2 ratio is the
-        arm's fold change. Single source of truth for the normalization,
-        shared by :meth:`data_loss`, :meth:`model_lfc`, and :meth:`evaluate`.
+        """``(arm_readout, ref_readout)`` for one arm: the reporter summaries
+        of its condition at ``qt`` and of its reference, ``None`` when the
+        arm has none. The one place the reference is resolved, shared by
+        :meth:`data_loss`, :meth:`model_readout` and :meth:`evaluate`.
         ``run_for(cond_name) -> (ts, reporter_trajs)`` is a (usually caching)
         condition solver.
 
-        What ``ref_readout`` (the reference each reporter is divided by) is:
-          baseline — the shared homeostatic day-0 value (``baseline``, from the
-                     equilibration burn-in) when equilibrating, else the arm's
-                     own t=0 (the fold-change-from-day-0 X_t/X_0);
-          paired   — the paired condition at matched t (cross-arm contrast);
-          raw      — unity (no reference) → the raw reporter summary.
-        """
-        cond, base = self.arm_pairs[arm]
-        ts_c, trajs_c = run_for(cond)
+        A ``"t0"`` reference is the shared homeostatic value from the
+        equilibration burn-in (``baseline``) when equilibrating, else the
+        arm's own t=0; a condition name is that condition at the matched
+        time."""
+        a = self.arms[arm]
+        ts_c, trajs_c = run_for(a.condition)
         arm_readout = self._reporter_summaries(
             ts_c, trajs_c, qt
         )  # (n_rep, n_t)
-        if self.normalization == "baseline":
+        if a.reference is None:
+            return arm_readout, None
+        if a.reference == "t0":
             if baseline is not None:
-                ref_readout = jnp.broadcast_to(baseline, arm_readout.shape)
-            else:
-                ref_readout = self._reporter_summaries(
-                    ts_c, trajs_c, jnp.zeros_like(qt)
+                return arm_readout, jnp.broadcast_to(
+                    baseline, arm_readout.shape
                 )
-        elif self.normalization == "paired":
-            ts_b, trajs_b = run_for(base)
-            ref_readout = self._reporter_summaries(ts_b, trajs_b, qt)
-        else:  # raw
-            ref_readout = jnp.ones_like(arm_readout)
-        return arm_readout, ref_readout
+            return arm_readout, self._reporter_summaries(
+                ts_c, trajs_c, jnp.zeros_like(qt)
+            )
+        ts_b, trajs_b = run_for(a.reference)
+        return arm_readout, self._reporter_summaries(ts_b, trajs_b, qt)
 
-    def _arm_lfc(self, run_for, arm: str, qt, baseline=None) -> jnp.ndarray:
-        """One arm's sign-aligned model log2 fold-change at ``qt``. Shared by
-        :meth:`data_loss` and :meth:`model_lfc` so figures plot exactly what
-        the loss fits."""
+    def _arm_readout(
+        self, run_for, arm: str, qt, baseline=None
+    ) -> jnp.ndarray:
+        """One arm's model readout at ``qt`` in the data's terms: the
+        sign-aligned log2 fold change against its reference, or, with no
+        reference, the summary itself times each reporter's ``scale``.
+        Shared by :meth:`data_loss` and :meth:`model_readout` so figures plot
+        exactly what the loss fits."""
         arm_readout, ref_readout = self._arm_reference(
             run_for, arm, qt, baseline
         )
+        if ref_readout is None:
+            scales = jnp.asarray(
+                [getattr(r, "scale", 1.0) for r in self.reporters], dtype=float
+            )
+            return arm_readout * scales.reshape(
+                scales.shape + (1,) * (jnp.ndim(arm_readout) - 1)
+            )
         return self._log2_fold_change(arm_readout, ref_readout)
 
-    def model_lfc(
+    def model_readout(
         self, param_values: dict[str, jnp.ndarray], arm: str, query_times
     ) -> jnp.ndarray:
-        """The model's sign-aligned log2 fold-change for ``arm`` at
-        ``query_times`` — the exact quantity :meth:`data_loss` fits, so a
-        trajectory figure never drifts from the loss. Returns ``(n_rep, n_t)``.
-        """
+        """The model's readout for ``arm`` at ``query_times`` in the data's
+        terms — the exact quantity :meth:`data_loss` fits, so a trajectory
+        figure never drifts from the loss. Returns ``(n_rep, n_t)``."""
         run_for, _, baseline = self._run_condition_set(param_values)
-        return self._arm_lfc(
+        return self._arm_readout(
             run_for, arm, jnp.atleast_1d(jnp.asarray(query_times)), baseline
         )
 
@@ -1712,11 +1754,11 @@ class CalibrationProblem:
         The pure data-fit term — no prior penalty. Factored out of
         :meth:`loss` so a held-out (validation) arm can be scored at
         arbitrary params, e.g. to trace a train-vs-validation curve for
-        early stopping. ``arms`` must be keys of ``arm_pairs``.
+        early stopping. ``arms`` must be keys of ``self.arms``.
         """
         # Each condition is solved once (whole trajectory) and cached, then
         # read at each arm's measured timepoints — so a condition that is
-        # both a condition and a baseline in different arm_pairs still runs
+        # both a condition and a reference in different arms still runs
         # once, and every timepoint reuses the same solve.
         run_for, _, baseline = self._run_condition_set(param_values)
 
@@ -1729,13 +1771,13 @@ class CalibrationProblem:
         arm_losses = []
         for arm in arms:
             qt = self._arm_query_times[arm]  # (n_t,)
-            lfc_sim = self._arm_lfc(run_for, arm, qt, baseline)  # (n_rep, n_t)
-            # The loss compares two log2 ratios, so Δ_data must be supplied as
-            # a log2 fold-change (the microarray demo already is; count data
-            # is log-normalized upstream). MSE then weighs every reporter's
-            # O(1) log-ratio comparably regardless of the observable's absolute
-            # scale (a 1e-4 pool and a 1e1 pool both contribute their
-            # fold-change, not their raw amplitude).
+            lfc_sim = self._arm_readout(run_for, arm, qt, baseline)
+            # With a reference the loss compares two log2 ratios, so the data
+            # must be supplied as a log2 fold change (the microarray demo
+            # already is; count data is log-normalized upstream): every
+            # reporter then weighs by its O(1) log ratio regardless of the
+            # observable's absolute scale. Without one it compares values in
+            # the data's units.
             delta_data = self._arm_data_matrix[arm]  # (n_rep, n_t)
             weight = self._arm_weight_matrix[arm]  # (n_rep, n_t)
             arm_losses.append(self.likelihood(lfc_sim, delta_data, weight))
@@ -2051,10 +2093,8 @@ class CalibrationProblem:
         # from tracers.
         self.warm_up(init)
         for arm in validation_arms or []:
-            if arm not in self.arm_pairs:
-                raise KeyError(
-                    f"validation_arms entry {arm!r} not in arm_pairs"
-                )
+            if arm not in self.arms:
+                raise KeyError(f"validation_arms entry {arm!r} not in arms")
         val_loss_fn = (
             (lambda p: self.data_loss(p, validation_arms))
             if validation_arms
@@ -2133,13 +2173,16 @@ class CalibrationProblem:
             times = self._arm_times[arm]
             qt = self._arm_query_times[arm]
             # Vectorized read: (n_rep, n_t) in one interp per condition, then
-            # slice per timepoint. Same normalization as the loss.
+            # slice per timepoint. Same reference as the loss.
             arm_readout, ref_readout = self._arm_reference(
                 run_for, arm, qt, baseline
             )
-            lfc = jnp.log2(jnp.maximum(arm_readout, eps)) - jnp.log2(
-                jnp.maximum(ref_readout, eps)
-            )  # (n_rep, n_t), unsigned; compute_concordance applies the sign
+            if ref_readout is None:
+                lfc = self._arm_readout(run_for, arm, qt, baseline)
+            else:
+                lfc = jnp.log2(jnp.maximum(arm_readout, eps)) - jnp.log2(
+                    jnp.maximum(ref_readout, eps)
+                )  # (n_rep, n_t), unsigned; compute_concordance applies sign
             per_t: dict[float, Any] = {}
             for j, t in enumerate(times):
                 delta_sim_named = {
@@ -2311,8 +2354,12 @@ class CalibrationProblem:
     def _reference_split(self) -> tuple[list[str], list[str]]:
         """``(reference, perturbed)`` conditions — the ones only ever used as a
         baseline, and the rest."""
-        on = {cond for cond, _ in self.arm_pairs.values()}
-        bases = {b for _, b in self.arm_pairs.values() if b is not None}
+        on = {a.condition for a in self.arms.values()}
+        bases = {
+            a.reference
+            for a in self.arms.values()
+            if a.reference not in (None, "t0")
+        }
         return sorted(bases - on), sorted(on)
 
     def _edge_is_inverted(self, rng, src, off_conds, on_conds) -> bool:

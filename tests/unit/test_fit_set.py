@@ -50,7 +50,7 @@ class _Problem:
     def initial_params(self):
         return {n: 1.0 for n in self._names}
 
-    def model_lfc(self, params, arm, times):
+    def model_readout(self, params, arm, times):
         return np.zeros((1, len(times)))
 
 
@@ -144,7 +144,7 @@ def test_screen_fittable_pools_the_composite_s_own_surface():
         reporters=[GeneReporter(observable="pool/x", gene_symbol="GX")],
         conditions={"a": Condition("a", {}), "b": Condition("b", {})},
         data={"b_vs_a": pd.Series({"GX": -0.5})},
-        arm_pairs={"b_vs_a": ("a", "b")},
+        arms={"b_vs_a": "a"},
         params={"r": ParameterRef("d", "rate")},
         fit_arms=["b_vs_a"],
         t_end=2.0,

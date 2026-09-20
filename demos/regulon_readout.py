@@ -92,7 +92,7 @@ def model_activity_deltas(problem, arms, normalization: str = "paired"):
     params = problem.initial_params()
     if normalization == "baseline":
         rows = [
-            np.asarray(problem.model_lfc(params, arm, list(QUERY_DAYS))).T
+            np.asarray(problem.model_readout(params, arm, list(QUERY_DAYS))).T
             for arm in arms
         ]
         return np.concatenate(rows, axis=0)
