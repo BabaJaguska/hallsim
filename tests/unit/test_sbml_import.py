@@ -384,3 +384,45 @@ class TestProvenance:
         assert "with_unfrozen" in caplog.text
         assert float(held[-1]) == 0.0
         assert float(res.get("sink/A")[-1]) < 5.0
+
+
+def test_a_pmc_id_imports_from_the_paper_supplement(tmp_path, monkeypatch):
+    """A Europe PMC hit's id is a paper; its model lives in the supplement,
+    so the same id an agent gets from search imports without a detour."""
+    from hallsim import literature, sbml_import
+
+    model = tmp_path / "model.xml"
+    model.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<sbml xmlns="http://www.sbml.org/sbml/level3/version2/core" '
+        'level="3" version="2"><model id="m">'
+        '<listOfCompartments><compartment id="c" size="1" '
+        'constant="true"/></listOfCompartments>'
+        '<listOfSpecies><species id="X" compartment="c" '
+        'initialConcentration="1" hasOnlySubstanceUnits="false" '
+        'boundaryCondition="false" constant="false"/></listOfSpecies>'
+        '<listOfParameters><parameter id="k" value="0.5" '
+        'constant="true"/></listOfParameters>'
+        '<listOfReactions><reaction id="decay" reversible="false">'
+        '<listOfReactants><speciesReference species="X" stoichiometry="1" '
+        'constant="true"/></listOfReactants><kineticLaw><math '
+        'xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/>'
+        "<ci>k</ci><ci>X</ci></apply></math></kineticLaw></reaction>"
+        "</listOfReactions></model></sbml>\n"
+    )
+    monkeypatch.setattr(
+        literature,
+        "supplementary_model_files",
+        lambda pmcid, **kw: [tmp_path / "code.m", model],
+    )
+    proc = sbml_import.process_from_sbml("PMC1234567")
+    assert proc._name == "pmc1234567"
+    assert "X" in proc._species_names
+
+    monkeypatch.setattr(
+        literature, "supplementary_model_files", lambda pmcid, **kw: []
+    )
+    import pytest
+
+    with pytest.raises(LookupError, match="no SBML or COPASI file"):
+        sbml_import.process_from_sbml("PMC1234567")

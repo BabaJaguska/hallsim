@@ -66,7 +66,7 @@ print(result.get("pool/x").shape)
 
 ### Workflow
 
-1. **Find** — `simulate find <query>`: search the repositories for a deposit that *emits* what you need; `simulate find-data <query>` does the same for a GEO dataset to calibrate against. When nothing is deposited, `simulate discover <topic>` finds the papers and the code they link.
+1. **Find** — `simulate find <query>`: search the repositories for a deposit that *emits* what you need; `simulate find-data <query>` does the same for a dataset to calibrate against, on GEO and Zenodo. When nothing is deposited, `simulate discover <topic>` finds the papers and the code they link.
 2. **Screen** — `simulate screen <id-or-path>`: triage and the numerical screen of that one model on its own. Nothing joins a composite unscreened.
 3. **Import** — `process_from_sbml` / `process_from_xpp`, then `reconciled_to` to put it on the composite's clock.
 4. **Compose** — `Composite` with a topology; `analyze_composability` where two models overlap.

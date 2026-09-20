@@ -1155,13 +1155,17 @@ def _download_jws_to_cache(slug: str) -> str:
 
 
 def _resolve_source(model_id, name):
-    """``(xml_path, name)`` for a local path, a BioModels ID, or ``jws:<slug>``.
+    """``(xml_path, name)`` for a local path, a BioModels ID, ``jws:<slug>``
+    or a ``PMC`` id.
 
     A bare integer or ``BIOMD...`` is BioModels; ``jws:glycolysis1`` is JWS
-    Online. Both cache to disk, so a repeated import is a local read. A local
-    path ending ``.cps`` is a COPASI model and is converted to SBML first.
+    Online; ``PMC1234567`` is a paper whose supplement holds the model, the
+    id a Europe PMC search hit carries. All cache to disk, so a repeated
+    import is a local read. A local path ending ``.cps`` is a COPASI model
+    and is converted to SBML first.
     """
     import os
+    import re
 
     if isinstance(model_id, str) and os.path.isfile(model_id):
         name = name or os.path.splitext(os.path.basename(model_id))[0]
@@ -1179,6 +1183,30 @@ def _resolve_source(model_id, name):
         name = name or f"jws_{slug}"
         log.info(f"Fetching JWS Online '{slug}' as '{name}'...")
         return _download_jws_to_cache(slug), name
+    if isinstance(model_id, str) and re.fullmatch(r"PMC\d+", model_id):
+        # A paper, not a deposit: the model is in its supplement, which is
+        # what a Europe PMC search hit points at.
+        from hallsim.literature import supplementary_model_files
+
+        files = [
+            str(p)
+            for p in supplementary_model_files(model_id)
+            if str(p).lower().endswith((".xml", ".sbml", ".cps"))
+        ]
+        if not files:
+            raise LookupError(
+                f"{model_id} deposited no SBML or COPASI file in its "
+                "supplement; hallsim.literature.supplementary_model_files "
+                "lists what it holds."
+            )
+        if len(files) > 1:
+            log.info(
+                "%s: %d model files in the supplement, importing %s.",
+                model_id,
+                len(files),
+                os.path.basename(files[0]),
+            )
+        return _resolve_source(files[0], name or model_id.lower())
     name = name or f"biomodel_{model_id}"
     log.info(f"Fetching BioModels #{model_id} as '{name}'...")
     return _download_biomodel_to_cache(model_id), name

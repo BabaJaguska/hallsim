@@ -59,15 +59,20 @@ class ModelCandidate:
     files: tuple = ()
 
     def fetch(self) -> Path:
-        """Download the main model file to the local cache; return its path."""
-        if self.source != "biomodels":
-            raise NotImplementedError(
-                f"no fetcher for source {self.source!r}; open {self.url} and "
-                f"vendor the file under demos/models/ or data/ by hand"
-            )
-        from hallsim.sbml_import import _download_biomodel_to_cache
+        """Download the model file to the local cache and return its path:
+        the main file of a BioModels deposit, the JWS Online file, or the
+        first model file in a paper's supplement. ``process_from_sbml`` takes
+        the same ids directly."""
+        if self.source == "biomodels":
+            from hallsim.sbml_import import _download_biomodel_to_cache
 
-        return Path(_download_biomodel_to_cache(self.id))
+            return Path(_download_biomodel_to_cache(self.id))
+        if self.source in ("jws", "europepmc"):
+            return Path(_sbml_paths_for(self.id, self.source, 120.0)[0])
+        raise NotImplementedError(
+            f"no fetcher for source {self.source!r}; open {self.url} and "
+            f"vendor the file under demos/models/ or data/ by hand"
+        )
 
     def record(self) -> dict:
         """The repository's full record for this model."""

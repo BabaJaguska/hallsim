@@ -67,3 +67,41 @@ def test_platform_head_and_loader_route(monkeypatch):
         "the loader reads symbols from column 'gene_assignment'"
     )
     assert "cannot map" in datasets.loader_route(head[["ID", "probeset_id"]])
+
+
+def test_zenodo_records_become_candidates_with_their_files(monkeypatch):
+    def fake_get_json(url, params, timeout):
+        if "zenodo" in url:
+            assert params["type"] == "dataset"
+            assert params["q"] == "senescence Homo sapiens"
+            return {
+                "hits": {
+                    "total": 1,
+                    "hits": [
+                        {
+                            "id": 18008608,
+                            "doi_url": "https://doi.org/10.5281/zenodo.18008608",
+                            "metadata": {
+                                "doi": "10.5281/zenodo.18008608",
+                                "title": "Monocyte activation program",
+                                "description": "<p>Bulk RNA-seq <b>counts</b></p>",
+                                "resource_type": {"title": "Dataset"},
+                            },
+                            "files": [
+                                {"key": "counts.csv", "size": 6263127},
+                                {"key": "meta.csv", "size": 5760},
+                            ],
+                        }
+                    ],
+                }
+            }
+        return {"esearchresult": {"count": "0", "idlist": []}}
+
+    monkeypatch.setattr(datasets, "_get_json", fake_get_json)
+    (hit,) = datasets.search_for_dataset("senescence", organism="Homo sapiens")
+    assert hit.source == "zenodo"
+    assert hit.accession == "10.5281/zenodo.18008608"
+    assert hit.url == "https://doi.org/10.5281/zenodo.18008608"
+    assert hit.files == ("counts.csv", "meta.csv")
+    assert hit.summary == "Bulk RNA-seq counts"
+    assert not hit.series_matrix_has_values

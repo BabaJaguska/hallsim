@@ -752,12 +752,12 @@ def discover(
     "how the loader would map its probes to genes.",
 )
 def find_data(query, limit, organism, check):
-    """Search GEO for a dataset to calibrate against.
+    """Search GEO and Zenodo for a dataset to calibrate against.
 
-    Lists series with their kind, organism, platform and sample titles (the
-    arms and timepoints are usually in the titles). Array expression series
-    carry their values in the series matrix the loader reads; sequencing
-    series usually do not.
+    Lists GEO series with their kind, organism, platform and sample titles
+    (the arms and timepoints are usually in the titles), and Zenodo datasets
+    with their files. Array expression series carry their values in the
+    series matrix the loader reads; sequencing series usually do not.
     """
     from hallsim.datasets import (
         loader_route,
@@ -781,6 +781,8 @@ def find_data(query, limit, organism, check):
         click.echo(f"    {d.title[:100]}")
         if d.samples:
             click.echo(f"    samples: {', '.join(d.samples[:6])}")
+        if d.files:
+            click.echo(f"    files: {', '.join(d.files[:6])}")
         if check and d.series_matrix_has_values:
             click.echo(
                 f"    platform: {loader_route(platform_head(d.accession))}"

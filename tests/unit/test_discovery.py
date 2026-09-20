@@ -734,3 +734,16 @@ def test_sources_are_asked_in_parallel_and_kept_in_order(monkeypatch):
     hits = discovery.search_for_model("x")
     assert time.perf_counter() - started < 1.0  # not 3 x 0.4 s
     assert [h.source for h in hits] == ["a", "b", "c"]
+
+
+def test_fetch_routes_a_paper_and_a_jws_hit_to_their_files(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        discovery,
+        "_sbml_paths_for",
+        lambda mid, src, timeout: seen.append((mid, src)) or ["/tmp/m.xml"],
+    )
+    for source, mid in (("europepmc", "PMC1"), ("jws", "glycolysis1")):
+        c = ModelCandidate(source, mid, "n", "SBML", "u", False)
+        assert str(c.fetch()) == "/tmp/m.xml"
+    assert seen == [("PMC1", "europepmc"), ("glycolysis1", "jws")]

@@ -2,17 +2,18 @@
 
 A calibration needs measurements under a perturbation the composite can
 represent, read by :func:`hallsim.gene_reporters.load_gene_expression`.
-:func:`search_for_dataset` asks the repositories; each hit says what kind of
-data it is, on what platform, and what its samples are called, which is
-where the arms show. :func:`platform_columns` reads a platform table's
-header from GEO so a hit can be checked against the loader before anything
-large is downloaded.
+:func:`search_for_dataset` asks the repositories, GEO and Zenodo; each hit
+says what kind of data it is, on what platform, and what its samples or
+files are called, which is where the arms show. :func:`platform_head` reads
+a platform table's head from GEO so a hit can be checked against the loader
+before anything large is downloaded.
 """
 
 from __future__ import annotations
 
 import gzip
 import logging
+import re
 import urllib.request
 from dataclasses import dataclass
 
@@ -25,6 +26,7 @@ log = logging.getLogger(__name__)
 
 GEO_EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 GEO_ACCESSION_URL = "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={}"
+ZENODO_RECORDS = "https://zenodo.org/api/records"
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,9 @@ class DatasetCandidate:
     summary: str = ""
     #: Sample titles as deposited; the arms and timepoints are usually in them.
     samples: tuple[str, ...] = ()
+    #: The deposit's file names, for a repository that holds files rather
+    #: than a series (Zenodo); which of them is a table decides the loader.
+    files: tuple[str, ...] = ()
 
     @property
     def short_kind(self) -> str:
@@ -114,7 +119,51 @@ def search_geo(
     return out
 
 
-SOURCES = {"geo": search_geo}
+def search_zenodo(
+    query: str,
+    limit: int = 25,
+    *,
+    organism: str | None = None,
+    timeout: float = 30.0,
+) -> list[DatasetCandidate]:
+    """Zenodo records of type dataset matching ``query``, through the
+    keyless records API. Zenodo has no organism field, so ``organism`` is
+    added to the query as a term. Each hit lists its files; a data table
+    among them is what the loader can read."""
+    q = f"{query} {organism}" if organism else query
+    payload = _get_json(
+        ZENODO_RECORDS,
+        {"q": q, "type": "dataset", "size": limit},
+        timeout,
+    )
+    hits = payload.get("hits", {}).get("hits", [])
+    log.info(
+        "zenodo '%s': %s hits", q, payload.get("hits", {}).get("total", "?")
+    )
+    out = []
+    for h in hits:
+        md = h.get("metadata", {})
+        summary = re.sub(r"<[^>]+>", " ", md.get("description", ""))
+        out.append(
+            DatasetCandidate(
+                source="zenodo",
+                accession=str(md.get("doi") or h.get("doi") or h.get("id")),
+                title=md.get("title", "") or h.get("title", ""),
+                kind=(md.get("resource_type") or {}).get("title", "dataset"),
+                organism="",
+                n_samples=0,
+                platform="",
+                url=h.get("doi_url")
+                or h.get("links", {}).get("html", "")
+                or f"https://zenodo.org/records/{h.get('id', '')}",
+                summary=" ".join(summary.split())[:400],
+                files=tuple(f.get("key", "") for f in h.get("files", [])),
+            )
+        )
+    return out
+
+
+SOURCES = {"geo": search_geo, "zenodo": search_zenodo}
 
 
 def search_for_dataset(
