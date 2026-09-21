@@ -78,6 +78,8 @@ print(result.get("pool/x").shape)
 toy processes, and one case study that composes three published SBML
 models and calibrates them against GSE248823 (`simulate demo
 multi-hallmark run`; the first run fetches the dataset). 
+`simulate view module:name` serves any composite as a page: levers over
+its handles, its wiring with a signal trace, and a saved calibration run.
 `make test` runs the unit suite.
 
 ## What you can do with it

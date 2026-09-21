@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import equinox as eqx
-import jax.numpy as jnp
+import numpy as np
 
 from hallsim.process import Process
 from hallsim.tracing import is_traced
@@ -114,7 +114,7 @@ class ParameterMapping:
         moved = floor + slope * severity
         if level:
             return moved
-        if not is_traced(base) and bool(jnp.all(jnp.asarray(base) == 0.0)):
+        if not is_traced(base) and bool(np.all(np.asarray(base) == 0.0)):
             raise ValueError(
                 f"{self.process_name}.{self.param_name} is 0, and a handle "
                 "moves a rate relative to its value, so this mapping can "

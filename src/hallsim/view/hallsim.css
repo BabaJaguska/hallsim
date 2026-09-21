@@ -1,47 +1,36 @@
-/* hallsim lever page. Every colour and face is a token: the values are
-   emitted into :root by the page from demos/hallmark_levers.py TOKENS, so
-   the Plotly figures and this sheet read the same source. */
-
+/* hallsim view: every colour and face is a token. The values are emitted
+   into :root by the page from the TOKENS in _theme.py, so the Plotly
+   figures and this sheet read the same source. */
 body { font-family: var(--font-body); font-size: 13px; line-height: 1.5;
        color: var(--color-text); background: var(--color-bg); margin: 0; }
 
-.wrap { display: flex; gap: 24px; padding: 18px 22px; }
-/* The levers take a fifth of the width at most and shrink with the window;
-   the plots keep the rest. */
+.top { display: flex; align-items: flex-end; justify-content: space-between;
+       gap: 24px; padding: 18px 22px 0; flex-wrap: wrap; }
+.top .brand { display: flex; align-items: baseline; gap: 16px;
+              flex-wrap: wrap; }
+.wrap { display: flex; gap: 24px; padding: 14px 22px 18px; }
 .side { flex: 0 0 clamp(168px, 19vw, 300px); min-width: 0; }
 .main { flex: 1 1 auto; min-width: 0; }
 
-/* On a phone-sized screen the levers sit above the rows and the panel grid
-   wraps two across (see the viewport store in demos/hallmark_levers.py);
-   anything wider keeps the levers beside the plots, smaller. */
 @media (max-width: 600px) {
   .wrap { flex-direction: column; gap: 6px; padding: 14px 16px; }
   .side { flex: none; width: auto; display: grid;
           grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
           column-gap: 22px; align-items: start; }
-  .side > h1, .side > .tag, .side > .chips, .side > .logos {
-    grid-column: 1 / -1; }
+  .side > .chips, .side > .logos, .side > .about { grid-column: 1 / -1; }
   h1 { font-size: 40px; }
-  .tag { margin: 8px 0 10px; }
   .card { border-top: none; padding: 6px 0 8px; }
   .logos { margin-top: 10px; }
 }
 
-/* Wordmark and tagline */
 h1 { font-family: var(--font-heading); font-size: clamp(30px, 4.2vw, 52px);
-     font-weight: 700;
-     line-height: 1; letter-spacing: -0.01em; margin: 0; }
-/* The subtitle behaves like a field value: mono, lowercase, on a rule. */
+     font-weight: 700; line-height: 1; letter-spacing: -0.01em; margin: 0; }
 .tag { display: flex; align-items: center; gap: 12px;
        font-family: var(--font-mono); font-size: 12.5px;
-       text-transform: lowercase; color: var(--color-neutral-700);
-       margin: 12px 0 16px; }
+       text-transform: lowercase; color: var(--color-neutral-700); }
 .tag::before { content: ""; width: 30px; height: 1px;
                background: var(--color-neutral-400); }
 
-/* Scenario chips: a pair side by side at equal width, hairline, the
-   selected one in the accent; a long name wraps inside its chip rather
-   than pushing the other chip to the next line. */
 .chips { display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
          margin: 0 0 14px; }
 .chip { font-family: var(--font-heading); font-size: 12px; font-weight: 500;
@@ -55,7 +44,6 @@ h1 { font-family: var(--font-heading); font-size: clamp(30px, 4.2vw, 52px);
 .chip.selected { color: var(--color-bg); background: var(--color-accent);
                  border-color: var(--color-accent); }
 
-/* Lever cards: hairline dividers, condensed names, mono values */
 .card { border-top: 1px solid var(--color-divider); padding: 14px 0 12px;
         margin: 0; }
 .card h3 { font-family: var(--font-heading); font-size: 12px;
@@ -66,8 +54,6 @@ h1 { font-family: var(--font-heading); font-size: clamp(30px, 4.2vw, 52px);
 .card h3 .val { font-family: var(--font-mono); font-size: 14px;
                 font-weight: 500; letter-spacing: 0; text-transform: none;
                 font-variant-numeric: tabular-nums; }
-
-/* Slider: a 1px rule, a 9px ink square, mono ticks */
 .card .dash-slider-track { height: 1px; background: var(--color-neutral-400);
                            border-radius: 0; }
 .card .dash-slider-root .dash-slider-range {
@@ -81,12 +67,26 @@ h1 { font-family: var(--font-heading); font-size: clamp(30px, 4.2vw, 52px);
                           color: var(--color-text);
                           font-variant-numeric: tabular-nums; }
 .card .dash-slider-mark-outside-selection { color: var(--color-neutral-700); }
-/* Dash adds a number box beside a narrow slider; the card's header already
-   shows the value. */
 .card .dash-range-slider-input { display: none !important; }
+.card .Select-control, .card .dash-dropdown .Select-control,
+.card input[type=text] {
+  font-family: var(--font-mono); font-size: 11.5px; border-radius: 0;
+  border: 1px solid var(--color-neutral-400); background: transparent; }
+.card input[type=text] { width: 100%; box-sizing: border-box;
+                         padding: 5px 7px; color: var(--color-text); }
+.card .btn { font-family: var(--font-heading); font-size: 12px;
+             font-weight: 500; letter-spacing: 0.16em;
+             text-transform: uppercase; color: var(--color-bg);
+             background: var(--color-text); border: 1px solid var(--color-text);
+             border-radius: 0; padding: 6px 12px; margin-top: 8px;
+             cursor: pointer; width: 100%; }
+.card .btn:disabled { background: var(--color-neutral-400);
+                      border-color: var(--color-neutral-400);
+                      cursor: default; }
+.card .note { font-family: var(--font-mono); font-size: 10px;
+              letter-spacing: 0.06em; color: var(--color-neutral-700);
+              margin-top: 6px; min-height: 12px; }
 
-/* Exposure switch: a segmented control, the chosen segment in ink, a
-   segment whose composite is still compiling greyed and disabled */
 .seg-group { display: inline-flex; border: 1px solid var(--color-neutral-400);
              margin: 2px 0 4px; }
 .seg { position: relative; font-family: var(--font-mono);
@@ -104,8 +104,8 @@ h1 { font-family: var(--font-heading); font-size: clamp(30px, 4.2vw, 52px);
 .seg-note { font-family: var(--font-mono); font-size: 9.5px;
             letter-spacing: 0.08em; text-transform: uppercase;
             color: var(--color-neutral-700); min-height: 12px; }
+.tabs .seg { padding: 7px 16px 8px; }
 
-/* Model rows */
 .row h2 { font-family: var(--font-heading); font-size: 15px;
           font-weight: 600; letter-spacing: 0.2em; text-transform: uppercase;
           margin: 10px 0 0; }
@@ -122,7 +122,6 @@ h1 { font-family: var(--font-heading); font-size: clamp(30px, 4.2vw, 52px);
         vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Legend for the shaded periods */
 .legend { display: flex; flex-wrap: wrap; gap: 4px 22px;
           font-family: var(--font-heading); font-size: 11.5px;
           font-weight: 500; letter-spacing: 0.16em; text-transform: uppercase;
@@ -134,21 +133,43 @@ h1 { font-family: var(--font-heading); font-size: clamp(30px, 4.2vw, 52px);
       vertical-align: 3px; background: var(--color-text); }
 .ln.dotted { background: repeating-linear-gradient(90deg,
                var(--color-neutral-700) 0 1.5px, transparent 1.5px 4.5px); }
-.ln.dashed { background: repeating-linear-gradient(90deg,
-               var(--color-text) 0 9px, transparent 9px 14px); }
 
-/* What the page models, under the levers */
 .about { border-top: 1px solid var(--color-divider); margin-top: 6px;
          padding-top: 12px; font-size: 11.5px; line-height: 1.45;
          color: var(--color-neutral-700); }
 .about p { margin: 0 0 8px; }
 .about a { color: var(--color-text); text-decoration: underline;
            text-underline-offset: 2px; }
-
-/* Institute and lab marks */
 .logos { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px;
          margin-top: 22px; }
 .logos img { height: 24px; width: auto; max-width: 100%; }
-/* The lab lockup carries a tagline line; it needs the extra height to read,
-   and gives it up rather than overflow a narrow sidebar. */
 .logos img[alt="Furman Lab"] { height: auto; width: min(150px, 100%); }
+
+.graph { border: 1px solid var(--color-divider); background: #fff;
+         height: 72vh; min-height: 420px; }
+.detail { font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
+          color: var(--color-text); white-space: pre-wrap;
+          word-break: break-word; }
+.detail b { font-family: var(--font-heading); font-size: 12px;
+            font-weight: 600; letter-spacing: 0.16em;
+            text-transform: uppercase; display: block; margin: 8px 0 2px; }
+.detail .k { color: var(--color-neutral-700); }
+pre.trace { font-family: var(--font-mono); font-size: 10.5px;
+            line-height: 1.45; margin: 8px 0 0; white-space: pre;
+            overflow-x: auto; color: var(--color-text); }
+
+table.fit { border-collapse: collapse; font-family: var(--font-mono);
+            font-size: 11px; margin: 6px 0 14px; }
+table.fit th { font-family: var(--font-heading); font-size: 11px;
+               font-weight: 600; letter-spacing: 0.14em;
+               text-transform: uppercase; text-align: left;
+               border-bottom: 1px solid var(--color-text);
+               padding: 3px 12px 3px 0; }
+table.fit td { padding: 2px 12px 2px 0; white-space: nowrap;
+               border-bottom: 1px solid var(--color-divider);
+               font-variant-numeric: tabular-nums; }
+table.fit td.num { text-align: right; }
+table.fit tr.held td { color: var(--color-neutral-700); }
+table.fit td.miss { color: var(--color-red); }
+.fit-grid { display: grid; grid-template-columns: repeat(auto-fit,
+            minmax(320px, 1fr)); gap: 0 24px; }

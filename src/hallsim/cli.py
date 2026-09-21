@@ -1186,10 +1186,26 @@ def multi_hallmark_ssa(t_end, save_dt, seed, max_events):
     )
 
 
+def _serve_options(f):
+    for opt in reversed(
+        [
+            click.option("--port", type=int, default=8050, show_default=True),
+            click.option("--host", default="127.0.0.1", show_default=True),
+            click.option("--debug", is_flag=True, help="Dash debug mode"),
+            click.option(
+                "--runs-dir",
+                default="outputs",
+                show_default=True,
+                help="folder whose calibration runs the fit tab lists",
+            ),
+        ]
+    ):
+        f = opt(f)
+    return f
+
+
 @demo.command("hallmark-levers")
-@click.option("--port", type=int, default=8050, show_default=True)
-@click.option("--host", default="127.0.0.1", show_default=True)
-@click.option("--debug", is_flag=True, help="Dash debug mode")
+@_serve_options
 @click.option(
     "--cells",
     type=click.IntRange(min=0),
@@ -1203,20 +1219,124 @@ def multi_hallmark_ssa(t_end, save_dt, seed, max_events):
 @click.option(
     "--seed", type=int, default=0, show_default=True, help="population seed"
 )
-def hallmark_levers(port, host, debug, cells, seed):
+def hallmark_levers(port, host, debug, runs_dir, cells, seed):
     """Serve the hallmark-lever page: one slider per hallmark of aging,
     wired into the multi-hallmark composite. Every pull applies the
     severity through the hallmark layer, re-solves Dalle Pezze 2014,
     Geva-Zatorsky 2006 and Proctor 2007 as one system and redraws them
     against the etoposide arm. The etoposide exposure window is shaded,
     with longer windows on a switch; Proctor 2007 is drawn as a population
-    of cells at reaction level, with the population mean over it.
+    of cells at reaction level, with the population mean over it. The
+    wiring and fit tabs are `simulate view`'s.
 
     Needs the `app` extra: pip install "hallsim[app]".
     """
     from demos.hallmark_levers import main
 
-    main(port=port, host=host, debug=debug, cells=cells, seed=seed)
+    main(
+        port=port,
+        host=host,
+        debug=debug,
+        cells=cells,
+        seed=seed,
+        runs_dir=runs_dir,
+    )
+
+
+def _import_target(target: str):
+    """``module:name`` resolved and, when it is a callable that is not a
+    page or composite, called."""
+    import importlib
+
+    from hallsim.composite import Composite
+    from hallsim.view import Page
+
+    module, sep, name = target.partition(":")
+    if not sep:
+        raise click.BadParameter("expected module:name", param_hint="TARGET")
+    obj = getattr(importlib.import_module(module), name)
+    if callable(obj) and not isinstance(obj, (Page, Composite)):
+        obj = obj()
+    return obj
+
+
+@simulate.command("view")
+@click.argument("target")
+@_serve_options
+@click.option(
+    "--registry",
+    default=None,
+    help="module:name of a handle registry, one lever per handle that "
+    "reaches the composite",
+)
+@click.option(
+    "--t-end", type=float, default=10.0, show_default=True, help="run length"
+)
+@click.option("--macro-dt", type=float, default=0.5, show_default=True)
+@click.option(
+    "--population",
+    multiple=True,
+    help="a process to draw as a population of cells at reaction level",
+)
+@click.option(
+    "--cells",
+    type=click.IntRange(min=0),
+    default=8,
+    show_default=True,
+    help="cells per population process",
+)
+@click.option("--seed", type=int, default=0, show_default=True)
+@click.option(
+    "--run",
+    "runs",
+    multiple=True,
+    type=click.Path(),
+    help="a calibration run folder for the fit tab",
+)
+def view(
+    target,
+    port,
+    host,
+    debug,
+    runs_dir,
+    registry,
+    t_end,
+    macro_dt,
+    population,
+    cells,
+    seed,
+    runs,
+):
+    """Serve a composite as a page: levers over its handles, its wiring
+    with a signal trace, and a saved calibration run.
+
+    TARGET is module:name — a composite, a `hallsim.view.Page`, or a
+    callable returning either. A composite gets one slider per registry
+    handle that reaches it, a panel per written state grouped by process,
+    and a control preset at zero severity.
+
+    Needs the `app` extra: pip install "hallsim[app]".
+    """
+    from hallsim.view import Page, page_for, serve
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    obj = _import_target(target)
+    if isinstance(obj, Page):
+        page = obj
+    else:
+        reg = _import_target(registry) if registry else None
+        page = page_for(
+            obj,
+            reg,
+            t_end=t_end,
+            macro_dt=macro_dt,
+            population=tuple(population),
+            cells=cells,
+            seed=seed,
+        )
+    serve(
+        page, host=host, port=port, debug=debug, runs=runs, runs_dir=runs_dir
+    )
 
 
 @simulate.command("info")
