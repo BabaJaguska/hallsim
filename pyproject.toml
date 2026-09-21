@@ -37,6 +37,9 @@ dependencies    = [
   "python-libsbml",
   "tqdm",
   "matplotlib",
+  # Process pool with a per-task timeout; the corpus census kills and
+  # respawns a worker stuck on one deposit instead of losing the run.
+  "pebble",
 ]
 
 [project.optional-dependencies]

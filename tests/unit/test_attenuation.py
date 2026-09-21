@@ -109,3 +109,38 @@ def test_a_parameter_control_doubles_and_an_open_gate_reaches():
     assert by_param.settings == (1.0, 2.0)
     assert by_param.nodes[-1].high > by_param.nodes[-1].low
     assert float(jnp.isfinite(by_param.nodes[-1].rel_change))
+
+
+class Source(Process):
+    rate: float = 1.0
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.EVOLVED, default=0.0),
+            "y": Port(role=PortRole.EVOLVED, default=0.0),
+        }
+
+    def derivative(self, t, state):
+        return {"x": self.rate, "y": 2.0 * self.rate}
+
+
+def test_a_summed_observer_is_on_the_route():
+    """A block port's rule names its elements ``parts_0, parts_1``; the
+    wiring binds each to the block's path, so the route runs through the
+    observer to its total."""
+    from hallsim.models.observer import SumObserver
+
+    comp = Composite(
+        processes={
+            "src": Source(),
+            "sum": SumObserver(elements=("x", "y")),
+        },
+        topology={
+            "src": {"x": "a/x", "y": "a/y"},
+            "sum": {"parts": ("a/x", "a/y"), "total": "a/total"},
+        },
+    )
+    trace = trace_path(comp, "src.rate", "a/total", t_end=2.0, macro_dt=1.0)
+    assert trace.reaches
+    assert [n.path for n in trace.nodes][-1] == "a/total"
+    assert trace.nodes[-1].terms == ("total",)

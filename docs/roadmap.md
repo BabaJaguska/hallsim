@@ -23,14 +23,14 @@ analysis behind the Scheduler items.
 
 ## Calibration & Uncertainty
 
-Rationale, measured costs and what each step buys:
-[uncertainty-quantification.md](uncertainty-quantification.md). In order — each
-step is the prerequisite for the next.
+In order — each step is the prerequisite for the next; the rationale and
+costs are in [Uncertainty: options and costs](#uncertainty-options-and-costs)
+below.
 
 * [ ] **Make the loss a proper log density.** `gaussian_nll` means over entries
   and drops the ½, `data_loss` means again over arms, `prior_weight` is a free
-  multiplier. The MAP is unaffected; every reported *width* is scaled by an
-  unknown factor. Needs a residual σ — real precision weights where the data has
+  multiplier. The MAP is unaffected; this is the prerequisite for reporting
+  widths. Needs a residual σ — real precision weights where the data has
   them, else σ̂ from the MAP residuals, which `identifiability.residual_scale`
   already computes for the identifiability report.
 * [ ] **Laplace / delta-method bands** — `(JᵀJ/σ̂² + Π_prior)⁻¹` off the Jacobian
@@ -40,26 +40,66 @@ step is the prerequisite for the next.
   missing prior-precision term.
 * [ ] **Profile likelihood** (Raue 2009) — the nonlinear check on the ellipse,
   and the way to report a fit above `MAX_FIT_CONDITION_NUMBER` instead of
-  refusing it. Batched over the profile grid; unverified whether the
+  refusing it. Batched over the profile grid; to check whether the
   equilibration Newton solve survives `vmap` over the parameter axis.
 * [ ] **NUTS on a single constituent** (blackjax; DP14 against its deposited fit)
   to measure how wrong the Laplace ellipse is on a real posterior. Not on a
   composite — one gradient is 26 s there, so a chain is ~40 days.
 
+### Uncertainty: options and costs
+
+Fitted outputs are point estimates; a lab needs bands. An optimizer and a
+sampler answer different questions — `Calibrator` returns a MAP point, a
+sampler a distribution — so the choice is which uncertainty method, at what
+cost, measured against one HallSim gradient.
+
+**Prerequisite.** The loss is not yet a log density: `gaussian_nll` is a
+mean without the ½, `data_loss` means again over arms, and `prior_weight` is
+a free multiplier. The MAP is unaffected, but every method that reports a
+width reads the curvature *and its scale*, so the scale has to be real —
+precision weights where the data has them (`weights` already accepts them),
+else `σ̂² = RSS/(n − p)` at the MAP, which `identifiability.residual_scale`
+already computes. Two functions.
+
+**Laplace + delta method, first.** `Σ_θ = (JᵀJ/σ̂² + Π_prior)⁻¹` off the
+Jacobian `identifiability.py` already builds, and `sqrt(diag(J_pred Σ_θ
+J_predᵀ))` on any prediction, held-out arms included. One Jacobian at the
+MAP, about one fit step (~41 s on the multi-hallmark demo). It also ranks
+which parameter dominates a band, i.e. which measurement to make next.
+Local and Gaussian, so least reliable where the Fisher condition number is
+large; the profile is its standing check.
+
+**Profile likelihood** (Raue et al. 2009): fix θᵢ on a grid, re-optimise
+the rest, read the interval off the χ² profile. About a day sequential at 7
+params × 15 grid points, embarrassingly parallel and batch-shaped. It
+separates structural, practical and identifiable with the nonlinear
+boundary, and it turns a fit above `MAX_FIT_CONDITION_NUMBER` from a refusal
+into "this combination is determined, and here is how far the rest can run".
+
+**NUTS.** One reverse gradient on the composite is ~26 s; at 30–100
+gradients per draw, 1000 warmup + 1000 draws is ~40 days per chain. Worth
+doing on a single constituent instead (DP14 against its deposited fitting
+data, milliseconds per gradient) to measure how far the Laplace ellipse
+departs from a real posterior; blackjax is pure JAX and the integration is
+~20 lines. A sampler also needs clamps as a bijection rather than a clip,
+and `steady_state` to report non-convergence so the density goes to `−inf`
+there.
+
+**Resampling** (multistart ensembles, an arm- or reporter-level bootstrap)
+asks how far the fit moves when the data moves; the most expensive per unit
+of insight on a composite, and the only one short of a sampler that finds a
+second basin.
+
 ### One calibration path for mechanism and learned components
 
-Agreed 2026-09-19. The paper says mechanistic and neural components are
-fitted jointly; the code has two training loops. `CalibrationProblem` fits
-named scalars in log space with priors, held-out arms, best-iterate
-tracking, checkpoints and the Fisher gate. The NeuralODE trainers in
-`hallsim.models.neuralode` run their own Adam loop and carry the three
-things the calibrator lacks: an objective over observed states, derivative
-matching without a solve, and multiple shooting with curriculum,
-continuity and soft-DTW. None of the three is neural, and P0.85 (the
-shooting fit returns its last iterate) is what a loop outside the
-calibrator costs. It is **one objective**: a reporter is a store path plus
-a summary plus a data key, and a trajectory observation is the same thing
-with the identity summary and the path as its key. The rest are options.
+Mechanistic and neural components are fitted jointly, through one
+objective. `CalibrationProblem` fits named scalars in log space with priors,
+held-out arms, best-iterate tracking, checkpoints and the Fisher gate, and
+the same path carries what a learned block needs: an objective over observed
+states, derivative matching without a solve, and multiple shooting with
+curriculum and continuity. A reporter is a store path plus a summary plus a
+data key, and a trajectory observation is the same thing with the identity
+summary and the path as its key. The rest are options.
 
 Done: `Arm(condition, reference)`, reference `"t0"` | a condition | `None`,
 the last comparing values in the data's units through `Readout.scale`
@@ -85,25 +125,25 @@ into the loss (`minibatch_seed`): `Collocation.batch` samples,
 `member_batch` members of a batched condition; iterates are ranked on the
 whole objective, or `eval_loss_fn`, every `eval_every` steps.
 `fit_neuralode_derivative` and `fit_neuralode_shooting` are wrappers over
-all of this (P0.85 closed 2026-09-20). Regression guard, the hybrid demo's
-held-out amplitude error: old loop 0.0097 derivative / 0.0101 shooting,
-wrappers 0.0167 / 0.0317; the derivative difference is inside the
-three-seed spread of the new path (0.045, 0.017, 0.021 in-sample against
-the old loop's 0.027), the shooting block is one run each side. The
-derivative stage runs in 68 s against 1,012 s. Open: a second shooting
-seed to attribute that block's gap, and the shooting stage's ranking
-evaluations (25 per stage) are the remaining tunable cost.
+all of this (2026-09-20); the derivative stage runs in 68 s against 1,012 s
+before. Open: the shooting stage's ranking evaluations (25 per stage) are
+the remaining tunable cost, and a second shooting seed would tighten its
+held-out number.
 
-Where a learned component belongs, in the order an agent meets it: a
-model that exists only as code (train on trajectories the original code
-produces, declare its ports with the original annotations; `discover`'s
-`source:matlab` candidates stop being dead ends); the coupling between
-published blocks, which is where the demo's four hand-anchored edges are;
-the readout from mechanistic state to the transcriptome; and a module with
-no published rate laws, the secretory response downstream of NF-κB. The
-§3.3 surrogate trained on the block it replaces is none of these, and the
-data an agent reaches for first, three timepoints of bulk arrays, cannot
-constrain a learned block, which the Fisher gate will say.
+Where a learned component belongs, in the order an agent meets it: the
+coupling between published blocks, which is where the demo's four
+hand-anchored edges are; the readout from mechanistic state to the
+transcriptome; a module with no published rate laws, the secretory
+response downstream of NF-κB; and a model whose code is not an ODE, or
+whose code is gone and only trajectories survive. A model that exists as
+readable code — `discover`'s `source:matlab` candidates — is translated,
+not surrogated: write it as SBML, check it against the original with the
+conformance run, and it enters through the importer with its parameters,
+provenance and gradients intact. The hybrid demo shows the mechanics a
+learned block needs, gradients through the mechanistic and learned parts
+together and a held-out score on the block; the cases above are where that
+block earns its place. Three timepoints of bulk arrays cannot constrain a
+learned block, and the Fisher gate says so.
 
 jaxkineticmodel (PLOS Comput Biol 2025), checked from source: its package
 fits scalars in log2 space by masked MSE on states at the data's times,
@@ -127,9 +167,9 @@ full model. The same two-loop split this section removes.
   dose axis of the readout difference between two levels of the contrasting
   parameter) and it needs a simulation rather than arithmetic, so it belongs
   next to `place_clamp_rate`, which already measures through the composite.
-  Done by hand in a probe script that is not in the repository; see P0.45.
+  The numbers above come from a hand-run probe.
 * [ ] **Lipid-metabolism extension** — Tighanimine et al. 2024 (*Nat Metab*, the paper behind GSE248823) identified a G3P/PEtn homeostatic switch as *causal* for senescence (p53 → glycerol kinase activation drives G3P↑; PCYT2 post-translational inactivation drives PEtn↑; lipid droplet biogenesis is the downstream effect). Adding a `LipidMetabolism` Process (states: G3P, PEtn; inputs: `p53_activity`, a PCYT2-PTM proxy; outputs: a senescence-amplifying signal that feeds back into the SASP axis) would let HallSim test their causal claim *in silico* — and the GSE248824 SuperSeries includes the paired metabolomics needed to validate it. HallSim recapitulates the G3P/PEtn → senescence amplification loop and predicts G3PP/ETNPPL overexpression as senomorphic.
-* [ ] **Trajectory-level validation** — GSE248823 has 3 timepoints per arm (DDIS: D00/D07/D14, OIS: D00/D04/D07). Current concordance uses two-endpoint deltas; matching predicted vs. measured pathway-score *trajectories* (rate of change, time-constant ordering across pathways) would be a substantially stronger validation than scalar deltas.
+* [ ] **Trajectory-level validation** — GSE248823 has 3 timepoints per arm (DDIS: D00/D07/D14, OIS: D00/D04/D07). Concordance reads two-endpoint deltas; matching predicted vs. measured pathway-score *trajectories* (rate of change, time-constant ordering across pathways) would add the dynamics to the score.
 * [ ] Validate against scRNA-seq (Tabula Muris Senis, Ma 2020 caloric restriction) — pseudobulk ssGSEA
 * [ ] PINNs: physics-informed loss for NeuralODE training
 
@@ -145,17 +185,17 @@ scale and not well-described by the ODE mean-field:
 * **Senescence entry** — threshold-on-stochastic-state transition
   (DDR signal accumulates by jumps; entry fires once threshold crossed)
 
-The framework already has the right abstraction (`ProcessKind.DISCRETE`
-with `update(t, state) -> delta` and `ProcessKind.EVENT` with
-`condition`/`handler`). What's missing is:
+Landed: the Gillespie lane (`hallsim.stochastic`) runs an imported
+reaction network at reaction level inside a composite, with
+`Scheduler(batch_mode=...)` choosing host threads for a stochastic batch
+(`simulate demo proctor2007-ssa`, `multi-hallmark-ssa`). Queued on top of
+it:
 
-* PRNG plumbing — pass a `jax.random.PRNGKey` into the Scheduler and
-  thread split keys to each stochastic Process
-* A `StochasticDiscrete` example Process (telomere-shortening or
+* PRNG plumbing for hand-written stochastic `DISCRETE` processes — a
+  `jax.random.PRNGKey` into the Scheduler, split keys per process
+* A `StochasticDiscrete` example Process (telomere shortening or a
   per-genome mutation Poisson) demonstrating the contract
 * Population-level statistics via batched y0 with per-cell PRNG keys
-  (the existing batched-IC machinery already gives the cell axis;
-  we just need the key axis alongside it)
 
 ### Multi-cell / inter-cell communication
 
@@ -184,18 +224,11 @@ the JAX-native execution model. Designed as a natural follow-up.
 
 * [ ] LLM agent-assisted model composition
 * [ ] FBA / genome-scale metabolism via `jaxopt`-based LP — couples
-  ERiQ signaling state to BiGG-scale flux distributions with gradients.
-  **Tested against a real use case 2026-09-06 and not justified by it.** The
-  VCC extent problem was the candidate application: does FBA single-gene
-  deletion predict how hard a CRISPRi knockdown perturbs the transcriptome?
-  Human-GEM + cobrapy over 1,574 measured K562 targets gave Spearman **-0.10**
-  against an existing lookup at **0.49**, with **94% of deletions returning
-  growth ratio exactly 1.0** — a genome-scale network routes around single
-  deletions, which is why MOMA/ROOM exist. The signal that survived was binary
-  (load-bearing or not), which essentiality annotation already supplies. See
-  `VCC/docs/diary.md` 2026-09-06 (evening). This does not show the LP path is
-  worthless; it shows the first application to ask for it did not need it, so
-  the item stays queued without a sponsor rather than being promoted.
+  signaling state to BiGG-scale flux distributions with gradients. Queued
+  without a sponsor: the first application that asked for it (a CRISPRi
+  perturbation-extent problem, 2026-09-06) turned out to need only
+  essentiality annotation, since a genome-scale network routes around single
+  deletions.
 * [ ] 3D spatial diffusion & ECM modelling
 
 ## Model-adjacent formats
@@ -227,12 +260,11 @@ import it.
   from its parameters, is boilerplate and should be reported as absent rather
   than executed.
 
-  **Why this is on the roadmap and not a nice-to-have.** Every candidate
-  screened in the 2026-09-04 session died at the same question — does the
-  deposit reproduce its paper — and each time the check was hand-built, twice
-  wrongly (see P0.36). `intake.published_fit_chi2` covers the minority of
-  papers that deposit fitting data; SED-ML covers the majority that deposit a
-  curated simulation instead.
+  **Why this is on the roadmap.** Every candidate screened on 2026-09-04
+  came down to the same question — does the deposit reproduce its paper —
+  and each time the check was built by hand. `intake.published_fit_chi2`
+  covers the minority of papers that deposit fitting data; SED-ML covers the
+  majority that deposit a curated simulation instead.
 
   Scope is the subset curated deposits actually use, not SED-ML L1V4 in full:
   `<uniformTimeCourse>` (start, end, steps), `<task>` and repeated tasks,
@@ -243,19 +275,14 @@ import it.
   Two things fall out of it. It gives `intake` an automatic reproduction gate,
   which is the check the model-selection work most needed. And it demonstrates
   a genuinely different axis than SBML/XPP import — the framework consuming an
-  *experiment description*, not another model dialect — which is worth stating
-  precisely rather than filing under "more formats".
-
-  Prerequisite: P0.36 (compose events by default). A SED-ML task run against a
-  composite that silently dropped the model's events would compare the wrong
-  thing and pass.
+  *experiment description*, not another model dialect. A composite carries
+  its members' events by default, so a SED-ML task runs the model as
+  deposited.
 
 ### CellML
 
-* [ ] **No importer.** `discovery.search_physiome` finds CellML models and
-  returns a pointer; `ModelCandidate.fetch()` refuses for that source by
-  design. Wiring one is real work and nothing currently needs it — recorded so
-  the gap is not mistaken for a bug.
+* [ ] **Importer queued.** `discovery.search_physiome` finds CellML models
+  and returns a pointer; an importer follows the first model that needs one.
 
 ## Model discovery: which repositories are worth adding
 
@@ -284,10 +311,9 @@ assumed: the catalogue check below moved SBML qual off the top of this list.
 | **CoMSES / NetLogo** | agent-based, stochastic | No shared state vector and no derivative. Wrong formalism. |
 | **CellML Model Repository** | CellML | Already covered: it runs on the Physiome infrastructure already registered. A format view, not an independent source. |
 
-Ordering: **SBML qual first**, then NeuroML, then PK/PD — but on the strength
-of the existing formalism and the untested DISCRETE path, *not* on filling the
-missing response programs. That justification was checked on 2026-09-06 and
-does not hold.
+Ordering: **SBML qual first**, then NeuroML, then PK/PD, on the strength of
+the existing formalism; the catalogue check below shows it does not fill the
+missing response programs.
 
 ### What the logical-model catalogues actually contain
 
@@ -309,26 +335,16 @@ programs are absent from BioModels in every formalism, curated or not, and a
 targeted search over ISR and nucleolar terms returns nothing usable. They need
 a model built, not found.
 
-One correction in the other direction: JWS holds `jws:goodman`, a PKR/eIF2α
-model (species `PKRp`, `eIF2ap`, `P58a`, influenza `NS1`). That is the ISR
-sensing arm, though not the ATF4 translational-control arm, so "ISR has no
-representative" was too strong. It surfaced only after the index-hydration fix
-below, having been invisible to the search before it.
+JWS holds `jws:goodman`, a PKR/eIF2α model (species `PKRp`, `eIF2ap`,
+`P58a`, influenza `NS1`): the ISR sensing arm, though not the ATF4
+translational-control arm.
 
 
 ## SBML Import
 
-* [ ] **Translate SBML events into `ProcessKind.EVENT`** — generic event translator,
-  so models with discontinuous state resets (Proctor 2008 BIOMD0000000188 and
-  ~10–20% of curated BioModels) become importable. Diffrax 0.5+ already supports
-  events natively; HallSim already has `ProcessKind.EVENT`. The missing piece is
-  parsing SBML event MathML (trigger expressions, assignments, delays, persistence)
-  and emitting the corresponding `condition` / `handler` methods.
-  **Promoted to the critical path 2026-08-29.** Yao 2008 (BIOMD0000000318), the
-  arrest switch Phase 2 of the senescence-model rebuild plan (working notes, not in the repository)
-  is built on, has its serum steps as events `e1`/`e2` that assign to the
-  **parameter** `S`, not to a species. `sbml_events` skips both, so the model's
-  own published experiment cannot be run and the constituent cannot be validated
-  against its source — which the intake protocol requires before composing.
-  Parameter-target assignments need LATCHED param promotion, which is a smaller
-  job than the full translator and unblocks Phase 2 on its own.
+* [x] **SBML events translate into `ProcessKind.EVENT`** (`hallsim.sbml_events`):
+  triggers, assignments to species and to parameters (Yao 2008's serum steps
+  run as published), persistence; a composite carries its members' events by
+  default.
+* [ ] **Delayed events and event priorities** — the two constructs the
+  translator still declines; the census counts how many deposits carry them.

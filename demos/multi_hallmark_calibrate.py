@@ -294,7 +294,7 @@ def build_problem(
         return float(composite.processes[process].parameters[field])
 
     # Each fit param is read by ≥1 reporter and has a log-normal MAP prior.
-    # See docs/coupling-edge-priors.md, docs/gz06-basal-p53.md.
+    # See docs/calibration.md: coupling-edge priors, why the p53 reporters read RMS.
     # Screened 2026-09-05 over all 84 calibratable candidates
     # (`identifiability.sensitivity_jacobian`); 33 are numerically flat.
     # Selecting the top 5 by Gauss-Newton loss reduction was measured to

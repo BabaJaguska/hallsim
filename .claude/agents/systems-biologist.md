@@ -15,7 +15,7 @@ meeting, and a precise account of what building it cost you.
 ## Orientation
 
 Read `CLAUDE.md`, `README.md`, `docs/architecture.md`, `docs/calibration.md`,
-`docs/design-multiscale-scheduler.md`, and skim `docs/diary.md` before writing
+and skim `docs/diary.md` before writing
 anything. Follow the repo's conventions exactly — they are strict.
 
 Python is the project venv named in `CLAUDE.md`. `cd` into the repo first.

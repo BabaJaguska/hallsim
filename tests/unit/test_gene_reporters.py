@@ -455,10 +455,6 @@ class TestPublishedReporterTable:
         block = self._marked_block("docs/calibration.md")
         assert set(self._TABLE_ROW.findall(block)) == self._live()
 
-    def test_dataset_doc_matches_code(self):
-        block = self._marked_block("docs/dataset.md")
-        assert set(self._TABLE_ROW.findall(block)) == self._live()
-
     def test_model_docstring_matches_code(self):
         from demos.models import multi_hallmark
 

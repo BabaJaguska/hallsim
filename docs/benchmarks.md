@@ -34,13 +34,11 @@ where the ODE work is substantial, the same fixed cost is a smaller fraction:
 Solver step counts are bit-identical across the change (group_0 1933 steps /
 405 rejected, group_1 3834 / 1146), so the numerics are untouched.
 
-**Why it went unnoticed.** Tracing and compilation are distinct. The XLA
-compile cache is keyed *on the trace*, so an unjitted function reuses the
-compiled executable but must re-trace to look it up. `jax.log_compiles`
-therefore reported **zero recompiles** the whole time it was costing seconds
-per call. `test_performance.py` asserted the right property and measured the
-wrong half — and its fixture was a single process, so it only exercised the
-fast path, where `diffeqsolve` is traced once and tracing is cheap.
+**Tracing and compilation are distinct.** The XLA compile cache is keyed *on
+the trace*, so an unjitted function reuses the compiled executable but must
+re-trace to look it up. `jax.log_compiles` therefore reports **zero
+recompiles** while re-tracing costs seconds per call; measure trace cost as
+well as compile count.
 
 **Fix.** `Scheduler.run` splits into an eager prologue (groups, coupling,
 stiffness routing, save grid — all structural) and a compiled core cached by
@@ -92,19 +90,18 @@ of 24 — 8–10× the linear algebra, 2× the JVPs. Restricting each group to i
 own evolved indices, splicing the frozen off-group values inside the RHS,
 measures **1.86×** and **2.78×**, and compounds with the 1.8× above.
 
-This is the half that scales badly for a composition framework: group size is
-fixed, total dimension is not, so the waste grows with every model added.
+This is the half that matters for a composition framework: group size is
+fixed, total dimension is not, so the saving grows with every model added.
 
 **Shipped** as `_ReducedRHS` (`scheduler.py`), measuring **2.30×** at
-`rtol=1e-6` and **2.67×** at `1e-8` against a worktree at the prior HEAD. The
-frozen-coupling caveat was wrong: `fill(t)` supplies the off-group states under
-interpolated coupling too, so the solved dimension is the same either way.
+`rtol=1e-6` and **2.67×** at `1e-8` against the prior HEAD. `fill(t)`
+supplies the off-group states under interpolated coupling too, so the solved
+dimension is the same either way.
 
 Build the restricted RHS *once*, outside the timing loop. A closure rebuilt per
 call is a static leaf that rehashes, so every solve misses diffrax's cache and
-the measurement inverts — the restricted arm came out 3× *slower* until that
-was fixed. `_FlatRHS` is an `eqx.Module` for exactly this reason; hand-rolling
-a solve around the Scheduler reintroduces the bug the framework already fixed.
+the measurement inverts. `_FlatRHS` is an `eqx.Module` for exactly this
+reason; hand-rolling a solve around the Scheduler gives that cost back.
 
 ---
 
@@ -202,7 +199,7 @@ live target rather than a curiosity.
 | `--xla_cpu_multi_thread_eigen=false` | 2.247 → 2.276 s. Nil — the solve is single-threaded and has no parallelism to exploit. Re-tested 2026-09-12 on the 80-core host against the Gillespie event loop, where an 80-thread Eigen pool per tiny op was the suspect: three interleaved passes, idle box, 10.43/10.22/11.49 s default against 10.31/10.42/10.34 s with the flag. Still nil; a one-shot pair on a *loaded* box read as 1.68x and was pure load drift |
 | `--xla_cpu_enable_fast_math=true` | 2.247 → 2.100 s (6.5%). Not worth FTZ and no-NaN reassociation at `atol=1e-9` with curated oscillators |
 | Lowering `max_steps` to shrink the reverse-mode checkpoint count | 32.1 s vs 27.7 s at the 4M default. `DEFAULT_MAX_STEPS` is not the lever |
-| Sharding the *existing vmapped* batch axis | 0.83× — slower than doing nothing. One vmapped `while_loop` has one trip-count predicate, so SPMD adds a cross-device reduce instead of splitting the loop. Needs `shard_map` (2.4×) — **not reproducible on JAX 0.10.2 (2026-09-10): `shard_map` around `Scheduler.run` fails inside lineax's LU solve; see §6 and P0.70** |
+| Sharding the *existing vmapped* batch axis | 0.83× — slower than doing nothing. One vmapped `while_loop` has one trip-count predicate, so SPMD adds a cross-device reduce instead of splitting the loop. `shard_map` (2.4× when it ran) is not supported around `Scheduler.run` on JAX 0.10.2, where it fails inside lineax's LU solve; worker processes over chunks are the route, §6 |
 | Parallelising forward-mode parameter directions | 1.09×. The vmapped JVP already shares one primal solve |
 | Branching the SSA save-grid write — `lax.cond` around the per-event `jnp.where` over the `(save points, species)` block | 3.8–4.0% **slower**, at both ~6 and ~50 save points per macro window (interleaved, idle host, 2026-09-12). The premise was that the select is O(save points) per event; it is not — a 50-point grid costs what a 6-point one does (13.14 against 12.78 µs/event) — so XLA already handles the block, and `jnp.any(fill)` plus the branch costs more than it saves. Deleting the write outright is worth 8.8%, which is the ceiling a branch chases, not what it recovers |
 | Inverse-CDF (`searchsorted(cumsum(rates), u·total)`) in place of `jax.random.choice`, and one fused validity reduction in place of two | +3.9% and +3.3% against a **5% control arm** — the same code measured twice — so neither is separable from noise; together +4.4%, sub-additive. The inverse-CDF also changes the draws (831,663 events against 796,857) |
@@ -215,7 +212,7 @@ treat a *level* as needing a re-measure.
 
 ---
 
-## 6. Batched populations on CPU: measured, and the claim does not hold past 64
+## 6. Batched populations on CPU: chunks of 64, or worker processes
 
 Multi-hallmark composite with Proctor 2007 attached — 79 states, 60 of them
 integrated, 9 processes, 2 stiff groups — control arm over 14 days,
@@ -233,8 +230,7 @@ The probe script is not in the repository.
 
 Every member solved at every size. The same 1024 population as 16 chunks of
 64 takes 418 s, 1.7× less than the one-shot batch and 1.3× less than 1024
-single runs, so a Python loop over chunks beats the framework's batch path
-(P0.70).
+single runs, so a chunk of about 64 is the efficient unit on CPU.
 
 **Mechanism, measured.** Inside one chunk of 64 the per-member solver step
 counts spread from ~165 to 258–590 in the slow group (rejections 7 to 68),
@@ -247,12 +243,14 @@ is enough to open that spread. The three members that left the basin
 chunks that were not the slowest, so this is the ordinary spread of an
 adaptive solver over a population, not a pathological member.
 
-**What does work on this machine: worker processes over chunks.** The same
-1024 as 16 chunks of 64 over 3 spawned processes, each with its own
-Scheduler and its own compile: **266 s, 260 ms per member**, 2.7× faster
-than the one batched call. Nothing is traced across members. `shard_map`
-and `pmap` over host devices both fail inside lineax's LU solve on this
-stack (P0.70). The GPU claim ("near-flat") is unmeasured on this machine.
+**Worker processes over chunks.** The same 1024 as 16 chunks of 64 over 3
+spawned processes, each with its own Scheduler and its own compile: **266 s,
+260 ms per member**, 2.7× faster than the one batched call. Nothing is
+traced across members. `shard_map` and `pmap` over host devices are not
+supported on this stack (both fail inside lineax's LU solve), so processes
+are the multi-core route on CPU. On GPU the batch is close to flat: a Tesla
+T4 runs 256 DallePezze cells at 4.6× the cost of one and 256 members of the
+composite at 11.7×.
 
 | how the 1024 were run | wall time | per member |
 |---|---|---|
@@ -319,7 +317,7 @@ the real `ssa_window_jax` (it is imported at call time, so a module-level swap
 reaches the run), keep a control arm that changes nothing, and trust only
 differences larger than what that control shows.
 
-**A measurement hazard this section's caveat understates.** The same single
+**A measurement hazard.** The same single
 chain measured 10.4 s on the idle host and 17.4 s with the box at load 65 of
 80 cores and 63% system time (another user's ~495 GB job, 667 GB of swap
 resident). That is a 1.7x swing with no code change, larger than most of the
@@ -430,8 +428,8 @@ Scheduler is 0.38 s.
 - On a feedback loop the default is first order in the macro step
   (0.50 → 0.13 → 0.054) and interpolated equals frozen, because the group
   solved first sees the other frozen. A second sweep buys 200× at 2× the
-  cost; Strang 7× at 5 %. The plan now warns when its coupling graph has a
-  cycle and one sweep (P1.28).
+  cost; Strang 7× at 5 %. The plan warns when its coupling graph has a
+  cycle and one sweep.
 - Explicit on everything crosses over: bare Tsit5 loses to bare Kvaerno5 by
   17× at 72 states, by 3.3× at 264, and wins by 1.8× at 1 032. Routing
   decides per group, so the split never has to pick.
@@ -446,16 +444,13 @@ Scheduler is 0.38 s.
   `analyze_groups` 59 s of the 67 s, 74 633 Jacobian-vector products
   through ARPACK against 1 597 at 1 024 states — a ring's top eigenvalues
   differ in the seventh digit at that size and the restarts multiply. The
-  verdict is right and cached per Scheduler instance. Fixed the same day
-  (P3.22): a Gershgorin bound over the Jacobian, in column chunks when the
-  pattern would be dense, certifies the chain not stiff before any
-  estimate — `analyze_groups` 59 s → 1.6 s, the plan 67 s → 0.9 s, same
-  routing.
-- Found on the way: routing crashed above 512 states on a clustered
-  spectrum (P0.82, fixed); interpolated coupling returns its own save grid
-  (P1.27); the routing verdict is measured at `y0` only — gz06's abscissa
-  there put it on the implicit solver where bare Tsit5 was 2.7× faster and
-  more accurate.
+  verdict is right and cached per Scheduler instance. A Gershgorin bound
+  over the Jacobian, in column chunks when the pattern would be dense, now
+  certifies the chain not stiff before any estimate — `analyze_groups` 59 s
+  → 1.6 s, the plan 67 s → 0.9 s, same routing.
+- The routing verdict is measured at `y0`. A model whose stiffness changes
+  along the trajectory (gz06's abscissa at `y0` routes it implicit, where
+  bare Tsit5 was 2.7× faster) can pin its solver.
 
 ## 8. Where the derivative's time goes
 
@@ -463,9 +458,9 @@ Scheduler is 0.38 s.
 slots), one Kvaerno5, one chord, one PID controller, `dt0=None`, 141 saved
 points; five presentations of the same field. *program*: the member's
 compiled program called bare. *generated*: the field re-emitted from
-`symbolic_field` as one CSE'd function — **a different problem** (P1.29: it
-holds the irradiation pulse on for ever; 1 140 steps against 663), kept only
-as the per-call floor for the code generation. *flat*: the composite's RHS
+`symbolic_field` as one CSE'd function — **a different problem** (it holds
+the irradiation pulse on for ever; 1 140 steps against 663), kept only as
+the per-call floor for the code generation. *flat*: the composite's RHS
 reduced to the evolved states, as the Scheduler integrates it. *no assign
 pass*: the same with the assignment-rule pass removed. *Scheduler*:
 `Scheduler.run`. Batched call is 256 states in one `vmap`.
@@ -517,14 +512,13 @@ default lane (§7's A/B table).
   trajectory gets every assigned value through `materialize_assigned` as
   before.
 - The Scheduler is now 2 % above the bare flat solve, and below the member's
-  program called bare in its own species order; that last gap was not
-  chased.
+  program called bare in its own species order.
 - Per call the composite's form cost 4× the standalone generated function
   (65 against 15 µs): element reads of `y`, `w` and `c`, and a dense
   stoichiometry product the generated form folds into its expressions. The
   product is now folded the same way (39 µs, 2.4×); the reads and the port
-  view's gather, slice and restack are what is left of P3.21, and the solve
-  bounds them by the implicit step's share of RHS work.
+  view's gather, slice and restack are what remains, and the solve bounds
+  them by the implicit step's share of RHS work.
 
 ## 9. Per-group stiffness routing against a pinned solver
 

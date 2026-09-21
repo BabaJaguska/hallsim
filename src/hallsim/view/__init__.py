@@ -1,5 +1,5 @@
-"""Serve a composite as a page: levers over its handles, its wiring with a
-signal trace, and a saved calibration run.
+"""Serve a composite as a page: levers over its handles and its wiring
+with a signal trace; a saved calibration run too when one is named.
 
 >>> from hallsim.view import page_for, serve
 >>> serve(page_for(comp, registry=REGISTRY, t_end=14.0))

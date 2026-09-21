@@ -907,6 +907,122 @@ def rejections(cls, slot):
         click.echo(f"    evidence: {r.evidence}")
 
 
+@simulate.group("census")
+def census():
+    """Measure a repository: what survives each intake gate, and why.
+
+    Stage 0 of the composition benchmark. `run` screens every SBML deposit
+    in BioModels, curated and uncurated, through the same gate as `simulate
+    screen`,
+    in parallel with a per-deposit timeout, streaming one row per deposit
+    to `outputs/census/<stamp>/rows.jsonl` (tail `progress.log`). `report`
+    writes the tables, the figures, the per-deposit failure list and a
+    write-up with a preprint paragraph and a blog section.
+    """
+
+
+@census.command("run")
+@click.option("--workers", type=int, default=4, show_default=True)
+@click.option(
+    "--t-end",
+    type=float,
+    default=10.0,
+    show_default=True,
+    help="screen horizon, in each model's native time unit",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=300.0,
+    show_default=True,
+    help="seconds per deposit before its worker is killed",
+)
+@click.option(
+    "--limit", type=int, default=None, help="first N accessions only"
+)
+@click.option(
+    "--only",
+    default=None,
+    help="comma-separated accessions or bare numbers, instead of the listing",
+)
+@click.option(
+    "--run-dir",
+    default=None,
+    help="resume into an existing run directory",
+)
+@click.option(
+    "--branch",
+    type=click.Choice(["all", "curated", "uncurated"]),
+    default="all",
+    show_default=True,
+    help="curated (BIOMD) deposits, uncurated (MODEL) ones, or both",
+)
+@click.option("--refresh", is_flag=True, help="re-list the repository")
+@click.option(
+    "--retry-timeouts",
+    is_flag=True,
+    help="re-screen the deposits a previous pass timed out on",
+)
+@click.option(
+    "--tasks-per-worker",
+    type=int,
+    default=6,
+    show_default=True,
+    help="deposits a worker screens before it is recycled (bounds memory)",
+)
+def census_run(
+    workers,
+    t_end,
+    timeout,
+    limit,
+    only,
+    run_dir,
+    branch,
+    refresh,
+    retry_timeouts,
+    tasks_per_worker,
+):
+    """Screen a branch of BioModels (or --only a few) and stream the rows."""
+    from hallsim.census import list_accessions, run_census
+
+    if only:
+        accessions = [
+            f"BIOMD{int(x):010d}" if x.strip().isdigit() else x.strip()
+            for x in only.split(",")
+        ]
+    else:
+        accessions = list_accessions(branch, refresh=refresh)
+    run = run_census(
+        accessions,
+        run_dir=run_dir,
+        workers=workers,
+        t_end=t_end,
+        timeout=timeout,
+        limit=limit,
+        retry_timeouts=retry_timeouts,
+        tasks_per_worker=tasks_per_worker,
+    )
+    click.echo(f"rows -> {run / 'rows.jsonl'}")
+
+
+@census.command("report")
+@click.option(
+    "--run-dir",
+    default=None,
+    help="a census run directory; default outputs/census/latest",
+)
+def census_report(run_dir):
+    """Tables, figures, failure list and write-up for a finished run."""
+    from pathlib import Path
+
+    from hallsim.census import write_report
+    from hallsim.io import outdir
+
+    run = Path(run_dir) if run_dir else outdir("census") / "latest"
+    out = write_report(run)
+    click.echo(str(out))
+
+
 @demo.command("stiffness")
 @click.option(
     "--macro-dt",
@@ -1192,12 +1308,6 @@ def _serve_options(f):
             click.option("--port", type=int, default=8050, show_default=True),
             click.option("--host", default="127.0.0.1", show_default=True),
             click.option("--debug", is_flag=True, help="Dash debug mode"),
-            click.option(
-                "--runs-dir",
-                default="outputs",
-                show_default=True,
-                help="folder whose calibration runs the fit tab lists",
-            ),
         ]
     ):
         f = opt(f)
@@ -1219,7 +1329,7 @@ def _serve_options(f):
 @click.option(
     "--seed", type=int, default=0, show_default=True, help="population seed"
 )
-def hallmark_levers(port, host, debug, runs_dir, cells, seed):
+def hallmark_levers(port, host, debug, cells, seed):
     """Serve the hallmark-lever page: one slider per hallmark of aging,
     wired into the multi-hallmark composite. Every pull applies the
     severity through the hallmark layer, re-solves Dalle Pezze 2014,
@@ -1227,20 +1337,13 @@ def hallmark_levers(port, host, debug, runs_dir, cells, seed):
     against the etoposide arm. The etoposide exposure window is shaded,
     with longer windows on a switch; Proctor 2007 is drawn as a population
     of cells at reaction level, with the population mean over it. The
-    wiring and fit tabs are `simulate view`'s.
+    wiring tab is `simulate view`'s.
 
     Needs the `app` extra: pip install "hallsim[app]".
     """
     from demos.hallmark_levers import main
 
-    main(
-        port=port,
-        host=host,
-        debug=debug,
-        cells=cells,
-        seed=seed,
-        runs_dir=runs_dir,
-    )
+    main(port=port, host=host, debug=debug, cells=cells, seed=seed)
 
 
 def _import_target(target: str):
@@ -1291,14 +1394,13 @@ def _import_target(target: str):
     "runs",
     multiple=True,
     type=click.Path(),
-    help="a calibration run folder for the fit tab",
+    help="a calibration run folder; given, the page gains a fit tab",
 )
 def view(
     target,
     port,
     host,
     debug,
-    runs_dir,
     registry,
     t_end,
     macro_dt,
@@ -1307,8 +1409,8 @@ def view(
     seed,
     runs,
 ):
-    """Serve a composite as a page: levers over its handles, its wiring
-    with a signal trace, and a saved calibration run.
+    """Serve a composite as a page: levers over its handles and its wiring
+    with a signal trace; with --run, a saved calibration run too.
 
     TARGET is module:name — a composite, a `hallsim.view.Page`, or a
     callable returning either. A composite gets one slider per registry
@@ -1334,9 +1436,7 @@ def view(
             cells=cells,
             seed=seed,
         )
-    serve(
-        page, host=host, port=port, debug=debug, runs=runs, runs_dir=runs_dir
-    )
+    serve(page, host=host, port=port, debug=debug, runs=runs)
 
 
 @simulate.command("info")

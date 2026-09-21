@@ -2,9 +2,9 @@
 
 How the framework fits together: the core objects, how processes are wired
 and run, the validation layer, how models compose, and how SBML models are
-imported. For the calibration/validation side see
-[calibration.md](calibration.md); for the multi-rate scheduler internals see
-[design-multiscale-scheduler.md](design-multiscale-scheduler.md).
+imported, plus the [Scheduler](#scheduler)'s macro-step semantics,
+[formalism coverage](#formalism-coverage) and the [key files](#key-files).
+For the calibration side see [calibration.md](calibration.md).
 
 ![HallSim Architecture](assets/hallsim_architecture.png)
 
@@ -13,7 +13,7 @@ and scheduling concepts from Ptolemy II, implemented natively on JAX for GPU
 acceleration and differentiability. HallSim deliberately covers a narrower
 set of modeling formalisms than Vivarium-collective in exchange for
 end-to-end differentiability, JIT, and native batched populations — see
-[formalism-coverage.md](formalism-coverage.md).
+[Formalism coverage](#formalism-coverage).
 
 ## Core concepts
 
@@ -23,7 +23,7 @@ end-to-end differentiability, JIT, and native batched populations — see
 | **Port** | Named connection point with a role, default value, units, description, and ontology annotation. |
 | **Topology** | Static wiring map `{proc_name: {port_name: store_path}}`, defined at composition time — not inside processes. |
 | **Composite** | Bundles processes + topology. `build_rhs()` returns a JAX-compatible flat ODE right-hand side over `store_keys()` order. Auto-groups continuous processes by timescale. |
-| **Scheduler** | The unified runner for every composite shape — multi-rate orchestration (timescale groups, discrete dispatch, event firing), single-group fast path, shape-polymorphic state (single or batched `y0`). See [scheduler design](design-multiscale-scheduler.md). |
+| **Scheduler** | The unified runner for every composite shape — multi-rate orchestration (timescale groups, discrete dispatch, event firing), single-group fast path, shape-polymorphic state (single or batched `y0`). See [Scheduler](#scheduler). |
 | **Store** | Flat `dict[str, jnp.ndarray]` with path-like keys (`"cytoplasm/ROS"`). A valid JAX PyTree. |
 
 **Flat-state order.** `store_keys()` is natural-sorted — digit runs compare
@@ -55,6 +55,73 @@ therefore split away from the SBML module it writes into (imports always carry
 boundary with nothing in the output to show for it. Give an edge the same
 `timescale` as the module it drives; `models/multi_hallmark.py` is the worked
 example.
+
+## Scheduler
+
+The Scheduler is the one runner. It borrows Vivarium's composition
+semantics (Process, Port, Topology, Store; Agmon et al. 2022) and Ptolemy
+II's idea of heterogeneous models of computation under one orchestrator,
+and implements both natively on JAX:
+
+| Capability | Vivarium | Ptolemy II | HallSim |
+|------------|----------|------------|---------|
+| GPU-accelerated continuous solves | No (CPython) | No (Java) | Yes (JAX/Diffrax) |
+| Differentiability through ODE solves | No | No | Yes (`jax.grad`) |
+| Population parallelism | multiprocessing | Threads | batched `y0` |
+| Composition-time validation | Basic | No | 4-subsystem semantic layer |
+| Heterogeneous process types | Yes (Engine) | Yes (Directors) | Yes (Scheduler) |
+
+**The macro step.** `Scheduler.run(composite, t_span, macro_dt)` advances in
+communication intervals of `macro_dt`. Within one:
+
+1. each continuous timescale group is solved by Diffrax over the interval,
+   groups in sequence under Lie splitting (`splitting="strang"` for the
+   symmetric second-order variant), the other groups' states supplied
+   frozen or interpolated (`coupling_mode`);
+2. discrete processes whose `dt_step` is due fire `update`, and their
+   deltas are added;
+3. event conditions are checked at the sync point, and a handler fires
+   once on a False→True crossing.
+
+The whole loop compiles to one `lax.scan`, so reverse-mode gradients flow
+through every macro step and across timescale groups; only event handlers
+are non-differentiable, which matches the biology they represent. A
+composite with one continuous group and no discrete, event or Strang
+machinery takes a fast path: one `diffeqsolve` over the whole span.
+
+**Choosing `macro_dt`.** It must not exceed the smallest discrete
+`dt_step`; it should be small enough that LATCHED values do not go stale in
+ways that matter, and large enough that orchestration is negligible against
+the solve. `min(dt_step) / 2` is the usual starting point, and
+[benchmarks.md](benchmarks.md) §7 measures the splitting error against the
+macro step on a feedback loop and on the multi-hallmark composite.
+
+**Stiffness routing.** Each group is analysed at `y0`
+(`hallsim.stiffness.analyze_groups`) and routed to an implicit solver
+(`Kvaerno5` with a Newton root finder) or an explicit one (`Tsit5`); a group
+may be pinned. A wrong pin costs 14× on a stiff group and 22× on a non-stiff
+one ([benchmarks.md](benchmarks.md) §9).
+
+**Validation for the multi-timescale contract**, run at composition time
+alongside the semantic layer:
+
+| Check | Severity |
+|-------|----------|
+| Continuous process writes to a LATCHED port | error |
+| Discrete/event process writes to an EVOLVED port | error |
+| `macro_dt` larger than the smallest discrete `dt_step` | error |
+| LATCHED port has no discrete/event writer | warning |
+| Timescale ratio within a group above 100× | warning |
+| Discrete `dt_step` not aligned with `macro_dt` | warning |
+
+**A multi-timescale cell**, in outline: fast ROS kinetics (`timescale=1.0`)
+and slow epigenetic drift (`timescale=86400*30`) auto-group apart and are
+solved at their own step sizes; a `CellDivision` discrete process with
+`dt_step=86400.0` fires once a day; a `SenescenceEntry` event process latches
+`cell/senescent` when its `p53` input crosses a threshold. One
+`Scheduler().run(composite, t_span=(0, 86400*365), macro_dt=3600.0)` runs the
+year, syncing the store every hour. `simulate demo multiscale` is the
+runnable version on toy processes.
 
 ## Validation layer
 
@@ -159,8 +226,9 @@ The importer:
 - translates `<event>` blocks (see `hallsim.sbml_events`), including those
   whose assignment target is a parameter rather than a species — the target is
   promoted onto the owning process via `with_param_input` so the assignment
-  reaches the rate laws. A nonzero delay or a priority is still refused, and a
-  zero delay is not a delay (COPASI writes `<delay>0</delay>` on every export).
+  reaches the rate laws. Delayed events and event priorities are not translated
+  yet; a zero delay is not a delay (COPASI writes `<delay>0</delay>` on every
+  export).
   **A `Composite` expands a member process's events automatically**; discarding
   them is `proc.without_events()`, written at the call site so the discard is
   visible where it is decided. `intake.triage_sbml` rejects two trigger
@@ -206,6 +274,19 @@ paper or repository; `--web` adds Brave Web Search from `BRAVE_SEARCH_API_KEY`,
 and any `provider` with `search(query, *, limit, timeout)` plugs in the same
 way. PDF text needs the `search` extra. A label describes filenames, not the
 model: screen anything selected with `simulate screen`.
+
+**The supply, measured.** `simulate census run` puts every SBML deposit in
+BioModels — curated and uncurated, or one branch with `--branch` — through
+the same gate as `simulate screen`, in parallel with a per-deposit timeout,
+streaming one row per deposit; `simulate census report` writes the funnel
+(listed → kinetic → imports → solves → clock → annotated → at rest → clean)
+per branch, a salvage class per deposit
+(`hallsim.census.SALVAGE`: as-is, cheap-fix, needs-review, importer-work,
+wrong-formalism, deposit-defect, framework-defect, timeout) with the
+concrete action beside it, the per-deposit failure table carrying each
+paper's own account of what it models, two figures, and a write-up with a
+preprint paragraph. It is the numerical gate only: nothing in it reads the
+paper, so its counts are upper bounds on the usable supply.
 
 ### On-disk caches
 
@@ -292,14 +373,10 @@ part of the package — [`multi_hallmark.py`](../demos/models/multi_hallmark.py)
 [`mitochondrial_aging.py`](../demos/models/mitochondrial_aging.py),
 [`stem_cell_niche.py`](../demos/models/stem_cell_niche.py).
 
-**These are exercises of the framework's mechanics, not results.** They exist to
-stress the paths this document describes — several time bases reconciled onto
-one clock, cross-publication coupling edges, multi-group solves, held-out arms,
-and end-to-end gradients through all of it. No claim about the framework rests
-on a demo's concordance score, and none should be built on one as biology.
-Which models a demo currently composes, and why, belongs to that demo's own
-docstring and to `docs/known-problems.md` — not here, where it goes stale
-silently.
+These demos exercise the paths this document describes — several time bases
+reconciled onto one clock, cross-publication coupling edges, multi-group
+solves, held-out arms, and end-to-end gradients through all of it. Which
+models a demo composes, and why, is in that demo's docstring.
 
 ## Population studies via batched `y0`
 
@@ -321,17 +398,16 @@ result = Scheduler().run(comp, t_span=(0.0, 50.0), macro_dt=5.0, y0=y0)
 result.get("dp14/CDKN1A").shape                      # (n_time, 64)
 ```
 
-Near-flat in `batch` on GPU (kernel launch dominates) is the design intent
-and is unmeasured. On CPU it is measured and it is not what the design
-intends: on the 79-state multi-hallmark composite over 14 days, per-member
-cost is 329 ms at 64 members, 442 ms at 256 and 707 ms at 1024, at which
-point one batched run is slower than 1024 sequential ones. One vmapped
-solver loop has one trip count, so every member steps as many times as the
-slowest, and a 10% jitter on the initial condition spreads adaptive step
-counts 1.6–3.6× between members. For launched populations whose dynamics
-tolerate a validated fixed step, `Scheduler(fixed_dt=...)` provides lockstep
-integration; it replaces error control, so compare its readouts with an
-adaptive reference first. Otherwise, run populations in chunks of about 64.
+On GPU the batch is close to flat: on a Tesla T4, 256 DallePezze 2014 cells
+cost 4.6× one cell, and 256 members of the 79-state multi-hallmark composite
+11.7× one. On CPU one vmapped solver loop has one trip count, so every member
+steps as many times as the slowest, and the efficient unit is a chunk of
+about 64 members (329 ms per member on that composite over 14 days, against
+528 ms solved one at a time); [benchmarks.md](benchmarks.md) §6 has the
+numbers and the worker-process pattern for larger populations. For
+populations whose dynamics tolerate a validated fixed step,
+`Scheduler(fixed_dt=...)` provides lockstep integration; it replaces error
+control, so compare its readouts with an adaptive reference first.
 Every process kind rides the
 batch axis: a discrete `update` and an event `condition`/`handler` see
 `(batch,)` per port, a delta may be a scalar for every member or one per
@@ -356,4 +432,104 @@ Small modules a model author needs early, each importable on its own:
 | `hallsim.structure` | What the declared symbolic forms (`reaction_channels`, `assignment_rules`, `rate_rules`) imply for a whole composite: `composite_stoichiometry` / `composite_moieties` (exact `N` and its integer moieties over store paths), `jacobian_pattern` + `compressed_jacobian` (the Jacobian in as many forward passes as its sparsity has colours; dense only on an undeclared process's own block), `check_pattern` (the pattern against the composite's derivative), `symbolic_field` (the field as sympy, over path and `<process>.<field>` parameter symbols). `steady_state` and `identifiability.structural_redundancy` are built on it. |
 | `hallsim.diagnostics` | `screen_process` / `screen_composite` (the constituents-first pre-flight), `screen_sensitivity`, and `recommend_coupling_source`. |
 | `hallsim.attenuation` | `trace_path(composite, control, reporter, ...)` — follows a handle or a parameter to a reporter through the wiring, runs the composite at two settings of it, and reports the relative change at every store path on the route, naming the node where it collapses and the reactions that carry that step. The diagnosis behind a flat reporter or a structural verdict; the identifiability report points here. |
-| `hallsim.view` | `page_for(composite, registry, t_end=...)` + `serve(page)` (`simulate view module:name`): a Dash page for any composite with a levers tab (one slider per handle that reaches it, a trajectory row per process, a population band for reaction-level members), a wiring tab (processes opened into their reactions and states, a `trace_path` route coloured by relative change) and a fit tab (a saved calibration run's history, parameters and concordance). The hallmark-lever demo is one `Page` over it. Needs the `app` extra. |
+| `hallsim.view` | `page_for(composite, registry, t_end=...)` + `serve(page)` (`simulate view module:name`): a Dash page for any composite with a levers tab (one slider per handle that reaches it, a trajectory row per process, a population band for reaction-level members), a wiring tab (processes opened into their reactions and states, a `trace_path` route coloured by relative change) and, when `--run` names one, a fit tab (a saved calibration run's history, parameters and concordance). The hallmark-lever demo is one `Page` over it. Needs the `app` extra. |
+
+## Formalism coverage
+
+HallSim covers a chosen subset of the modelling formalisms a "multiscale
+model" slide lists, and the choice is the design: the composition contract
+(`derivative` / `update` / `condition` + `handler`, all over JAX arrays) is
+narrower than Vivarium's any-Python-callable `update(t, dt)`, and in
+exchange the whole composite is differentiable, JIT-compilable, GPU-runnable
+and natively batched. For aging biology — signaling networks, metabolic
+ODEs, oscillators, stem-cell niches — that is the right trade; for
+genome-scale FBA or molecular dynamics it is not, and those compose at the
+boundary as INPUT ports fed from their own tools.
+
+Of Milner's bigraphs, which the Vivarium papers cite, HallSim keeps the link
+graph (`topology = {process: {port: store_path}}`) and drops the place graph:
+state is one flat `dict[str, jnp.ndarray]` with `/`-separated keys, not a
+nested hierarchy. Homogeneous populations are a batched `y0`; paracrine
+coupling is a process that reduces along the batch axis and writes a shared
+store path every cell reads; a composite reused under two names nests inside
+another and flattens with a prefix.
+
+| Formalism | Status | Notes |
+|---|---|---|
+| Differential equations | ✅ | native CONTINUOUS Process via Diffrax |
+| Michaelis-Menten, Monod-Wyman-Changeux, linear degradation | ✅ | ODE forms of the same machinery |
+| Neural network | ✅ | `NeuralODE` Process with its training path (`hallsim.models.neuralode`) |
+| SBML — deterministic ODE | ✅ | `process_from_sbml`, native (`hallsim.sbml_core`); `scripts/conformance.py` compares an import with libRoadRunner and COPASI |
+| SBML — events | 🟢 | `hallsim.sbml_events`, including assignments to parameters; delayed events and priorities are roadmap |
+| Gillespie / stochastic | 🟢 | `hallsim.stochastic` runs an imported reaction network at reaction level inside a composite, with a threaded batch lane; PRNG plumbing for hand-written stochastic DISCRETE processes is roadmap |
+| Boolean network | 🟡 | a DISCRETE update over logical ops; no model written yet |
+| Rule-based (BNGL / Kappa) | 🟡 | a CONTINUOUS Process emitting an expanded ODE system; not built |
+| Agent-based / multi-cellularity | 🟡 | batched `y0` gives N independent cells; inter-cell communication needs a `PopulationAggregate` — [roadmap.md](roadmap.md) |
+| Constraint-based (FBA / BiGG) | ❌ | needs an LP solver; doable via `jaxopt` and queued behind an application |
+| Molecular dynamics, Brownian dynamics, physics engines | ❌ | wrong scale or no spatial state; OpenMM / GROMACS |
+| Graphical / Bayesian networks | ❌ | a different paradigm; wrap behind a Process if needed |
+
+✅ native or reduces to something native, with working models; 🟢 built
+and exercised; 🟡 the abstractions support it and a canonical example is
+mostly Process authoring; ❌ outside the design envelope, composed at the
+boundary.
+
+## Development
+
+- `pyproject.toml` is the single source of dependencies.
+- A reusable primitive (a coupling edge, a clamp, an event) is a `Process`
+  subclass in `src/hallsim/models/`; a specific biology lives in
+  `demos/models/` with a `build_<name>_composite()` factory.
+- Models aggregate additively in the ODE RHS via EVOLVED ports. A
+  multiplicative effect reads the other variable through a separate store
+  path and an INPUT port.
+- Handle-targeted parameters are not fittable by default (a handle's
+  severity is the experimental condition, set per arm);
+  `Process.calibratable_params()` is the self-documenting discovery API;
+  held-out splits are mandatory — see [calibration.md](calibration.md).
+- `make test-docs` runs every Python block in the README, this page and
+  calibration.md as written, top to bottom per page; minutes on CPU and
+  needs the network, so run it before a release.
+
+### Key files
+
+```
+src/hallsim/
+  process.py           — Process base class (Port, PortRole, ProcessKind), read_param / write_param
+  store.py             — flat store: build, extract, route, validate
+  composite.py         — Composite: topology wiring, auto-grouping, build_rhs, calibration_targets()
+  scheduler.py         — the one runner: multi-rate orchestration, batched lanes, single-group fast path
+  root_finders.py      — the Chord root finder the Scheduler installs into implicit solvers
+  stiffness.py         — per-group spectral verdict and solver routing
+  structure.py         — stoichiometry, moieties, Jacobian sparsity, symbolic field
+  steady_state.py      — Newton to a fixed point of a composite
+  bifurcation.py       — equilibrium, spectrum, codim-1 continuation
+  validation.py        — unit / semantic / graph / coupling checks, analyze_composability
+  diagnostics.py       — screen_process / screen_composite, coupling-source verdicts
+  intake.py            — triage_sbml, published_fit_chi2
+  census.py            — the corpus census: every deposit through the gate, and the report
+  discovery.py         — search_for_model across BioModels, JWS, ModelDB, BioSimulations, Physiome, Europe PMC
+  literature.py        — Europe PMC full text, model pointers, what a cited repository holds
+  datasets.py          — search_for_dataset (GEO, Zenodo), platform-table check against the loader
+  rejections.py        — the record of deposits screened out, and why
+  sbml_core.py, sbml_math.py, sbml_events.py — libsbml -> sympy -> JAX
+  sbml_import.py, cps_import.py, xpp_import.py — SBML / COPASI / XPPAUT importers
+  sbml_export.py       — Composite.to_sbml
+  imported.py          — ImportedODEProcess: time reconciliation, parameter and species inputs
+  handles.py           — Handle, ParameterMapping, apply_handles, with_handles; suggest_registry
+  hallmarks.py         — HALLMARK_INTENTS: the twelve hallmarks in ontology terms, naming no model
+  gene_reporters.py    — GeneReporter, MULTI_HALLMARK_REPORTERS, GeneExpressionDataset, GEO fetch
+  calibration.py       — Calibrator, CalibrationProblem, Condition, FitParam
+  identifiability.py   — structural redundancy, fittable-set screen
+  stochastic.py        — Gillespie SSA lane
+  attenuation.py       — trace_path: follow a control to a reporter through the wiring
+  view/                — the Dash page: levers, wiring, fit tabs
+  plotting.py          — figures for a run
+  cli.py               — the `simulate` command group
+  models/              — reusable primitives: hill_edge, gain_edge, clamp_edge, kick_event,
+                         forcing, running_integral, bistable_latch, gated_removal,
+                         saturating_removal, observer, neuralode
+demos/models/          — specific biology: multi_hallmark (DP14 + GZ06 + Proctor 2007), eriq,
+                         stem_cell_niche, hallmarks (HALLMARK_REGISTRY on those models),
+                         and the vendored SBML under sbml/
+```

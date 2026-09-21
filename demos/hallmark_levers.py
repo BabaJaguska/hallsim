@@ -190,18 +190,11 @@ def main(
     debug: bool = False,
     cells: int = DEFAULT_CELLS,
     seed: int = 0,
-    runs_dir: str | None = "outputs",
 ):
     from hallsim.view import serve
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    serve(
-        page(cells=cells, seed=seed),
-        host=host,
-        port=port,
-        debug=debug,
-        runs_dir=runs_dir,
-    )
+    serve(page(cells=cells, seed=seed), host=host, port=port, debug=debug)
 
 
 if __name__ == "__main__":

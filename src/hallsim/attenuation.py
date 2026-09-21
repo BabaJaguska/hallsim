@@ -146,10 +146,22 @@ def _wiring(composite: Composite) -> nx.DiGraph:
         schema = proc.ports_schema()
         declared = False
 
+        def read_paths(symbol):
+            """A port's paths, or one element of a block port named
+            ``<port>_<i>``."""
+            if symbol in paths_of:
+                return paths_of[symbol]
+            port, _, index = symbol.rpartition("_")
+            if port in paths_of and index.isdigit():
+                block = paths_of[port]
+                if int(index) < len(block):
+                    return (block[int(index)],)
+            return ()
+
         def add(node, reads, writes):
             g.add_node(node, reads=frozenset(reads))
             for r in reads:
-                for rp in paths_of.get(r, ()):
+                for rp in read_paths(r):
                     g.add_edge(("path", rp), node)
             for w in writes:
                 for wp in paths_of.get(w, ()):
@@ -218,7 +230,7 @@ def _route(g: nx.DiGraph, starts: list, reporter: str) -> list[tuple]:
             sorted(
                 n[2]
                 for n in g.predecessors(best[i])
-                if n[0] == "rxn"
+                if n[0] in ("rxn", "rule")
                 and n[1] == process
                 and (
                     prev_path is None

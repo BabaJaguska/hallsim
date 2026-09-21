@@ -136,12 +136,23 @@ def _reactions(composite) -> dict[tuple[str, str], dict]:
     return out
 
 
-def elements(composite, page: Page, expanded=None, trace=None) -> list[dict]:
-    """Cytoscape elements: one node per process, expanded ones opened into
-    their reactions and the paths they write, edges labelled with the paths
-    they carry. With ``trace``, the route's nodes carry their relative
-    change and everything else is dimmed; ``expanded=None`` opens the
-    route's processes onto the route alone."""
+def elements(
+    composite,
+    page: Page,
+    expanded=None,
+    trace=None,
+    reactions=False,
+    observables=False,
+) -> list[dict]:
+    """Cytoscape elements: one node per process, opened ones showing the
+    states they write with their reactions folded into the edges between
+    states, or drawn as their own nodes when ``reactions`` is set. Edges
+    between processes are labelled with the paths they carry. With
+    ``trace``, the route's nodes carry their relative change and everything
+    else is dimmed; ``expanded=None`` opens the route's processes onto the
+    route alone. Frozen sinks are never drawn, and states set only by rules
+    and read by nothing (an import's observables) only when ``observables``
+    is set; a state on the route always is."""
     g = wiring(composite)
     owner = owners(g)
     info = _port_info(composite)
@@ -161,6 +172,33 @@ def elements(composite, page: Page, expanded=None, trace=None) -> list[dict]:
                 and (n[1], n[2] if len(n) > 2 else "") in route_terms
             }
     expanded = set(expanded)
+    quiet = set(composite.frozen_paths())
+    if not observables:
+        for node in g.nodes:
+            if node[0] != "path":
+                continue
+            writers = list(g.predecessors(node))
+            readers = list(g.successors(node))
+            if (
+                writers
+                and not readers
+                and all(w[0] == "rule" for w in writers)
+            ):
+                quiet.add(node[1])
+    hidden = {("path", q) for q in quiet if q not in route}
+
+    def ident_of(node):
+        return node[2] if len(node) > 2 else "derivative"
+
+    def folded(node):
+        """A carrier drawn as edges between the states it joins."""
+        return (
+            node[0] != "path"
+            and node[1] in expanded
+            and shown is None
+            and not reactions
+        )
+
     out = []
     for name, proc in composite.processes.items():
         classes = ["process"]
@@ -188,6 +226,8 @@ def elements(composite, page: Page, expanded=None, trace=None) -> list[dict]:
             }
         )
     for node in g.nodes:
+        if folded(node) or node in hidden:
+            continue
         rep = _representative(node, owner, expanded, shown)
         if rep.startswith("proc:"):
             continue
@@ -228,8 +268,7 @@ def elements(composite, page: Page, expanded=None, trace=None) -> list[dict]:
                 classes.append("dim")
             out.append({"data": data, "classes": " ".join(classes)})
         else:
-            proc = node[1]
-            ident = node[2] if len(node) > 2 else "derivative"
+            proc, ident = node[1], ident_of(node)
             d = rxn.get((proc, ident), {})
             classes = [kind]
             if (proc, ident) in route_terms:
@@ -253,44 +292,159 @@ def elements(composite, page: Page, expanded=None, trace=None) -> list[dict]:
                     "classes": " ".join(classes),
                 }
             )
-    edges: dict[tuple[str, str], set[str]] = {}
     parent_of = {
         e["data"]["id"]: e["data"].get("parent")
         for e in out
         if "id" in e["data"]
     }
+
+    def joinable(ru, rv):
+        if ru == rv:
+            return False
+        return not (parent_of.get(ru) == rv or parent_of.get(rv) == ru)
+
+    edges: dict[tuple[str, str], dict] = {}
+
+    def join(ru, rv, path=None, term=None):
+        if not joinable(ru, rv):
+            return
+        e = edges.setdefault((ru, rv), {"paths": set(), "terms": set()})
+        if path:
+            e["paths"].add(path)
+        if term:
+            e["terms"].add(term)
+
     for u, v in g.edges:
+        if folded(u) or folded(v) or u in hidden or v in hidden:
+            continue
         ru, rv = (
             _representative(u, owner, expanded, shown),
             _representative(v, owner, expanded, shown),
         )
-        if ru == rv or parent_of.get(ru) == rv or parent_of.get(rv) == ru:
+        join(ru, rv, path=u[1] if u[0] == "path" else v[1])
+    for node in g.nodes:
+        if not folded(node):
             continue
-        label = u[1] if u[0] == "path" else (v[1] if v[0] == "path" else "")
-        edges.setdefault((ru, rv), set())
-        if label:
-            edges[(ru, rv)].add(label)
+        reads = [
+            u
+            for u in g.predecessors(node)
+            if u[0] == "path" and u not in hidden
+        ]
+        writes = [
+            v for v in g.successors(node) if v[0] == "path" and v not in hidden
+        ]
+        for u in reads:
+            for v in writes:
+                join(
+                    _representative(u, owner, expanded, shown),
+                    _representative(v, owner, expanded, shown),
+                    term=ident_of(node),
+                )
     ids = {e["data"]["id"] for e in out}
     route_ids = {
         e["data"]["id"] for e in out if "route" in e["classes"].split()
     } | {f"proc:{n.process}" for n in (trace.nodes if trace else ())}
-    for (ru, rv), labels in edges.items():
+    for (ru, rv), carried in edges.items():
         if ru not in ids or rv not in ids:
             continue
-        names = sorted(labels)
-        label = ", ".join(names) if len(names) <= 3 else f"{len(names)} paths"
+        names = sorted(carried["paths"]) or sorted(carried["terms"])
+        what = "paths" if carried["paths"] else "reactions"
+        label = ", ".join(names) if len(names) <= 3 else f"{len(names)} {what}"
         classes = []
         if trace:
             classes.append(
                 "route" if ru in route_ids and rv in route_ids else "dim"
             )
+        if parent_of.get(ru) is not None or parent_of.get(rv) is not None:
+            classes.append("inner")
         out.append(
             {
-                "data": {"source": ru, "target": rv, "label": label},
+                "data": {
+                    "source": ru,
+                    "target": rv,
+                    "label": label,
+                    "kind": "edge",
+                    "detail": {
+                        "from": ru.split(":", 1)[-1],
+                        "to": rv.split(":", 1)[-1],
+                        "carries": ", ".join(sorted(carried["paths"])),
+                        "via": ", ".join(sorted(carried["terms"])),
+                    },
+                },
                 "classes": " ".join(classes),
             }
         )
     return out
+
+
+def place(els: list[dict], positions: dict | None, spacing: float = 60.0):
+    """Give every node a position: its last one where it had one, a compact
+    grid at its parent's last position for a node just revealed inside an
+    opened process (the browser lays those out by their edges and moves
+    whatever the finished box overlaps), else the centre of its placed
+    neighbours. Returns the elements with ``position`` set, for a preset
+    layout."""
+    positions = dict(positions or {})
+    if not positions:
+        return els
+    nodes = [e for e in els if "id" in e["data"]]
+    edges = [e for e in els if "source" in e["data"]]
+    by_parent: dict[str, list[dict]] = {}
+    for n in nodes:
+        nid = n["data"]["id"]
+        if nid in positions:
+            n["position"] = dict(positions[nid])
+        elif n["data"].get("parent"):
+            by_parent.setdefault(n["data"]["parent"], []).append(n)
+    for parent, children in by_parent.items():
+        centre = positions.get(parent)
+        if centre is None:
+            placed = [
+                positions[c["data"]["id"]]
+                for c in nodes
+                if c["data"].get("parent") == parent
+                and c["data"]["id"] in positions
+            ]
+            if placed:
+                centre = {
+                    "x": sum(q["x"] for q in placed) / len(placed),
+                    "y": sum(q["y"] for q in placed) / len(placed),
+                }
+        centre = centre or {"x": 0.0, "y": 0.0}
+        cols = max(1, int(len(children) ** 0.5 + 0.999))
+        rows = -(-len(children) // cols)
+        for i, c in enumerate(children):
+            c["position"] = {
+                "x": centre["x"] + (i % cols - (cols - 1) / 2) * spacing,
+                "y": centre["y"] + (i // cols - (rows - 1) / 2) * spacing,
+            }
+            positions[c["data"]["id"]] = c["position"]
+            c["classes"] = (c.get("classes", "") + " placed").strip()
+    for n in nodes:
+        if "position" in n:
+            continue
+        nid = n["data"]["id"]
+        near = [
+            positions[o]
+            for e in edges
+            for o in (e["data"]["source"], e["data"]["target"])
+            if nid in (e["data"]["source"], e["data"]["target"])
+            and o != nid
+            and o in positions
+        ]
+        n["position"] = (
+            {
+                "x": sum(q["x"] for q in near) / len(near),
+                "y": sum(q["y"] for q in near) / len(near),
+            }
+            if near
+            else {"x": 0.0, "y": 0.0}
+        )
+        positions[nid] = n["position"]
+    return els
+
+
+PRESET_LAYOUT = {"name": "preset", "animate": False, "fit": False}
 
 
 def stylesheet(page: Page) -> list[dict]:
@@ -398,7 +552,23 @@ def stylesheet(page: Page) -> list[dict]:
             "style": {"background-color": accent, "width": 18, "height": 18},
         },
         {"selector": ".dim", "style": {"opacity": 0.22}},
-        {"selector": "edge.dim, edge.route", "style": {"text-opacity": 0}},
+        {
+            "selector": "node.hl",
+            "style": {"border-color": accent, "border-width": 2.5},
+        },
+        {
+            "selector": "edge.hl",
+            "style": {
+                "line-color": accent,
+                "target-arrow-color": accent,
+                "text-opacity": 1,
+                "width": 2.2,
+            },
+        },
+        {
+            "selector": "edge.dim, edge.route, edge.inner",
+            "style": {"text-opacity": 0},
+        },
         {
             "selector": "node.path.route",
             "style": {"font-size": 10, "font-weight": 600, "padding": "9px"},
@@ -466,7 +636,7 @@ def detail_items(data: dict):
     from dash import html
 
     if not data:
-        return [html.Span("hover a node", className="k")]
+        return [html.Span("hover a node or an edge", className="k")]
     d = data.get("detail") or {}
     kind = data.get("kind", "")
     out = [html.B(kind or "node")]
@@ -525,8 +695,29 @@ def layout(page: Page, bank):
                     dcc.Store(id="graph-trace", data=None),
                     dcc.Store(id="graph-expanded", data=[]),
                     dcc.Store(id="graph-fitted", data=0),
+                    dcc.Store(id="graph-positions", data=None),
+                    dcc.Store(id="graph-sublayout", data=0),
+                    dcc.Store(id="graph-hover", data=False),
                     dcc.Interval(
                         id="graph-poll", interval=1000, n_intervals=0
+                    ),
+                ],
+            ),
+            html.Div(
+                className="card",
+                children=[
+                    html.H3("View"),
+                    dcc.Checklist(
+                        id="graph-show",
+                        options=[
+                            {"label": " reactions", "value": "reactions"},
+                            {"label": " observables", "value": "observables"},
+                        ],
+                        value=[],
+                        className="check",
+                    ),
+                    html.Button(
+                        "reset", id="graph-reset", className="btn ghost"
                     ),
                 ],
             ),
@@ -542,19 +733,9 @@ def layout(page: Page, bank):
                 ],
             ),
             html.Div(
-                className="about",
-                children=[
-                    html.P(
-                        "Boxes are processes; click one to open it into its "
-                        "reactions and the states it writes. Edges carry "
-                        "store paths."
-                    ),
-                    html.P(
-                        "A trace runs the composite at two settings of the "
-                        "control and colours the route by how much of the "
-                        "relative change each state keeps."
-                    ),
-                ],
+                "click a box to open it · hover a state to see what it "
+                "touches",
+                className="note",
             ),
         ],
     )
@@ -582,10 +763,10 @@ def register(app, page: Page, bank):
 
     runner = TraceRunner(page)
     # The graph is laid out while its tab is hidden, at zero size: refit
-    # it once the tab shows.
+    # it once the tab shows, and whenever the reset button asks.
     app.clientside_callback(
         """
-        function(tab, n) {
+        function(tab, _clicks, n) {
             if (tab !== "wiring") { return window.dash_clientside.no_update; }
             setTimeout(function() {
                 const g = document.querySelector("#graph");
@@ -596,8 +777,157 @@ def register(app, page: Page, bank):
         }
         """,
         Output("graph-fitted", "data"),
-        Input("tab", "data"),
+        [Input("tab", "data"), Input("graph-reset", "n_clicks")],
         State("graph-fitted", "data"),
+    )
+
+    # Where every node sits, read before a click's redraw so the map keeps
+    # its shape and only what the click reveals is placed.
+    app.clientside_callback(
+        """
+        function(_node, _clicks) {
+            const g = document.querySelector("#graph");
+            const cy = g && g._cyreg && g._cyreg.cy;
+            if (!cy) { return window.dash_clientside.no_update; }
+            const out = {};
+            cy.nodes().forEach(function(n) {
+                if (!n.isParent()) { out[n.id()] = n.position(); }
+            });
+            return out;
+        }
+        """,
+        Output("graph-positions", "data"),
+        [Input("graph", "tapNodeData"), Input("graph-run", "n_clicks")],
+        prevent_initial_call=True,
+    )
+
+    # States just revealed inside an opened process are laid out by their
+    # edges within the room made for them.
+    app.clientside_callback(
+        """
+        function(_elements, n) {
+            const g = document.querySelector("#graph");
+            const cy = g && g._cyreg && g._cyreg.cy;
+            if (!cy) { return window.dash_clientside.no_update; }
+            setTimeout(function() {
+                const placed = cy.nodes(".placed");
+                if (placed.length === 0) {
+                    cy.animate({
+                        fit: {eles: cy.elements(), padding: 24},
+                        duration: 400, easing: "ease-in-out-cubic",
+                    });
+                    return;
+                }
+                const parents = {};
+                placed.forEach(function(n) { parents[n.data("parent")] = true; });
+                Object.keys(parents).forEach(function(pid) {
+                    const kids = cy.nodes('[parent = "' + pid + '"]');
+                    if (kids.length < 2) { return; }
+                    const room = kids.boundingBox();
+                    const inner = kids.edgesWith(kids);
+                    kids.union(inner).layout({
+                        name: "cose-bilkent", fit: false, animate: false,
+                        randomize: true, nodeDimensionsIncludeLabels: true,
+                        idealEdgeLength: 80, nodeRepulsion: 6000, tile: true,
+                        tilingPaddingVertical: 16, tilingPaddingHorizontal: 16,
+                    }).run();
+                    // Centre the result where the room was, then move only
+                    // what the finished box overlaps, by the overlap.
+                    const got = kids.boundingBox({includeLabels: true});
+                    const cx = (room.x1 + room.x2) / 2, cy0 = (room.y1 + room.y2) / 2;
+                    const gx = (got.x1 + got.x2) / 2, gy = (got.y1 + got.y2) / 2;
+                    kids.positions(function(n) {
+                        const q = n.position();
+                        return {x: q.x - gx + cx, y: q.y - gy + cy0};
+                    });
+                    // Then treat every top-level node and opened box as a
+                    // rigid rectangle, this box fixed, and separate any two
+                    // that overlap by exactly their overlap until none do.
+                    const M = 28;
+                    const items = cy.nodes().filter(function(n) {
+                        return n.parent().length === 0;
+                    });
+                    const rectOf = function(ele) {
+                        const bb = ele.boundingBox({includeLabels: true});
+                        return {ele: ele, x1: bb.x1 - M, y1: bb.y1 - M,
+                                x2: bb.x2 + M, y2: bb.y2 + M,
+                                fixed: ele.id() === pid};
+                    };
+                    const moveBy = function(r, dx, dy) {
+                        if (r.ele.isParent()) {
+                            r.ele.children().positions(function(n) {
+                                const q = n.position();
+                                return {x: q.x + dx, y: q.y + dy};
+                            });
+                        } else {
+                            const q = r.ele.position();
+                            r.ele.position({x: q.x + dx, y: q.y + dy});
+                        }
+                        r.x1 += dx; r.x2 += dx; r.y1 += dy; r.y2 += dy;
+                    };
+                    for (let it = 0; it < 60; it++) {
+                        const rs = items.map(rectOf);
+                        let moved = false;
+                        for (let i = 0; i < rs.length; i++) {
+                            for (let j = i + 1; j < rs.length; j++) {
+                                const a = rs[i], b = rs[j];
+                                const ox = Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1);
+                                const oy = Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1);
+                                if (ox <= 0 || oy <= 0) { continue; }
+                                moved = true;
+                                const acx = (a.x1 + a.x2) / 2, bcx = (b.x1 + b.x2) / 2;
+                                const acy = (a.y1 + a.y2) / 2, bcy = (b.y1 + b.y2) / 2;
+                                let dx = 0, dy = 0;
+                                if (ox < oy) { dx = (bcx >= acx ? ox : -ox) + 1; }
+                                else { dy = (bcy >= acy ? oy : -oy) + 1; }
+                                if (a.fixed) { moveBy(b, dx, dy); }
+                                else if (b.fixed) { moveBy(a, -dx, -dy); }
+                                else { moveBy(b, dx / 2, dy / 2); moveBy(a, -dx / 2, -dy / 2); }
+                            }
+                        }
+                        if (!moved) { break; }
+                    }
+                });
+                placed.removeClass("placed");
+                // The map keeps its arrangement, so bring all of it into
+                // view rather than leave the eye on the gap it just made.
+                cy.animate({
+                    fit: {eles: cy.elements(), padding: 24},
+                    duration: 400, easing: "ease-in-out-cubic",
+                });
+            }, 150);
+            return (n || 0) + 1;
+        }
+        """,
+        Output("graph-sublayout", "data"),
+        Input("graph", "elements"),
+        State("graph-sublayout", "data"),
+    )
+    # Hovering a state fades everything but its neighbourhood.
+    app.clientside_callback(
+        """
+        function(_fitted, installed) {
+            const g = document.querySelector("#graph");
+            const cy = g && g._cyreg && g._cyreg.cy;
+            if (!cy || cy.scratch("hallsimHover")) {
+                return window.dash_clientside.no_update;
+            }
+            cy.scratch("hallsimHover", true);
+            cy.on("mouseover", "node", function(e) {
+                const n = e.target;
+                if (n.isParent()) { return; }
+                n.closedNeighborhood().addClass("hl");
+            });
+            const clear = function() { cy.elements().removeClass("hl"); };
+            cy.on("mouseout", "node", clear);
+            cy.on("tap", clear);
+            g.addEventListener("mouseleave", clear);
+            return true;
+        }
+        """,
+        Output("graph-hover", "data"),
+        Input("graph-fitted", "data"),
+        State("graph-hover", "data"),
     )
 
     def composite_for(window):
@@ -624,10 +954,36 @@ def register(app, page: Page, bank):
     @app.callback(
         Output("graph-detail", "children"),
         Input("graph", "mouseoverNodeData"),
+        Input("graph", "mouseoverEdgeData"),
         Input("graph", "tapNodeData"),
     )
-    def detail(hovered, tapped):
-        return detail_items(hovered or tapped or {})
+    def detail(hovered, edge, tapped):
+        from dash import ctx
+
+        latest = {
+            "mouseoverNodeData": hovered,
+            "mouseoverEdgeData": edge,
+            "tapNodeData": tapped,
+        }.get(
+            (ctx.triggered_id and ctx.triggered[0]["prop_id"].split(".")[-1])
+            or "",
+            None,
+        )
+        return detail_items(latest or hovered or tapped or {})
+
+    @app.callback(
+        [
+            Output("graph-expanded", "data", allow_duplicate=True),
+            Output("graph-trace", "data", allow_duplicate=True),
+            Output("graph-positions", "data", allow_duplicate=True),
+        ],
+        Input("graph-reset", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def reset(_n):
+        """Back to the opening view: every process closed, no trace, laid
+        out afresh."""
+        return [], None, None
 
     @app.callback(
         [
@@ -664,15 +1020,31 @@ def register(app, page: Page, bank):
             Input("graph-trace", "data"),
             Input("graph-poll", "n_intervals"),
             Input("window", "data"),
+            Input("graph-show", "value"),
         ],
+        State("graph-positions", "data"),
     )
-    def redraw(expanded, key, _n, window):
+    def redraw(expanded, key, _n, window, show, positions):
+        from dash import ctx
+
+        fresh = ctx.triggered_id in ("window", None) or not positions
         composite = composite_for(window)
         trace = runner.result(key)
         error = runner.error(key)
         if key and trace is None and error is None:
             return no_update, no_update, no_update, "tracing…", False
-        els = elements(composite, page, expanded or None, trace)
-        note = error or ("" if trace is None else "")
+        show = set(show or ())
+        els = elements(
+            composite,
+            page,
+            expanded or None,
+            trace,
+            reactions="reactions" in show,
+            observables="observables" in show,
+        )
+        note = error or ""
         table = str(trace) if trace is not None else ""
-        return els, dict(TABS_LAYOUT), table, note, True
+        layout = dict(TABS_LAYOUT) if fresh else dict(PRESET_LAYOUT)
+        if not fresh:
+            els = place(els, positions)
+        return els, layout, table, note, True

@@ -426,3 +426,46 @@ def test_a_pmc_id_imports_from_the_paper_supplement(tmp_path, monkeypatch):
 
     with pytest.raises(LookupError, match="no SBML or COPASI file"):
         sbml_import.process_from_sbml("PMC1234567")
+
+
+def test_biomodel_download_falls_back_to_the_records_main_file(
+    monkeypatch, tmp_path
+):
+    """Newer deposits keep the author's filename; the conventional
+    ``<accession>_url.xml`` answers 400 and the record names the file."""
+    import io
+    import urllib.error
+    import urllib.request
+
+    from hallsim import sbml_import
+
+    served = {}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        url = request.full_url
+        served.setdefault("urls", []).append(url)
+        if "_url.xml" in url:
+            raise urllib.error.HTTPError(url, 400, "Bad Request", {}, None)
+        return _Resp(b"<sbml/>")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    import hallsim.discovery as disc
+
+    monkeypatch.setattr(
+        disc,
+        "biomodels_record",
+        lambda acc, timeout=30.0: {
+            "files": {"main": [{"name": "Csikasz-Nagy2006.xml"}]}
+        },
+    )
+    text = sbml_import._fetch_biomodel_main("BIOMD0000001044")
+    assert text == "<sbml/>"
+    assert len(served["urls"]) == 2
+    assert "Csikasz-Nagy2006.xml" in served["urls"][1]

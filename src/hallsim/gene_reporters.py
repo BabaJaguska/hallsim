@@ -104,7 +104,7 @@ def window_rms(window: float = 0.5):
     Rises with oscillation amplitude, so it reads a pulsatile species' encoded
     pulsing rather than its buffered mean, while keeping that mean as a floor —
     a quiescent baseline gives a finite fold-change instead of diverging. Same
-    contract as :func:`window_mean`. See docs/gz06-basal-p53.md.
+    contract as :func:`window_mean`. See docs/calibration.md, "Why the p53 reporters read RMS".
     """
     mean_square = window_mean(window)
 

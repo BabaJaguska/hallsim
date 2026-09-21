@@ -6,9 +6,7 @@ counted: the distribution of *why* candidate models fail is a finding about the
 field, and it is what the framework's claim rests on — that it rejects fast,
 for stated reasons, before a reviewer is spent.
 
-It also stops repeat screening. Four separate sessions re-derived the same
-verdict on the same NF-κB deposits because the reasoning lived in ten
-`docs/review-*.md` files and nothing indexed it.
+It also stops repeat screening: a verdict recorded here is not re-derived.
 
 Parsed by `hallsim.rejections`; the format is checked by
 `tests/unit/test_rejections.py`. One row per line, pipes inside a cell are not

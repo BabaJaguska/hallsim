@@ -741,9 +741,8 @@ def _download_biomodel_to_cache(model_id) -> str:
     model per machine.
     """
     import os
-    import urllib.request
 
-    from hallsim.discovery import BIOMODELS_DOWNLOAD, _accession
+    from hallsim.discovery import _accession
 
     cache_dir = os.path.expanduser("~/.cache/hallsim/biomodels")
     os.makedirs(cache_dir, exist_ok=True)
@@ -753,17 +752,54 @@ def _download_biomodel_to_cache(model_id) -> str:
         fname = f"{model_id}.xml"
     cache_path = os.path.join(cache_dir, fname)
     if not os.path.exists(cache_path):
-        accession = _accession(model_id)
-        url = (
-            BIOMODELS_DOWNLOAD.format(model_id=accession)
-            + f"?filename={accession}_url.xml"
-        )
-        with urllib.request.urlopen(url, timeout=60) as response:
-            xml = response.read().decode("utf-8")
+        xml = _fetch_biomodel_main(_accession(model_id))
         # Atomic, so an interrupted or concurrent download cannot leave a
         # truncated file that every later run then trusts.
         _atomic_write(cache_path, lambda p: open(p, "w").write(xml))
     return cache_path
+
+
+def _fetch_biomodel_main(accession: str, timeout: float = 60.0) -> str:
+    """The text of a deposit's main SBML file.
+
+    Older curated deposits name it ``<accession>_url.xml``; newer ones keep
+    the author's filename (BIOMD0000001044 is ``Csikasz-Nagy2006.xml``) and
+    the conventional name answers HTTP 400. The record says which file is
+    main, so that is read when the convention fails.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    from hallsim.discovery import (
+        BIOMODELS_DOWNLOAD,
+        USER_AGENT,
+        biomodels_record,
+    )
+
+    base = BIOMODELS_DOWNLOAD.format(model_id=accession)
+
+    def fetch(name: str) -> str:
+        query = urllib.parse.urlencode({"filename": name})
+        request = urllib.request.Request(
+            f"{base}?{query}", headers={"User-Agent": USER_AGENT}
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8")
+
+    try:
+        return fetch(f"{accession}_url.xml")
+    except urllib.error.HTTPError as first:
+        record = biomodels_record(accession, timeout=timeout)
+        main = [
+            f.get("name", "")
+            for f in ((record.get("files") or {}).get("main") or [])
+            if f.get("name")
+        ]
+        sbml = [n for n in main if n.lower().endswith((".xml", ".sbml"))]
+        if not sbml:
+            raise first
+        return fetch(sbml[0])
 
 
 def _extract_compartment_names(xml_path: str) -> frozenset[str]:

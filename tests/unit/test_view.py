@@ -138,6 +138,15 @@ def test_the_wiring_collapses_to_processes_and_opens_into_paths(
     els = elements(composite, page, expanded={"fast"})
     by_id = {e["data"]["id"]: e["data"] for e in els if "id" in e["data"]}
     assert by_id["path:cell/ROS"]["parent"] == "proc:fast"
+    assert "deriv:fast" not in by_id
+    edges = {
+        (e["data"]["source"], e["data"]["target"])
+        for e in els
+        if "source" in e["data"]
+    }
+    assert edges == {("path:cell/ROS", "proc:slow")}
+    els = elements(composite, page, expanded={"fast"}, reactions=True)
+    by_id = {e["data"]["id"]: e["data"] for e in els if "id" in e["data"]}
     assert by_id["deriv:fast"]["parent"] == "proc:fast"
     edges = {
         (e["data"]["source"], e["data"]["target"])
@@ -231,7 +240,7 @@ def test_a_saved_run_renders(tmp_path):
         "readouts": [],
     }
     (run / "summary.json").write_text(json.dumps(summary))
-    assert _fit.find_runs(tmp_path) == [run]
+    assert _fit.find_runs([run, tmp_path / "missing"]) == [run]
     view = _fit.run_view(_fit.load_run(run))
     figures = [c for c in view.children if type(c).__name__ == "Graph"]
     assert len(figures) == 1

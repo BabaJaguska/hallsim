@@ -206,7 +206,7 @@ def test_the_page_says_it_is_working_while_it_is(tmp_path):
     first = next(iter(DOSE_WINDOWS.items()))
     one = page(cells=2, windows=dict([first]))
     bank = ModelBank(one)
-    app = build_app(one, bank, runs_dir=str(tmp_path))
+    app = build_app(one, bank)
 
     def children(node):
         kids = getattr(node, "children", None)

@@ -12,19 +12,9 @@ import numpy as np
 from hallsim.view._theme import TOKENS, font
 
 
-def find_runs(runs_dir, explicit=()) -> list[Path]:
-    """Run folders holding a ``summary.json``: the explicit ones first, then
-    every one under ``runs_dir``, newest first."""
-    out = [Path(p) for p in explicit if (Path(p) / "summary.json").exists()]
-    if runs_dir and Path(runs_dir).is_dir():
-        found = [
-            p.parent
-            for p in Path(runs_dir).glob("*/summary.json")
-            if p.parent not in out
-        ]
-        found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        out += found
-    return out
+def find_runs(paths) -> list[Path]:
+    """Those of ``paths`` that are run folders holding a ``summary.json``."""
+    return [Path(p) for p in paths if (Path(p) / "summary.json").exists()]
 
 
 def load_run(folder) -> dict:
@@ -397,7 +387,8 @@ def run_view(run: dict):
     )
 
 
-def layout(runs: list[Path]):
+def layout(runs: list[Path], selected: str | None = None):
+    """The tab: a run picker over ``runs``, ``selected`` open."""
     from dash import dcc, html
 
     options = [{"label": p.name, "value": str(p)} for p in runs]
@@ -411,9 +402,9 @@ def layout(runs: list[Path]):
                     dcc.Dropdown(
                         id="fit-run",
                         options=options,
-                        value=options[0]["value"] if options else None,
-                        placeholder="a folder with summary.json",
-                        clearable=False,
+                        value=selected,
+                        placeholder="pick a run",
+                        clearable=True,
                     ),
                     dcc.Input(
                         id="fit-path",
