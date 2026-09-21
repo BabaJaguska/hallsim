@@ -479,6 +479,10 @@ def _classify_import_error(text: str) -> tuple[str, str]:
         )
     if "sbml qual" in low:
         return "wrong-formalism", "SBML-qual logical model"
+    if "no integrated quantity" in low:
+        return "wrong-formalism", (
+            "no integrated quantity: an algebraic model, nothing to solve"
+        )
     if "algebraic rules" in low:
         return "importer-work", "algebraic rules (a DAE, not an ODE)"
     if (
@@ -505,6 +509,10 @@ def _classify_import_error(text: str) -> tuple[str, str]:
         return "deposit-defect", "libsbml cannot read the file"
     if "no kinetic law" in low:
         return "deposit-defect", "a reaction has no kinetic law"
+    if "have no value" in low:
+        return "deposit-defect", (
+            "a parameter has no value (libRoadRunner refuses it too)"
+        )
     if "no initial value" in low:
         return "importer-work", (
             "a species has no initial value; other simulators default it to "
@@ -763,6 +771,7 @@ def run_census(
     limit: int | None = None,
     retry_timeouts: bool = False,
     tasks_per_worker: int = TASKS_PER_WORKER,
+    redo: bool = False,
 ) -> Path:
     """Screen every accession, appending one JSON row per deposit to
     ``rows.jsonl`` as it completes and a line per deposit to
@@ -810,7 +819,7 @@ def run_census(
             prior = json.loads(line)
             if retry_timeouts and prior.get("error", "").startswith("timeout"):
                 continue
-            if prior["accession"] in wanted:
+            if prior["accession"] in wanted and not redo:
                 done.add(prior["accession"])
     todo = [a for a in accessions if a not in done]
     total = len(accessions)

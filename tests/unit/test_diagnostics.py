@@ -423,3 +423,101 @@ def test_screen_takes_an_absolute_tolerance():
     report = screen_process(MolarDecay(), 5.0, atol=1e-18, n_save=50)
     assert report.ok, report.detail
     assert report.tunes is not False
+
+
+GROWTH_SBML = """<?xml version="1.0" encoding="UTF-8"?>
+<sbml xmlns="http://www.sbml.org/sbml/level3/version2/core" level="3" version="2">
+<model id="grow" timeUnits="second">
+<listOfUnitDefinitions><unitDefinition id="second"><listOfUnits><unit kind="second" exponent="1" scale="0" multiplier="1"/></listOfUnits></unitDefinition></listOfUnitDefinitions>
+<listOfCompartments><compartment id="c" spatialDimensions="3" size="1" constant="true"/></listOfCompartments>
+<listOfSpecies><species id="X" compartment="c" initialConcentration="1" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false"/></listOfSpecies>
+<listOfParameters><parameter id="k" value="1" constant="true"/></listOfParameters>
+<listOfReactions><reaction id="dup" reversible="false">
+  <listOfReactants><speciesReference species="X" stoichiometry="1" constant="true"/></listOfReactants>
+  <listOfProducts><speciesReference species="X" stoichiometry="2" constant="true"/></listOfProducts>
+  <kineticLaw><math xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/><ci>c</ci><ci>k</ci><ci>X</ci></apply></math></kineticLaw>
+</reaction></listOfReactions>
+</model></sbml>
+"""
+
+
+def test_agreed_growth_is_growth_not_divergence(tmp_path):
+    """``dX/dt = X`` grows e^10 over ten units, past the exploding threshold
+    and still rising; the independent integrator reaches the same peak, so
+    the report says growing, not exploding, and blames no framework."""
+    from hallsim.diagnostics import screen_process
+    from hallsim.sbml_import import process_from_sbml
+
+    path = tmp_path / "grow.xml"
+    path.write_text(GROWTH_SBML)
+    report = screen_process(process_from_sbml(str(path), name="g"), 10.0)
+    assert report.growing and not report.exploding
+    assert not report.framework_suspect and not report.blocking
+    assert any("growth" in a for a in report.advisories)
+
+
+UNDEFINED_FRACTION_SBML = """<?xml version="1.0" encoding="UTF-8"?>
+<sbml xmlns="http://www.sbml.org/sbml/level3/version2/core" level="3" version="2">
+<model id="frac" timeUnits="second">
+<listOfUnitDefinitions><unitDefinition id="second"><listOfUnits><unit kind="second" exponent="1" scale="0" multiplier="1"/></listOfUnits></unitDefinition></listOfUnitDefinitions>
+<listOfCompartments><compartment id="c" spatialDimensions="3" size="1" constant="true"/></listOfCompartments>
+<listOfSpecies>
+  <species id="A" compartment="c" initialConcentration="0" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false"/>
+  <species id="B" compartment="c" initialConcentration="0" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false"/>
+</listOfSpecies>
+<listOfParameters><parameter id="k" value="1" constant="true"/><parameter id="frac" value="0" constant="false"/></listOfParameters>
+<listOfRules><assignmentRule variable="frac"><math xmlns="http://www.w3.org/1998/Math/MathML"><apply><divide/><ci>A</ci><apply><plus/><ci>A</ci><ci>B</ci></apply></apply></math></assignmentRule></listOfRules>
+<listOfReactions>
+  <reaction id="src" reversible="false"><listOfProducts><speciesReference species="A" stoichiometry="1" constant="true"/></listOfProducts>
+    <kineticLaw><math xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/><ci>c</ci><ci>k</ci></apply></math></kineticLaw></reaction>
+  <reaction id="deg" reversible="false"><listOfReactants><speciesReference species="A" stoichiometry="1" constant="true"/></listOfReactants>
+    <kineticLaw><math xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/><ci>c</ci><ci>k</ci><ci>A</ci></apply></math></kineticLaw></reaction>
+</listOfReactions>
+</model></sbml>
+"""
+
+
+def test_an_undefined_assigned_quantity_is_named_not_called_divergence(
+    tmp_path,
+):
+    """``frac = A/(A+B)`` is 0/0 at t = 0 and defined once A is produced;
+    the integrated states are finite throughout, so the screen reports the
+    undefined quantity by name and does not call the model exploding."""
+    from hallsim.diagnostics import screen_process
+    from hallsim.sbml_import import process_from_sbml
+
+    path = tmp_path / "frac.xml"
+    path.write_text(UNDEFINED_FRACTION_SBML)
+    report = screen_process(process_from_sbml(str(path), name="f"), 5.0)
+    assert not report.exploding and not report.framework_suspect
+    assert report.undefined_assigned == ("f/frac",)
+    assert any("undefined" in a for a in report.advisories)
+
+
+def test_field_level_tunability_catches_a_non_finite_parameter_derivative():
+    """``sqrt(k)`` at k = 0 has an infinite derivative in k: the model runs
+    and does not tune, and the field-level probe says so without a solve."""
+    import jax.numpy as jnp
+
+    from hallsim.diagnostics import _tunes
+    from hallsim.process import Port, PortRole, Process
+
+    class Root(Process):
+        k: float = 0.0
+
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def derivative(self, t, state):
+            return {"x": -jnp.sqrt(self.k) * state["x"]}
+
+        def calibratable_params(self):
+            from hallsim.calibration import CalibratableParam
+
+            return [CalibratableParam("root", "k", float(self.k), (0.0, 10.0))]
+
+    class Fine(Root):
+        k: float = 0.5
+
+    assert _tunes(Root(), 1.0) == (False, False)
+    assert _tunes(Fine(), 1.0) == (True, False)

@@ -159,9 +159,150 @@ def test_unsupported_constructs_are_named(tmp_path, snippet, message):
         compile_sbml(path)
 
 
-def test_unset_initial_value_is_refused(tmp_path):
+def test_unset_initial_value_defaults_to_zero_with_a_warning(tmp_path, caplog):
     text = COMPARTMENTS.replace(' initialAmount="0.5"', "")
+    with caplog.at_level("WARNING"):
+        core = compile_sbml(_write(tmp_path, "noinit", text))
+    assert core.y0[core.y_indexes["B"]] == 0.0
+    assert "no initial value for B" in caplog.text
+
+
+def test_a_rule_targets_value_attribute_is_not_read(tmp_path):
+    """A parameter carrying both a value and a rule: the rule wins, and no
+    other rule may read the stale attribute on the way (0/0 at t = 0 on a
+    curated deposit)."""
+    text = COMPARTMENTS.replace(
+        '<listOfParameters><parameter id="k1" value="0.7" constant="true"/></listOfParameters>',
+        '<listOfParameters><parameter id="k1" value="0.7" constant="true"/>'
+        '<parameter id="D" value="0" constant="false"/>'
+        '<parameter id="I" value="0" constant="false"/></listOfParameters>'
+        '<listOfInitialAssignments><initialAssignment symbol="I">'
+        '<math xmlns="http://www.w3.org/1998/Math/MathML"><apply><divide/><cn>1</cn><ci>D</ci></apply></math>'
+        "</initialAssignment></listOfInitialAssignments>"
+        '<listOfRules><assignmentRule variable="D">'
+        '<math xmlns="http://www.w3.org/1998/Math/MathML"><apply><plus/><ci>k1</ci><cn>1</cn></apply></math>'
+        "</assignmentRule></listOfRules>",
+    )
+    core = compile_sbml(_write(tmp_path, "ruled", text))
+    assert core.c0[core.c_indexes["I"]] == pytest.approx(1 / 1.7)
+
+
+def _run(path, t_end=10.0):
+    from hallsim.composite import single_process_composite
+    from hallsim.scheduler import Scheduler
+    from hallsim.sbml_import import process_from_sbml
+
+    comp = single_process_composite(process_from_sbml(str(path), name="m"))
+    res = Scheduler().run(
+        comp, t_span=(0.0, t_end), macro_dt=t_end, save_dt=t_end / 100
+    )
+    return comp, res
+
+
+def test_varying_compartment_by_rate_rule_keeps_amounts(tmp_path):
+    """No reactions: an amount is conserved while its compartment grows,
+    and a concentration held by a rate rule of zero gains amount with it."""
+    text = COMPARTMENTS.replace(
+        '<compartment id="cyt" spatialDimensions="3" size="2.5" constant="true"/>',
+        '<compartment id="cyt" spatialDimensions="3" size="2.5" constant="false"/>',
+    ).replace(
+        "<listOfReactions>",
+        "<listOfRules>"
+        '<rateRule variable="cyt"><math xmlns="http://www.w3.org/1998/Math/MathML"><apply><times/><cn>0.1</cn><ci>cyt</ci></apply></math></rateRule>'
+        '<rateRule variable="C"><math xmlns="http://www.w3.org/1998/Math/MathML"><cn>0</cn></math></rateRule>'
+        "</listOfRules><listOfReactions>",
+    )
+    # strip the two reactions so nothing but the rules moves
+    import re
+
+    text = re.sub(r"<reaction .*?</reaction>", "", text, flags=re.S)
+    text = text.replace(
+        '<species id="C" compartment="nuc" initialConcentration="0.0"',
+        '<species id="C" compartment="cyt" initialConcentration="0.4"',
+    )
+    comp, res = _run(_write(tmp_path, "grow", text))
+    idx = comp.store_index()
+    key = lambda n: next(k for k in idx if k.endswith("/" + n))  # noqa: E731
+    V = np.asarray(res.get(key("cyt")))
+    A = np.asarray(res.get(key("A")))
+    C = np.asarray(res.get(key("C")))
+    assert V[-1] == pytest.approx(2.5 * np.exp(1.0), rel=1e-4)
+    assert np.allclose(A, 2.5, rtol=1e-6)  # amount conserved
+    assert C[-1] == pytest.approx(0.4 * V[-1], rel=1e-4)  # concentration held
+
+
+def test_varying_compartment_by_assignment_rule(tmp_path):
+    text = COMPARTMENTS.replace(
+        '<compartment id="cyt" spatialDimensions="3" size="2.5" constant="true"/>',
+        '<compartment id="cyt" spatialDimensions="3" size="2.5" constant="false"/>',
+    ).replace(
+        "<listOfReactions>",
+        '<listOfRules><assignmentRule variable="cyt"><math xmlns="http://www.w3.org/1998/Math/MathML">'
+        '<apply><plus/><cn>1</cn><csymbol encoding="text" definitionURL="http://www.sbml.org/sbml/symbols/time">t</csymbol></apply>'
+        "</math></assignmentRule></listOfRules><listOfReactions>",
+    )
+    comp, res = _run(_write(tmp_path, "assigned", text), t_end=5.0)
+    idx = comp.store_index()
+    key = next(k for k in idx if k.endswith("/cyt"))
+    assert np.asarray(res.get(key))[-1] == pytest.approx(6.0, rel=1e-6)
+
+
+def test_nan_in_a_comparison_imports_and_reads_false(tmp_path):
+    text = (
+        COMPARTMENTS.replace(
+            "<listOfParameters>",
+            '<listOfFunctionDefinitions><functionDefinition id="rateOf"><math xmlns="http://www.w3.org/1998/Math/MathML">'
+            "<lambda><bvar><ci>a</ci></bvar><notanumber/></lambda></math></functionDefinition></listOfFunctionDefinitions>"
+            "<listOfParameters>",
+        )
+        .replace(
+            "<listOfReactions>",
+            '<listOfRules><assignmentRule variable="E"><math xmlns="http://www.w3.org/1998/Math/MathML">'
+            "<piecewise><piece><cn>1</cn><apply><lt/><apply><ci>rateOf</ci><ci>A</ci></apply><cn>2</cn></apply></piece><otherwise><cn>0.3</cn></otherwise></piecewise>"
+            "</math></assignmentRule></listOfRules><listOfReactions>",
+        )
+        .replace(
+            'boundaryCondition="true" constant="true"/>',
+            'boundaryCondition="true" constant="false"/>',
+        )
+    )
+    core = compile_sbml(_write(tmp_path, "nan", text))
+    assert core.w0[core.w_indexes["E"]] == pytest.approx(0.3 * 2.5)
+
+
+def test_a_bound_variable_named_twice_binds_its_first_argument(tmp_path):
+    text = (
+        COMPARTMENTS.replace(
+            "<listOfParameters>",
+            '<listOfFunctionDefinitions><functionDefinition id="f"><math xmlns="http://www.w3.org/1998/Math/MathML">'
+            "<lambda><bvar><ci>x</ci></bvar><bvar><ci>x</ci></bvar><apply><plus/><ci>x</ci><cn>1</cn></apply></lambda></math></functionDefinition></listOfFunctionDefinitions>"
+            "<listOfParameters>",
+        )
+        .replace(
+            "<listOfReactions>",
+            '<listOfRules><assignmentRule variable="E"><math xmlns="http://www.w3.org/1998/Math/MathML">'
+            "<apply><ci>f</ci><cn>2</cn><cn>3</cn></apply></math></assignmentRule></listOfRules><listOfReactions>",
+        )
+        .replace(
+            'boundaryCondition="true" constant="true"/>',
+            'boundaryCondition="true" constant="false"/>',
+        )
+    )
+    core = compile_sbml(_write(tmp_path, "dup", text))
+    assert core.w0[core.w_indexes["E"]] == pytest.approx(3.0 * 2.5)
+
+
+def test_a_model_with_nothing_to_integrate_is_named(tmp_path):
+    text = COMPARTMENTS.replace(
+        'boundaryCondition="false"', 'boundaryCondition="true"'
+    )
     with pytest.raises(
-        UnsupportedSBMLFeatureError, match="'B' has no initial"
+        UnsupportedSBMLFeatureError, match="no integrated quantity"
     ):
-        compile_sbml(_write(tmp_path, "noinit", text))
+        compile_sbml(_write(tmp_path, "algebraic", text))
+
+
+def test_a_parameter_with_no_value_is_refused_like_roadrunner(tmp_path):
+    text = COMPARTMENTS.replace(' value="0.7"', "")
+    with pytest.raises(UnsupportedSBMLFeatureError, match="have no value"):
+        compile_sbml(_write(tmp_path, "noparam", text))

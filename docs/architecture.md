@@ -98,9 +98,19 @@ macro step on a feedback loop and on the multi-hallmark composite.
 
 **Stiffness routing.** Each group is analysed at `y0`
 (`hallsim.stiffness.analyze_groups`) and routed to an implicit solver
-(`Kvaerno5` with a Newton root finder) or an explicit one (`Tsit5`); a group
+(`Kvaerno5` with a chord root finder) or an explicit one (`Tsit5`); a group
 may be pinned. A wrong pin costs 14× on a stiff group and 22× on a non-stiff
-one ([benchmarks.md](benchmarks.md) §9).
+one ([benchmarks.md](benchmarks.md) §9). Two cases the verdict at `y0`
+cannot see are handled at run time: a Jacobian that is not finite at the
+initial state (a square root or a fractional power of a state that starts
+at zero) routes the group explicit, since Newton could not use that
+Jacobian either; and a failed solve climbs a ladder. A group whose explicit
+solve fails — a model that is not stiff at `y0` and turns stiff along its
+trajectory — is re-run on the implicit solver; a stiff group runs the
+fifth-order implicit solver under a step budget (`LADDER_STEP_BUDGET`) and,
+if it runs out, is re-run on `Kvaerno3` with diffrax's per-step chord, which
+is what a very stiff system at a loose tolerance needs. The verdict a group
+ends on is kept for the composite, so the next run takes it directly.
 
 **Validation for the multi-timescale contract**, run at composition time
 alongside the semantic layer:
@@ -236,6 +246,15 @@ The importer:
   make the outcome depend on round-off at the crossing, and equalities against
   time, which make the scheduler's `macro_dt` decide whether the event fires at
   all;
+- carries a compartment whose size a rate rule or an assignment rule sets:
+  values are amounts throughout, so a moving volume changes what a rate law
+  reads and never the stoichiometric balance, and a rate rule on a
+  concentration in such a compartment gains the dilution term. Checked
+  against libRoadRunner on Schaber 2012 (rate rule) and Zi 2011 (assignment
+  rule) to better than one part in ten million;
+- gives a species or parameter with no initial value the zero that
+  libRoadRunner and COPASI give it, with a warning naming it, and ignores
+  the value attribute on a rule's target, as SBML specifies;
 - extracts MIRIAM annotations into `Port.ontology` from species CVTerms;
 - freezes inert sinks (species reactions write and nothing reads) at their
   initial value so a degradation counter cannot grow without bound. A

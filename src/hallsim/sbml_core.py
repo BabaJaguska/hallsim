@@ -32,6 +32,7 @@ import libsbml
 import sympy
 
 from hallsim.sbml_math import (
+    NAN,
     TIME,
     UnsupportedMathError,
     function_definitions,
@@ -141,13 +142,6 @@ def _structural_issues(doc, model) -> list[str]:
         if r.isAlgebraic():
             issues.append("algebraic rules are not supported")
             break
-    for i in range(model.getNumCompartments()):
-        comp = model.getCompartment(i)
-        if comp.isSetConstant() and not comp.getConstant():
-            issues.append(
-                f"compartment {comp.getId()!r} is not constant; a varying "
-                "volume is not supported"
-            )
     for i in range(model.getNumReactions()):
         rxn = model.getReaction(i)
         for refs in (rxn.getListOfReactants(), rxn.getListOfProducts()):
@@ -313,13 +307,6 @@ def _compile(path: str) -> SBMLCore:
     species = [model.getSpecies(i) for i in range(model.getNumSpecies())]
     params = [model.getParameter(i) for i in range(model.getNumParameters())]
     reactions = [model.getReaction(i) for i in range(model.getNumReactions())]
-    for cid in compartments:
-        if cid in assigned or cid in rate_ruled:
-            raise UnsupportedSBMLFeatureError(
-                f"compartment {cid!r} is set by a rule; a varying volume "
-                "is not supported"
-            )
-
     # ── layout ────────────────────────────────────────────────────
     y_names = [
         s.getId()
@@ -329,6 +316,17 @@ def _compile(path: str) -> SBMLCore:
         and (not s.getBoundaryCondition() or s.getId() in rate_ruled)
     ]
     y_names += [p.getId() for p in params if p.getId() in rate_ruled]
+    # A compartment a rate rule drives is integrated like any other rate-rule
+    # target; one an assignment rule sets is a ``w`` entry through
+    # ``_dependency_order`` below. Values are amounts, so a varying volume
+    # changes what an expression reads, never the stoichiometric balance.
+    y_names += [cid for cid in compartments if cid in rate_ruled]
+    if not y_names:
+        raise UnsupportedSBMLFeatureError(
+            "no integrated quantity: every species is constant, boundary "
+            "or set by an assignment rule and no rate rule exists, so there "
+            "is no ODE to solve"
+        )
     w_names = _dependency_order(assigned)
     c_names = [
         p.getId()
@@ -340,7 +338,11 @@ def _compile(path: str) -> SBMLCore:
         for s in species
         if s.getId() not in y_names and s.getId() not in assigned
     ]
-    c_names += list(compartments)
+    c_names += [
+        cid
+        for cid in compartments
+        if cid not in assigned and cid not in rate_ruled
+    ]
     local_names: dict[str, dict[str, str]] = {}
     for rxn in reactions:
         kl = rxn.getKineticLaw()
@@ -370,7 +372,7 @@ def _compile(path: str) -> SBMLCore:
             return None
         if comp.isSetSpatialDimensions() and comp.getSpatialDimensions() == 0:
             return None
-        return _C[c_indexes[comp.getId()]]
+        return location(comp.getId())
 
     def location(name):
         if name in y_indexes:
@@ -393,7 +395,7 @@ def _compile(path: str) -> SBMLCore:
         """Map the model's symbols onto ``y``, ``w``, ``c`` and ``t``."""
         subs = {TIME: _T}
         for sym in expr.atoms(sympy.Symbol):
-            if sym is TIME:
+            if sym is TIME or sym is NAN:
                 continue
             name = sym.name
             if reaction_id is not None and name in local_names.get(
@@ -418,14 +420,27 @@ def _compile(path: str) -> SBMLCore:
         return expr * vol if vol is not None else expr
 
     # ── initial values ────────────────────────────────────────────
+    initial_assignments = {
+        model.getInitialAssignment(i).getSymbol(): expr_of(
+            model.getInitialAssignment(i).getMath()
+        )
+        for i in range(model.getNumInitialAssignments())
+    }
+    # A value attribute on a rule's or an initial assignment's target is
+    # not a value: SBML says the rule wins, and seeding it would let a
+    # later rule read a stale number (0/0 at t = 0, on a real deposit).
+    ruled = set(assigned) | set(initial_assignments)
     values: dict[str, float] = {}
     for cid, comp in compartments.items():
         values[cid] = float(comp.getSize()) if comp.isSetSize() else 1.0
     for p in params:
-        if p.isSetValue():
+        if p.isSetValue() and p.getId() not in ruled:
             values[p.getId()] = float(p.getValue())
+    as_concentration: set[str] = set()
     for s in species:
         sid = s.getId()
+        if sid in ruled:
+            continue
         if s.isSetInitialAmount():
             values[sid] = float(s.getInitialAmount())
         elif s.isSetInitialConcentration():
@@ -433,12 +448,36 @@ def _compile(path: str) -> SBMLCore:
             values[sid] = float(s.getInitialConcentration()) * (
                 1.0 if sid in substance_only else size
             )
-    initial_assignments = {
-        model.getInitialAssignment(i).getSymbol(): expr_of(
-            model.getInitialAssignment(i).getMath()
+            if sid not in substance_only:
+                as_concentration.add(sid)
+    n_local = sum(len(v) for v in local_names.values())
+    unset = [
+        n
+        for n in list(y_names) + c_names[: len(c_names) - n_local]
+        if n not in values and n not in ruled
+    ]
+    unset_params = [n for n in unset if n not in is_species]
+    if unset_params:
+        # libRoadRunner gives a species zero and refuses a parameter with
+        # no value; so does this.
+        raise UnsupportedSBMLFeatureError(
+            f"parameter(s) {unset_params[:6]} have no value: no attribute, "
+            "no initial assignment and no rule sets them"
         )
-        for i in range(model.getNumInitialAssignments())
-    }
+    unset = [n for n in unset if n in is_species]
+    if unset:
+        # SBML leaves the value undefined; libRoadRunner and COPASI run
+        # the model with zero, and so does this.
+        log.warning(
+            "%s: no initial value for %s%s; defaulting to 0 as other "
+            "simulators do",
+            os.path.basename(path),
+            ", ".join(unset[:8]),
+            f" and {len(unset) - 8} more" if len(unset) > 8 else "",
+        )
+        for n in unset:
+            values[n] = 0.0
+    seed_sizes = {cid: values[cid] for cid in compartments}
     _evaluate_initials(
         values,
         initial_assignments,
@@ -449,6 +488,12 @@ def _compile(path: str) -> SBMLCore:
         species_compartment,
         compartments,
     )
+    # A concentration was converted with the size attribute; if an initial
+    # assignment or rule moved the compartment, the amount follows it.
+    for sid in as_concentration:
+        cid = species_compartment[sid]
+        if cid in seed_sizes and values[cid] != seed_sizes[cid]:
+            values[sid] *= values[cid] / seed_sizes[cid]
 
     def initial(name):
         if name not in values:
@@ -506,7 +551,21 @@ def _compile(path: str) -> SBMLCore:
             raise UnsupportedSBMLFeatureError(
                 f"rate rule on {name!r}, which is not an integrated quantity"
             )
-        rate_rule_exprs[y_indexes[name]] = stored(name, bind(expr))
+        rate = stored(name, bind(expr))
+        cid = species_compartment.get(name)
+        if name in is_species and volume(name) is not None and cid:
+            # The rule gives d(concentration)/dt; the store holds the
+            # amount, so a moving volume adds concentration · dV/dt.
+            if cid in rate_ruled:
+                rate = rate + (location(name) / location(cid)) * bind(
+                    rate_ruled[cid]
+                )
+            elif cid in assigned:
+                raise UnsupportedSBMLFeatureError(
+                    f"rate rule on {name!r}, a concentration in compartment "
+                    f"{cid!r} that an assignment rule sets"
+                )
+        rate_rule_exprs[y_indexes[name]] = rate
 
     # Assignments in dependency order, each with every earlier non-boundary
     # one substituted, so one expression list carries every law and rule
@@ -691,9 +750,23 @@ def _evaluate_initials(
         for name in targets:
             expr = initial_assignments.get(name, assigned.get(name))
             value = expr.xreplace(env)
+            if NAN in value.free_symbols:
+                # IEEE: a comparison with NaN is false, and NaN elsewhere is
+                # NaN. sympy refuses ``nan < x``, so relationals go first.
+                value = value.replace(
+                    lambda e: isinstance(e, sympy.Rel)
+                    and NAN in e.free_symbols,
+                    lambda e: sympy.false,
+                ).xreplace({NAN: sympy.nan})
             if value.free_symbols:
                 continue
-            store(name, float(value.evalf()))
+            num = complex(value.evalf())
+            if abs(num.imag) > 1e-12 * max(1.0, abs(num.real)):
+                raise UnsupportedSBMLFeatureError(
+                    f"{name!r} evaluates to the complex number {num} at "
+                    f"t = 0: {sympy.sstr(expr)[:120]}"
+                )
+            store(name, num.real)
         if values == before and all(n in values for n in targets):
             return
     missing = [n for n in targets if n not in values]

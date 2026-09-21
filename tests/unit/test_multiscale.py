@@ -2547,3 +2547,67 @@ def test_an_event_composite_with_two_groups_runs_inside_a_trace():
     traced = float(eqx.filter_jit(final_x)(comp))
     assert traced == pytest.approx(eager, rel=1e-6)
     assert eager > float(jnp.exp(-0.1 * 10.0)) + 0.5
+
+
+def test_a_non_finite_jacobian_at_y0_routes_explicit_and_runs():
+    """``d/dx sqrt(x)`` is infinite at x = 0, so the stiffness analysis has
+    no eigenvalues to read and Newton no Jacobian to use; the explicit solver
+    integrates away from the singular point (Koo 2013, Ferreira 2003 and
+    others in the BioModels census)."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from hallsim.composite import Composite
+    from hallsim.process import Port, PortRole, Process
+    from hallsim.scheduler import Scheduler
+
+    class Root(Process):
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=0.0)}
+
+        def derivative(self, t, state):
+            return {"x": jnp.sqrt(state["x"]) + 1.0}
+
+    comp = Composite({"r": Root()}, {"r": {"x": "p/x"}}, validate=False)
+    res = Scheduler().run(comp, t_span=(0.0, 2.0), macro_dt=2.0, save_dt=0.5)
+    x = np.asarray(res.get("p/x"))
+    assert np.isfinite(x).all() and x[-1] > 2.0
+
+
+def test_a_model_that_turns_stiff_is_rerouted_to_the_implicit_solver(caplog):
+    """Non-stiff at y0, so the verdict routes it explicit; the relaxation
+    rate then climbs to 1e6 and the explicit solver runs out of steps. The
+    Scheduler re-runs the group implicitly, keeps that verdict, and the
+    trajectory follows the exact solution cos t."""
+    import jax.numpy as jnp
+    import numpy as np
+
+    from hallsim.composite import Composite
+    from hallsim.process import Port, PortRole, Process
+    from hallsim.scheduler import Scheduler
+
+    T = 20.0
+
+    class Stiffening(Process):
+        def ports_schema(self):
+            return {"y": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def derivative(self, t, state):
+            k = 1.0 + 1e6 * (t / T) ** 4
+            y = state["y"]
+            return {"y": -k * (y - jnp.cos(t)) - jnp.sin(t)}
+
+    comp = Composite({"s": Stiffening()}, {"s": {"y": "p/y"}}, validate=False)
+    sched = Scheduler(max_steps=20_000)
+    with caplog.at_level("WARNING"):
+        res = sched.run(comp, t_span=(0.0, T), macro_dt=T, save_dt=1.0)
+    y = np.asarray(res.get("p/y"))
+    assert np.isfinite(y).all()
+    assert abs(y[-1] - np.cos(T)) < 1e-3
+    assert "did not solve on the explicit solver" in caplog.text
+    # The verdict is remembered: a second run goes implicit at once.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        res2 = sched.run(comp, t_span=(0.0, T), macro_dt=T, save_dt=1.0)
+    assert "did not solve" not in caplog.text
+    assert abs(float(np.asarray(res2.get("p/y"))[-1]) - np.cos(T)) < 1e-3

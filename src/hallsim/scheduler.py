@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import math
 import os
 import threading
@@ -49,6 +50,8 @@ from hallsim.config import (
     DEFAULT_DT0,
     DEFAULT_MAX_EXPLICIT_SUBSTEPS,
     DEFAULT_MAX_STEPS,
+    EXPLICIT_STEP_BUDGET,
+    LADDER_STEP_BUDGET,
     DEFAULT_RTOL,
 )
 from hallsim.process import PortRole
@@ -77,6 +80,13 @@ def _inherits_controller_tolerances(root_finder) -> bool:
         and not isinstance(tol, (int, float))
         and not hasattr(tol, "shape")
     )
+
+
+#: Routing verdicts by structural signature, shared by every Scheduler
+#: instance in the process: which rung of the solver ladder each group ended
+#: on. A screen builds a Scheduler per tolerance, a census a Scheduler per
+#: deposit, and a verdict climbed once should not be climbed again.
+_RUNG_MEMORY: dict = {}
 
 
 def _with_own_root_finder(solver, root_finder):
@@ -153,6 +163,11 @@ class GroupIntegrator:
     controller: dfx.AbstractStepSizeController
     stiff: bool
     info: GroupStiffness | None = None
+    #: Step budget on this rung of the solver ladder; ``None`` is the
+    #: Scheduler's ``max_steps``. A stiff group starts on the fifth-order
+    #: implicit solver under ``LADDER_STEP_BUDGET`` and moves to the
+    #: third-order one, unbudgeted, if it runs out.
+    max_steps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -313,7 +328,10 @@ class SchedulerResult:
                 return jnp.asarray(code == "successful")
             return jnp.asarray(code == dfx.RESULTS.successful)
 
-        return jnp.all(jnp.stack([_succeeded(c) for c in codes]), axis=0)
+        # A batched run carries the batch axis on its diffrax lanes and a
+        # scalar on a stochastic one; put them on one shape before stacking.
+        flags = jnp.broadcast_arrays(*[_succeeded(c) for c in codes])
+        return jnp.all(jnp.stack(flags), axis=0)
 
     def __contains__(self, key: str) -> bool:
         return key in self._index
@@ -710,6 +728,16 @@ class Scheduler:
         self.implicit_solver = _with_own_root_finder(
             implicit_solver or dfx.Kvaerno5(), newton
         )
+        # The rung below the implicit solver: lower order, and diffrax's own
+        # chord, which linearises once per step rather than per stage and
+        # tests convergence in the controller's norm. On Kerkhoven 2013 at
+        # rtol 1e-3 that chord takes 806 steps where optimistix's per-stage
+        # chord runs out of 500 000; on the multi-hallmark composite at tight
+        # tolerance the per-stage chord is the faster one, which is why it
+        # stays the default and this is the fallback.
+        self.fallback_solver = dfx.Kvaerno3(
+            root_finder=dfx.VeryChord(rtol=rtol, atol=atol)
+        )
         self.solver = (
             _with_own_root_finder(solver, newton)
             if solver is not None
@@ -877,7 +905,105 @@ class Scheduler:
         plan = self._plan_for(
             composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
         )
+        # The solver ladder. The stiffness verdict is measured at y0, so a
+        # model that turns stiff along its trajectory runs its explicit
+        # solver out of steps; a very stiff one at a loose tolerance runs
+        # the fifth-order implicit solver out of its budget. Each failure
+        # moves the failing groups one rung up, twice at most.
+        for _ in range(3):
+            try:
+                result = self._execute(plan, y0, rng_key=rng_key)
+            except eqx.EquinoxRuntimeError as exc:
+                head = str(exc).splitlines()[0]
+                match = re.search(r"group '([^']+)'", str(exc))
+                failed = [match.group(1)] if match else None
+                if not self._promote_failed(
+                    plan, composite, macro_dt, y0, head, failed
+                ):
+                    raise
+            else:
+                ok = result.ok
+                if isinstance(ok, jax.core.Tracer) or bool(jnp.all(ok)):
+                    return result
+                failed = [
+                    g
+                    for g, st in result.stats.items()
+                    if isinstance(st, dict)
+                    and "result" in st
+                    and not isinstance(st["result"], str)
+                    and not bool(
+                        jnp.all(st["result"] == dfx.RESULTS.successful)
+                    )
+                ]
+                if not self._promote_failed(
+                    plan, composite, macro_dt, y0, "result.ok is False", failed
+                ):
+                    return result
+            plan = self._plan_for(
+                composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
+            )
         return self._execute(plan, y0, rng_key=rng_key)
+
+    def _promote_failed(
+        self, plan: RunPlan, composite, macro_dt, y0, why: str, failed=None
+    ) -> bool:
+        """After a failed solve, move the failing groups (every group when
+        the failure did not name one) one rung up the ladder — explicit to
+        the implicit solver, the implicit solver to the lower-order one —
+        and remember that as the composite's verdict, so the retry and every
+        later run take it. False when no group can move (routing is pinned,
+        or the failing groups are on the top rung already)."""
+        if not self.auto_solver:
+            return False
+        candidates = [
+            g for g in plan.integrators if failed is None or g in failed
+        ]
+        integ = dict(plan.integrators)
+        moved = []
+        for g in candidates:
+            current = plan.integrators[g]
+            if not current.stiff:
+                integ[g] = GroupIntegrator(
+                    self.implicit_solver,
+                    self.controller,
+                    stiff=True,
+                    info=current.info,
+                    max_steps=min(self.max_steps, LADDER_STEP_BUDGET),
+                )
+                moved.append((g, "explicit"))
+            elif current.solver is self.implicit_solver:
+                integ[g] = GroupIntegrator(
+                    self.fallback_solver,
+                    self.controller,
+                    stiff=True,
+                    info=current.info,
+                )
+                moved.append((g, type(self.implicit_solver).__name__))
+        if not moved:
+            return False
+        state = (
+            composite.initial_state_vec(plan.keys)
+            if y0 is None
+            else jnp.asarray(y0)
+        )
+        base = self._integrator_signature(
+            composite, plan.groups, state, macro_dt
+        )
+        digest = _param_digest(composite)
+        self._remember_verdict((base, digest), base, digest, integ)
+        self._last_plan = None
+        for g, came_from in moved:
+            log.warning(
+                "group %r did not solve on the %s solver (%s); re-running on "
+                "%s and keeping that verdict for this composite. The "
+                "stiffness verdict is measured at y0; this model is stiffer "
+                "along its trajectory than it is there.",
+                g,
+                came_from,
+                why[:120],
+                type(integ[g].solver).__name__,
+            )
+        return True
 
     def plan(
         self,
@@ -1666,7 +1792,10 @@ class Scheduler:
             tuple(
                 type(integrators[g].solver).__name__ for g in sorted(groups)
             ),
-            tuple(bool(integrators[g].stiff) for g in sorted(groups)),
+            tuple(
+                (bool(integrators[g].stiff), integrators[g].max_steps)
+                for g in sorted(groups)
+            ),
             tuple(state.shape),
             str(state.dtype),
             (None if jump_ts is None else tuple(float(t) for t in jump_ts)),
@@ -2525,10 +2654,42 @@ class Scheduler:
     def _remember_verdict(self, sig, base, digest, integ):
         """Cache a routing verdict under its exact key, and — when it was
         measured from concrete parameters — as *the* verdict a later traced
-        run of this structure should inherit."""
+        run of this structure should inherit, in this instance and in every
+        other."""
         self._integrator_cache[sig] = integ
         if digest is not None:
             self._eager_verdict[base] = integ
+            _RUNG_MEMORY[base] = {
+                g: self._rung_of(i) for g, i in integ.items()
+            }
+
+    def _rung_of(self, integ) -> str:
+        if not integ.stiff:
+            return "explicit"
+        if integ.solver is self.fallback_solver:
+            return "fallback"
+        return "implicit"
+
+    def _integrator_on(self, rung: str, info=None):
+        if rung == "explicit":
+            return GroupIntegrator(
+                self.explicit_solver,
+                self.lockstep_controller,
+                stiff=False,
+                info=info,
+                max_steps=min(self.max_steps, EXPLICIT_STEP_BUDGET),
+            )
+        if rung == "fallback":
+            return GroupIntegrator(
+                self.fallback_solver, self.controller, stiff=True, info=info
+            )
+        return GroupIntegrator(
+            self.implicit_solver,
+            self.controller,
+            stiff=True,
+            info=info,
+            max_steps=min(self.max_steps, LADDER_STEP_BUDGET),
+        )
 
     @staticmethod
     def _integrator_signature(composite, groups, state, macro_dt):
@@ -2739,6 +2900,11 @@ class Scheduler:
             cached = self._eager_verdict.get(base)
         if cached is not None:
             return cached
+        rungs = _RUNG_MEMORY.get(base) if self.auto_solver else None
+        if rungs is not None and set(rungs) == set(groups):
+            integ = {g: self._integrator_on(rungs[g]) for g in groups}
+            self._integrator_cache[sig] = integ
+            return integ
 
         if not self.auto_solver:
             integ = {
@@ -2751,19 +2917,15 @@ class Scheduler:
             return integ
 
         def _all_explicit():
-            return {
-                g: GroupIntegrator(
-                    self.explicit_solver,
-                    self.lockstep_controller,
-                    stiff=False,
-                )
-                for g in groups
-            }
+            return {g: self._integrator_on("explicit") for g in groups}
 
         def _all_implicit():
             return {
                 g: GroupIntegrator(
-                    self.implicit_solver, self.controller, stiff=True
+                    self.implicit_solver,
+                    self.controller,
+                    stiff=True,
+                    max_steps=min(self.max_steps, LADDER_STEP_BUDGET),
                 )
                 for g in groups
             }
@@ -2791,9 +2953,26 @@ class Scheduler:
             report = None  # tracers in the RHS — same cold-trace situation
         except (np.linalg.LinAlgError, StiffnessInconclusive) as exc:
             # A deterministic property of the composite, not a trace artifact,
-            # so this verdict is safe to cache. Degrade toward correctness:
-            # an implicit solve of a non-stiff group is slow, an explicit
-            # solve of a stiff one is wrong.
+            # so this verdict is safe to cache.
+            if isinstance(exc, np.linalg.LinAlgError) and (
+                "inf" in str(exc).lower() or "nan" in str(exc).lower()
+            ):
+                # The Jacobian at y0 is not finite — a sqrt or a power of a
+                # state that starts at zero. Newton cannot use that Jacobian
+                # either, so the implicit solver would fail at its first
+                # step; the explicit solver needs no Jacobian and integrates
+                # away from the singular point.
+                log.warning(
+                    "the Jacobian at the initial state is not finite (%s); "
+                    "using the explicit solver %s for all groups",
+                    exc,
+                    type(self.explicit_solver).__name__,
+                )
+                integ = {g: self._integrator_on("explicit") for g in groups}
+                self._remember_verdict(sig, base, digest, integ)
+                return integ
+            # Degrade toward correctness: an implicit solve of a non-stiff
+            # group is slow, an explicit solve of a stiff one is wrong.
             log.warning(
                 "stiffness analysis was inconclusive (%s); using the implicit "
                 "solver %s for all groups",
@@ -2829,14 +3008,10 @@ class Scheduler:
                     self.controller,
                     stiff=True,
                     info=verdict,
+                    max_steps=min(self.max_steps, LADDER_STEP_BUDGET),
                 )
             else:
-                integ[g] = GroupIntegrator(
-                    self.explicit_solver,
-                    self.lockstep_controller,
-                    stiff=False,
-                    info=verdict,
-                )
+                integ[g] = self._integrator_on("explicit", info=verdict)
             if self.debug:
                 log.info("  stiffness: %s", verdict)
         self._remember_verdict(sig, base, digest, integ)
@@ -2920,7 +3095,7 @@ class Scheduler:
                 integ.controller, jump_ts
             ),
             adjoint=adjoint,
-            max_steps=self.max_steps,
+            max_steps=integ.max_steps or self.max_steps,
             throw=False,
         )
         saved = (

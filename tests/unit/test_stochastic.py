@@ -203,6 +203,34 @@ def test_batched_stochastic_members_draw_independent_noise(tmp_path):
     assert not np.array_equal(np.asarray(run(4).ys), ys)
 
 
+def test_ok_puts_a_scalar_lane_beside_batched_ones():
+    # A batched run: the diffrax lanes carry the batch axis, the stochastic
+    # lane reports one string. `ok` broadcasts before it stacks.
+    import diffrax as dfx
+
+    from hallsim.scheduler import SchedulerResult
+
+    def codes(failed):
+        def one(flag):
+            return dfx.RESULTS.where(
+                flag, dfx.RESULTS.max_steps_reached, dfx.RESULTS.successful
+            )
+
+        return jax.vmap(one)(jnp.asarray(failed))
+
+    result = SchedulerResult(
+        ts=jnp.zeros(1),
+        ys=jnp.zeros((1, 4, 1)),
+        keys=["a/x"],
+        stats={
+            "fast": {"result": codes([False] * 4)},
+            "slow": {"result": codes([False, False, True, False])},
+            "ssa": {"result": "successful"},
+        },
+    )
+    assert np.array_equal(np.asarray(result.ok), [True, True, False, True])
+
+
 def test_key_argument_matches_seed(tmp_path):
     composite = _decay_composite(tmp_path)
     by_seed = Scheduler().run(composite, seed=7, **_SPAN)

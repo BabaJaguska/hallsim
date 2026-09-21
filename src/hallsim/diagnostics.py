@@ -100,6 +100,15 @@ class ScreenReport:
     #: it EXPLODING sends the reader to solver tolerances instead of to the
     #: construction error.
     did_not_construct: bool = False
+    #: Grew past the growth threshold and is still rising at the horizon,
+    #: and an independent integrator reaches the same peak: growth over the
+    #: screened span, not divergence. Advisory — the horizon may simply be
+    #: shorter than the model's own.
+    growing: bool = False
+    #: ASSIGNED paths that were not finite somewhere on the run: undefined
+    #: quantities (a fraction that is 0/0 at t = 0), reported by name and
+    #: kept out of the divergence verdict.
+    undefined_assigned: tuple = ()
 
     @property
     def ok(self) -> bool:
@@ -111,6 +120,7 @@ class ScreenReport:
                 or self.vanishing
                 or self.tolerance_sensitive
                 or self.negative
+                or self.growing
             )
             and self.tunes is not False
         )
@@ -160,6 +170,20 @@ class ScreenReport:
             )
         if self.vanishing:
             out.append("every state decayed to zero")
+        if self.undefined_assigned:
+            out.append(
+                "assigned quantity undefined (non-finite) on part of the run: "
+                + ", ".join(self.undefined_assigned)
+                + " — a 0/0 at t = 0 is the usual cause; the integrated "
+                "states are judged without it"
+            )
+        if self.growing:
+            out.append(
+                "still growing at the horizon, past 1000x its initial scale; "
+                "an independent integrator reaches the same peak, so this is "
+                "growth over the screened span rather than divergence — "
+                "screen over the model's own span before reading more into it"
+            )
         if self.tunes is False:
             out.append("non-finite gradient — not calibratable as configured")
         return tuple(out)
@@ -257,13 +281,25 @@ def _solo_run(
         save_dt=t_end / n_save,
     )
     ys = np.asarray(res.ys)
-    if probe is None:
-        return ys
-    # The probed paths are held constants, not dynamics — judging the run on
-    # them would let the probe value itself pass for a live trajectory.
-    return np.delete(
-        ys, np.asarray(comp.unfed_input_indices(list(res.keys))), axis=-1
+    keys = list(res.keys)
+    # An assigned column is recomputed from the state, never integrated; a
+    # non-finite one is an undefined quantity (0/0 at t = 0), not a
+    # diverging solve, so it is reported by name and kept out of the verdict.
+    assigned = np.asarray(comp.assigned_indices(keys))
+    undefined = tuple(
+        keys[int(i)]
+        for i in assigned
+        if not np.isfinite(ys[..., int(i)]).all()
     )
+    drop = list(assigned)
+    if probe is not None:
+        # The probed paths are held constants, not dynamics — judging the run
+        # on them would let the probe value itself pass for a live trajectory.
+        drop += list(np.asarray(comp.unfed_input_indices(keys)))
+    full = ys
+    if drop:
+        ys = np.delete(ys, np.asarray(sorted(set(drop)), dtype=int), axis=-1)
+    return ys, undefined, full
 
 
 def operating_range(
@@ -423,52 +459,84 @@ def _verdict(
 def _native_finite(
     process, t_end: float, n_steps: int, atol: float = DEFAULT_ATOL
 ):
-    """Integrate an SBML-imported process with an independent explicit
-    adaptive integrator (``jax.experimental.ode.odeint``, Dormand–Prince).
-
-    Rolls the compiled core forward over ``[0, t_end]`` on the model's
-    native clock, recomputing the assignment rules between steps — the
-    independent reference for the "is it the model or is it us?" check.
-    Returns ``(max_abs, finite)``, or ``None`` for a non-SBML process (no
-    native reference exists) or if the run itself errors.
+    """Integrate an SBML-imported process with a solver configuration the
+    Scheduler does not use — bare diffrax ``Kvaerno5`` with its own
+    per-step chord, no routing, no ladder — over ``[0, t_end]`` on the
+    model's native clock, recomputing the assignment rules between saved
+    points. The independent reference for the "is it the model or is it
+    us?" check. Bounded: a million steps, and a solve that does not finish
+    returns ``None`` rather than an answer. Returns ``(max_abs, finite)``,
+    or ``None`` for a non-SBML process or a reference that could not run.
     """
     core = getattr(process, "_model", None)
     if core is None or not hasattr(process, "_species_y0"):
         return None
     try:
-        from jax.experimental.ode import odeint
+        import diffrax as dfx
 
         y0 = jnp.asarray(process._species_y0)
         c0 = process._c
-        dt = t_end / n_steps
+        w0 = process._w0
 
-        def rhs(y, t, w):
+        def rhs(t, y, args):
+            w = core.assignmentfunc(y, w0, c0, t) if w0 is not None else w0
             return core.ratefunc(y, t, w, c0)
 
-        def step(carry, _):
-            y, w, t = carry
-            y = odeint(
-                rhs,
-                y,
-                jnp.array([t, t + dt]),
-                w,
-                atol=atol,
-                rtol=1e-12,
-                mxstep=5_000_000,
-            )[-1]
-            t = t + dt
-            w = core.assignmentfunc(y, w, c0, t)
-            return (y, w, t), y
-
-        _, ys = jax.lax.scan(
-            step, (y0, process._w0, 0.0), None, length=n_steps
+        sol = dfx.diffeqsolve(
+            dfx.ODETerm(rhs),
+            dfx.Kvaerno5(root_finder=dfx.VeryChord(rtol=1e-6, atol=atol)),
+            0.0,
+            float(t_end),
+            None,
+            y0,
+            saveat=dfx.SaveAt(ts=jnp.linspace(0.0, float(t_end), n_steps)),
+            stepsize_controller=dfx.PIDController(rtol=1e-6, atol=atol),
+            max_steps=1_000_000,
+            throw=False,
         )
-        ys = np.asarray(ys)
+        if sol.result != dfx.RESULTS.successful:
+            return None
+        ys = np.asarray(sol.ys)
     except Exception:
         return None
     finite = bool(np.all(np.isfinite(ys)))
     max_abs = float(np.nanmax(np.abs(ys))) if ys.size else 0.0
     return max_abs, finite
+
+
+def _core_field(process, core, comp, cp, ts, rows):
+    """``val -> stacked rates`` of an imported model's compiled core with
+    the probed constant set to ``val``, at the given times and store rows;
+    ``None`` when the constant is not in the core's vector."""
+    name = str(cp.field).split(".", 1)[1]
+    j = core.c_indexes.get(name)
+    if j is None:
+        return None
+    idx = comp.store_index()
+    pname = next(iter(comp.processes))
+    cols = [idx.get(f"{pname}/{n}") for n in core.y_indexes]
+    y_init = jnp.asarray(process._species_y0, float)
+    c0 = jnp.asarray(process._c, float)
+    w0 = jnp.asarray(process._w0, float) if process._w0 is not None else None
+    core_rows = [
+        jnp.asarray(
+            [
+                (row[c] if c is not None else y_init[k])
+                for k, c in enumerate(cols)
+            ]
+        )
+        for row in rows
+    ]
+
+    def fn(val):
+        c = c0.at[j].set(val)
+        outs = []
+        for t, y in zip(ts, core_rows):
+            w = core.assignmentfunc(y, w0, c, t) if w0 is not None else w0
+            outs.append(core.ratefunc(y, t, w, c))
+        return jnp.stack(outs)
+
+    return fn
 
 
 def _tunes(
@@ -478,20 +546,25 @@ def _tunes(
     sched_kwargs=None,
     probe=None,
     atol: float = DEFAULT_ATOL,
+    through_solve: bool = False,
+    states=None,
 ):
     """Forward-mode gradient finiteness — the 'tunes' half of the rule.
 
     The constituents-first rule requires each model both *runs* and
-    *tunes*: a finite forward-mode gradient of a state summary w.r.t. one
-    of its parameters. This probes up to ``n_probe`` of the process's
-    ``calibratable_params`` with ``jax.jvp`` through ``Scheduler.run``
-    (the same ForwardMode path calibration uses). A model whose explicit
-    forward sensitivities overflow (stiff) is retried on the implicit
-    solver — that is how it would actually be calibrated.
+    *tunes*: a finite forward-mode gradient w.r.t. one of its parameters.
+    By default that is the gradient of the *field* at the initial state and
+    at ``states`` sampled from the run — an eager ``jax.jvp`` of the
+    right-hand side, no compile, milliseconds — which catches what makes a
+    deposit uncalibratable in practice: a square root or a power whose
+    derivative is not finite where the model sits. ``through_solve=True``
+    differentiates a state summary through ``Scheduler.run`` instead (the
+    ForwardMode path calibration uses), retrying a stiff model on the
+    implicit solver; that is one compile and one solve per probe.
 
-    Returns ``(tunes, needs_implicit)``: ``tunes`` True if some path gives
-    finite gradients, False if neither does, ``needs_implicit`` True when
-    only the implicit solver works. Returns ``(None, False)`` when the
+    Returns ``(tunes, needs_implicit)``: ``tunes`` True if the gradients
+    are finite, False if not, ``needs_implicit`` True when only the implicit
+    solver works (through the solve only). ``(None, False)`` when the
     process exposes no calibratable parameters.
     """
     from hallsim.calibration import _substitute_param
@@ -500,6 +573,42 @@ def _tunes(
     probes = process.calibratable_params()[:n_probe]
     if not probes:
         return None, False
+
+    if not through_solve:
+        comp = single_process_composite(process)
+        y0 = comp.initial_state_vec()
+        if probe is not None:
+            y0 = y0.at[comp.unfed_input_indices()].set(probe)
+        rows = [y0] + [jnp.asarray(r) for r in (states or [])]
+        ts = [0.0] + [
+            t_end * (i + 1) / (len(rows)) for i in range(len(rows) - 1)
+        ]
+        core = getattr(process, "_model", None)
+        for cp in probes:
+            if core is not None and str(cp.field).startswith("parameters."):
+                # An imported model: differentiate the compiled core's rate
+                # function in its constants vector directly. No composite
+                # is rebuilt and nothing is traced beyond the field.
+                fn = _core_field(process, core, comp, cp, ts, rows)
+            else:
+
+                def fn(val, field=cp.field):
+                    proc = _substitute_param(process, field, val)
+                    rhs, _ = single_process_composite(proc).build_rhs()
+                    return jnp.stack([rhs(t, y) for t, y in zip(ts, rows)])
+
+            if fn is None:
+                continue
+            try:
+                _, tangent = jax.jvp(
+                    fn, (jnp.asarray(cp.default, float),), (jnp.ones(()),)
+                )
+            except Exception as exc:
+                log.debug("tunability probe on %s raised: %s", cp.field, exc)
+                return False, False
+            if not bool(jnp.all(jnp.isfinite(tangent))):
+                return False, False
+        return True, False
 
     def all_finite(sched):
         for cp in probes:
@@ -560,7 +669,7 @@ def screen_process(
     growth_threshold: float = 1e3,
     n_save: int = 400,
     max_steps: int = DEFAULT_MAX_STEPS,
-    check_tunability: bool = True,
+    check_tunability: bool | str = True,
     input_probe: float = 1.0,
     **sched_kwargs,
 ) -> ScreenReport:
@@ -597,22 +706,34 @@ def screen_process(
     proc = _on_native_clock(process)
     name = getattr(proc, "_name", type(proc).__name__)
 
+    undefined_assigned: tuple = ()
+    sampled: list = []
+
+    def solo(rtol, probe=None):
+        nonlocal undefined_assigned
+        ys, undefined, full = _solo_run(
+            proc, t_end, rtol, atol, n_save, max_steps, sched_kwargs, probe
+        )
+        if undefined and not undefined_assigned:
+            undefined_assigned = undefined
+        if not sampled and len(full):
+            step = max(1, len(full) // 4)
+            sampled.extend(full[step::step][:4])
+        return ys
+
     def tight_and_loose(probe=None):
         # atol is the same across both runs so the loose-vs-tight comparison
-        # isolates rtol sensitivity.
-        return tuple(
-            _solo_run(
-                proc,
-                t_end,
-                rtol,
-                atol,
-                n_save,
-                max_steps,
-                sched_kwargs,
-                probe,
-            )
-            for rtol in (rtol_tight, rtol_loose)
-        )
+        # isolates rtol sensitivity. The tight run is the screen; a loose
+        # run that fails where the tight one integrates is a tolerance
+        # finding, not a failed model.
+        y_tight = solo(rtol_tight, probe)
+        try:
+            y_loose = solo(rtol_loose, probe)
+        except TypeError:
+            raise
+        except Exception as exc:
+            return y_tight, np.full_like(y_tight, np.nan), type(exc).__name__
+        return y_tight, y_loose, None
 
     try:
         # Build before solving, so a composite that cannot be assembled is
@@ -633,7 +754,7 @@ def screen_process(
         )
 
     try:
-        y_tight, y_loose = tight_and_loose()
+        y_tight, y_loose, loose_failed = tight_and_loose()
     except TypeError:  # bad sched_kwargs, not an unintegrable model
         raise
     except Exception as exc:  # max_steps / non-finite blow the solve up
@@ -667,6 +788,14 @@ def screen_process(
         rtol_tight,
         atol=atol,
     )
+    if loose_failed:
+        v.tolerance_sensitive = True
+        v.tol_rel_diff = float("inf")
+        v.detail = _and(
+            v.detail,
+            f"rtol {rtol_loose:.0e} fails ({loose_failed}) where rtol "
+            f"{rtol_tight:.0e} integrates",
+        )
 
     # A component that only moves when driven (coupling edge, clamp,
     # param-input) sits flat at its port defaults, which reads as VANISHING.
@@ -675,8 +804,10 @@ def screen_process(
     undriven = False
     if v.vanishing and _has_unfed_inputs(proc):
         try:
+            yt, yl, _ = tight_and_loose(input_probe)
             v_driven = _verdict(
-                *tight_and_loose(input_probe),
+                yt,
+                yl,
                 growth_threshold,
                 tol_rel_threshold,
                 rtol_loose,
@@ -694,15 +825,39 @@ def screen_process(
             )
 
     framework_suspect = False
+    growing = False
     if v.exploding:
         native = _native_finite(proc, t_end, n_save, atol)
+        if native is not None and native[0] <= 1e-12 * max(v.peak, 1.0):
+            # A flat-zero reference saw none of the dynamics (a dose that
+            # enters through an event or a rate-ruled parameter it does not
+            # carry) and says nothing about this run.
+            native = None
         if native is not None and native[1]:
-            framework_suspect = True
-            v.detail = _and(
-                v.detail,
-                f"an independent integrator keeps it bounded (max|y|={native[0]:.3g})"
-                " — framework issue, not the model",
+            agree = (
+                np.isfinite(v.peak)
+                and native[0] <= 1.5 * v.peak
+                and v.peak <= 1.5 * native[0]
             )
+            if agree:
+                # Both integrators reach the same peak: the model grows
+                # past the threshold over this span, and nothing diverged.
+                v.exploding = False
+                growing = True
+                v.detail = _and(
+                    v.detail,
+                    f"an independent integrator reaches the same peak "
+                    f"(max|y|={native[0]:.3g}) — growth over the screened "
+                    "span, not divergence",
+                )
+            else:
+                framework_suspect = True
+                v.detail = _and(
+                    v.detail,
+                    f"an independent integrator keeps it bounded "
+                    f"(max|y|={native[0]:.3g}) — framework issue, not the "
+                    "model",
+                )
 
     tunes = None
     if check_tunability and not v.exploding:
@@ -712,6 +867,8 @@ def screen_process(
             sched_kwargs=sched_kwargs,
             probe=input_probe if undriven else None,
             atol=atol,
+            through_solve=check_tunability == "solve",
+            states=sampled,
         )
         if tunes is False:
             v.detail = _and(v.detail, "non-finite gradient")
@@ -742,6 +899,8 @@ def screen_process(
         rest_state=state,
         rtol_loose=rtol_loose,
         rtol_tight=rtol_tight,
+        growing=growing,
+        undefined_assigned=undefined_assigned,
     )
 
 

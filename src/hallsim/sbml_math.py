@@ -17,13 +17,22 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 import libsbml
+import logging
+
 import sympy
 from sympy.core.function import AppliedUndef
 from sympy.printing.numpy import JaxPrinter
 
+log = logging.getLogger(__name__)
+
 #: The SBML ``time`` csymbol. Not a valid SBML identifier, so it cannot
 #: collide with a model's own names.
 TIME = sympy.Symbol("<time>")
+#: IEEE NaN as a symbol. ``sympy.nan`` cannot sit inside a relational
+#: (``nan < x`` raises), and a deposit's placeholder ``rateOf`` or an empty
+#: piecewise does put one there; the symbol lowers to ``jnp.nan`` at print
+#: time, where the comparison is simply false.
+NAN = sympy.Symbol("<nan>")
 #: The SBML ``avogadro`` csymbol, substituted by value in :func:`to_jax`.
 AVOGADRO = sympy.Symbol("<avogadro>")
 AVOGADRO_VALUE = libsbml.ASTNode(libsbml.AST_NAME_AVOGADRO).getValue()
@@ -121,12 +130,16 @@ _LEAVES = {
     libsbml.AST_NAME_AVOGADRO: lambda node: AVOGADRO,
     libsbml.AST_NAME: lambda node: sympy.Symbol(node.getName()),
     libsbml.AST_INTEGER: lambda node: sympy.Integer(node.getInteger()),
-    libsbml.AST_REAL: lambda node: sympy.Float(node.getValue()),
-    libsbml.AST_REAL_E: lambda node: sympy.Float(node.getValue()),
+    libsbml.AST_REAL: lambda node: _real(node.getValue()),
+    libsbml.AST_REAL_E: lambda node: _real(node.getValue()),
     libsbml.AST_RATIONAL: lambda node: sympy.Rational(
         node.getNumerator(), node.getDenominator()
     ),
 }
+
+
+def _real(value: float):
+    return NAN if value != value else sympy.Float(value)
 
 
 def _truncated_quotient(a, b):
@@ -201,12 +214,25 @@ def to_sympy(node) -> sympy.Basic:
         if len(children) % 2:
             pieces.append((children[-1], sympy.true))
         if not pieces:
-            return sympy.nan
+            return NAN
         return sympy.Piecewise(*pieces)
     if kind == libsbml.AST_LAMBDA:
         if not children:
             raise UnsupportedMathError("LAMBDA with no body")
-        return sympy.Lambda(tuple(children[:-1]), children[-1])
+        # A bound variable named twice binds its first argument; SBML
+        # forbids the repeat, libsbml reads it, and a deposit carries it.
+        bound, seen = [], set()
+        for b in children[:-1]:
+            if b in seen:
+                log.warning(
+                    "function definition binds %r twice; the first binding "
+                    "is the one its body sees",
+                    b.name,
+                )
+                b = sympy.Dummy(b.name)
+            seen.add(b)
+            bound.append(b)
+        return sympy.Lambda(tuple(bound), children[-1])
     if kind == libsbml.AST_FUNCTION:
         return sympy.Function(node.getName())(*children)
     raise UnsupportedMathError(
@@ -257,6 +283,13 @@ def inline_functions(
 # ── sympy → JAX ──────────────────────────────────────────────────────
 
 
+class _Printer(JaxPrinter):
+    def _print_Symbol(self, expr):
+        if expr is NAN:
+            return "nan"
+        return super()._print_Symbol(expr)
+
+
 def to_jax(
     expr: sympy.Basic, symbols: Sequence[sympy.Symbol], *, cse: bool = False
 ):
@@ -276,7 +309,7 @@ def to_jax(
     for r in expr.atoms(sympy.Rational):
         if not r.is_Integer and (abs(r.p) > _INT_LIMIT or r.q > _INT_LIMIT):
             demote[r] = sympy.Float(r)
-    printer = JaxPrinter(
+    printer = _Printer(
         {
             "fully_qualified_modules": False,
             "inline": True,

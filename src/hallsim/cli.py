@@ -970,6 +970,11 @@ def census():
     show_default=True,
     help="deposits a worker screens before it is recycled (bounds memory)",
 )
+@click.option(
+    "--redo",
+    is_flag=True,
+    help="re-screen the given accessions even if the run already has them",
+)
 def census_run(
     workers,
     t_end,
@@ -981,6 +986,7 @@ def census_run(
     refresh,
     retry_timeouts,
     tasks_per_worker,
+    redo,
 ):
     """Screen a branch of BioModels (or --only a few) and stream the rows."""
     from hallsim.census import list_accessions, run_census
@@ -1001,6 +1007,7 @@ def census_run(
         limit=limit,
         retry_timeouts=retry_timeouts,
         tasks_per_worker=tasks_per_worker,
+        redo=redo,
     )
     click.echo(f"rows -> {run / 'rows.jsonl'}")
 

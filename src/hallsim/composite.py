@@ -992,6 +992,29 @@ class Composite(eqx.Module):
             sorted(key_to_idx[p] for p in read - written), dtype=jnp.int32
         )
 
+    def assigned_indices(self, keys: list[str] | None = None) -> jnp.ndarray:
+        """Trailing-axis indices of ASSIGNED (algebraic) paths.
+
+        These columns of a saved trajectory are recomputed from the
+        integrated state each step, never integrated; a screen that judges
+        finiteness should judge the integrated states and read a non-finite
+        assigned value as what it is, an undefined quantity (0/0 at t = 0
+        is the usual case), not a diverging solve.
+        """
+        if keys is None:
+            keys = self.store_keys()
+        key_to_idx = {k: i for i, k in enumerate(keys)}
+        assigned: set[str] = set()
+        for pname, proc in self.processes.items():
+            proc_topo = self.topology[pname]
+            for port, p in proc.ports_schema().items():
+                if p.role == PortRole.ASSIGNED:
+                    assigned.update(as_paths(proc_topo[port]))
+        return jnp.array(
+            sorted(key_to_idx[p] for p in assigned if p in key_to_idx),
+            dtype=jnp.int32,
+        )
+
     # -----------------------------------------------------------------
     # Initial state
     # -----------------------------------------------------------------

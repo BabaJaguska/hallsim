@@ -12,10 +12,8 @@ Override per run by passing the argument explicitly
 value here.
 """
 
-# Relative / absolute tolerance for the adaptive step-size controller.
-# Oscillatory biology (p53-Mdm2, NF-kB, cell cycle) is accuracy-limited,
-# so the tolerance is tight; loosening it without screening every
-# oscillator first risks numerical anti-damping.
+# Step-controller tolerances; tight, because oscillatory biology is
+# accuracy-limited (loosen only after screening every oscillator).
 DEFAULT_RTOL = 1e-6
 DEFAULT_ATOL = 1e-9
 
@@ -23,14 +21,15 @@ DEFAULT_ATOL = 1e-9
 # accuracy target, and deliberately not DEFAULT_ATOL (docs/diary.md).
 DEFAULT_NEWTON_ATOL = 1e-6
 
-# Safety ceiling on solver steps per macro step. Sized for the
-# second-scale t_span values some SBML composites run at; far above any
-# healthy integration, it only fires on genuinely runaway dynamics.
+# Ceiling on solver steps per macro step; fires only on runaway dynamics.
 DEFAULT_MAX_STEPS = 4_000_000
 
-# First step of the adaptive controller. None: each group's first step is
-# estimated from its field at the launch state (Hairer's rule, what diffrax
-# does for dt0=None); a float pins it for every group.
+# Solver-ladder step budgets: past these a group moves to the next rung
+# (explicit -> Kvaerno5 -> Kvaerno3). A healthy solve is thousands of steps.
+LADDER_STEP_BUDGET = 100_000
+EXPLICIT_STEP_BUDGET = 500_000
+
+# First adaptive step; None estimates it from the field (Hairer's rule).
 DEFAULT_DT0 = None
 
 # Where XLA caches compiled executables between processes. Set
@@ -38,21 +37,11 @@ DEFAULT_DT0 = None
 # disable. Caches codegen only; tracing and lowering are Python and still run.
 DEFAULT_COMPILATION_CACHE_DIR = "~/.cache/hallsim/jax"
 
-# Minimum compile time worth a disk round trip. Zero, because one run emits a
-# couple of hundred individually-fast executables and the cost is their sum —
-# JAX's 1.0 s default caches four of them and saves nothing.
+# Minimum compile time worth caching: zero, a run's cost is many small ones.
 DEFAULT_COMPILATION_CACHE_MIN_SECS = 0.0
 
-# Stiffness diagnostic threshold. The stiffness index ``spectral_abscissa
-# × dt`` is the number of stability-limited substeps an explicit method
-# would be forced to take across one solve interval (its step is bounded
-# by ``Δt ≲ 2/|λ|``). Below this many, explicit integration is cheap and
-# robust; far above it, the explicit step is stability- not
-# accuracy-limited. Canonical cases separate by orders of magnitude: a
-# mildly multiscale but slow oscillator (ERiQ, index ~3–26) sits well
-# below; a fast dissipative subsystem (DallePezze 2014 mitochondria
-# λ≈-3e5, Ihekwaba NF-κB λ≈-1.7e4, index ~1e4–1e6) sits far above. 100
-# leaves a wide margin on both sides.
+# Stiff when spectral_abscissa x dt, the explicit substeps one interval would
+# force, exceeds this; canonical cases sit orders of magnitude either side.
 DEFAULT_MAX_EXPLICIT_SUBSTEPS = 100.0
 
 
