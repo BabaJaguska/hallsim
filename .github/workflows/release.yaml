@@ -1,0 +1,45 @@
+name: Release
+
+# A pushed tag `vX.Y.Z` is a release: the suite must pass, then the wheel
+# and the source distribution are built from that tag (setuptools-scm reads
+# the version from it) and attached to a GitHub Release under the tag.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: make install-dev
+
+      - name: Run tests
+        run: make test
+
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --title "$GITHUB_REF_NAME" --generate-notes

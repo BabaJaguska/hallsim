@@ -15,6 +15,13 @@ anyone, which is where a mechanical screen is worth most.
     simulate census run --branch uncurated
     simulate census report                 # tables, figures, write-up
 
+Every row carries the HallSim version and commit it was screened under and
+when, so a resumed run says which rows the current code produced. When
+the run is the whole census — every listed deposit screened, every row
+stamped — ``report`` also copies the table and the counts to the tracked
+``results/census/``, so a diff between two commits names the deposits a
+change lifted or broke; a probe or a partial run leaves that table alone.
+
 The gates, in the order a model has to clear them:
 
 =============  ==============================================================
@@ -45,11 +52,14 @@ what class of work lifts it.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -196,6 +206,26 @@ def list_accessions(branch: str = "all", refresh: bool = False) -> list[str]:
 
 def branch_of(accession: str) -> str:
     return "curated" if accession.startswith("BIOMD") else "uncurated"
+
+
+def listing_stamp() -> dict:
+    """When the BioModels listing the run enumerates was fetched (the index
+    cache's modification date) and how many SBML deposits it held; ``None``
+    for both when it has never been fetched."""
+    from hallsim.discovery import _cache_dir
+
+    path = _cache_dir() / "biomodels_all.json"
+    if not path.exists():
+        return {"fetched": None, "n_sbml": None}
+    rows = json.loads(path.read_text())
+    return {
+        "fetched": time.strftime(
+            "%Y-%m-%d", time.localtime(path.stat().st_mtime)
+        ),
+        "n_sbml": sum(
+            1 for r in rows if (r.get("format") or "").upper() == "SBML"
+        ),
+    }
 
 
 def _records_dir() -> Path:
@@ -373,15 +403,17 @@ _SCREEN_FIELDS = (
 )
 
 
-def _blank_row(accession: str) -> dict:
+def _blank_row(accession: str, t_end: float = DEFAULT_T_END) -> dict:
     row = {
         "accession": accession,
+        "t_end": t_end,
         "kind": "unknown",
         "n_species": 0,
         "n_reactions": 0,
         "n_parameters": 0,
         "n_events": 0,
         "n_rate_rules": 0,
+        "species_ids": [],
         "status": "",
         "blockers": [],
         "flags": [],
@@ -398,6 +430,37 @@ def _blank_row(accession: str) -> dict:
     for f in _SCREEN_FIELDS:
         row[f] = None
     return row
+
+
+def species_ids(path) -> list[str]:
+    """The deposit's species annotations as ``namespace:id`` curies, the
+    join key a dataset's measured quantities are matched on. Structural
+    vocabularies (SBO) are left out."""
+    from hallsim.datasets import curie
+    from hallsim.sbml_import import _extract_species_ontology
+
+    ids = {
+        curie(ns, ident)
+        for ont in _extract_species_ontology(str(path)).values()
+        for ns, ident in ont.items()
+        if ns.lower() != "sbo"
+    }
+    return sorted(ids)
+
+
+def cached_species_ids(accession: str) -> list[str] | None:
+    """:func:`species_ids` from the file already in the BioModels cache,
+    or ``None`` when the deposit was never downloaded."""
+    path = (
+        Path.home() / ".cache" / "hallsim" / "biomodels" / f"{accession}.xml"
+    )
+    if not path.exists() or not path.stat().st_size:
+        return None
+    try:
+        return species_ids(path)
+    except Exception as exc:  # noqa: BLE001 - an unreadable cached file
+        log.info("%s: species ids not read (%s)", accession, exc)
+        return None
 
 
 def _formalism(model) -> tuple[str, str]:
@@ -671,7 +734,7 @@ def reason_of(row: dict) -> str:
 def census_one(accession: str, t_end: float = DEFAULT_T_END) -> dict:
     """Run one deposit through every gate. Never raises."""
     t0 = time.time()
-    row = _blank_row(accession)
+    row = _blank_row(accession, t_end)
     try:
         import libsbml
 
@@ -700,6 +763,7 @@ def census_one(accession: str, t_end: float = DEFAULT_T_END) -> dict:
         row["n_rate_rules"] = sum(
             1 for i in range(model.getNumRules()) if model.getRule(i).isRate()
         )
+        row["species_ids"] = species_ids(path)
         kind, note = _formalism(model)
         row["kind"], row["kind_note"] = kind, note
         if kind != "ode":
@@ -741,16 +805,30 @@ def census_one(accession: str, t_end: float = DEFAULT_T_END) -> dict:
     return _finish(row, t0)
 
 
+@functools.lru_cache(maxsize=1)
+def _stamp() -> tuple[str | None, str | None]:
+    """HallSim's version and commit, once per process (each pool worker
+    reads git once, not once per deposit)."""
+    from hallsim.io import versions
+
+    v = versions()
+    return v["hallsim"], v["hallsim_commit"]
+
+
 def _finish(row: dict, t0: float) -> dict:
     row["seconds"] = round(time.time() - t0, 2)
+    row["screened_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    row["hallsim_version"], row["hallsim_commit"] = _stamp()
     row["stage"] = stage_of(row)
     row["salvage"], row["how"] = salvage_verdict(row)
     row["reason"] = reason_of(row)
     return row
 
 
-def timeout_row(accession: str, timeout: float) -> dict:
-    row = _blank_row(accession)
+def timeout_row(
+    accession: str, timeout: float, t_end: float = DEFAULT_T_END
+) -> dict:
+    row = _blank_row(accession, t_end)
     row["error"] = f"timeout: not screened within {timeout:.0f} s"
     row["seconds"] = timeout
     return _finish(row, time.time() - timeout)
@@ -785,7 +863,7 @@ def run_census(
 
     from pebble import ProcessExpired, ProcessPool
 
-    from hallsim.io import make_run_dir
+    from hallsim.io import make_run_dir, versions
 
     run = Path(run_dir) if run_dir else make_run_dir("census")
     run.mkdir(parents=True, exist_ok=True)
@@ -823,18 +901,27 @@ def run_census(
                 done.add(prior["accession"])
     todo = [a for a in accessions if a not in done]
     total = len(accessions)
-    (run / "config.json").write_text(
-        json.dumps(
-            {
-                "n_accessions": total,
-                "workers": workers,
-                "t_end": t_end,
-                "timeout": timeout,
-                "started": time.strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            indent=1,
+    # One line per invocation, appended: a resumed run keeps every pass.
+    with (run / "invocations.jsonl").open("a") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "n_accessions": total,
+                    "n_done": len(done),
+                    "n_todo": len(todo),
+                    "workers": workers,
+                    "tasks_per_worker": tasks_per_worker,
+                    "t_end": t_end,
+                    "timeout": timeout,
+                    "retry_timeouts": retry_timeouts,
+                    "redo": redo,
+                    "listing": listing_stamp(),
+                    "versions": versions(),
+                }
+            )
+            + "\n"
         )
-    )
     log.info(
         "census: %d deposits, %d already done, %d to screen, %d workers",
         total,
@@ -864,13 +951,13 @@ def run_census(
             try:
                 row = fut.result()
             except FutureTimeout:
-                row = timeout_row(acc, timeout)
+                row = timeout_row(acc, timeout, t_end)
             except ProcessExpired as exc:
-                row = _blank_row(acc)
+                row = _blank_row(acc, t_end)
                 row["error"] = f"worker died: {exc}"
                 row = _finish(row, time.time())
             except Exception as exc:  # pragma: no cover - defensive
-                row = _blank_row(acc)
+                row = _blank_row(acc, t_end)
                 row["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
                 row = _finish(row, time.time())
             out.write(json.dumps(row) + "\n")
@@ -914,12 +1001,17 @@ def refresh_deposits(run_dir: Path | str) -> int:
     out, refreshed = [], 0
     for d in stored:
         acc = d["accession"]
+        # The deposit is immutable, so its species ids are read once.
+        ids = d.get("species_ids")
         cached = _records_dir() / f"{acc}.json"
         if cached.exists() and cached.stat().st_size:
-            out.append(describe(json.loads(cached.read_text()), acc))
+            d = describe(json.loads(cached.read_text()), acc)
             refreshed += 1
-        else:
-            out.append(d)
+        if ids is None:
+            ids = cached_species_ids(acc)
+        if ids is not None:
+            d["species_ids"] = ids
+        out.append(d)
     tmp = dpath.with_suffix(".jsonl.tmp")
     tmp.write_text("".join(json.dumps(d) + "\n" for d in out))
     tmp.replace(dpath)
@@ -1211,16 +1303,83 @@ def _paragraph(s: dict, label: str, t_end: float, stamp: str) -> str:
     )
 
 
-def write_report(run_dir: Path | str) -> Path:
+def _invocations(run: Path) -> list[dict]:
+    path = run / "invocations.jsonl"
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text().splitlines()
+        if line.strip()
+    ]
+
+
+def _provenance(df, invocations: list[dict]) -> dict:
+    """What produced the rows: the commit and version each was screened
+    under (with counts, since a resumed run mixes them), when, over what
+    horizon, against which listing, and how many rows carry no stamp at
+    all (screened before stamping existed). Heads ``summary.json``."""
+    from hallsim.io import versions
+
+    def counts(col):
+        if col not in df:
+            return {"unstamped": int(len(df))}
+        s = df[col].astype(object).where(df[col].notna(), "unstamped")
+        return {str(k): int(v) for k, v in s.value_counts().items()}
+
+    if "screened_at" in df:
+        stamped = df["screened_at"].dropna().astype(str)
+    else:
+        stamped = df.iloc[0:0]["accession"]
+    return {
+        "reported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "reported_under": versions(),
+        "rows": int(len(df)),
+        "unstamped_rows": int(len(df) - len(stamped)),
+        "screened_between": (
+            [str(stamped.min()), str(stamped.max())] if len(stamped) else None
+        ),
+        "hallsim_commit": counts("hallsim_commit"),
+        "hallsim_version": counts("hallsim_version"),
+        "t_end": counts("t_end"),
+        "listing": invocations[-1].get("listing") if invocations else None,
+        "invocations": [
+            {k: v for k, v in inv.items() if k != "versions"}
+            for inv in invocations
+        ],
+    }
+
+
+@dataclass
+class Report:
+    """What :func:`write_report` produced: the write-up, and whether the
+    table reached the tracked folder — ``published`` is that folder, or
+    ``None`` with ``skipped`` saying why; ``delta`` is the
+    :func:`verdict_delta` against the table that was there before, ``None``
+    for the first."""
+
+    writeup: Path
+    published: Path | None = None
+    skipped: str = ""
+    delta: dict | None = None
+
+
+def write_report(
+    run_dir: Path | str, dest: Path | str | None = None
+) -> Report:
     """``census.csv``, ``summary.json``, ``failures.md``, two figures and
     ``writeup.md`` (a preprint paragraph and a blog section) in ``run_dir``.
-    With both branches present the figures and tables compare them."""
+    With both branches present the figures and tables compare them. When
+    the run is the whole census, the table and the counts are also copied
+    to ``dest`` (default ``<repo>/results/census/``, which is tracked)."""
     run = Path(run_dir)
     refresh_deposits(run)
     df = load_rows(run)
-    summary = summarize(df)
-    cfg = {}
-    if (run / "config.json").exists():
+    invocations = _invocations(run)
+    provenance = _provenance(df, invocations)
+    summary = {"provenance": provenance, **summarize(df)}
+    cfg = invocations[-1] if invocations else {}
+    if not cfg and (run / "config.json").exists():
         cfg = json.loads((run / "config.json").read_text())
     t_end = cfg.get("t_end", DEFAULT_T_END)
     stamp = time.strftime("%Y-%m-%d")
@@ -1237,6 +1396,7 @@ def write_report(run_dir: Path | str) -> Path:
         "tolerance_sensitive", "negative", "undriven", "tunes",
         "framework_suspect", "stochastic_propensities", "has_sedml",
         "data_files", "blockers", "flags", "error", "seconds",
+        "t_end", "screened_at", "hallsim_version", "hallsim_commit",
     ]  # fmt: skip
     cols = [c for c in cols if c in df.columns]
     df[cols].to_csv(run / "census.csv", index=False)
@@ -1574,4 +1734,81 @@ def write_report(run_dir: Path | str) -> Path:
         ]
     )
     (run / "writeup.md").write_text(writeup)
-    return run / "writeup.md"
+    published, skipped, delta = _publish(run, summary, dest)
+    return Report(run / "writeup.md", published, skipped, delta)
+
+
+#: What the report carries into the tracked results folder: every row with
+#: every column, and the counts. Figures, logs and the failure list are
+#: derivable from these and stay in the run directory.
+PUBLISHED = ("census.csv", "summary.json")
+
+
+def verdict_delta(old, new) -> dict:
+    """Accessions added, removed, and whose gate or salvage class differs
+    between two census tables — what a re-run changed, by name."""
+    o = old.set_index("accession")
+    n = new.set_index("accession")
+    both = sorted(set(o.index) & set(n.index))
+    changed = []
+    for acc in both:
+        before = f"{_text(o.at[acc, 'stage'])}/{_text(o.at[acc, 'salvage'])}"
+        after = f"{_text(n.at[acc, 'stage'])}/{_text(n.at[acc, 'salvage'])}"
+        if before != after:
+            changed.append({"accession": acc, "from": before, "to": after})
+    return {
+        "added": sorted(set(n.index) - set(o.index)),
+        "removed": sorted(set(o.index) - set(n.index)),
+        "changed": changed,
+    }
+
+
+def _publish(
+    run: Path, summary: dict, dest: Path | str | None
+) -> tuple[Path | None, str, dict | None]:
+    """Copy :data:`PUBLISHED` to ``dest`` when the run is the whole census:
+    every row stamped with what screened it, and every deposit the listing
+    holds screened. A run with unstamped rows, or a probe (``--only``,
+    ``--limit``, one branch), leaves the tracked table alone and says why;
+    a tracked table has to say what produced it, and a partial run is not
+    the census. Returns the folder (or ``None``), the reason it was
+    skipped, and the :func:`verdict_delta` against the table found there."""
+    import pandas as pd
+
+    from hallsim.io import results_dir
+
+    prov = summary["provenance"]
+    if prov["unstamped_rows"]:
+        return (
+            None,
+            f"{prov['unstamped_rows']} of {summary['n']} rows carry no "
+            "framework stamp (screened before stamping existed); re-screen "
+            "them with --redo",
+            None,
+        )
+    listed = (prov.get("listing") or {}).get("n_sbml")
+    if not listed:
+        return (
+            None,
+            "the run recorded no listing to check coverage against",
+            None,
+        )
+    if summary["n"] < listed:
+        return (
+            None,
+            f"{summary['n']} of {listed:,} listed deposits screened; a "
+            "partial run is not the census",
+            None,
+        )
+    dest = Path(dest) if dest else results_dir("census")
+    dest.mkdir(parents=True, exist_ok=True)
+    delta = None
+    prior = dest / "census.csv"
+    if prior.exists():
+        delta = verdict_delta(
+            pd.read_csv(prior, low_memory=False),
+            pd.read_csv(run / "census.csv", low_memory=False),
+        )
+    for name in PUBLISHED:
+        shutil.copyfile(run / name, dest / name)
+    return dest, "", delta

@@ -392,6 +392,21 @@ def validate_reporter_mappings(reporters, composite):
     return ValidationReport(results=results)
 
 
+def tf_observables(composite, ontmap=None) -> dict[str, str]:
+    """``store_path → TF symbol`` for every annotated path whose protein is
+    a transcription factor with regulon targets: the observables a
+    transcriptome can report on, before any particular gene is chosen."""
+    tf_set, _, _ = _collectri()
+    ontmap = store_ontology_map(composite) if ontmap is None else ontmap
+    out = {}
+    for path, ont in ontmap.items():
+        uni = ont.get("uniprot")
+        sym = _human_symbol(uni)[0] if uni else None
+        if sym and sym in tf_set:
+            out[path] = sym
+    return out
+
+
 def recommend_reporters(composite, measured_genes) -> list[dict]:
     """Candidate reporters: TF nodes in the composite × their CollecTRI
     targets that are actually measured, sign from the regulon.

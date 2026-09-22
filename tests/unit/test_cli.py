@@ -201,3 +201,19 @@ def test_handles_lists_where_the_hallmarks_land():
     assert "Telomere Attrition" in result.output
     assert "parameters.alpha_k" in result.output  # Mdm2-mediated p53 loss
     assert "no annotated species matches" in result.output  # e.g. dysbiosis
+
+
+def test_the_problem_builds_without_the_dataset(monkeypatch, tmp_path):
+    # A fresh checkout has no series matrix: the arms carry no observations
+    # yet, and the problem still constructs with its fitted set.
+    sys.path.insert(0, str(DEMOS))
+    try:
+        import multi_hallmark_calibrate as demo
+    finally:
+        sys.path.remove(str(DEMOS))
+    monkeypatch.setattr(demo, "SERIES_MATRIX", tmp_path / "missing.txt")
+    monkeypatch.setattr(demo, "PLATFORM", tmp_path / "missing_platform.txt")
+    chosen = ("CDKN1A_transcr", "alpha_x_control")
+    problem = demo.build_problem(fitted=chosen)
+    assert set(problem.fittables) == set(chosen)
+    assert all(m.shape[1] == 0 for m in problem._arm_data_matrix.values())

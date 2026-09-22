@@ -11,6 +11,7 @@ _LEVELS = [logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG]
 
 
 @click.group()
+@click.version_option(package_name="hallsim")
 @click.option(
     "-v",
     "--verbose",
@@ -742,47 +743,118 @@ def discover(
 
 
 @simulate.command("find-data")
-@click.argument("query", nargs=-1, required=True)
+@click.argument("query", nargs=-1, required=False)
 @click.option("--limit", type=int, default=20)
 @click.option("--organism", default=None, help='e.g. "Homo sapiens"')
+@click.option(
+    "--source",
+    "sources",
+    multiple=True,
+    help="a repository to ask (default: all); repeatable",
+)
+@click.option(
+    "--composite",
+    default=None,
+    help="module:name of a composite (or a page over one): keep the hits "
+    "that measure one of its annotated quantities, and say which",
+)
+@click.option(
+    "--paper",
+    default=None,
+    help="a PubMed id: list the data that paper deposits or cites, its "
+    "supplement included, instead of searching",
+)
 @click.option(
     "--check/--no-check",
     default=False,
     help="Read the head of each series' platform table from GEO and say "
     "how the loader would map its probes to genes.",
 )
-def find_data(query, limit, organism, check):
-    """Search GEO and Zenodo for a dataset to calibrate against.
+def find_data(query, limit, organism, sources, composite, paper, check):
+    """Search the data repositories for a time course to calibrate against.
 
-    Lists GEO series with their kind, organism, platform and sample titles
-    (the arms and timepoints are usually in the titles), and Zenodo datasets
-    with their files. Array expression series carry their values in the
-    series matrix the loader reads; sequencing series usually do not.
+    Asks GEO, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench,
+    ArrayExpress and the BioImage Archive. Every hit says what it
+    measured, and how its samples are arranged as read from their titles:
+    arms, a control arm when one is named, timepoints. With --composite the
+    list is narrowed to what that composite carries, by ontology. With
+    --paper the paper's own data is listed instead of a search.
     """
     from hallsim.datasets import (
+        SOURCES,
+        coverage,
+        datasets_of,
         loader_route,
         platform_head,
         search_for_dataset,
     )
 
+    if not query and not paper:
+        raise click.UsageError("give a query, or --paper PMID")
+    for s in sources:
+        if s not in SOURCES:
+            raise click.BadParameter(
+                f"unknown source {s!r}; have {', '.join(SOURCES)}",
+                param_hint="--source",
+            )
+    comp = None
+    if composite:
+        from hallsim.view import Page
+
+        comp = _import_target(composite)
+        if isinstance(comp, Page):
+            comp = comp.composite
     seen, hits = set(), []
-    for term in query:
-        for d in search_for_dataset(term, limit=limit, organism=organism):
+
+    def add(found):
+        for d in found:
             if d.accession not in seen:
                 seen.add(d.accession)
                 hits.append(d)
-    hits.sort(key=lambda d: not d.series_matrix_has_values)
-    click.echo(f"{len(hits)} series")
+
+    if paper:
+        add(datasets_of(paper, with_files=True))
+    for term in query:
+        add(
+            search_for_dataset(
+                term,
+                limit=limit,
+                sources=list(sources) or None,
+                organism=organism,
+            )
+        )
+    covered = {}
+    if comp is not None:
+        covered = {d.accession: coverage(d, comp) for d in hits}
+        hits = [d for d in hits if covered[d.accession]]
+    hits.sort(
+        key=lambda d: (
+            -len(covered[d.accession].paths) if covered else 0,
+            -d.design.n_timepoints,
+            not d.series_matrix_has_values,
+        )
+    )
+    click.echo(f"{len(hits)} datasets")
     for d in hits:
         click.echo(
-            f"\n{d.accession:11s} {d.short_kind:<14.14s} {d.organism:<16.16s} "
-            f"{d.n_samples:4d} samples  {d.platform}"
+            f"\n{d.accession:14s} {d.short_kind:<14.14s} "
+            f"{d.organism:<16.16s} "
+            + (f"{d.n_samples:4d} samples  " if d.n_samples else "")
+            + d.platform
         )
         click.echo(f"    {d.title[:100]}")
         if d.samples:
+            click.echo(f"    design: {d.design.summary()}")
             click.echo(f"    samples: {', '.join(d.samples[:6])}")
+        if d.factors:
+            click.echo(f"    factors: {', '.join(d.factors[:6])}")
         if d.files:
             click.echo(f"    files: {', '.join(d.files[:6])}")
+        if d.pubmed:
+            click.echo(f"    paper: PMID {d.pubmed}")
+        cov = covered.get(d.accession)
+        if cov:
+            click.echo(f"    measures ({cov.via}): {', '.join(cov.paths[:8])}")
         if check and d.series_matrix_has_values:
             click.echo(
                 f"    platform: {loader_route(platform_head(d.accession))}"
@@ -917,7 +989,8 @@ def census():
     in parallel with a per-deposit timeout, streaming one row per deposit
     to `outputs/census/<stamp>/rows.jsonl` (tail `progress.log`). `report`
     writes the tables, the figures, the per-deposit failure list and a
-    write-up with a preprint paragraph and a blog section.
+    write-up with a preprint paragraph and a blog section, and, for a
+    whole census, refreshes the tracked table under `results/census/`.
     """
 
 
@@ -1019,15 +1092,181 @@ def census_run(
     help="a census run directory; default outputs/census/latest",
 )
 def census_report(run_dir):
-    """Tables, figures, failure list and write-up for a finished run."""
+    """Tables, figures, failure list and write-up for a run; a whole
+    census also refreshes the tracked table under results/census."""
     from pathlib import Path
 
-    from hallsim.census import write_report
+    from hallsim.census import PUBLISHED, write_report
     from hallsim.io import outdir
 
     run = Path(run_dir) if run_dir else outdir("census") / "latest"
-    out = write_report(run)
-    click.echo(str(out))
+    rep = write_report(run)
+    click.echo(str(rep.writeup))
+    if rep.published is None:
+        click.echo(f"results/census not updated: {rep.skipped}")
+        return
+    for name in PUBLISHED:
+        click.echo(str(rep.published / name))
+    if rep.delta is None:
+        click.echo("first tracked table")
+        return
+    d = rep.delta
+    click.echo(
+        f"against the tracked table: {len(d['added'])} added, "
+        f"{len(d['removed'])} removed, "
+        f"{len(d['changed'])} changed verdict (gate/salvage)"
+    )
+    for c in d["changed"][:25]:
+        click.echo(f"  {c['accession']}  {c['from']} -> {c['to']}")
+    if len(d["changed"]) > 25:
+        click.echo(f"  ... {len(d['changed']) - 25} more")
+
+
+@simulate.group("census-data")
+def census_data():
+    """Measure the data repositories: every deposited time course, and
+    what a screened model could be scored on.
+
+    The data side of `simulate census`. `run` enumerates the routes (the
+    model papers through Europe PMC, every GEO series for the organisms,
+    every PRIDE, MetaboLights, Metabolomics Workbench and ArrayExpress
+    entry, the BioImage Archive) and streams one row per dataset through
+    the gates timed, measured, matched, loadable to
+    `outputs/census-data/<stamp>/rows.jsonl`, resumable. Arms, a control
+    and the perturbation labels are recorded, not gated. `report` writes
+    the funnel per route and modality, the pair list and the paper census.
+    """
+
+
+@census_data.command("run")
+@click.option(
+    "--models-run",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="a `simulate census` run directory whose deposits carry species "
+    "ids (default: outputs/census/latest)",
+)
+@click.option("--run-dir", default=None, type=click.Path(file_okay=False))
+@click.option(
+    "--route",
+    "routes",
+    multiple=True,
+    type=click.Choice(["papers", "geo", "ebi", "bioimages"]),
+    help="a route to enumerate (default: all); repeatable",
+)
+@click.option(
+    "--organism",
+    "organisms",
+    multiple=True,
+    help='GEO organisms (default: "Homo sapiens", "Mus musculus")',
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="cap each route for a pilot; leaves no completion marker",
+)
+@click.option(
+    "--all-models",
+    is_flag=True,
+    help="match against every deposit with species ids, not only the "
+    "ones that clear the gates or need a cheap fix",
+)
+@click.option(
+    "--resolve",
+    is_flag=True,
+    help="resolve perturbation labels to ChEBI ids and UniProt targets "
+    "(keyless lookups, cached; recorded, never gated)",
+)
+@click.option(
+    "--files",
+    "with_files",
+    is_flag=True,
+    help="list the files of each paper's supplement (downloads archives)",
+)
+@click.option("--workers", type=int, default=4, show_default=True)
+def census_data_run(
+    models_run,
+    run_dir,
+    routes,
+    organisms,
+    limit,
+    all_models,
+    resolve,
+    with_files,
+    workers,
+):
+    """Enumerate the routes and screen every dataset. Resumes a
+    --run-dir; a finished route is skipped."""
+    from pathlib import Path
+
+    from hallsim.dataset_census import (
+        DEFAULT_ORGANISMS,
+        ROUTES,
+        run_census,
+    )
+    from hallsim.io import outdir
+
+    models = Path(models_run) if models_run else outdir("census") / "latest"
+    if not (models / "rows.jsonl").exists():
+        raise click.UsageError(f"no model census at {models}")
+    run = run_census(
+        models,
+        run_dir=run_dir,
+        routes=tuple(routes) or ROUTES,
+        organisms=tuple(organisms) or DEFAULT_ORGANISMS,
+        limit=limit,
+        usable_only=not all_models,
+        resolve=resolve,
+        with_files=with_files,
+        workers=workers,
+    )
+    click.echo(str(run))
+
+
+@census_data.command("rescreen")
+@click.option(
+    "--run-dir", default=None, type=click.Path(exists=True, file_okay=False)
+)
+@click.option(
+    "--models-run",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="the model census to match against (default: the run's own)",
+)
+@click.option("--all-models", is_flag=True)
+def census_data_rescreen(run_dir, models_run, all_models):
+    """Screen every stored row again under the current gates and models,
+    without asking the repositories; then run `report`."""
+    import json
+    from pathlib import Path
+
+    from hallsim.dataset_census import load_models, rescreen
+    from hallsim.io import outdir
+
+    run = Path(run_dir) if run_dir else outdir("census-data") / "latest"
+    if models_run is None:
+        cfg = json.loads((run / "config.json").read_text())
+        models_run = cfg["models_run"]
+    models = load_models(models_run, usable_only=not all_models)
+    n = rescreen(run, models)
+    click.echo(f"{n} rows screened again against {len(models)} models")
+
+
+@census_data.command("report")
+@click.option(
+    "--run-dir", default=None, type=click.Path(exists=True, file_okay=False)
+)
+def census_data_report(run_dir):
+    """Funnel, design and match tables, the pair list and the paper
+    census for a run (default: the latest)."""
+    from pathlib import Path
+
+    from hallsim.dataset_census import write_report
+    from hallsim.io import outdir
+
+    run = Path(run_dir) if run_dir else outdir("census-data") / "latest"
+    click.echo(str(write_report(run)))
 
 
 @demo.command("stiffness")
@@ -1321,8 +1560,35 @@ def _serve_options(f):
     return f
 
 
+def _bake_options(f):
+    for opt in reversed(
+        [
+            click.option(
+                "--bake",
+                "bake_dir",
+                type=click.Path(file_okay=False),
+                default=None,
+                help="write the page as a static site to this directory "
+                "instead of serving it: every slider setting on a grid "
+                "(--step) solved once, read back by plain HTML and JS. "
+                "The wiring tab stays with the server",
+            ),
+            click.option(
+                "--step",
+                type=click.FloatRange(min=0.01, max=1.0),
+                default=0.25,
+                show_default=True,
+                help="slider spacing of the baked grid",
+            ),
+        ]
+    ):
+        f = opt(f)
+    return f
+
+
 @demo.command("hallmark-levers")
 @_serve_options
+@_bake_options
 @click.option(
     "--cells",
     type=click.IntRange(min=0),
@@ -1336,7 +1602,7 @@ def _serve_options(f):
 @click.option(
     "--seed", type=int, default=0, show_default=True, help="population seed"
 )
-def hallmark_levers(port, host, debug, cells, seed):
+def hallmark_levers(port, host, debug, bake_dir, step, cells, seed):
     """Serve the hallmark-lever page: one slider per hallmark of aging,
     wired into the multi-hallmark composite. Every pull applies the
     severity through the hallmark layer, re-solves Dalle Pezze 2014,
@@ -1344,13 +1610,24 @@ def hallmark_levers(port, host, debug, cells, seed):
     against the etoposide arm. The etoposide exposure window is shaded,
     with longer windows on a switch; Proctor 2007 is drawn as a population
     of cells at reaction level, with the population mean over it. The
-    wiring tab is `simulate view`'s.
+    wiring tab is `simulate view`'s. With --bake the page is written as a
+    static site instead.
 
     Needs the `app` extra: pip install "hallsim[app]".
     """
     from demos.hallmark_levers import main
 
-    main(port=port, host=host, debug=debug, cells=cells, seed=seed)
+    out = main(
+        port=port,
+        host=host,
+        debug=debug,
+        cells=cells,
+        seed=seed,
+        bake=bake_dir,
+        step=step,
+    )
+    if out is not None:
+        click.echo(f"baked to {out}; serve it from any static host")
 
 
 def _import_target(target: str):
@@ -1373,6 +1650,7 @@ def _import_target(target: str):
 @simulate.command("view")
 @click.argument("target")
 @_serve_options
+@_bake_options
 @click.option(
     "--registry",
     default=None,
@@ -1408,6 +1686,8 @@ def view(
     port,
     host,
     debug,
+    bake_dir,
+    step,
     registry,
     t_end,
     macro_dt,
@@ -1417,7 +1697,8 @@ def view(
     runs,
 ):
     """Serve a composite as a page: levers over its handles and its wiring
-    with a signal trace; with --run, a saved calibration run too.
+    with a signal trace; with --run, a saved calibration run too. With
+    --bake, write the levers as a static site instead of serving.
 
     TARGET is module:name — a composite, a `hallsim.view.Page`, or a
     callable returning either. A composite gets one slider per registry
@@ -1426,7 +1707,7 @@ def view(
 
     Needs the `app` extra: pip install "hallsim[app]".
     """
-    from hallsim.view import Page, page_for, serve
+    from hallsim.view import Page, bake, page_for, serve
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     obj = _import_target(target)
@@ -1443,6 +1724,10 @@ def view(
             cells=cells,
             seed=seed,
         )
+    if bake_dir:
+        out = bake(page, bake_dir, step=step)
+        click.echo(f"baked to {out}; serve it from any static host")
+        return
     serve(page, host=host, port=port, debug=debug, runs=runs)
 
 

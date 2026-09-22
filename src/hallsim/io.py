@@ -21,6 +21,59 @@ def outdir(name: str) -> Path:
     return d
 
 
+def results_dir(name: str) -> Path:
+    """Return ``<repo>/results/<name>/``, creating it if needed. Unlike
+    :func:`outdir` this folder is tracked: it holds the small, stamped
+    products of a run that the repository carries (a census table, a
+    benchmark score), so git history is their time series."""
+    d = _ROOT / "results" / name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def versions() -> dict:
+    """What a result was produced under: ``jax``, ``diffrax``, ``equinox``,
+    ``optax`` and ``hallsim`` from installed metadata, ``hallsim_commit``
+    from ``git describe`` on the checkout (nearest tag, distance and short
+    hash, ``-dirty`` when the tree has uncommitted changes), ``python`` and
+    ``platform``. ``None`` where a package is not installed or the tree is
+    not a git checkout. Written beside every run's numbers so a table can
+    be traced to the code that made it."""
+    import importlib.metadata as md
+    import platform
+    import subprocess
+
+    out = {}
+    for dist in ("jax", "diffrax", "equinox", "optax", "hallsim"):
+        try:
+            out[dist] = md.version(dist)
+        except md.PackageNotFoundError:
+            out[dist] = None
+    try:
+        out["hallsim_commit"] = (
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(_ROOT),
+                    "describe",
+                    "--tags",
+                    "--always",
+                    "--dirty",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            or None
+        )
+    except Exception:  # noqa: BLE001 - no git, no commit
+        out["hallsim_commit"] = None
+    out["python"] = platform.python_version()
+    out["platform"] = platform.platform()
+    return out
+
+
 def make_run_dir(name: str, stamp: str | None = None) -> Path:
     """Timestamped subfolder of :func:`outdir`, with ``latest`` symlinked to
     it — so a run never overwrites the last one and figure scripts can follow

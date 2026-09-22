@@ -190,11 +190,20 @@ def main(
     debug: bool = False,
     cells: int = DEFAULT_CELLS,
     seed: int = 0,
+    bake: str | None = None,
+    step: float = 0.25,
 ):
+    """Serve the page, or with ``bake`` write it as a static site: every
+    slider setting on a grid at ``step``, solved once. Returns the site's
+    directory when baking."""
+    from hallsim.view import bake as bake_page
     from hallsim.view import serve
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    serve(page(cells=cells, seed=seed), host=host, port=port, debug=debug)
+    built = page(cells=cells, seed=seed)
+    if bake:
+        return bake_page(built, bake, step=step)
+    serve(built, host=host, port=port, debug=debug)
 
 
 if __name__ == "__main__":

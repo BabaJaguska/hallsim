@@ -216,7 +216,7 @@ def test_write_report_produces_every_file(tmp_path):
     (tmp_path / "deposits.jsonl").write_text(
         "\n".join(json.dumps(d) for d in deps) + "\n"
     )
-    out = census.write_report(tmp_path)
+    out = census.write_report(tmp_path, dest=tmp_path / "results")
     for name in (
         "census.csv",
         "summary.json",
@@ -232,10 +232,136 @@ def test_write_report_produces_every_file(tmp_path):
     assert summary["pass"] == 2
     assert summary["branches"]["curated"]["pass"] == 1
     assert summary["branches"]["uncurated"]["n"] == 2
-    text = out.read_text()
+    text = out.writeup.read_text()
     assert "1 of 4 curated" in text and "1 of 2 uncurated" in text
+    # No invocation log, so no listing to check coverage against.
+    assert out.published is None and "listing" in out.skipped
+    assert not (tmp_path / "results").exists()
     assert "framework-defect" in text
     assert "BIOMD0000000004" in (tmp_path / "failures.md").read_text()
+
+
+def test_every_row_says_what_screened_it():
+    row = census._finish(_row(), 0.0)
+    assert row["screened_at"][:2] == "20" and "T" in row["screened_at"]
+    assert row["hallsim_version"]
+    assert row["hallsim_commit"]
+    assert row["t_end"] == census.DEFAULT_T_END
+    late = census.timeout_row("BIOMD0000000009", 300.0, t_end=4.0)
+    assert late["t_end"] == 4.0 and late["hallsim_commit"]
+
+
+def _run_dir(tmp_path, rows):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "rows.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n"
+    )
+    (tmp_path / "deposits.jsonl").write_text(
+        "\n".join(
+            json.dumps({"accession": r["accession"], "name": "m"})
+            for r in rows
+        )
+        + "\n"
+    )
+    return tmp_path
+
+
+def test_summary_is_headed_by_provenance(tmp_path):
+    rows = [
+        census._finish(_row(), 0.0),
+        census._finish(_row(accession="BIOMD0000000002"), 0.0),
+    ]
+    del rows[1]["screened_at"]
+    del rows[1]["hallsim_commit"]
+    run = _run_dir(tmp_path, rows)
+    (run / "invocations.jsonl").write_text(
+        json.dumps({"t_end": 7.0, "listing": {"fetched": "2026-09-20"}}) + "\n"
+    )
+    census.write_report(run, dest=tmp_path / "results")
+    summary = json.loads((run / "summary.json").read_text())
+    assert list(summary)[0] == "provenance"
+    prov = summary["provenance"]
+    assert prov["rows"] == 2 and prov["unstamped_rows"] == 1
+    assert prov["hallsim_commit"] == {
+        rows[0]["hallsim_commit"]: 1,
+        "unstamped": 1,
+    }
+    assert prov["listing"] == {"fetched": "2026-09-20"}
+    assert prov["invocations"] == [
+        {"t_end": 7.0, "listing": {"fetched": "2026-09-20"}}
+    ]
+    assert "jax" in prov["reported_under"]
+    header = (run / "census.csv").read_text().splitlines()[0]
+    assert header.endswith(
+        "seconds,t_end,screened_at,hallsim_version,hallsim_commit"
+    )
+
+
+def _whole(run, n):
+    (run / "invocations.jsonl").write_text(
+        json.dumps({"t_end": 10.0, "listing": {"n_sbml": n}}) + "\n"
+    )
+    return run
+
+
+def test_a_whole_census_refreshes_the_tracked_table(tmp_path):
+    run = _whole(
+        _run_dir(
+            tmp_path / "run",
+            [
+                census._finish(_row(), 0.0),
+                census._finish(_row(accession="BIOMD0000000002"), 0.0),
+            ],
+        ),
+        2,
+    )
+    dest = tmp_path / "results"
+    rep = census.write_report(run, dest)
+    assert rep.published == dest and rep.delta is None and not rep.skipped
+    assert sorted(p.name for p in dest.iterdir()) == list(census.PUBLISHED)
+
+    run2 = _whole(
+        _run_dir(
+            tmp_path / "run2",
+            [
+                census._finish(_row(time_unit_declared=False), 0.0),
+                census._finish(_row(accession="BIOMD0000000003"), 0.0),
+            ],
+        ),
+        2,
+    )
+    rep = census.write_report(run2, dest)
+    assert rep.delta["added"] == ["BIOMD0000000003"]
+    assert rep.delta["removed"] == ["BIOMD0000000002"]
+    assert rep.delta["changed"] == [
+        {
+            "accession": "BIOMD0000000001",
+            "from": "pass/as-is",
+            "to": "clock/cheap-fix",
+        }
+    ]
+    assert json.loads((dest / "summary.json").read_text())["pass"] == 1
+
+
+def test_a_partial_or_unstamped_run_leaves_the_tracked_table_alone(
+    tmp_path,
+):
+    dest = tmp_path / "results"
+    # A probe: one row against a listing of five.
+    run = _whole(
+        _run_dir(tmp_path / "probe", [census._finish(_row(), 0.0)]), 5
+    )
+    rep = census.write_report(run, dest)
+    assert rep.published is None and "1 of 5" in rep.skipped
+    assert not dest.exists()
+    # Rows screened before the stamp existed.
+    row = census._finish(_row(), 0.0)
+    del row["hallsim_commit"]
+    del row["screened_at"]
+    run = _whole(_run_dir(tmp_path / "old", [row]), 1)
+    rep = census.write_report(run, dest)
+    assert rep.published is None and "no framework stamp" in rep.skipped
+    assert not dest.exists()
 
 
 def test_a_non_sbml_deposit_is_wrong_formalism_not_a_broken_file(tmp_path):
@@ -282,3 +408,17 @@ def test_cobra_style_export_is_constraint_based(tmp_path):
             prm.setValue(0.0)
     kind, note = census._formalism(model)
     assert kind == "constraint-based" and "COBRA" in note
+
+
+def test_species_ids_are_the_deposits_annotations_as_curies():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    path = root / "demos/models/sbml/dallepezze2014"
+    path = path / "dallepezze2014_BIOMD0000000582.xml"
+    ids = census.species_ids(path)
+    assert "uniprot:P31749" in ids  # Akt
+    assert any(i.startswith("chebi:") for i in ids)
+    assert not any(i.startswith("sbo:") for i in ids)
+    assert not any(":chebi:" in i.lower() for i in ids)
+    assert ids == sorted(set(ids))

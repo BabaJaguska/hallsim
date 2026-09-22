@@ -1625,8 +1625,7 @@ class CalibrationProblem:
         library versions, and any ``notes`` the caller attached (a dataset
         accession, a declared scalar). Written beside every run's summary
         so the numbers in a folder can be traced to what produced them."""
-        import importlib.metadata as md
-        import subprocess
+        from hallsim.io import versions as _versions
 
         kw = self._ctor_kwargs
         comp = self.composite
@@ -1647,25 +1646,7 @@ class CalibrationProblem:
             except Exception:  # noqa: BLE001 - a traced or absent start
                 entry["initial"] = None
             params[name] = entry
-        versions = {}
-        for dist in ("jax", "diffrax", "equinox", "optax", "hallsim"):
-            try:
-                versions[dist] = md.version(dist)
-            except md.PackageNotFoundError:
-                versions[dist] = None
-        try:
-            root = Path(__file__).resolve().parents[2]
-            versions["hallsim_commit"] = (
-                subprocess.run(
-                    ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                ).stdout.strip()
-                or None
-            )
-        except Exception:  # noqa: BLE001 - no git, no commit
-            versions["hallsim_commit"] = None
+        versions = _versions()
         return _jsonable(
             {
                 "composite": {
@@ -1943,6 +1924,11 @@ class CalibrationProblem:
         not carry."""
         import pandas as pd
 
+        if not times:
+            # An arm with no observations yet: a block with no timepoints,
+            # so a problem built before its data arrives still constructs.
+            shape = (len(self.readouts), 0) + ((n_batch,) if n_batch else ())
+            return jnp.zeros(shape, dtype=float)
         cols = []
         for t in times:
             entry = per_t.get(t)

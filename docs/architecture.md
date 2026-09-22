@@ -305,7 +305,30 @@ wrong-formalism, deposit-defect, framework-defect, timeout) with the
 concrete action beside it, the per-deposit failure table carrying each
 paper's own account of what it models, two figures, and a write-up with a
 preprint paragraph. It is the numerical gate only: nothing in it reads the
-paper, so its counts are upper bounds on the usable supply.
+paper, so its counts are upper bounds on the usable supply. Every row
+carries the HallSim version and commit it was screened under and when.
+When the run is the whole census — every listed deposit screened, every
+row stamped — the report also copies the table and the counts to
+`results/census/`, which is tracked, so a diff between two commits names
+the deposits a change lifted or broke; a probe or a partial run leaves
+that table alone.
+
+**The data side.** `simulate census-data run` enumerates the repositories
+the same way: every GEO series for the organisms, every PRIDE,
+MetaboLights, Metabolomics Workbench and ArrayExpress entry, the BioImage
+Archive, and each screened model's own paper through Europe PMC (its
+flags, the datasets it links, its supplement). Every dataset meets four
+nested gates: timed (three or more timepoints, read from the sample
+titles, a declared time factor or the description), measured (quantities
+that can be named: a transcriptome, a proteome, listed metabolite ids),
+matched (a screened model carries one of them, by ontology: a shared
+ChEBI id, a protein in a proteome, a transcription factor a transcriptome
+reads through its regulon) and loadable (a reader exists for its tables).
+Arms, a named control and the perturbation labels are recorded, not gated:
+an unperturbed time course is data. `census-data report` writes the funnel
+per route and modality, the direct pair list and the paper census;
+`census-data rescreen` re-judges stored rows under the current gates and
+model set without asking the repositories again.
 
 ### On-disk caches
 
@@ -451,7 +474,7 @@ Small modules a model author needs early, each importable on its own:
 | `hallsim.structure` | What the declared symbolic forms (`reaction_channels`, `assignment_rules`, `rate_rules`) imply for a whole composite: `composite_stoichiometry` / `composite_moieties` (exact `N` and its integer moieties over store paths), `jacobian_pattern` + `compressed_jacobian` (the Jacobian in as many forward passes as its sparsity has colours; dense only on an undeclared process's own block), `check_pattern` (the pattern against the composite's derivative), `symbolic_field` (the field as sympy, over path and `<process>.<field>` parameter symbols). `steady_state` and `identifiability.structural_redundancy` are built on it. |
 | `hallsim.diagnostics` | `screen_process` / `screen_composite` (the constituents-first pre-flight), `screen_sensitivity`, and `recommend_coupling_source`. |
 | `hallsim.attenuation` | `trace_path(composite, control, reporter, ...)` — follows a handle or a parameter to a reporter through the wiring, runs the composite at two settings of it, and reports the relative change at every store path on the route, naming the node where it collapses and the reactions that carry that step. The diagnosis behind a flat reporter or a structural verdict; the identifiability report points here. |
-| `hallsim.view` | `page_for(composite, registry, t_end=...)` + `serve(page)` (`simulate view module:name`): a Dash page for any composite with a levers tab (one slider per handle that reaches it, a trajectory row per process, a population band for reaction-level members), a wiring tab (processes opened into their reactions and states, a `trace_path` route coloured by relative change) and, when `--run` names one, a fit tab (a saved calibration run's history, parameters and concordance). The hallmark-lever demo is one `Page` over it. Needs the `app` extra. |
+| `hallsim.view` | `page_for(composite, registry, t_end=...)` + `serve(page)` (`simulate view module:name`): a Dash page for any composite with a levers tab (one slider per handle that reaches it, a trajectory row per process, a population band for reaction-level members), a wiring tab (processes opened into their reactions and states, a `trace_path` route coloured by relative change) and, when `--run` names one, a fit tab (a saved calibration run's history, parameters and concordance). The hallmark-lever demo is one `Page` over it. Needs the `app` extra. `bake(page, dir, step=0.25)` (`--bake DIR` on `simulate view` and on the lever demo) writes the levers as a static site instead: every slider setting on a grid, solved once, read back by plain HTML and JS from any static host. |
 
 ## Formalism coverage
 
@@ -509,6 +532,15 @@ boundary.
 - `make test-docs` runs every Python block in the README, this page and
   calibration.md as written, top to bottom per page; minutes on CPU and
   needs the network, so run it before a release.
+- The version is the git tag (setuptools-scm): `0.2.0` at tag `v0.2.0`,
+  `0.2.1.devN+g<hash>` N commits past it; `simulate --version` prints it.
+  A release is `git tag -a vX.Y.Z -m "..."` and a push of the tag: the
+  release workflow runs the suite, builds the wheel and the source
+  distribution from the tag and attaches them to a GitHub Release.
+- The public lever page is the baked site, served at hallsim.org from
+  Cloudflare Pages: `simulate demo hallmark-levers --bake outputs/site`
+  (about an hour at the default grid and 16 cells), then
+  `npx wrangler pages deploy outputs/site --project-name hallsim`.
 
 ### Key files
 
@@ -529,7 +561,8 @@ src/hallsim/
   census.py            — the corpus census: every deposit through the gate, and the report
   discovery.py         — search_for_model across BioModels, JWS, ModelDB, BioSimulations, Physiome, Europe PMC
   literature.py        — Europe PMC full text, model pointers, what a cited repository holds
-  datasets.py          — search_for_dataset (GEO, Zenodo), platform-table check against the loader
+  datasets.py          — search_for_dataset (GEO, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench, ArrayExpress, BioImage Archive), parse_design, a paper's own data, coverage of a composite
+  dataset_census.py    — the data census: every deposited time course through timed → measured → matched → loadable
   rejections.py        — the record of deposits screened out, and why
   sbml_core.py, sbml_math.py, sbml_events.py — libsbml -> sympy -> JAX
   sbml_import.py, cps_import.py, xpp_import.py — SBML / COPASI / XPPAUT importers

@@ -186,6 +186,28 @@ def test_a_trace_marks_its_route(composite, page, registry):
     assert all(0.0 <= v <= 1.0 for v in rel.values())
 
 
+def test_a_page_bakes_to_a_static_site(page, tmp_path):
+    from hallsim.view import bake
+    from hallsim.view._bake import setting_key
+
+    out = bake(page, tmp_path / "site", step=0.5, quiet=True)
+    index = json.loads((out / "index.json").read_text())
+    assert [lv["handle"] for lv in index["levers"]] == ["Oxidative load"]
+    assert [r["name"] for r in index["rows"]] == ["fast", "slow"]
+    assert set(index["layouts"]["composite"]) == {"5", "2"}
+    names = sorted(p.name for p in (out / "data" / "composite").glob("*"))
+    assert names == ["0.00.json", "0.50.json", "1.00.json"]
+    assert setting_key((1.0,)) == "1.00"
+    ref = json.loads((out / "reference" / "composite.json").read_text())
+    top = json.loads((out / "data" / "composite" / "1.00.json").read_text())
+    assert len(top["series"]["fast"][0]) == len(ref["t"])
+    # the handle doubles the production rate, so more ROS at the end
+    assert top["series"]["fast"][0][-1] > ref["series"]["fast"][0][-1]
+    assert top["population"] == {}
+    for name in ("index.html", "bake.js", "plotly.min.js"):
+        assert (out / name).exists()
+
+
 def test_a_saved_run_renders(tmp_path):
     pytest.importorskip("plotly")
     pytest.importorskip("dash")

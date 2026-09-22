@@ -1,10 +1,10 @@
 [build-system]
-requires      = ["setuptools>=69.0", "wheel"]
+requires      = ["setuptools>=69.0", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name            = "hallsim"
-version         = "0.1.0"
+dynamic         = ["version"]
 description     = "Differentiable, composable multi-scale modelling framework for aging biology"
 readme          = "README.md"
 license         = {text = "MIT"}
@@ -76,6 +76,14 @@ copasi = ["python-copasi>=4.42"]
 # its own published fit — see hallsim.intake.published_fit_chi2.
 dev = ["pytest", "black", "pre-commit", "flake8", "xlrd>=2.0"]
 
+# The version is the git tag: `0.2.0` at tag `v0.2.0`, `0.2.1.devN+g<hash>`
+# N commits past it (plus a date when the tree has uncommitted edits), so
+# every build says where it sits between releases. Release by tagging:
+# `git tag -a vX.Y.Z -m "..."` and push the tag; .github/workflows/release
+# builds the wheel from it. An editable install fixes the version at
+# install time, so `hallsim.io.versions` reads git beside it.
+[tool.setuptools_scm]
+
 [tool.setuptools.packages.find]
 # `demos` ships too: the `simulate` entry point below imports it, so it cannot
 # live outside the distribution. Include-filtered so nothing else at the repo
@@ -89,6 +97,8 @@ hallsim = [
   "reference/**/*.tsv",
   "reference/**/*.md",
   "view/*.css",
+  "view/*.html",
+  "view/*.js",
 ]
 "demos.models" = ["sbml/**/*.xml"]
 # The lever page's Dash assets (the institute wordmark).

@@ -26,7 +26,8 @@ def shades_of(page: Page, variant: str | None):
 
 
 def spans(page: Page, severities, variant=None):
-    """``(on, x0, x1, color, opacity)`` per shade at this setting."""
+    """``(on, x0, x1, color, opacity, label)`` per shade at this
+    setting."""
     sev = page.severities(severities)
     return tuple(
         (
@@ -35,35 +36,45 @@ def spans(page: Page, severities, variant=None):
             page.t_end if sh.end is None else sh.end,
             color(sh.color),
             sh.opacity,
+            sh.label,
         )
         for sh in shades_of(page, variant)
     )
 
 
-def legend_items(page: Page, severities, variant=None):
-    from dash import html
-
-    def entry(sample, name):
-        return html.Span([sample, name])
-
+def legend_entries(page: Page, severities, variant=None) -> list[dict]:
+    """The legend as plain rows ``{kind, label, color}``: ``line`` is this
+    setting, ``dotted`` the reference, ``swatch`` a shaded period that is
+    on."""
     sev = page.severities(severities)
     items = [
-        entry(html.Span(className="ln"), "current setting"),
-        entry(html.Span(className="ln dotted"), page.reference_label),
+        {"kind": "line", "label": "current setting", "color": None},
+        {"kind": "dotted", "label": page.reference_label, "color": None},
     ]
     items += [
-        entry(
-            html.Span(
-                className="sw", style={"background": rgba(col, op * 2.5)}
-            ),
-            sh.name(sev),
-        )
-        for sh, (on, _, _, col, op) in zip(
+        {"kind": "swatch", "label": sh.name(sev), "color": rgba(col, op * 2.5)}
+        for sh, (on, _, _, col, op, _) in zip(
             shades_of(page, variant), spans(page, severities, variant)
         )
         if on
     ]
     return items
+
+
+def legend_items(page: Page, severities, variant=None):
+    from dash import html
+
+    out = []
+    for entry in legend_entries(page, severities, variant):
+        if entry["kind"] == "swatch":
+            sample = html.Span(
+                className="sw", style={"background": entry["color"]}
+            )
+        else:
+            dotted = " dotted" if entry["kind"] == "dotted" else ""
+            sample = html.Span(className="ln" + dotted)
+        out.append(html.Span([sample, entry["label"]]))
+    return out
 
 
 def _grid(n: int, ncols) -> tuple[int, int]:
@@ -76,10 +87,18 @@ def _cell(j: int, cols: int) -> tuple[int, int]:
 
 
 def row_figure(
-    page: Page, name: str, severities, variant=None, height=210, ncols=None
+    page: Page,
+    name: str,
+    severities,
+    variant=None,
+    height=210,
+    ncols=None,
+    all_shades=False,
 ):
     """An empty figure for one process's panels, the shaded periods in
-    every panel, the shared axes."""
+    every panel, the shared axes. ``all_shades`` draws every period
+    whether or not the setting switches it on, each shape named after it,
+    for a page that keeps or drops them itself."""
     from plotly.subplots import make_subplots
 
     row = page.panels[name]
@@ -93,8 +112,8 @@ def row_figure(
         horizontal_spacing=0.045,
         vertical_spacing=(64 / total_height) if rows > 1 else 0.1,
     )
-    for on, x0, x1, col, opacity in spans(page, severities, variant):
-        if not on:
+    for on, x0, x1, col, opacity, label in spans(page, severities, variant):
+        if not (on or all_shades):
             continue
         for j in range(n):
             r, c = _cell(j, cols)
@@ -104,6 +123,7 @@ def row_figure(
                 fillcolor=col,
                 opacity=opacity,
                 line_width=0,
+                name=label,
                 row=r,
                 col=c,
                 exclude_empty_subplots=False,

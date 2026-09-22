@@ -66,7 +66,7 @@ print(result.get("pool/x").shape)
 
 ### Workflow
 
-1. **Find** — `simulate find <query>`: search the repositories for a deposit that *emits* what you need; `simulate find-data <query>` does the same for a dataset to calibrate against, on GEO and Zenodo. When nothing is deposited, `simulate discover <topic>` finds the papers and the code they link. `simulate census` measures how much of BioModels, curated and uncurated, clears the gate at all.
+1. **Find** — `simulate find <query>`: search the repositories for a deposit that *emits* what you need; `simulate find-data <query>` does the same for a time course to calibrate against, across GEO, ArrayExpress, PRIDE, MetaboLights, Metabolomics Workbench, the BioImage Archive and Zenodo, reading each hit's arms and timepoints from its sample titles; `--composite` keeps the hits that measure something your composite carries, and `--paper` lists a paper's own data. When nothing is deposited, `simulate discover <topic>` finds the papers and the code they link. `simulate census` measures how much of BioModels, curated and uncurated, clears the gate at all and keeps the stamped verdict table under `results/census/`; `simulate census-data` does the same for the data repositories: every deposited time course, and which screened models it could score.
 2. **Screen** — `simulate screen <id-or-path>`: triage and the numerical screen of that one model on its own. Nothing joins a composite unscreened.
 3. **Import** — `process_from_sbml` / `process_from_xpp`, then `reconciled_to` to put it on the composite's clock.
 4. **Compose** — `Composite` with a topology; `analyze_composability` where two models overlap.
@@ -79,7 +79,8 @@ toy processes, and one case study that composes three published SBML
 models and calibrates them against GSE248823 (`simulate demo
 multi-hallmark run`; the first run fetches the dataset). 
 `simulate view module:name` serves any composite as a page: levers over
-its handles and its wiring with a signal trace.
+its handles and its wiring with a signal trace; `--bake DIR` writes the
+levers as a static site instead.
 `make test` runs the unit suite.
 
 ## What you can do with it

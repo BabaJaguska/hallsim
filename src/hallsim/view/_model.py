@@ -230,6 +230,13 @@ class ViewModel:
             )
         return self._populations[key]
 
+    def discard_population(self, severities) -> None:
+        """Drop a kept sample so a sweep does not hold every one; the
+        reference's stays."""
+        key = self.key(severities)
+        if key != self.key(self.page.presets[self.page.reference]):
+            self._populations.pop(key, None)
+
     def moved(self, lever: Lever, severity: float) -> list[dict]:
         """What the lever set on this composite: ``{target, published,
         now, description}`` per parameter, published being the value at

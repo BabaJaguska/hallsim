@@ -8,6 +8,7 @@ Needs the ``app`` extra.
 """
 
 from hallsim.view._app import build_app, serve
+from hallsim.view._bake import bake
 from hallsim.view._model import ModelBank, ViewModel
 from hallsim.view._page import Lever, Page, Panel, Shade, page_for, panel
 
@@ -18,6 +19,7 @@ __all__ = [
     "Panel",
     "Shade",
     "ViewModel",
+    "bake",
     "build_app",
     "page_for",
     "panel",

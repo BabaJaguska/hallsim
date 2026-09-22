@@ -181,3 +181,21 @@ table.fit tr.held td { color: var(--color-neutral-700); }
 table.fit td.miss { color: var(--color-red); }
 .fit-grid { display: grid; grid-template-columns: repeat(auto-fit,
             minmax(320px, 1fr)); gap: 0 24px; }
+
+/* The baked page's sliders: a plain range input drawn like the served
+   one, marks under it. */
+.card input[type=range] { -webkit-appearance: none; appearance: none;
+                          display: block; width: 100%; height: 1px;
+                          background: var(--color-neutral-400);
+                          margin: 14px 0 6px; outline: none; }
+.card input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 9px; height: 9px;
+  background: var(--color-text); border: none; border-radius: 0;
+  cursor: pointer; }
+.card input[type=range]::-moz-range-thumb {
+  width: 9px; height: 9px; background: var(--color-text); border: none;
+  border-radius: 0; cursor: pointer; }
+.card .marks { display: flex; justify-content: space-between;
+               font-family: var(--font-mono); font-size: 10px;
+               color: var(--color-text);
+               font-variant-numeric: tabular-nums; }
