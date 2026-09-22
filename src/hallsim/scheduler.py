@@ -2659,9 +2659,13 @@ class Scheduler:
         self._integrator_cache[sig] = integ
         if digest is not None:
             self._eager_verdict[base] = integ
-            _RUNG_MEMORY[base] = {
-                g: self._rung_of(i) for g, i in integ.items()
-            }
+            rungs = {g: self._rung_of(i) for g, i in integ.items()}
+            # Under its exact key, since a rate constant of 1 and one of
+            # 1e6 are the same structure and different problems; and as
+            # the structure's latest eager verdict, for a traced run that
+            # cannot measure its own.
+            _RUNG_MEMORY[sig] = rungs
+            _RUNG_MEMORY[(base, None)] = rungs
 
     def _rung_of(self, integ) -> str:
         if not integ.stiff:
@@ -2900,10 +2904,12 @@ class Scheduler:
             cached = self._eager_verdict.get(base)
         if cached is not None:
             return cached
-        rungs = _RUNG_MEMORY.get(base) if self.auto_solver else None
+        rungs = _RUNG_MEMORY.get(sig) if self.auto_solver else None
         if rungs is not None and set(rungs) == set(groups):
             integ = {g: self._integrator_on(rungs[g]) for g in groups}
-            self._integrator_cache[sig] = integ
+            # Recorded as this instance's own verdict too, so its traced
+            # runs follow the arm it was last warmed on, not the process's.
+            self._remember_verdict(sig, base, digest, integ)
             return integ
 
         if not self.auto_solver:
