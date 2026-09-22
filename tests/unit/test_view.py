@@ -187,6 +187,7 @@ def test_a_trace_marks_its_route(composite, page, registry):
 
 
 def test_a_page_bakes_to_a_static_site(page, tmp_path):
+    pytest.importorskip("plotly")
     from hallsim.view import bake
     from hallsim.view._bake import setting_key
 
