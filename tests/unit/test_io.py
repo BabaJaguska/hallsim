@@ -1,6 +1,8 @@
 """Output conventions: where runs and tracked results go, and the stamp
 that says what produced them."""
 
+import re
+
 from hallsim import io
 
 
@@ -8,8 +10,13 @@ def test_versions_names_the_libraries_and_the_commit():
     v = io.versions()
     for key in ("jax", "diffrax", "equinox", "optax", "hallsim"):
         assert v[key], key
-    # A git checkout: the short hash, "-dirty" when the tree has edits.
-    assert v["hallsim_commit"] and len(v["hallsim_commit"]) >= 7
+    # A git checkout: `git describe`, which is the tag alone on a release
+    # commit ("v0.1.0"), the tag plus distance and short hash after it, or
+    # the short hash before any tag; "-dirty" when the tree has edits.
+    assert re.fullmatch(
+        r"(v\d[\w.]*(-\d+-g[0-9a-f]{7,})?|[0-9a-f]{7,})(-dirty)?",
+        v["hallsim_commit"],
+    ), v["hallsim_commit"]
     assert v["python"].count(".") == 2
     assert v["platform"]
 
