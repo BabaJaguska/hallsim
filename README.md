@@ -96,4 +96,4 @@ MIT.
 
 ## References
 
-Preprint available at: []
+If you use hallsim, please cite our paper: https://doi.org/10.64898/2026.09.22.753641 
