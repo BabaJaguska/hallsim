@@ -1,4 +1,4 @@
-# hallsim: A Differentiable, Composable Multi-Scale Modelling Framework for Aging Biology
+# hallsim: a differentiable, composable multi-scale modelling framework for aging biology
 [![Basic CI/CD Workflow](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml/badge.svg)](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml)
 
 **hallsim composes independently-published systems-biology models into one multi-scale dynamical system and calibrates the whole thing by gradient descent through the ODE solve.** Built on JAX / Equinox / Diffrax, with a focus on aging biology, where no single model captures the crosstalk between hallmarks.
