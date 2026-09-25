@@ -66,7 +66,10 @@ LOADERS = {
     ("biostudies-arrayexpress", "expression", True): "processed-table",
     ("pride", "proteomics", True): "result-files",
 }
-READABLE = frozenset({"series-matrix"})
+#: Routes a reader exists for. A counts file still has to be a
+#: well-formed table; NCBI's reprocessed series always are, an
+#: author's upload may not be.
+READABLE = frozenset({"series-matrix", "counts-file"})
 _TIME_FACTOR = re.compile(
     r"\b(time|timepoint|time[- ]?point|time[- ]?course|hour|day|week|"
     r"duration|age)s?\b",

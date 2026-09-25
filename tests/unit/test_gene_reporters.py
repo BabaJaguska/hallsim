@@ -671,3 +671,73 @@ class TestProbeGeneMap:
         )
         assert first == again == {"NM_000001": "TP53"}
         assert len(calls) == 1 and b"species=9606" in calls[0]
+
+
+# ── RNA-seq counts: the other half of GEO's expression deposits ────
+
+
+def test_identifier_kind_reads_the_index_not_a_filename():
+    from hallsim import gene_reporters as gr
+
+    assert gr.identifier_kind(["TP53", "MDM2", "CDKN1A"]) == "symbol"
+    assert gr.identifier_kind(["7157", "4193", "1026"]) == "entrez"
+    assert gr.identifier_kind(["ENSG00000141510.12", "ENSG00000135679"]) == (
+        "ensembl"
+    )
+    assert gr.identifier_kind(["NM_000546", "NM_002392"]) == "accession"
+    assert gr.identifier_kind([]) == "accession"
+
+
+def test_counts_become_log_cpm_so_depth_cancels():
+    import numpy as np
+    import pandas as pd
+
+    from hallsim.gene_reporters import counts_to_log_cpm
+
+    # The same composition sequenced twice as deep must give the same CPM.
+    shallow = pd.DataFrame({"a": [10.0, 30.0, 60.0]})
+    deep = pd.DataFrame({"a": [100.0, 300.0, 600.0]})
+    assert np.allclose(
+        counts_to_log_cpm(shallow)["a"], counts_to_log_cpm(deep)["a"]
+    )
+    # A gene seen in nobody is 0, not minus infinity.
+    assert counts_to_log_cpm(pd.DataFrame({"a": [0.0, 1.0]}))["a"][0] == 0.0
+
+
+def test_a_counts_table_becomes_a_gene_by_sample_frame():
+    import pandas as pd
+
+    from hallsim.gene_reporters import GeneExpressionDataset, read_counts_table
+
+    frame = pd.DataFrame(
+        {
+            "ctrl_1": [100, 50, 0, 10],
+            "ctrl_2": [110, 45, 2, 12],
+            "drug_1": [200, 25, 0, 11],
+            # A non-numeric annotation column rides along in real tables.
+            "gene_name": ["a", "b", "c", "d"],
+        },
+        index=["TP53", "MDM2", "IL6", "TP53"],
+    )
+    out = read_counts_table(frame)
+    assert list(out.columns) == ["ctrl_1", "ctrl_2", "drug_1"]
+    # The duplicated symbol is summed before normalising, not averaged.
+    assert list(out.index) == ["IL6", "MDM2", "TP53"]
+    ds = GeneExpressionDataset.from_counts(
+        frame, sample_position_groups={"ctrl": [0, 1], "drug": [2]}
+    )
+    assert ds.sample_groups == {
+        "ctrl": ["ctrl_1", "ctrl_2"],
+        "drug": ["drug_1"],
+    }
+    assert "TP53" in ds.gene_expr.index
+
+
+def test_a_counts_table_with_no_samples_is_refused():
+    import pandas as pd
+    import pytest
+
+    from hallsim.gene_reporters import read_counts_table
+
+    with pytest.raises(ValueError, match="no numeric sample columns"):
+        read_counts_table(pd.DataFrame({"name": ["a"]}, index=["TP53"]))

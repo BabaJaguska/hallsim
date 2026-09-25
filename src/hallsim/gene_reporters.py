@@ -848,11 +848,16 @@ def symbols_for_accessions(
     so a platform is resolved once per machine."""
     accessions = sorted(set(accessions))
     cache = Path(cache_dir or os.path.expanduser("~/.cache/hallsim/mygene"))
+    scopes = (
+        "refseq,accession,ensembl.transcript,ensembl.gene,uniprot,entrezgene"
+    )
     out: dict[str, str] = {}
     for i in range(0, len(accessions), MYGENE_BATCH):
         batch = accessions[i : i + MYGENE_BATCH]
+        # The scopes are in the key: widening them has to miss the cache,
+        # or ids that only the new scope resolves stay unresolved forever.
         key = hashlib.sha256(
-            ("\n".join(batch) + f"|{taxid}").encode()
+            ("\n".join(batch) + f"|{taxid}|{scopes}").encode()
         ).hexdigest()[:24]
         path = cache / f"{key}.json"
         if path.exists():
@@ -860,8 +865,7 @@ def symbols_for_accessions(
         else:
             form = {
                 "q": ",".join(batch),
-                "scopes": "refseq,accession,ensembl.transcript,ensembl.gene,"
-                "uniprot",
+                "scopes": scopes,
                 "fields": "symbol",
             }
             if taxid is not None:
@@ -923,6 +927,151 @@ def geo_series_urls(accession: str) -> tuple[str, str]:
         f"{base}/matrix/{accession}_series_matrix.txt.gz",
         f"{base}/soft/{accession}_family.soft.gz",
     )
+
+
+#: NCBI reprocesses a subset of GEO's RNA-seq series onto one assembly and
+#: serves the result as an Entrez-indexed counts matrix. Covered series are
+#: the clean case; the rest ship whatever the authors uploaded.
+GEO_DOWNLOAD = "https://www.ncbi.nlm.nih.gov/geo/download/"
+NCBI_COUNTS_BUILD = {9606: "GRCh38.p13", 10090: "GRCm39"}
+#: An Entrez gene id: digits only, so it cannot be confused with a symbol.
+ENTREZ = re.compile(r"^\d+$")
+#: An Ensembl gene id, with the version suffix a pipeline may leave on.
+ENSEMBL_GENE = re.compile(r"^ENS[A-Z]*G\d{6,}(?:\.\d+)?$")
+
+
+def identifier_kind(ids) -> str:
+    """What a counts table indexes its rows by: ``symbol``, ``entrez``,
+    ``ensembl`` or ``accession``, decided by what most of them look like."""
+    sample = [str(i).strip() for i in list(ids)[:400] if str(i).strip()]
+    if not sample:
+        return "accession"
+    scores = {
+        "entrez": sum(bool(ENTREZ.match(i)) for i in sample),
+        "ensembl": sum(bool(ENSEMBL_GENE.match(i)) for i in sample),
+        "symbol": sum(bool(SYMBOL.match(i.upper())) for i in sample),
+        "accession": sum(bool(ACCESSION.match(i)) for i in sample),
+    }
+    kind, hits = max(scores.items(), key=lambda kv: kv[1])
+    return kind if hits >= len(sample) // 2 else "accession"
+
+
+def counts_to_log_cpm(counts: pd.DataFrame) -> pd.DataFrame:
+    """Raw counts as log2 counts-per-million.
+
+    Library size differs between samples by more than most effects, so a
+    fold change on raw counts is mostly sequencing depth. CPM divides it
+    out and the log puts the result on the scale
+    :meth:`GeneExpressionDataset.from_dataframe` expects, where a fold
+    change is a difference of group means. The pseudocount is 1, so a gene
+    seen in neither sample is 0 rather than minus infinity.
+    """
+    depth = counts.sum(axis=0).replace(0, np.nan)
+    return np.log2(counts.divide(depth, axis=1) * 1e6 + 1.0)
+
+
+def read_counts_table(
+    path_or_frame, *, taxid: int | None = None, timeout: float = 60.0
+) -> pd.DataFrame:
+    """A gene-by-sample counts table as a log2-CPM frame indexed by gene
+    symbol, whatever the table indexes its rows by.
+
+    Reads the plain, compressed or Excel-free delimited tables that GEO's
+    sequencing series ship: the first column is the gene identifier and
+    every numeric column is a sample. Identifier columns that are not
+    counts, such as a gene name or a transcript length, are dropped by
+    being non-numeric. Counts for rows that resolve to the same symbol are
+    summed, which is the additive thing to do before normalising, and only
+    then converted.
+    """
+    if isinstance(path_or_frame, pd.DataFrame):
+        frame = path_or_frame.copy()
+    else:
+        path = Path(path_or_frame)
+        sep = "," if path.name.lower().endswith((".csv", ".csv.gz")) else "\t"
+        frame = pd.read_csv(path, sep=sep, index_col=0, low_memory=False)
+    counts = frame.apply(pd.to_numeric, errors="coerce").dropna(
+        axis=1, how="all"
+    )
+    if counts.empty:
+        raise ValueError("no numeric sample columns in the counts table")
+    counts = counts.fillna(0.0)
+    counts.index = [str(i).strip() for i in counts.index]
+
+    kind = identifier_kind(counts.index)
+    if kind == "symbol":
+        genes = {i: i.upper() for i in counts.index}
+    else:
+        query = [i.split(".", 1)[0] for i in counts.index]
+        resolved = symbols_for_accessions(query, taxid=taxid, timeout=timeout)
+        genes = {
+            i: resolved[q]
+            for i, q in zip(counts.index, query)
+            if q in resolved
+        }
+    log.info(
+        "counts table: %d rows indexed by %s, %d resolved to a symbol, "
+        "%d samples",
+        len(counts),
+        kind,
+        len(genes),
+        counts.shape[1],
+    )
+    if not genes:
+        raise ValueError(f"no {kind} identifier resolved to a gene symbol")
+    counts = counts.loc[list(genes)]
+    counts.index = [genes[i] for i in counts.index]
+    return counts_to_log_cpm(counts.groupby(level=0).sum())
+
+
+def fetch_geo_counts(
+    accession: str,
+    dest: Path | str,
+    *,
+    taxid: int | None = None,
+    timeout: float = 300.0,
+) -> Path | None:
+    """NCBI's reprocessed counts for a series, or ``None`` when it has
+    none. Coverage is partial, so a caller falls back to the series'
+    supplementary files.
+    """
+    dest = Path(dest)
+    if dest.exists() and dest.stat().st_size:
+        return dest
+    builds = (
+        [NCBI_COUNTS_BUILD[taxid]]
+        if taxid in NCBI_COUNTS_BUILD
+        else list(NCBI_COUNTS_BUILD.values())
+    )
+    for build in builds:
+        name = f"{accession}_raw_counts_{build}_NCBI.tsv.gz"
+        query = urllib.parse.urlencode(
+            {
+                "type": "rnaseq_counts",
+                "acc": accession,
+                "format": "file",
+                "file": name,
+            }
+        )
+        try:
+            with urllib.request.urlopen(
+                f"{GEO_DOWNLOAD}?{query}", timeout=timeout
+            ) as fh:
+                blob = fh.read()
+        except Exception as exc:  # noqa: BLE001 - not every series is covered
+            log.info("%s: no %s counts (%s)", accession, build, exc)
+            continue
+        # A missing file answers 200 with an HTML page, so trust the magic
+        # number rather than the status.
+        if not blob.startswith(b"\x1f\x8b"):
+            log.info("%s: no reprocessed counts on %s", accession, build)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(blob)
+        record_checksum(dest)
+        log.info("%s: %s counts, %.1f MB", accession, build, len(blob) / 1e6)
+        return dest
+    return None
 
 
 def platform_table(lines) -> list[str]:
@@ -1044,6 +1193,39 @@ class GeneExpressionDataset:
                 "give exactly one of sample_groups or sample_position_groups"
             )
         gene_expr = load_gene_expression(series_matrix_path, platform_path)
+        if sample_position_groups is not None:
+            samples = list(gene_expr.columns)
+            sample_groups = {
+                k: [samples[i] for i in idxs]
+                for k, idxs in sample_position_groups.items()
+            }
+        return cls(gene_expr=gene_expr, sample_groups=sample_groups)
+
+    @classmethod
+    def from_counts(
+        cls,
+        counts_path,
+        sample_groups: dict[str, list] | None = None,
+        sample_position_groups: dict[str, list[int]] | None = None,
+        *,
+        taxid: int | None = None,
+    ) -> "GeneExpressionDataset":
+        """Build from an RNA-seq counts table, the other half of GEO's
+        expression deposits.
+
+        Takes what a sequencing series ships instead of a series matrix:
+        a gene-by-sample table of raw counts, indexed by Entrez, Ensembl,
+        symbol or accession. :func:`read_counts_table` resolves the index
+        and converts to log2 CPM, so everything downstream is unchanged.
+        NCBI reprocesses a subset of series onto one assembly and
+        :func:`fetch_geo_counts` retrieves that when it exists; the
+        columns are then GSM accessions rather than sample titles.
+        """
+        if (sample_groups is None) == (sample_position_groups is None):
+            raise ValueError(
+                "give exactly one of sample_groups or sample_position_groups"
+            )
+        gene_expr = read_counts_table(counts_path, taxid=taxid)
         if sample_position_groups is not None:
             samples = list(gene_expr.columns)
             sample_groups = {
