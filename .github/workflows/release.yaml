@@ -43,3 +43,31 @@ jobs:
         run: >
           gh release create "$GITHUB_REF_NAME" dist/*
           --title "$GITHUB_REF_NAME" --generate-notes
+
+      - name: Keep the built files for the PyPI job
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # The same files go to PyPI through trusted publishing: PyPI accepts the
+  # workflow's identity token instead of a stored secret, so the repository
+  # holds no credential. The `pypi` environment is where PyPI expects the
+  # token to come from; it is declared in the repository settings and on
+  # PyPI as the pending publisher of the project.
+  pypi:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Fetch the built files
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

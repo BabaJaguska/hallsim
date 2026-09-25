@@ -272,3 +272,9 @@ docs/gz06-population.md
 docs/jacobian-reuse.md
 docs/proctor2007-comparison.md
 docs/senescence-model-rebuild.md
+
+# The public demo deployment (demo.hallsim.org): one account, one domain,
+# not the framework. The command is in docs/architecture.md.
+/wrangler.jsonc
+# wrangler's local state: the logged-in account id, caches.
+/.wrangler/

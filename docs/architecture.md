@@ -537,10 +537,10 @@ boundary.
   A release is `git tag -a vX.Y.Z -m "..."` and a push of the tag: the
   release workflow runs the suite, builds the wheel and the source
   distribution from the tag and attaches them to a GitHub Release.
-- The public lever page is the baked site, served at hallsim.org from
-  Cloudflare Pages: `simulate demo hallmark-levers --bake outputs/site`
-  (about an hour at the default grid and 16 cells), then
-  `npx wrangler pages deploy outputs/site --project-name hallsim`.
+- The public lever page is the baked site, served at demo.hallsim.org as
+  static files on Cloudflare (`wrangler.jsonc`): `simulate demo
+  hallmark-levers --bake outputs/site` (about an hour at the default grid
+  and 16 cells), then `npx wrangler deploy`.
 
 ### Key files
 

@@ -13,22 +13,6 @@
 - Educational material letting students see what happens across a range of processes when a perturbation is applied 
 
 
-## Architecture
-
-![HallSim Architecture](docs/assets/hallsim_architecture.png)
-
-| Concept | Role |
-|---|---|
-| **Process** | `eqx.Module` with typed ports and a kind (CONTINUOUS / DISCRETE / EVENT); parameters are JAX arrays. |
-| **Port** | Named connection point with a role (INPUT / EVOLVED / EXCLUSIVE / LATCHED / ASSIGNED), units, and ontology. |
-| **Topology** | Static wiring `{proc: {port: store_path}}`, outside the processes. |
-| **Composite** | Bundles processes + topology into a flat, JAX-compatible ODE RHS; auto-groups by timescale. |
-| **Scheduler** | The one runner for every composite shape — timescale groups, discrete dispatch, events, batched populations. |
-| **Store** | Flat `dict[str, jnp.ndarray]` with path-like keys; a JAX PyTree. |
-
-A composition-time **validation layer** (units via pint, ontology IDs, feedback/fan-in graph analysis, duplicate-reaction heuristics) runs warnings-by-default and raises on hard conflicts.
-
-
 ## Quickstart
 
 ```bash
