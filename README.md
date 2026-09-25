@@ -12,6 +12,7 @@
 - Make large multi-model composition, tractable for AI agents building at a scale no one assembles by hand.
 - Educational material letting students see what happens across a range of processes when a perturbation is applied 
 
+![hallsim architecture](docs/assets/hallsim_architecture.png)
 
 ## Quickstart
 
