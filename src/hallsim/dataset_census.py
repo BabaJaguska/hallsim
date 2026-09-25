@@ -272,7 +272,10 @@ def screen_dataset(
         # without asking the repository twice.
         "raw": {
             "kind": cand.kind,
-            "summary": cand.summary[:600],
+            # Untruncated: the text route reads it, so a capped copy makes
+            # `rescreen` disagree with the run that wrote the row. A third
+            # of descriptions were losing their tail at 600 characters.
+            "summary": cand.summary,
             "samples": list(cand.samples),
             "files": list(cand.files),
             "factors": list(cand.factors),

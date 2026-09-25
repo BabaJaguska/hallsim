@@ -405,3 +405,33 @@ def test_geo_enumeration_splits_a_page_the_converter_refuses(monkeypatch):
         0,
         1,
     ) in calls  # the refused page was quartered
+
+
+def test_a_per_sample_identifier_is_not_an_arm():
+    # Animal and accession tokens are unique per sample, so keeping them
+    # made every sample its own arm and no arm held a time course.
+    titles = [
+        "MUC26513_young_control_d0",
+        "MUC26536_young_control_d0",
+        "MUC26533_young_bleo_d10",
+        "MUC26541_young_bleo_d21",
+        "MUC26550_old_control_d0",
+        "MUC26562_old_bleo_d10",
+        "MUC26571_old_bleo_d21",
+    ]
+    d = datasets.parse_design(titles)
+    assert d.arms == ("old bleo", "old control", "young bleo", "young control")
+    assert dict(d.per_arm)["young bleo"] == (10.0, 21.0)
+    assert d.time_unit == "d"
+
+
+def test_identifier_pruning_leaves_a_real_design_alone():
+    # Every token here partitions the samples, so nothing may be dropped.
+    d = datasets.parse_design(
+        ["ctrl 0h", "ctrl 6h", "ctrl 24h", "drug 0h", "drug 6h", "drug 24h"]
+    )
+    assert d.arms == ("ctrl", "drug") and d.control == "ctrl"
+    assert d.timepoints == (0.0, 6.0, 24.0)
+    # Too few samples to judge frequency: left untouched rather than merged.
+    pair = datasets.parse_design(["a_x_1", "b_y_2"])
+    assert len(pair.arms) == 2

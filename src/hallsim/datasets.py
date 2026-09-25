@@ -267,6 +267,25 @@ def _arm_label(rest: str) -> list[str]:
     return [t for t in _SEP.split(rest) if t]
 
 
+def _drop_identifiers(labels: list[list[str]]) -> list[list[str]]:
+    """Drop tokens that name a sample rather than a condition.
+
+    An arm label has to partition the samples: a token carried by exactly
+    one of them is an accession, a well, a plate or an animal id, and
+    keeping it makes every sample its own arm. Frequency decides, so this
+    works on a cohort nobody has seen and needs no vocabulary."""
+    if len(labels) < 3:
+        return labels
+    seen: dict[str, int] = {}
+    for label in labels:
+        for token in set(label):
+            seen[token] = seen.get(token, 0) + 1
+    pruned = [[t for t in label if seen[t] > 1] for label in labels]
+    # A title made only of identifiers keeps what it had; dropping
+    # everything would merge unrelated samples into one unnamed arm.
+    return [new or old for new, old in zip(pruned, labels)]
+
+
 def _strip_common(labels: list[list[str]]) -> list[list[str]]:
     """Drop the tokens every label shares at its head and its tail."""
     if len(labels) < 2:
@@ -309,6 +328,7 @@ def parse_design(samples) -> Design:
             if (unit_names)
             else ("t" if units else "")
         )
+    labels = _drop_identifiers(labels)
     labels = _strip_common(labels)
     per_arm: dict[str, set[float]] = {}
     for found, lb in zip(times, labels):
