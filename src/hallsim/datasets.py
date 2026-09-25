@@ -248,6 +248,14 @@ _TIME_LIST = re.compile(
 )
 
 
+#: Whether a declared study factor is a time axis, by its name.
+TIME_FACTOR = re.compile(
+    r"\b(time|timepoint|time[- ]?point|time[- ]?course|hour|day|week|"
+    r"duration|age)s?\b",
+    re.I,
+)
+
+
 def time_values(text: str) -> set[float]:
     """The distinct time values a description names: ``24 h``, ``day 7``,
     ``D07``, and lists such as ``0, 6 and 24 h`` where the unit closes the

@@ -10,11 +10,13 @@ then meets the same gates, cheapest first and nested:
 
 1. ``timed``: three or more timepoints, read from the sample titles, a
    declared time factor, or time tokens in the description;
-2. ``measured``: a modality whose quantities can be named (a
-   transcriptome, a proteome, listed metabolites);
+2. ``measured``: a modality that measures molecules a model integrates —
+   every one of them, since a reporter reads a single species and a panel
+   is therefore as nameable as a whole proteome;
 3. ``matched``: some screened model carries a quantity it measures, by
-   ontology: a metabolite id in common, a protein in a proteome, a
-   transcription factor a transcriptome reads through its regulon;
+   ontology, over routes that assume progressively more: a shared
+   identifier, a factor's DNA occupancy, a proteome's coverage, a
+   transcriptome's regulon, or an unlisted panel resolved on reading;
 4. ``loadable``: a reader exists for the deposit's tables.
 
 Arms, a named control and the perturbation labels are recorded, never
@@ -45,6 +47,7 @@ from hallsim.datasets import (
     iter_ebi,
     iter_geo,
     paper_data,
+    TIME_FACTOR,
     parse_design,
     resolve_perturbation,
     time_values,
@@ -55,8 +58,22 @@ log = logging.getLogger(__name__)
 GATES = ("timed", "measured", "matched", "loadable")
 ROUTES = ("papers", "geo", "ebi", "bioimages")
 DEFAULT_ORGANISMS = ("Homo sapiens", "Mus musculus")
-#: Modalities whose quantities can be named against a model.
-MEASURABLE = frozenset({"expression", "proteomics", "metabolomics"})
+#: Modalities whose quantities can be named against a model. A modality
+#: earns a place here by measuring something a model integrates, not by
+#: measuring all of it: a reporter reads one species, so a panel of a few
+#: hundred proteins is as nameable as a whole proteome, and the framework
+#: already scores single-gene reporters that way.
+MEASURABLE = frozenset(
+    {
+        "expression",
+        "proteomics",
+        "metabolomics",
+        "methylation",
+        "binding",
+        "ncrna",
+        "imaging",
+    }
+)
 #: What the framework reads today, by source and modality.
 LOADERS = {
     ("geo", "expression", True): "series-matrix",
@@ -69,12 +86,7 @@ LOADERS = {
 #: Routes a reader exists for. A counts file still has to be a
 #: well-formed table; NCBI's reprocessed series always are, an
 #: author's upload may not be.
-READABLE = frozenset({"series-matrix", "counts-file"})
-_TIME_FACTOR = re.compile(
-    r"\b(time|timepoint|time[- ]?point|time[- ]?course|hour|day|week|"
-    r"duration|age)s?\b",
-    re.I,
-)
+READABLE = frozenset({"series-matrix", "counts-file", "maf"})
 _COUNTS_FILE = re.compile(
     r"count|tpm|fpkm|rpkm|matrix|expression|abundance|normali[sz]ed", re.I
 )
@@ -150,7 +162,7 @@ def timed_evidence(cand: DatasetCandidate, design: Design) -> str:
     more distinct time tokens in the description), or empty."""
     if design.time_course:
         return "titles"
-    if any(_TIME_FACTOR.search(f) for f in cand.factors):
+    if any(TIME_FACTOR.search(f) for f in cand.factors):
         return "factors"
     values = time_values(f"{cand.title} {cand.summary}")
     return "text" if len(values) >= 3 else ""
@@ -175,11 +187,16 @@ def perturbation_labels(cand: DatasetCandidate, design: Design) -> list[str]:
 
 
 def nameable(m: Measured) -> bool:
-    """Whether the measurement's quantities can be named against a model:
-    a whole transcriptome or proteome, or listed metabolite ids."""
-    if m.modality in ("expression", "proteomics"):
-        return m.complete
-    return m.modality == "metabolomics" and bool(m.ids)
+    """Whether the measurement's quantities can be named against a model.
+
+    Completeness buys a *route* — a whole transcriptome reaches any
+    TF-annotated model through its regulon — but it is not what makes a
+    measurement nameable. A panel that assays a few hundred proteins names
+    those proteins, and one of them matching a model species is a closer
+    reading than a transcript of a target gene. So every molecular modality
+    qualifies; which models it lands on is :func:`match_models`'s question.
+    """
+    return m.modality in MEASURABLE
 
 
 def loader_of(cand: DatasetCandidate) -> str:
@@ -194,19 +211,59 @@ def loader_of(cand: DatasetCandidate) -> str:
     return LOADERS.get(key, "none")
 
 
+_MIRRORED = re.compile(r"^E-GEOD-(\d+)$", re.I)
+
+
+def original_of(source: str, accession: str) -> tuple[str, str]:
+    """``(source, accession)`` of the deposit a row really describes.
+
+    ArrayExpress mirrors about half of its holdings from GEO and encodes
+    the origin in the accession, so ``E-GEOD-12345`` is ``GSE12345``
+    listed twice. Returning the original collapses the pair without a
+    title comparison.
+    """
+    if source == "biostudies-arrayexpress" and (
+        m := _MIRRORED.match(accession)
+    ):
+        return "geo", f"GSE{m.group(1)}"
+    return source, accession
+
+
 def match_models(m: Measured, models: list[ModelIds]) -> dict:
-    """Which models a measurement lands on: ``via`` (``direct``,
-    ``complete``, ``regulon`` or ``none``), the count, the best five with
-    the number of shared quantities, and the shared ids for direct hits."""
+    """Which models a measurement lands on, and how.
+
+    ``via`` names the route, ordered by how much it assumes:
+
+    ``direct``
+        the deposit lists identifiers and some are a model's species, so
+        one accession is the other.
+    ``occupancy``
+        a DNA-binding or accessibility assay reads a transcription
+        factor's engagement with DNA, which is nearer that factor's
+        activity than any transcript of its targets.
+    ``complete``
+        a whole proteome covers a model's proteins without naming them.
+    ``regulon``
+        a transcriptome reaches a factor's activity through its targets,
+        the longest inference of the four.
+    ``panel``
+        a molecular assay whose quantities are not listed in the metadata;
+        which model it lands on is decided by reading the file.
+    """
     scored: list[tuple[int, str, tuple]] = []
     via = "none"
-    if m.modality == "metabolomics" and m.ids:
+    if m.ids:
         ids = {i.lower() for i in m.ids}
         for mod in models:
-            shared = tuple(sorted(mod.chebi & ids))
+            shared = tuple(sorted((mod.chebi | mod.uniprot) & ids))
             if shared:
                 scored.append((len(shared), mod.accession, shared))
         via = "direct" if scored else "none"
+    elif m.modality == "binding":
+        scored = [
+            (len(mod.tfs), mod.accession, ()) for mod in models if mod.tfs
+        ]
+        via = "occupancy" if scored else "none"
     elif m.modality == "proteomics" and m.complete:
         scored = [
             (len(mod.uniprot), mod.accession, ())
@@ -219,6 +276,13 @@ def match_models(m: Measured, models: list[ModelIds]) -> dict:
             (len(mod.tfs), mod.accession, ()) for mod in models if mod.tfs
         ]
         via = "regulon" if scored else "none"
+    elif m.modality in MEASURABLE:
+        scored = [
+            (len(mod.uniprot | mod.chebi), mod.accession, ())
+            for mod in models
+            if mod.uniprot or mod.chebi
+        ]
+        via = "panel" if scored else "none"
     scored.sort(key=lambda s: (-s[0], s[1]))
     return {
         "via": via,
@@ -712,8 +776,19 @@ def load_rows(run_dir):
     for line in (Path(run_dir) / "rows.jsonl").read_text().splitlines():
         if line.strip():
             rows.append(json.loads(line))
-    df = pd.DataFrame(rows).drop_duplicates(
-        ["source", "accession"], keep="last"
+    df = pd.DataFrame(rows)
+    # An ArrayExpress mirror and its GEO original are one deposit, and the
+    # GEO row is the one a reader can open.
+    origin = [
+        original_of(r.source, r.accession) for r in df.itertuples(index=False)
+    ]
+    df["_origin"] = [f"{s}/{a}" for s, a in origin]
+    df["_mirror"] = [s != r for (s, _), r in zip(origin, df["source"])]
+    df = (
+        df.sort_values("_mirror", ascending=False, kind="stable")
+        .drop_duplicates("_origin", keep="last")
+        .drop(columns=["_origin", "_mirror"])
+        .sort_index()
     )
     df["reason"] = [reason_of(r) for r in df.to_dict("records")]
     return df.reset_index(drop=True)

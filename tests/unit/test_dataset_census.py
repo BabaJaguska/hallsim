@@ -70,7 +70,7 @@ def test_an_array_time_course_clears_every_gate():
     assert dc.reason_of(row) == ""
 
 
-def test_listed_metabolites_pair_directly_and_stop_at_the_loader():
+def test_listed_metabolites_pair_directly_and_are_readable():
     cand = _cand(
         "metabolights",
         Measured("metabolomics", False, ("chebi:15422", "chebi:99")),
@@ -84,8 +84,8 @@ def test_listed_metabolites_pair_directly_and_stop_at_the_loader():
     assert row["direct_pairs"] == [
         {"model": "BIOMD1", "n_shared": 1, "shared": ["chebi:15422"]}
     ]
-    assert row["loader"] == "maf" and row["stage"] == "loadable"
-    assert dc.reason_of(row) == "loader work: maf"
+    assert row["loader"] == "maf" and row["stage"] == "pass"
+    assert dc.reason_of(row) == ""
 
 
 def test_a_proteome_reads_its_time_course_from_the_text():
@@ -102,13 +102,13 @@ def test_a_proteome_reads_its_time_course_from_the_text():
 
 
 def test_the_earlier_gates_name_their_reason():
-    imaging = dc.screen_dataset(
-        _cand("bioimages", Measured("imaging"), summary="0, 5, 10 min"),
+    genotype = dc.screen_dataset(
+        _cand("geo", Measured("genotype", True), summary="0, 5, 10 min"),
         _models(),
-        route="bioimages",
+        route="geo",
     )
-    assert imaging["stage"] == "measured"
-    assert "imaging" in dc.reason_of(imaging)
+    assert genotype["stage"] == "measured"
+    assert "genotype" in dc.reason_of(genotype)
     short = dc.screen_dataset(
         _cand(
             "geo",
@@ -218,7 +218,7 @@ def test_the_report_reproduces_from_the_rows(tmp_path):
         ["timed", 2],
         ["measured", 2],
         ["matched", 2],
-        ["loadable", 1],
+        ["loadable", 2],
     ]
     assert summary["arms"]["two"] == 1 and summary["timed_unperturbed"] == 1
     pairs = (run / "pairs.csv").read_text().splitlines()
@@ -253,4 +253,72 @@ def test_rows_screen_again_from_their_raw_part(tmp_path):
         "Rapamycin"
     ]
     assert dc.rescreen(run, _models()) == 1
-    assert json.loads((run / "rows.jsonl").read_text())["stage"] == "loadable"
+    assert json.loads((run / "rows.jsonl").read_text())["stage"] == "pass"
+
+
+def test_a_panel_is_nameable_even_though_it_is_not_a_proteome():
+    """A reporter reads one species, so a chosen panel is as nameable as a
+    whole proteome; only the route it matches by differs."""
+    row = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("proteomics", False),
+            samples=("ctrl 0h", "ctrl 24h", "ctrl 48h"),
+            n_samples=3,
+        ),
+        _models(),
+        route="geo",
+    )
+    assert row["measured"] and row["matched"]
+    assert row["via"] == "panel"
+
+
+def test_a_binding_assay_reads_a_factor_nearer_than_a_transcript_does():
+    row = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("binding", True),
+            samples=("ctrl 0h", "ctrl 24h", "ctrl 48h"),
+            n_samples=3,
+        ),
+        _models(),
+        route="geo",
+    )
+    assert row["via"] == "occupancy"
+
+
+def test_an_arrayexpress_mirror_collapses_onto_its_geo_original(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    mirror = dc.screen_dataset(
+        _cand(
+            "biostudies-arrayexpress",
+            Measured("expression", True),
+            accession="E-GEOD-777",
+            factors=("time",),
+        ),
+        _models(),
+        route="ebi",
+    )
+    original = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            accession="GSE777",
+            factors=("time",),
+        ),
+        _models(),
+        route="geo",
+    )
+    (run / "rows.jsonl").write_text(
+        json.dumps(mirror) + "\n" + json.dumps(original) + "\n"
+    )
+    df = dc.load_rows(run)
+    assert len(df) == 1
+    # The GEO row survives, because that is the one a reader can open.
+    assert df.iloc[0]["source"] == "geo"
+    assert dc.original_of("biostudies-arrayexpress", "E-GEOD-777") == (
+        "geo",
+        "GSE777",
+    )
+    assert dc.original_of("geo", "GSE777") == ("geo", "GSE777")

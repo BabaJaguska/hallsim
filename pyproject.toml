@@ -35,6 +35,12 @@ dependencies    = [
   "networkx",
   "sympy",
   "python-libsbml",
+  # ISA-Tab and the MetaboLights FTP layout, from the repository's own
+  # team, so the assignment-file specification is not ours to track.
+  "metabolights-utils",
+  # mzTab parsing and PRIDE/MassIVE fetching, both maintained upstream.
+  "pyteomics",
+  "ppx",
   "tqdm",
   "matplotlib",
   # Process pool with a per-task timeout; the corpus census kills and
