@@ -162,14 +162,45 @@ def test_the_earlier_gates_name_their_reason():
 
 
 def test_a_counts_file_is_a_loader_route():
-    cand = _cand(
+    seq = dict(kind="Expression profiling by high throughput sequencing")
+    named = _cand(
         "geo",
         Measured("expression", True),
-        kind="Expression profiling by high throughput sequencing",
         files=("GSE1_raw_counts.txt.gz", "GSE1_RAW.tar"),
+        **seq,
     )
-    assert dc.loader_of(cand) == "counts-file"
+    assert dc.loader_of(named) == "counts-file"
     assert dc.loader_of(_cand("geo", Measured("expression", True))) == "none"
+
+
+def test_a_series_known_only_by_file_types_waits_on_the_names():
+    """E-utilities lists a series' supplementary files as type tokens, so a
+    counts table and a differential-expression table both read ``TXT``;
+    only GEO's own ``COUNTS`` token decides without the names."""
+    seq = dict(kind="Expression profiling by high throughput sequencing")
+    tokens = _cand(
+        "geo", Measured("expression", True), files=("TXT", "XLSX"), **seq
+    )
+    assert dc.loader_of(tokens) == "unchecked"
+    ncbi = _cand(
+        "geo", Measured("expression", True), files=("TXT", "COUNTS"), **seq
+    )
+    assert dc.loader_of(ncbi) == "counts-file"
+    # A sparse matrix is called a matrix and is not a table the reader opens.
+    sparse = _cand(
+        "geo",
+        Measured("expression", True),
+        files=("GSE1_matrix.mtx.gz", "GSE1_barcodes.tsv.gz"),
+        **seq,
+    )
+    assert dc.loader_of(sparse) == "none"
+    pcr = _cand(
+        "geo",
+        Measured("expression", True),
+        files=("TXT",),
+        kind="Expression profiling by RT-PCR",
+    )
+    assert dc.loader_of(pcr) == "none"
 
 
 def test_the_report_reproduces_from_the_rows(tmp_path):
@@ -365,9 +396,15 @@ def test_the_file_list_decides_the_loader_where_a_modality_cannot():
         Measured("expression", True),
         files=("arrayexpress_counts.txt",),
     )
+    sparse = _cand(
+        "biostudies-arrayexpress",
+        Measured("expression", True),
+        files=("E-MTAB-1.matrix.mtx.gz",),
+    )
     unknown = _cand("biostudies-arrayexpress", Measured("expression", True))
     assert dc.loader_of(raw) == "none"
     assert dc.loader_of(processed) == "counts-file"
+    assert dc.loader_of(sparse) == "none"
     assert dc.loader_of(unknown) == "unchecked"
 
     with_mztab = _cand(
@@ -681,3 +718,189 @@ def test_rows_from_earlier_gates_are_refused_not_misread():
     )
     with pytest.raises(ValueError, match="rescreen"):
         dc.funnel(old)
+
+
+def test_a_same_species_deposit_outranks_a_richer_foreign_one():
+    """The ortholog step is a cost; the ranking pays it only when no
+    deposit of the dataset's own organism is there."""
+    human = dc.ModelIds(
+        "H1",
+        "",
+        frozenset({"P04637", "P42345"}),
+        frozenset(),
+        frozenset({"P04637", "P42345"}),
+        "Homo sapiens",
+    )
+    mouse = dc.ModelIds(
+        "M1",
+        "",
+        frozenset({"P04637"}),
+        frozenset(),
+        frozenset({"P04637"}),
+        "Mus musculus",
+    )
+    row = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            samples=("ctrl 0h", "ctrl 24h", "ctrl 48h"),
+            n_samples=3,
+            organism="Mus musculus",
+        ),
+        [human, mouse],
+        route="geo",
+    )
+    assert row["top_models"][0]["model"] == "M1"
+    assert row["species"] == "same" and row["n_same_species"] == 1
+    # With no mouse deposit at all, the pairing crosses species and says so.
+    alone = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            samples=("ctrl 0h", "ctrl 24h", "ctrl 48h"),
+            n_samples=3,
+            organism="Mus musculus",
+        ),
+        [human],
+        route="geo",
+    )
+    assert alone["species"] == "ortholog"
+
+
+def test_a_rescreen_can_settle_an_unchecked_loader(tmp_path, monkeypatch):
+    """The file list decides the loader for these sources and enumeration
+    carries none, so one request per deposit settles it — and the list is
+    kept, so it is fetched once."""
+    run = tmp_path / "run"
+    run.mkdir()
+    row = dc.screen_dataset(
+        _cand(
+            "pride",
+            Measured("proteomics", True),
+            accession="PXD1",
+            summary="Lysates at 0, 6 and 24 h after rapamycin",
+        ),
+        _models(),
+        route="ebi",
+    )
+    assert row["loader"] == "unchecked"
+    (run / "rows.jsonl").write_text(json.dumps(row) + "\n")
+
+    calls = []
+
+    def fake(cand, *, timeout=60.0):
+        calls.append(cand.accession)
+        return ("results.mzTab", "run.raw")
+
+    monkeypatch.setattr(dc, "study_files", fake)
+    assert dc.rescreen(run, _models(), with_files=True) == 1
+    again = json.loads((run / "rows.jsonl").read_text())
+    assert again["loader"] == "mztab" and again["stage"] == "pass"
+    assert again["raw"]["files"] == ["results.mzTab", "run.raw"]
+    # Fetched once: the second pass finds the list already in the row.
+    dc.rescreen(run, _models(), with_files=True)
+    assert calls == ["PXD1"]
+
+
+def test_file_lists_are_fetched_only_where_a_loader_waits_on_them(
+    tmp_path, monkeypatch
+):
+    """A row that failed an earlier gate would not use its file list, and a
+    mirror's original is the row that is kept."""
+    run = tmp_path / "run"
+    run.mkdir()
+    waiting = dc.screen_dataset(
+        _cand(
+            "pride",
+            Measured("proteomics", True),
+            accession="PXD1",
+            summary="Lysates at 0, 6 and 24 h after rapamycin",
+        ),
+        _models(),
+        route="ebi",
+    )
+    untimed = dc.screen_dataset(
+        _cand("pride", Measured("proteomics", True), accession="PXD2"),
+        _models(),
+        route="ebi",
+    )
+    mirror = dc.screen_dataset(
+        _cand(
+            "biostudies-arrayexpress",
+            Measured("expression", True),
+            accession="E-GEOD-5",
+            factors=("time",),
+        ),
+        _models(),
+        route="ebi",
+    )
+    original = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            accession="GSE5",
+            samples=tuple(TITLES),
+            n_samples=5,
+        ),
+        _models(),
+        route="geo",
+    )
+    assert waiting["loader"] == "unchecked"
+    assert untimed["stage"] == "contrast"
+    asked = []
+    monkeypatch.setattr(
+        dc,
+        "study_files",
+        lambda c, *, timeout=15.0: asked.append(c.accession) or (),
+    )
+    # With its GEO original listed, the mirror is skipped.
+    (run / "rows.jsonl").write_text(
+        "".join(
+            json.dumps(r) + "\n" for r in (waiting, untimed, mirror, original)
+        )
+    )
+    dc.rescreen(run, _models(), with_files=True)
+    assert asked == ["PXD1"]
+    # Without it, the mirror is the only copy there is, and is fetched.
+    asked.clear()
+    (run / "rows.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in (untimed, mirror))
+    )
+    dc.rescreen(run, _models(), with_files=True)
+    assert asked == ["E-GEOD-5"]
+
+
+def test_a_row_screened_under_an_older_loader_rule_is_still_fetched(
+    tmp_path, monkeypatch
+):
+    """The row stores the verdict of the rule that screened it last; the
+    selector applies today's rule, so a series that read ``none`` when
+    tokens were taken as names is fetched once the rule says it waits."""
+    run = tmp_path / "run"
+    run.mkdir()
+    row = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            accession="GSE9",
+            kind="Expression profiling by high throughput sequencing",
+            files=("TXT", "XLSX"),
+            samples=tuple(TITLES),
+            n_samples=5,
+        ),
+        _models(),
+        route="geo",
+    )
+    assert row["stage"] == "loadable" and row["loader"] == "unchecked"
+    # The older rule took the ``RPKM`` token for a counts file and passed
+    # the row; the stored stage and loader are that rule's, not today's.
+    row["stage"], row["loader"] = "pass", "counts-file"
+    (run / "rows.jsonl").write_text(json.dumps(row) + "\n")
+
+    def fake(cand, *, timeout=60.0):
+        return ("GSE9_gene_counts.txt.gz", "GSE9_RAW.tar")
+
+    monkeypatch.setattr(dc, "study_files", fake)
+    dc.rescreen(run, _models(), with_files=True)
+    again = json.loads((run / "rows.jsonl").read_text())
+    assert again["loader"] == "counts-file" and again["stage"] == "pass"

@@ -44,6 +44,7 @@ from pathlib import Path
 
 from hallsim.datasets import (
     EBI_DOMAINS,
+    GEO_FILE_TOKEN,
     DatasetCandidate,
     Design,
     Measured,
@@ -54,6 +55,7 @@ from hallsim.datasets import (
     iter_osdr,
     osdr_files,
     paper_data,
+    study_files,
     TIME_FACTOR,
     parse_design,
     resolve_perturbation,
@@ -105,6 +107,16 @@ READABLE = frozenset(
 _COUNTS_FILE = re.compile(
     r"count|tpm|fpkm|rpkm|matrix|expression|abundance|normali[sz]ed", re.I
 )
+#: A delimited table the counts reader opens, plain or compressed. A sparse
+#: ``.mtx``, an ``.h5`` or a workbook may be called a matrix and is not one.
+_TABLE_FILE = re.compile(r"\.(txt|tsv|csv|tab)(\.gz|\.bz2|\.zip)?$", re.I)
+
+
+def _counts_table(name: str) -> bool:
+    """A counts-shaped name on a table the reader can open."""
+    return bool(_COUNTS_FILE.search(name) and _TABLE_FILE.search(name))
+
+
 SALVAGE_USABLE = frozenset({"as-is", "cheap-fix"})
 #: The measurable modalities whose quantities are molecules, so an unlisted
 #: panel can still be resolved by reading its table. Imaging is measurable
@@ -303,8 +315,16 @@ def loader_of(cand: DatasetCandidate) -> str:
     if cand.source == "geo" and m.modality == "expression":
         if cand.series_matrix_has_values:
             return "series-matrix"
-        if any(_COUNTS_FILE.search(f) for f in cand.files):
+        tokens = [f for f in cand.files if GEO_FILE_TOKEN.match(f)]
+        names = [f for f in cand.files if not GEO_FILE_TOKEN.match(f)]
+        # ``COUNTS`` is GEO's own reprocessed matrix, fetched by accession;
+        # an author's table is known by its name.
+        if "COUNTS" in tokens or any(_counts_table(f) for f in names):
             return "counts-file"
+        # The summary lists a sequencing series' files by type alone, so
+        # whether one of them is a counts table waits on the names.
+        if tokens and not names and cand.short_kind == "rna-seq":
+            return "unchecked"
         return "none"
     if cand.source in FILE_DECIDED:
         if not cand.files:
@@ -314,7 +334,7 @@ def loader_of(cand: DatasetCandidate) -> str:
 
 
 def _arrayexpress_loader(files) -> str:
-    if any(_COUNTS_FILE.search(f) for f in files):
+    if any(_counts_table(f) for f in files):
         return "counts-file"
     return "none"
 
@@ -410,6 +430,11 @@ CLADES = frozenset(
 )
 
 
+#: Ranking among matched deposits: the dataset's own species first, a
+#: deposit whose taxon is only a clade next, another species last.
+SPECIES_RANK = {"same": 0, "unknown": 1, "ortholog": 2}
+
+
 def species_of(organism: str, taxon: str) -> str:
     """How a dataset's organism stands to a model's declared taxon.
 
@@ -485,8 +510,17 @@ def match_models(
             if mod.uniprot or mod.chebi
         ]
         via = "panel" if scored else "none"
-    scored.sort(key=lambda s: (-s[0], s[1]))
     taxa = {mod.accession: mod.taxon for mod in models}
+    # A deposit of the dataset's own organism outranks one of another
+    # species however many quantities the other shares: an ortholog step
+    # is a cost, and the ranking pays it only when nothing else is there.
+    scored.sort(
+        key=lambda s: (
+            SPECIES_RANK[species_of(organism, taxa.get(s[1], ""))],
+            -s[0],
+            s[1],
+        )
+    )
     relations = [
         species_of(organism, taxa.get(acc, "")) for _, acc, _ in scored
     ]
@@ -639,25 +673,83 @@ def candidate_of(row: dict) -> DatasetCandidate:
     )
 
 
-def rescreen(run_dir, models: list[ModelIds], *, resolve: bool = False) -> int:
+def rescreen(
+    run_dir,
+    models: list[ModelIds],
+    *,
+    resolve: bool = False,
+    with_files: bool = False,
+    workers: int = 4,
+) -> int:
     """Screen every stored row again from its raw part, under the current
-    gates and models, rewriting ``rows.jsonl`` in place. Returns the count."""
+    gates and models, rewriting ``rows.jsonl`` in place. Returns the count.
+
+    ``with_files`` fetches the file list for every row that, screened under
+    the current rules, reaches the loader and waits on one — one request
+    per deposit, against its own repository — and screens those rows again
+    with it, so an ``unchecked`` loader is settled. The list is kept in the
+    row's raw part, so it is fetched once.
+    """
     run = Path(run_dir)
     path = run / "rows.jsonl"
-    out = []
-    for line in path.read_text().splitlines():
-        if not line.strip():
-            continue
-        old = json.loads(line)
-        if not old.get("raw"):
-            out.append(old)
-            continue
+    rows = [
+        json.loads(line)
+        for line in path.read_text().splitlines()
+        if line.strip()
+    ]
+    cands = {
+        i: candidate_of(old) for i, old in enumerate(rows) if old.get("raw")
+    }
+
+    def screened(i: int) -> dict:
         new = screen_dataset(
-            candidate_of(old), models, route=old["route"], resolve=resolve
+            cands[i], models, route=rows[i]["route"], resolve=resolve
         )
-        if "resolved" in old and "resolved" not in new:
-            new["resolved"] = old["resolved"]
-        out.append(new)
+        if "resolved" in rows[i] and "resolved" not in new:
+            new["resolved"] = rows[i]["resolved"]
+        return new
+
+    out = [screened(i) if i in cands else old for i, old in enumerate(rows)]
+    if with_files:
+        # The selection reads the fresh screen, not the stored row: a row
+        # keeps the verdict of whatever rule screened it last. Only a row
+        # that reaches the loader and stalls there needs its file list; a
+        # row that fails an earlier gate would not use it, and a mirror's
+        # original is the row that is kept.
+        present = {(r["source"], r["accession"]) for r in rows}
+        need = []
+        for i, c in cands.items():
+            if out[i]["stage"] != "loadable":
+                continue
+            if out[i]["loader"] != "unchecked":
+                continue
+            origin = original_of(c.source, c.accession, c.mirrors)
+            # A mirror is skipped only when its original is here to be
+            # kept instead; a mirror of a series the run never listed is
+            # the only copy there is.
+            if origin != (c.source, c.accession) and origin in present:
+                continue
+            need.append(i)
+        log.info("fetching file lists for %d deposits", len(need))
+        done = failed = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(study_files, cands[i]): i for i in need}
+            for future in as_completed(futures):
+                i = futures[future]
+                done += 1
+                try:
+                    cands[i] = replace(cands[i], files=future.result())
+                    out[i] = screened(i)
+                except Exception as exc:  # noqa: BLE001 - row stays unchecked
+                    failed += 1
+                    log.info("%s: no file list (%s)", cands[i].accession, exc)
+                if done % 50 == 0 or done == len(need):
+                    log.info(
+                        "file lists: %d of %d (%d failed)",
+                        done,
+                        len(need),
+                        failed,
+                    )
     tmp = path.with_suffix(".jsonl.tmp")
     tmp.write_text("".join(json.dumps(r) + "\n" for r in out))
     tmp.replace(path)

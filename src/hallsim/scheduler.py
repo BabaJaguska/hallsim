@@ -902,6 +902,11 @@ class Scheduler:
             )
         if t_span is None:
             raise TypeError("run() requires t_span unless given a RunPlan")
+        if y0 is None:
+            # This composite's initial state, not the memoised plan's:
+            # ``initial`` is static, so neither the structural key nor the
+            # parameter digest notices when only it differs.
+            y0 = composite.initial_state_vec(composite.store_keys())
         plan = self._plan_for(
             composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
         )

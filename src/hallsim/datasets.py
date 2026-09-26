@@ -25,14 +25,16 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 
-from hallsim.discovery import _get_json
+from hallsim.discovery import USER_AGENT, _get_json
 from hallsim.gene_reporters import SYMBOL, choose_annotation, geo_series_urls
 
 log = logging.getLogger(__name__)
@@ -976,6 +978,129 @@ def osdr_files(accession: str, *, timeout: float = 90.0) -> tuple[str, ...]:
 
     walk(payload)
     return tuple(dict.fromkeys(out))
+
+
+PRIDE_ARCHIVE = "https://www.ebi.ac.uk/pride/ws/archive/v3"
+
+
+def _walk_paths(node, key: str, out: list) -> None:
+    if isinstance(node, dict):
+        if isinstance(node.get(key), str):
+            out.append(node[key])
+        for value in node.values():
+            _walk_paths(value, key, out)
+    elif isinstance(node, list):
+        for item in node:
+            _walk_paths(item, key, out)
+
+
+def biostudies_files(
+    accession: str, *, timeout: float = 60.0
+) -> tuple[str, ...]:
+    """Every file an ArrayExpress or BioStudies deposit holds."""
+    payload = _get_json(f"{BIOSTUDIES}/studies/{accession}", {}, timeout)
+    out: list[str] = []
+    _walk_paths(payload, "path", out)
+    return tuple(dict.fromkeys(out))
+
+
+def pride_files(accession: str, *, timeout: float = 60.0) -> tuple[str, ...]:
+    """Every file a PRIDE project holds."""
+    payload = _get_json(
+        f"{PRIDE_ARCHIVE}/projects/{accession}/files",
+        {"pageSize": 500, "page": 0},
+        timeout,
+    )
+    entries = (
+        payload if isinstance(payload, list) else payload.get("content", [])
+    )
+    return tuple(
+        dict.fromkeys(
+            str(e.get("fileName") or "") for e in entries if e.get("fileName")
+        )
+    )
+
+
+#: GEO's E-utilities summary names a series' supplementary files by type
+#: token alone — ``TXT``, ``CSV``, ``MTX``, ``COUNTS`` — never by name.
+GEO_FILE_TOKEN = re.compile(r"^[A-Z0-9_]+$")
+_SUPPLEMENTARY_FILE = re.compile(
+    r"^!Series_supplementary_file\s*=\s*(\S+)", re.M
+)
+#: NCBI asks for no more than three requests a second without an API key;
+#: the throttle is shared across threads.
+_GEO_INTERVAL = 1 / 3
+_geo_clock = {"last": 0.0, "lock": threading.Lock()}
+
+
+def _geo_throttle() -> None:
+    with _geo_clock["lock"]:
+        wait = _geo_clock["last"] + _GEO_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _geo_clock["last"] = time.monotonic()
+
+
+def supplementary_names(soft: str) -> tuple[str, ...]:
+    """The file names a series' brief SOFT record lists, in order. Anything
+    that is not a series record — GEO answers an unknown accession with an
+    HTML page and status 200 — is refused rather than read as "no files"."""
+    if "^SERIES" not in soft:
+        raise LookupError("not a GEO series record")
+    names = [u.rsplit("/", 1)[-1] for u in _SUPPLEMENTARY_FILE.findall(soft)]
+    return tuple(dict.fromkeys(names))
+
+
+def geo_files(accession: str, *, timeout: float = 30.0) -> tuple[str, ...]:
+    """The supplementary files a GEO series ships, by name.
+
+    The E-utilities summary carries only type tokens, so a counts table is
+    indistinguishable from a differential-expression table there. The
+    series' own brief SOFT record names every file in a few kilobytes. The
+    FTP mirror's ``filelist.txt`` would be lighter still but exists only
+    where a series ships an archive.
+    """
+    url = GEO_ACCESSION_URL.format(accession) + (
+        "&targ=self&form=text&view=brief"
+    )
+
+    def fetch():
+        _geo_throttle()
+        request = urllib.request.Request(
+            url, headers={"User-Agent": USER_AGENT}
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as fh:
+            return supplementary_names(fh.read().decode("utf-8", "replace"))
+
+    return _retrying(fetch, tries=3, fatal=(LookupError,))
+
+
+_FILE_LISTERS = {
+    "biostudies-arrayexpress": biostudies_files,
+    "pride": pride_files,
+    "osdr": osdr_files,
+    "geo": geo_files,
+}
+
+
+def study_files(cand: "DatasetCandidate", *, timeout: float = 15.0) -> tuple:
+    """A deposit's file list from its own repository, for the sources
+    whose loader the file list decides. Enumeration metadata carries none,
+    so this is one request per deposit.
+
+    Each list is written to the on-disk cache as it arrives, so a pass over
+    thousands of deposits that is stopped part-way keeps what it fetched
+    and a rerun asks only for the rest. The timeout is short on purpose: a
+    hung endpoint should fail the one deposit, not stall the pass.
+    """
+    fetch = _FILE_LISTERS.get(cand.source)
+    if fetch is None:
+        return cand.files
+    listed = _cached_json(
+        f"files {cand.source} {cand.accession}",
+        lambda: list(fetch(cand.accession, timeout=timeout)),
+    )
+    return tuple(listed)
 
 
 def search_bioimages(

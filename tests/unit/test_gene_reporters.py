@@ -741,3 +741,44 @@ def test_a_counts_table_with_no_samples_is_refused():
 
     with pytest.raises(ValueError, match="no numeric sample columns"):
         read_counts_table(pd.DataFrame({"name": ["a"]}, index=["TP53"]))
+
+
+class TestSeriesMatrixScale:
+    """A series matrix carries the submitter's values as deposited: RMA is
+    log2, MAS5 and GCOS are linear signal, and the table does not say
+    which. The loader puts both on log2, and the dataset refuses a linear
+    table handed to it directly."""
+
+    def test_linear_signal_is_logged_and_log2_is_left_alone(self, caplog):
+        import logging
+
+        import numpy as np
+        import pandas as pd
+
+        from hallsim import gene_reporters as gr
+
+        linear = pd.DataFrame(
+            {"GSM1": [3000.0, 0.2], "GSM2": [1500.0, 12.0]},
+            index=["P1", "P2"],
+        )
+        with caplog.at_level(logging.WARNING, logger=gr.log.name):
+            out = gr.as_log2(linear, source="GSE1", note="MAS 5.0")
+        assert "linear" in caplog.text and "MAS 5.0" in caplog.text
+        assert out.loc["P1", "GSM1"] == pytest.approx(np.log2(3000.0))
+        assert out.loc["P2", "GSM1"] == 0.0  # floored at 1 before the log
+        logged = pd.DataFrame({"GSM1": [11.5, 2.0]}, index=["P1", "P2"])
+        assert gr.as_log2(logged).equals(logged.astype(float))
+
+    def test_a_linear_table_is_refused_as_log_values(self):
+        import pandas as pd
+
+        from hallsim import gene_reporters as gr
+
+        ds = gr.GeneExpressionDataset(
+            gene_expr=pd.DataFrame(
+                {"a": [3000.0], "b": [1500.0]}, index=["GENE1"]
+            ),
+            sample_groups={"ctrl": ["a"], "trt": ["b"]},
+        )
+        with pytest.raises(ValueError, match="linear signal"):
+            ds.delta("trt", "ctrl")

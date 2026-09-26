@@ -2611,3 +2611,27 @@ def test_a_model_that_turns_stiff_is_rerouted_to_the_implicit_solver(caplog):
         res2 = sched.run(comp, t_span=(0.0, T), macro_dt=T, save_dt=1.0)
     assert "did not solve" not in caplog.text
     assert abs(float(np.asarray(res2.get("p/y"))[-1]) - np.cos(T)) < 1e-3
+
+
+def test_each_composite_runs_from_its_own_initial_state():
+    """Two composites of one structure that differ only in ``initial``,
+    through one Scheduler with ``y0`` omitted, start where each says.
+    ``initial`` is static, so the plan memo cannot see it change."""
+    from hallsim.handles import with_handles
+    from hallsim.scheduler import Scheduler
+
+    def build(x0):
+        return Composite(
+            processes={"a": ContinuousDecay()},
+            topology={"a": {"x": "cell/x"}},
+            initial={"cell/x": x0},
+            semantic_validation=False,
+        )
+
+    scheduler = Scheduler()
+    first = scheduler.run(build(1.0), t_span=(0.0, 4.0))
+    second = scheduler.run(build(3.0), t_span=(0.0, 4.0))
+    assert float(jnp.asarray(first.ys)[0, 0]) == pytest.approx(1.0)
+    assert float(jnp.asarray(second.ys)[0, 0]) == pytest.approx(3.0)
+    # A handle-applied variant keeps the base composite's initial state.
+    assert with_handles(build(3.0), {}, registry={}).initial == {"cell/x": 3.0}

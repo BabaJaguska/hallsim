@@ -435,3 +435,32 @@ def test_identifier_pruning_leaves_a_real_design_alone():
     # Too few samples to judge frequency: left untouched rather than merged.
     pair = datasets.parse_design(["a_x_1", "b_y_2"])
     assert len(pair.arms) == 2
+
+
+def test_a_series_record_names_its_supplementary_files():
+    """E-utilities gives only file types; the series' brief SOFT record
+    names each file. An unknown accession answers with an HTML page and
+    status 200, which must not be read as "no files"."""
+    soft = (
+        "^SERIES = GSE67270\n"
+        "!Series_type = Expression profiling by high throughput sequencing\n"
+        "!Series_supplementary_file = ftp://ftp.ncbi.nlm.nih.gov/geo/series/"
+        "GSE67nnn/GSE67270/suppl/GSE67270_HP32R_FPKM.txt.gz\n"
+        "!Series_supplementary_file = ftp://ftp.ncbi.nlm.nih.gov/geo/series/"
+        "GSE67nnn/GSE67270/suppl/GSE67270_RAW.tar\n"
+    )
+    assert datasets.supplementary_names(soft) == (
+        "GSE67270_HP32R_FPKM.txt.gz",
+        "GSE67270_RAW.tar",
+    )
+    assert (
+        datasets.supplementary_names("^SERIES = GSE1\n!Series_type = x\n")
+        == ()
+    )
+    try:
+        datasets.supplementary_names("<html><title>Not found</title></html>")
+    except LookupError:
+        pass
+    else:
+        raise AssertionError("an HTML page was read as a series record")
+    assert datasets._FILE_LISTERS["geo"] is datasets.geo_files

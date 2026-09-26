@@ -681,6 +681,31 @@ def summarize_reporters(
 # ── Gene-expression parsing (Affymetrix-style series matrix) ───────
 
 
+#: No log2 expression value reaches this; linear MAS5, GCOS and PLIER
+#: signal runs to the tens of thousands.
+LOG2_CEILING = 64.0
+
+
+def as_log2(
+    table: pd.DataFrame, *, source: str = "", note: str = ""
+) -> pd.DataFrame:
+    """``table`` on a log2 scale, whatever scale it arrived on. A table whose
+    largest value exceeds :data:`LOG2_CEILING` is linear signal and is
+    logged with a floor of 1; one within it is taken as already log2."""
+    values = table.apply(pd.to_numeric, errors="coerce")
+    top = float(np.nanmax(values.values)) if values.size else 0.0
+    if top <= LOG2_CEILING:
+        return values
+    log.warning(
+        "%s: values reach %.0f, a linear signal (%s); taking log2 with a "
+        "floor of 1",
+        source or "expression table",
+        top,
+        note or "processing not stated",
+    )
+    return np.log2(values.clip(lower=1.0))
+
+
 def load_gene_expression(
     series_matrix_path: Path,
     platform_path: Path,
@@ -688,8 +713,10 @@ def load_gene_expression(
     """Parse GEO series-matrix expression + platform annotation into a
     ``(gene_symbol × sample)`` DataFrame.
 
-    - Series-matrix expression values are typically log2-RMA normalized;
-      no further transform is applied.
+    - Values are returned on a log2 scale. A series matrix carries the
+      submitter's numbers as deposited: RMA and SCAN are log2, MAS5, GCOS
+      and PLIER are linear signal, and the table does not say which, so the
+      value range decides (:func:`as_log2`).
     - Probes are mapped to gene symbols by whatever the platform table
       carries, chosen by content (:func:`choose_annotation`): a symbol
       column, an Affymetrix assignment string, or bare accessions resolved
@@ -730,6 +757,15 @@ def load_gene_expression(
         index_col=0,
         quotechar='"',
     ).dropna(how="all")
+    processing = next(
+        (
+            ln.split("\t", 1)[1].strip().strip('"')[:100]
+            for ln in lines
+            if ln.startswith("!Sample_data_processing") and "\t" in ln
+        ),
+        "",
+    )
+    expr = as_log2(expr, source=Path(series_matrix_path).name, note=processing)
 
     plat = pd.read_csv(
         platform_path, sep="\t", comment="#", low_memory=False, dtype=str
@@ -1284,6 +1320,17 @@ class GeneExpressionDataset(MeasuredDataset):
 
     @property
     def log_values(self) -> pd.DataFrame:
+        top = (
+            float(np.nanmax(self.gene_expr.values))
+            if self.gene_expr.size
+            else 0.0
+        )
+        if top > LOG2_CEILING:
+            raise ValueError(
+                f"gene_expr reaches {top:.0f}: linear signal, not log2, so a "
+                "difference of means is not a fold change; pass it through "
+                "as_log2 first"
+            )
         return self.gene_expr
 
 
