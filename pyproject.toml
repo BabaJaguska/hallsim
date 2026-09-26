@@ -41,6 +41,8 @@ dependencies    = [
   # mzTab parsing and PRIDE/MassIVE fetching, both maintained upstream.
   "pyteomics",
   "ppx",
+  # Metabolomics Workbench's own mwTab format, parsed by its own parser.
+  "mwtab",
   "tqdm",
   "matplotlib",
   # Process pool with a per-task timeout; the corpus census kills and

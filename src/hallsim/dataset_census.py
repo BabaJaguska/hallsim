@@ -2,14 +2,19 @@
 for what a screened model could be scored on. The data-side mirror of
 :mod:`hallsim.census`, and the supply count for a composition benchmark.
 
-Three routes enumerate: ``papers`` (the model census's PubMed ids through
+Five routes enumerate: ``papers`` (the model census's PubMed ids through
 Europe PMC: what each model's own paper deposited), ``geo`` (every series
-for the organisms) and ``ebi`` (every entry of PRIDE, MetaboLights,
-Metabolomics Workbench and ArrayExpress through EBI Search). Every row
-then meets the same gates, cheapest first and nested:
+for the organisms), ``ebi`` (every entry of PRIDE, MetaboLights,
+Metabolomics Workbench and ArrayExpress through EBI Search), ``osdr``
+(NASA's Open Science Data Repository, where a study's ground-against-flight
+contrast is a declared factor) and ``bioimages``. Every row then meets the
+same gates, cheapest first and nested:
 
-1. ``timed``: three or more timepoints, read from the sample titles, a
-   declared time factor, or time tokens in the description;
+1. ``contrast``: two sample groups, so a fold change exists — two
+   timepoints in an arm, or a perturbed arm beside a control. Three or
+   more timepoints is recorded as ``dynamics`` and constrains a rate, but
+   is not required: every reader returns a contrast, and gating on it
+   discarded nine usable deposits for every one kept;
 2. ``measured``: a modality that measures molecules a model integrates —
    every one of them, since a reporter reads a single species and a panel
    is therefore as nameable as a whole proteome;
@@ -34,7 +39,7 @@ import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hallsim.datasets import (
@@ -46,6 +51,8 @@ from hallsim.datasets import (
     iter_bioimages,
     iter_ebi,
     iter_geo,
+    iter_osdr,
+    osdr_files,
     paper_data,
     TIME_FACTOR,
     parse_design,
@@ -55,8 +62,8 @@ from hallsim.datasets import (
 
 log = logging.getLogger(__name__)
 
-GATES = ("timed", "measured", "matched", "loadable")
-ROUTES = ("papers", "geo", "ebi", "bioimages")
+GATES = ("contrast", "measured", "matched", "loadable")
+ROUTES = ("papers", "geo", "ebi", "osdr", "bioimages")
 DEFAULT_ORGANISMS = ("Homo sapiens", "Mus musculus")
 #: Modalities whose quantities can be named against a model. A modality
 #: earns a place here by measuring something a model integrates, not by
@@ -79,18 +86,30 @@ LOADERS = {
     ("geo", "expression", True): "series-matrix",
     ("geo", "expression", False): "counts-file",
     ("metabolights", "metabolomics", False): "maf",
-    ("metabolomics_workbench", "metabolomics", False): "table",
-    ("biostudies-arrayexpress", "expression", True): "processed-table",
-    ("pride", "proteomics", True): "result-files",
+    ("metabolomics_workbench", "metabolomics", False): "mwtab",
 }
 #: Routes a reader exists for. A counts file still has to be a
 #: well-formed table; NCBI's reprocessed series always are, an
-#: author's upload may not be.
-READABLE = frozenset({"series-matrix", "counts-file", "maf"})
+#: author's upload may not be. Sources whose loader the file list decides
+#: are absent from :data:`LOADERS`; see :data:`FILE_DECIDED`.
+READABLE = frozenset(
+    {
+        "series-matrix",
+        "counts-file",
+        "maf",
+        "mwtab",
+        "mztab",
+        "glbulkrnaseq",
+    }
+)
 _COUNTS_FILE = re.compile(
     r"count|tpm|fpkm|rpkm|matrix|expression|abundance|normali[sz]ed", re.I
 )
 SALVAGE_USABLE = frozenset({"as-is", "cheap-fix"})
+#: The measurable modalities whose quantities are molecules, so an unlisted
+#: panel can still be resolved by reading its table. Imaging is measurable
+#: and not molecular: it clears ``measured`` and matches nothing.
+MOLECULAR = MEASURABLE - {"imaging"}
 
 
 # ── The model side ──────────────────────────────────────────────────
@@ -106,6 +125,8 @@ class ModelIds:
     uniprot: frozenset
     chebi: frozenset
     tfs: frozenset
+    #: The organism the deposit declares, which may be a clade.
+    taxon: str = ""
 
 
 def _human_tfs(uniprots) -> frozenset:
@@ -148,6 +169,7 @@ def load_models(run_dir, usable_only: bool = True) -> list[ModelIds]:
                 uni,
                 che,
                 _human_tfs(uni),
+                str(getattr(r, "taxon", "") or "").strip(),
             )
         )
     return out
@@ -157,15 +179,78 @@ def load_models(run_dir, usable_only: bool = True) -> list[ModelIds]:
 
 
 def timed_evidence(cand: DatasetCandidate, design: Design) -> str:
-    """Where the time course shows: ``titles`` (three or more timepoints
+    """Where a *time course* shows: ``titles`` (three or more timepoints
     in some arm), ``factors`` (a declared time factor), ``text`` (three or
-    more distinct time tokens in the description), or empty."""
+    more distinct time tokens in the description), or empty.
+
+    Three timepoints is what constrains a rate, so this is the evidence for
+    fitting dynamics — not for whether the deposit is usable at all, which
+    is :func:`contrast_of`.
+    """
     if design.time_course:
         return "titles"
     if any(TIME_FACTOR.search(f) for f in cand.factors):
         return "factors"
     values = time_values(f"{cand.title} {cand.summary}")
     return "text" if len(values) >= 3 else ""
+
+
+def contrast_of(design: Design, evidence: str = "") -> str:
+    """Which contrast a deposit supports, which is what decides whether it
+    can be used at all.
+
+    Every reader returns a fold change between two named sample groups, so
+    two groups is the requirement and three timepoints is a bonus:
+
+    ``dynamics``
+        three or more timepoints in some arm, read from the sample titles —
+        enough to constrain a rate.
+    ``declared``
+        the repository asserts a time course through a study factor or its
+        description, but the sample titles do not show the groups. The
+        groups exist; reading them takes the deposit's own metadata files.
+    ``course``
+        two timepoints in some arm: a change over time, but only an
+        endpoint's worth of constraint.
+    ``arms``
+        two or more arms, so a perturbed group divides by a control at the
+        same time. This is the ordinary perturbation experiment and the
+        supply most validation actually runs on.
+    empty
+        one group, so nothing to divide by.
+    """
+    if design.time_course:
+        return "dynamics"
+    if evidence:
+        return "declared"
+    if design.n_timepoints >= 2 and _replicated(design):
+        return "course"
+    if design.perturbed and _replicated(design):
+        return "arms"
+    return ""
+
+
+def _replicated(design: Design) -> bool:
+    """Whether the groups could hold replicates: at least two *subjects*
+    per arm-and-timepoint cell on average, falling back to samples where
+    the deposit names no subject.
+
+    An arm with a single subject cannot be contrasted against anything, and
+    a label that gives nearly one arm per sample is a parsed token rather
+    than a condition — a plate well, an animal id, or a clinical covariate
+    crossed with nine others. Frequency pruning does not catch that case,
+    because each token recurs; the count does.
+
+    Subjects rather than samples, because two samples from one organism are
+    one observation. A study that assays three brain regions from ten mice
+    deposits thirty samples and holds ten independent units, and scoring it
+    as thirty is how an effect appears that is not there.
+    """
+    units = design.n_subjects or design.n_titles
+    groups = sum(max(1, len(ts)) for _, ts in design.per_arm) or len(
+        design.arms
+    )
+    return groups > 0 and groups * 2 <= units
 
 
 def perturbation_labels(cand: DatasetCandidate, design: Design) -> list[str]:
@@ -200,36 +285,152 @@ def nameable(m: Measured) -> bool:
 
 
 def loader_of(cand: DatasetCandidate) -> str:
+    """Which reader a deposit's tables need, or why none applies.
+
+    A loader cannot be decided from a modality alone. ArrayExpress deposits
+    are labelled processed but mostly ship per-sample raw arrays and
+    sequencing files — ``.cel``, ``.idat``, ``.gpr``, ``.bam`` — and a third
+    ship no data at all, their raw reads living in ENA; PRIDE deposits are
+    labelled with results but only a minority carry a quantification file.
+    Both are decided by the file list, the way GEO already is.
+
+    ``unchecked`` is returned where the file list decides and this row does
+    not carry one: enumeration metadata does not include it, so it takes a
+    per-accession request. That verdict keeps such a row out of the readable
+    count instead of asserting a reader that may not apply.
+    """
     m = cand.measured
-    key = (cand.source, m.modality, m.complete)
     if cand.source == "geo" and m.modality == "expression":
         if cand.series_matrix_has_values:
             return "series-matrix"
         if any(_COUNTS_FILE.search(f) for f in cand.files):
             return "counts-file"
         return "none"
-    return LOADERS.get(key, "none")
+    if cand.source in FILE_DECIDED:
+        if not cand.files:
+            return "unchecked"
+        return FILE_DECIDED[cand.source](cand.files)
+    return LOADERS.get((cand.source, m.modality, m.complete), "none")
+
+
+def _arrayexpress_loader(files) -> str:
+    if any(_COUNTS_FILE.search(f) for f in files):
+        return "counts-file"
+    return "none"
+
+
+def _osdr_loader(files) -> str:
+    from hallsim.datasets import GL_COUNTS
+
+    if any(GL_COUNTS.search(f) for f in files):
+        return "glbulkrnaseq"
+    return "none"
+
+
+def _pride_loader(files) -> str:
+    if any(f.lower().endswith(".mztab") for f in files):
+        return "mztab"
+    return "none"
+
+
+#: Sources whose loader is decided by the file list rather than by the
+#: modality, with the rule that decides it.
+FILE_DECIDED = {
+    "biostudies-arrayexpress": _arrayexpress_loader,
+    "pride": _pride_loader,
+    "osdr": _osdr_loader,
+}
 
 
 _MIRRORED = re.compile(r"^E-GEOD-(\d+)$", re.I)
 
 
-def original_of(source: str, accession: str) -> tuple[str, str]:
+def original_of(
+    source: str, accession: str, mirrors: str = ""
+) -> tuple[str, str]:
     """``(source, accession)`` of the deposit a row really describes.
 
-    ArrayExpress mirrors about half of its holdings from GEO and encodes
-    the origin in the accession, so ``E-GEOD-12345`` is ``GSE12345``
-    listed twice. Returning the original collapses the pair without a
-    title comparison.
+    Two repositories re-host other people's studies. ArrayExpress mirrors
+    about half of its holdings from GEO and encodes the origin in the
+    accession, so ``E-GEOD-12345`` is ``GSE12345`` listed twice; OSDR
+    re-hosts from both and states the original outright in ``mirrors``.
+    Returning the original collapses the copies without a title comparison,
+    and resolves a chain — an OSDR row mirroring ``E-GEOD-12345`` lands on
+    the GEO series, not on the ArrayExpress copy of it.
     """
-    if source == "biostudies-arrayexpress" and (
-        m := _MIRRORED.match(accession)
-    ):
-        return "geo", f"GSE{m.group(1)}"
+    for candidate in (mirrors.strip(), accession):
+        if m := _MIRRORED.match(candidate):
+            return "geo", f"GSE{m.group(1)}"
+    declared = mirrors.strip().upper()
+    if declared.startswith("GSE"):
+        return "geo", declared
+    if declared.startswith("E-MTAB-"):
+        return "biostudies-arrayexpress", declared
     return source, accession
 
 
-def match_models(m: Measured, models: list[ModelIds]) -> dict:
+def shared_subjects(designs: dict[str, tuple]) -> list[tuple[str, ...]]:
+    """Groups of deposits that assayed the same subjects.
+
+    A repository lists one deposit per tissue, so a single experiment can
+    appear as several accessions over one set of organisms. Treating those
+    as independent evidence multiplies the apparent sample size without
+    adding information. ``designs`` maps an accession to its subject
+    identifiers; the result is each group of two or more accessions that
+    overlap, largest first.
+    """
+    names = list(designs)
+    seen: set[str] = set()
+    groups = []
+    for i, a in enumerate(names):
+        if a in seen or not designs[a]:
+            continue
+        group = {a}
+        for b in names[i + 1 :]:
+            if designs[b] and set(designs[a]) & set(designs[b]):
+                group.add(b)
+        if len(group) > 1:
+            seen |= group
+            groups.append(tuple(sorted(group)))
+    return sorted(groups, key=len, reverse=True)
+
+
+#: Taxon strings that name a clade rather than an organism, so a model
+#: carrying one cannot be said to agree or disagree with a dataset's.
+CLADES = frozenset(
+    {
+        "mammalia",
+        "eukaryota",
+        "cellular organisms",
+        "vertebrata",
+        "metazoa",
+        "chordata",
+        "",
+    }
+)
+
+
+def species_of(organism: str, taxon: str) -> str:
+    """How a dataset's organism stands to a model's declared taxon.
+
+    ``same``, ``ortholog`` when they differ, or ``unknown`` when either
+    side names a clade or nothing. A cross-species match is not wrong —
+    it is how a human-annotated model is scored on mouse data — but it
+    carries an ortholog step that the identifiers hide, so it is named
+    rather than folded into the others. :func:`match_models` reports this
+    for the best-scoring deposit and counts how many of the matched set
+    share the dataset's organism.
+    """
+    a = (organism or "").strip().lower()
+    b = (taxon or "").strip().lower()
+    if not a or b in CLADES:
+        return "unknown"
+    return "same" if b in a else "ortholog"
+
+
+def match_models(
+    m: Measured, models: list[ModelIds], organism: str = ""
+) -> dict:
     """Which models a measurement lands on, and how.
 
     ``via`` names the route, ordered by how much it assumes:
@@ -255,7 +456,8 @@ def match_models(m: Measured, models: list[ModelIds]) -> dict:
     if m.ids:
         ids = {i.lower() for i in m.ids}
         for mod in models:
-            shared = tuple(sorted((mod.chebi | mod.uniprot) & ids))
+            carried = mod.chebi | {f"uniprot:{u}".lower() for u in mod.uniprot}
+            shared = tuple(sorted(carried & ids))
             if shared:
                 scored.append((len(shared), mod.accession, shared))
         via = "direct" if scored else "none"
@@ -276,7 +478,7 @@ def match_models(m: Measured, models: list[ModelIds]) -> dict:
             (len(mod.tfs), mod.accession, ()) for mod in models if mod.tfs
         ]
         via = "regulon" if scored else "none"
-    elif m.modality in MEASURABLE:
+    elif m.modality in MOLECULAR:
         scored = [
             (len(mod.uniprot | mod.chebi), mod.accession, ())
             for mod in models
@@ -284,7 +486,23 @@ def match_models(m: Measured, models: list[ModelIds]) -> dict:
         ]
         via = "panel" if scored else "none"
     scored.sort(key=lambda s: (-s[0], s[1]))
+    taxa = {mod.accession: mod.taxon for mod in models}
+    relations = [
+        species_of(organism, taxa.get(acc, "")) for _, acc, _ in scored
+    ]
+    # A metabolite is the same molecule in every organism, so a ChEBI
+    # identity carries no species step; every other route does. Elsewhere
+    # the count is what informs: a row matching six hundred deposits of
+    # which nine share its organism has not been matched within species,
+    # and reporting the best case would say that it had.
+    chebi_only = via == "direct" and all(
+        i.startswith("chebi:") for _, _, sh in scored for i in sh
+    )
     return {
+        "species": (
+            "n/a" if chebi_only else (relations[0] if relations else "")
+        ),
+        "n_same_species": 0 if chebi_only else relations.count("same"),
         "via": via,
         "n_models": len(scored),
         "top_models": [
@@ -320,6 +538,7 @@ def screen_dataset(
         "route": route,
         "source": cand.source,
         "accession": cand.accession,
+        "mirrors": cand.mirrors,
         "title": cand.title[:200],
         "organism": cand.organism,
         "modality": m.modality,
@@ -330,10 +549,12 @@ def screen_dataset(
         "n_arms": len(design.arms),
         "control": design.control or "",
         "n_timepoints": design.n_timepoints,
+        "n_subjects": design.n_subjects,
         "time_unit": design.time_unit,
         "perturbed": design.perturbed,
         "perturbations": labels[:12],
         "timed_evidence": evidence,
+        "contrast_kind": contrast_of(design, evidence),
         "loader": loader_of(cand),
         # What the gates were judged on, so a row can be screened again
         # without asking the repository twice.
@@ -351,12 +572,19 @@ def screen_dataset(
             "platform": cand.platform,
         },
     }
+    # Dynamics is recorded, not gated: a deposit that only supports an
+    # endpoint contrast is still data, and discarding it threw away nine
+    # rows for every one kept.
+    row["dynamics"] = bool(evidence)
     row["timed"] = bool(evidence)
-    row["measured"] = row["timed"] and nameable(m)
+    row["contrast"] = bool(row["contrast_kind"])
+    row["measured"] = row["contrast"] and nameable(m)
     match = (
-        match_models(m, models)
+        match_models(m, models, cand.organism)
         if row["measured"]
         else {
+            "species": "",
+            "n_same_species": 0,
             "via": "none",
             "n_models": 0,
             "top_models": [],
@@ -407,6 +635,7 @@ def candidate_of(row: dict) -> DatasetCandidate:
         ),
         pubmed=row.get("pubmed", ""),
         factors=tuple(raw.get("factors", ())),
+        mirrors=str(row.get("mirrors") or ""),
     )
 
 
@@ -440,18 +669,18 @@ def reason_of(row: dict) -> str:
     stage = row["stage"]
     if stage == "pass":
         return ""
-    if stage == "timed":
-        if row["n_samples"] and not row["n_timepoints"]:
-            return "no timepoints in the sample titles"
-        if row["n_timepoints"]:
-            return f"{row['n_timepoints']} timepoints, fewer than three"
-        return "no time course declared"
+    if stage == "contrast":
+        if row["n_samples"]:
+            return "one sample group, so nothing to divide by"
+        return "no sample groups declared"
     if stage == "measured":
         return f"{row['modality']}: quantities not nameable against a model"
     if stage == "matched":
         return (
             f"no screened model carries what it measures ({row['modality']})"
         )
+    if row["loader"] == "unchecked":
+        return "loader undecided: the deposit's file list is not fetched"
     return f"loader work: {row['loader']}"
 
 
@@ -746,6 +975,25 @@ def run_census(
             )
         elif route == "ebi":
             run_ebi(run, models, sink, limit=limit, resolve=resolve)
+        elif route == "osdr":
+            n = 0
+            for cand in iter_osdr():
+                if with_files and not cand.files:
+                    try:
+                        cand = replace(cand, files=osdr_files(cand.accession))
+                    except Exception as exc:  # noqa: BLE001
+                        sink.note(f"{cand.accession}: no file list ({exc})")
+                if not sink.has(cand):
+                    sink.write(
+                        screen_dataset(
+                            cand, models, route=route, resolve=resolve
+                        )
+                    )
+                n += 1
+                if limit and n >= limit:
+                    break
+            if not limit:
+                _route_marker(run, route).touch()
         elif route == "bioimages":
             n = 0
             for cand in iter_bioimages():
@@ -779,9 +1027,16 @@ def load_rows(run_dir):
     df = pd.DataFrame(rows)
     # An ArrayExpress mirror and its GEO original are one deposit, and the
     # GEO row is the one a reader can open.
-    origin = [
-        original_of(r.source, r.accession) for r in df.itertuples(index=False)
-    ]
+    origin = []
+    for r in df.itertuples(index=False):
+        mirrors = getattr(r, "mirrors", "")
+        origin.append(
+            original_of(
+                r.source,
+                r.accession,
+                mirrors if isinstance(mirrors, str) else "",
+            )
+        )
     df["_origin"] = [f"{s}/{a}" for s, a in origin]
     df["_mirror"] = [s != r for (s, _), r in zip(origin, df["source"])]
     df = (
@@ -795,6 +1050,15 @@ def load_rows(run_dir):
 
 
 def funnel(df) -> list[tuple[str, int]]:
+    """The gate counts, listed first. Rows written under an earlier set of
+    gates lack the columns and are refused rather than misread: rescreen
+    them and the report follows."""
+    missing = [g for g in GATES if g not in df]
+    if missing:
+        raise ValueError(
+            f"rows carry no {', '.join(missing)} gate; they were screened "
+            "under earlier rules, so rescreen the run before reporting it"
+        )
     out = [("listed", len(df))]
     for g in GATES:
         out.append((g, int(df[g].sum()) if len(df) else 0))
@@ -859,6 +1123,10 @@ def summarize(df, run: Path) -> dict:
         },
         "timed_and_perturbed": int((df["timed"] & df["perturbed"]).sum()),
         "timed_unperturbed": int((df["timed"] & ~df["perturbed"]).sum()),
+        "contrast": df["contrast_kind"]
+        .replace("", "none")
+        .value_counts()
+        .to_dict(),
         "via": df.loc[df["matched"], "via"].value_counts().to_dict(),
         "loaders": df.loc[df["matched"], "loader"].value_counts().to_dict(),
         "stages": df["stage"].value_counts().to_dict(),
@@ -984,6 +1252,9 @@ def write_report(run_dir) -> Path:
                 ("time course, unperturbed", s["timed_unperturbed"]),
             ],
         ),
+        "",
+        "Contrast each deposit supports: "
+        + ", ".join(f"{k} {v}" for k, v in s["contrast"].items()),
         "",
         "Time course read from: "
         + ", ".join(f"{k} {v}" for k, v in s["timed_evidence"].items()),

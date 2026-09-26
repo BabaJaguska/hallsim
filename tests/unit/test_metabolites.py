@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from hallsim import metabolites
 from hallsim.dataset_census import READABLE
 from hallsim.metabolites import (
     MetaboliteDataset,
@@ -268,3 +269,141 @@ def test_log_values_are_the_log2_of_the_intensities(dataset):
     assert dataset.log_values.loc["chebi:16414", "Sample1"] == pytest.approx(
         np.log2(50.0)
     )
+
+
+# ── Metabolomics Workbench (mwTab) ──────────────────────────────────
+
+MWTAB_TEXT = "#METABOLOMICS WORKBENCH STUDY_ID:ST000999 ANALYSIS_ID:AN000999\nVERSION             \t1\nCREATED_ON          \t2026-09-25\n#PROJECT\nPR:PROJECT_TITLE                \ta synthetic study\n#STUDY\nST:STUDY_TITLE                  \ta synthetic study\n#SUBJECT\nSU:SUBJECT_TYPE                 \tHuman\n#SUBJECT_SAMPLE_FACTORS:        \tSUBJECT(optional)[tab]SAMPLE[tab]FACTORS(NAME:VALUE pairs separated by |)[tab]Raw file names and additional sample data\nSUBJECT_SAMPLE_FACTORS          \t-\tS1\tTreatment:control | Time:24 h\t\nSUBJECT_SAMPLE_FACTORS          \t-\tS2\tTreatment:control | Time:24 h\t\nSUBJECT_SAMPLE_FACTORS          \t-\tS3\tTreatment:rapamycin | Time:24 h\t\nSUBJECT_SAMPLE_FACTORS          \t-\tS4\tTreatment:rapamycin | Time:24 h\t\n#COLLECTION\nCO:COLLECTION_SUMMARY           \tx\n#TREATMENT\nTR:TREATMENT_SUMMARY            \tx\n#SAMPLEPREP\nSP:SAMPLEPREP_SUMMARY           \tx\n#CHROMATOGRAPHY\nCH:CHROMATOGRAPHY_TYPE          \tGC\n#ANALYSIS\nAN:ANALYSIS_TYPE                \tMS\n#MS\nMS:INSTRUMENT_NAME              \tx\nMS:MS_TYPE                      \tEI\nMS:ION_MODE                     \tPOSITIVE\n#MS_METABOLITE_DATA\nMS_METABOLITE_DATA:UNITS        \tPeak height\nMS_METABOLITE_DATA_START\nSamples\tS1\tS2\tS3\tS4\nFactors\tTreatment:control | Time:24 h\tTreatment:control | Time:24 h\tTreatment:rapamycin | Time:24 h\tTreatment:rapamycin | Time:24 h\nglucose\t100\t110\t200\t220\nvaline\t50\t55\t25\t27.5\natp\t0\t-1\t10\t10\nmystery\t7\t7\t7\t7\nMS_METABOLITE_DATA_END\n#METABOLITES\nMETABOLITES_START\nmetabolite_name\tpubchem_id\tinchi_key\tkegg_id\nglucose\t5793\t\tC00031\nvaline\t6287\t\tC00183\natp\t5957\t\tC00002\nmystery\t\t\tC99999\nMETABOLITES_END\n#END\n"
+#: What UniChem answers for this fixture, so the test makes no request.
+FAKE_CHEBI = {
+    ("5793", "pubchem"): ("chebi:17234",),
+    ("6287", "pubchem"): ("chebi:16414", "chebi:57762"),
+    ("5957", "pubchem"): ("chebi:15422",),
+}
+
+
+@pytest.fixture
+def mwtab_file(tmp_path):
+    path = tmp_path / "ST000999.mwtab.txt"
+    path.write_text(MWTAB_TEXT)
+    return path
+
+
+@pytest.fixture
+def offline_unichem(monkeypatch):
+    def fake(query, source="", *, timeout=30.0):
+        return FAKE_CHEBI.get((query, source), ())
+
+    monkeypatch.setattr(metabolites, "chebi_for", fake)
+
+
+def test_mwtab_keys_its_compounds_through_the_crosswalk(
+    offline_unichem, mwtab_file
+):
+    """mwTab carries PubChem, InChIKey and KEGG but never ChEBI, so the
+    join is structural rather than by name."""
+    table = metabolites.read_mwtab(mwtab_file)
+
+    assert table.features == 4
+    assert table.keyed == 3
+    # KEGG-only compounds do not resolve: UniChem does not index KEGG.
+    assert table.unannotated == 1
+    assert table.coverage == pytest.approx(3 / 4)
+    assert table.names["chebi:17234"] == "glucose"
+
+
+def test_several_chebi_ids_for_one_compound_are_all_kept(
+    offline_unichem, mwtab_file
+):
+    """ChEBI models protonation states separately, so valine is two
+    accessions for one molecule — granularity, not uncertainty."""
+    table = metabolites.read_mwtab(mwtab_file)
+
+    assert len(table.quantities) == 4
+    assert sorted(table.quantities.index) == [
+        "chebi:15422",
+        "chebi:16414",
+        "chebi:17234",
+        "chebi:57762",
+    ]
+
+
+def test_the_workbench_design_comes_from_its_factor_dicts(
+    offline_unichem, mwtab_file
+):
+    ds = metabolites.MetaboliteDataset.from_workbench(mwtab_file)
+
+    assert ds.design.arms == ("control", "rapamycin")
+    assert ds.design.control == "control"
+    assert ds.design.time_unit == "h"
+    assert ds.design.timepoints == (24.0,)
+    assert ds.sample_groups == {
+        "control @ 24h": ["S1", "S2"],
+        "rapamycin @ 24h": ["S3", "S4"],
+    }
+
+
+def test_a_workbench_contrast_reaches_a_model_species(
+    offline_unichem, mwtab_file
+):
+    ds = metabolites.MetaboliteDataset.from_workbench(mwtab_file)
+    delta = ds.delta("rapamycin @ 24h", "control @ 24h")
+
+    assert delta["chebi:17234"] == pytest.approx(1.0)
+    # Both accessions of one molecule carry the same contrast.
+    assert delta["chebi:16414"] == pytest.approx(-1.0)
+    assert delta["chebi:57762"] == pytest.approx(-1.0)
+    # Below detection throughout the baseline: no contrast to report.
+    assert "chebi:15422" not in delta.index
+
+
+def test_a_time_factor_value_is_read_with_the_title_parser():
+    """``24 h`` inside a factor value needs no separate unit field."""
+    design, groups = metabolites.factor_design(
+        ["S1", "S2", "S3"],
+        [
+            {"Treatment": "ctrl", "Time": "0 h"},
+            {"Treatment": "ctrl", "Time": "24 h"},
+            {"Treatment": "ctrl", "Time": "48 h"},
+        ],
+    )
+    assert design.time_unit == "h"
+    assert design.timepoints == (0.0, 24.0, 48.0)
+    assert design.time_course
+    assert sorted(groups) == ["all @ 0h", "all @ 24h", "all @ 48h"]
+
+
+def test_the_census_reads_a_workbench_study():
+    from hallsim.dataset_census import LOADERS, READABLE
+
+    assert LOADERS[("metabolomics_workbench", "metabolomics", False)] == (
+        "mwtab"
+    )
+    assert "mwtab" in READABLE
+
+
+def test_an_nmr_study_keeps_its_table_under_another_block(
+    offline_unichem, tmp_path
+):
+    path = tmp_path / "ST000998.mwtab.txt"
+    path.write_text(
+        MWTAB_TEXT.replace("MS_METABOLITE_DATA", "NMR_METABOLITE_DATA")
+    )
+    table = metabolites.read_mwtab(path)
+    assert table.features == 4 and table.keyed == 3
+
+
+def test_a_failed_lookup_is_not_cached_as_no_compound(monkeypatch, tmp_path):
+    """One timeout must not record a permanent false negative."""
+    import urllib.request
+
+    from hallsim import datasets
+
+    monkeypatch.setattr(datasets, "_cache_dir", lambda: tmp_path)
+
+    def down(*a, **k):
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(urllib.request, "urlopen", down)
+    assert metabolites.chebi_for("602", "pubchem") == ()
+    assert list(tmp_path.glob("*.json")) == []

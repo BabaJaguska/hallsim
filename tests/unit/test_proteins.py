@@ -109,8 +109,9 @@ def test_a_contrast_is_keyed_so_it_joins_model_species(tmp_path):
 
     assert delta["P04637"] == pytest.approx(1.0)
     assert delta["P42345"] == pytest.approx(-1.0)
-    # No baseline left once below-detection cells are missing.
-    assert np.isnan(delta["Q00987"])
+    # No baseline left once below-detection cells are missing, so the
+    # contrast drops rather than reporting a value that is not a number.
+    assert "Q00987" not in delta.index
     assert {"P04637"} == set(delta.index) & {"P04637", "P99999"}
 
 

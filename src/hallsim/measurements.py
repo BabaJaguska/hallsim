@@ -46,11 +46,17 @@ class MeasuredDataset:
             ) from None
 
     def delta(self, condition: str, baseline: str) -> pd.Series:
-        """Δ_data = log2 fold change between two named sample groups."""
+        """Δ_data = log2 fold change between two named sample groups.
+
+        A quantity the contrast cannot determine — measured in neither
+        group, or below detection throughout the baseline — is absent from
+        the result rather than present as a missing value, because a
+        calibration target that is not a number is not a target.
+        """
         values = self.log_values
         cond = values[self._columns(condition)].mean(axis=1)
         base = values[self._columns(baseline)].mean(axis=1)
-        return self._reduce(cond - base)
+        return self._reduce(cond - base).dropna()
 
     def variance(self, condition: str, baseline: str) -> pd.Series:
         """Per-quantity sampling variance of the log2 fold change.

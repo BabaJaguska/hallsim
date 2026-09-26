@@ -98,7 +98,9 @@ def test_a_proteome_reads_its_time_course_from_the_text():
     row = dc.screen_dataset(cand, _models(), route="ebi")
     assert row["timed_evidence"] == "text"
     assert (row["via"], row["n_models"]) == ("complete", 1)
-    assert row["stage"] == "loadable" and row["loader"] == "result-files"
+    # Whether PRIDE deposited a quantification file is not in the
+    # enumeration metadata, so the loader is not asserted from the modality.
+    assert row["stage"] == "loadable" and row["loader"] == "unchecked"
 
 
 def test_the_earlier_gates_name_their_reason():
@@ -109,19 +111,44 @@ def test_the_earlier_gates_name_their_reason():
     )
     assert genotype["stage"] == "measured"
     assert "genotype" in dc.reason_of(genotype)
+    # Two timepoints and two arms is not a time course, but it is a
+    # contrast, so it is kept and labelled rather than discarded.
     short = dc.screen_dataset(
         _cand(
             "geo",
             Measured("expression", True),
-            samples=("ctrl 0h", "ctrl 24h", "TNF 0h", "TNF 24h"),
-            n_samples=4,
+            samples=(
+                "ctrl 0h r1",
+                "ctrl 0h r2",
+                "ctrl 24h r1",
+                "ctrl 24h r2",
+                "TNF 0h r1",
+                "TNF 0h r2",
+                "TNF 24h r1",
+                "TNF 24h r2",
+            ),
+            n_samples=8,
         ),
         _models(),
         route="geo",
     )
-    assert short["stage"] == "timed" and not short["timed"]
-    assert dc.reason_of(short) == "2 timepoints, fewer than three"
+    assert not short["dynamics"]
+    assert short["contrast"] and short["contrast_kind"] == "course"
+    # Kept through matching; it stops at the loader, not at the gate.
+    assert short["stage"] == "loadable"
     assert short["perturbed"] and short["control"] == "ctrl"
+    lone = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            samples=("one sample",),
+            n_samples=1,
+        ),
+        _models(),
+        route="geo",
+    )
+    assert lone["stage"] == "contrast"
+    assert "nothing to divide by" in dc.reason_of(lone)
     unmatched = dc.screen_dataset(
         _cand(
             "metabolights",
@@ -215,7 +242,7 @@ def test_the_report_reproduces_from_the_rows(tmp_path):
     summary = json.loads((run / "summary.json").read_text())
     assert summary["funnel"] == [
         ["listed", 3],
-        ["timed", 2],
+        ["contrast", 2],
         ["measured", 2],
         ["matched", 2],
         ["loadable", 2],
@@ -322,3 +349,335 @@ def test_an_arrayexpress_mirror_collapses_onto_its_geo_original(tmp_path):
         "GSE777",
     )
     assert dc.original_of("geo", "GSE777") == ("geo", "GSE777")
+
+
+def test_the_file_list_decides_the_loader_where_a_modality_cannot():
+    """ArrayExpress labels deposits processed while mostly shipping raw
+    per-sample arrays, and a third ship no data at all, so the modality
+    cannot name a reader."""
+    raw = _cand(
+        "biostudies-arrayexpress",
+        Measured("expression", True),
+        files=("E-MEXP-1-raw-data-1.txt", "sample1.cel"),
+    )
+    processed = _cand(
+        "biostudies-arrayexpress",
+        Measured("expression", True),
+        files=("arrayexpress_counts.txt",),
+    )
+    unknown = _cand("biostudies-arrayexpress", Measured("expression", True))
+    assert dc.loader_of(raw) == "none"
+    assert dc.loader_of(processed) == "counts-file"
+    assert dc.loader_of(unknown) == "unchecked"
+
+    with_mztab = _cand(
+        "pride", Measured("proteomics", True), files=("study.mzTab",)
+    )
+    ids_only = _cand(
+        "pride", Measured("proteomics", True), files=("run.mzid", "run.mgf")
+    )
+    assert dc.loader_of(with_mztab) == "mztab"
+    assert dc.loader_of(ids_only) == "none"
+    assert "mztab" in dc.READABLE
+    assert "unchecked" not in dc.READABLE
+
+
+def test_a_perturbation_at_one_timepoint_is_a_contrast():
+    """Every reader returns a fold change between two groups, so a
+    perturbed arm beside a control is usable even with no time axis. Gating
+    on three timepoints discarded nine such deposits for every one kept."""
+    row = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            samples=("ctrl rep1", "ctrl rep2", "TNF rep1", "TNF rep2"),
+            n_samples=4,
+        ),
+        _models(),
+        route="geo",
+    )
+    assert row["contrast_kind"] == "arms"
+    assert row["contrast"] and not row["dynamics"]
+    assert row["measured"] and row["matched"]
+
+
+def test_dynamics_is_recorded_beside_the_contrast():
+    row = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            samples=tuple(TITLES),
+            n_samples=5,
+        ),
+        _models(),
+        route="geo",
+    )
+    assert row["contrast_kind"] == "dynamics" and row["dynamics"]
+
+
+def test_an_arm_per_sample_is_not_a_contrast():
+    """Labels that give nearly one arm per sample are parsed tokens, not
+    conditions, and an arm holding one sample cannot be contrasted."""
+    row = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            samples=("P01 A1", "P02 B2", "P03 C3", "P04 D4"),
+            n_samples=4,
+        ),
+        _models(),
+        route="geo",
+    )
+    assert row["n_arms"] == 4 and row["n_samples"] == 4
+    assert row["contrast_kind"] == "" and not row["contrast"]
+
+
+def test_replication_is_counted_in_subjects_not_samples():
+    """Three brain regions from ten mice is ten independent units, not
+    thirty: scoring it as thirty is how an effect appears that is not
+    there."""
+    from hallsim.datasets import Design
+
+    thirty_samples_ten_mice = Design(
+        arms=("flight", "ground"),
+        per_arm=(("flight", ()), ("ground", ())),
+        n_titles=30,
+        n_subjects=10,
+    )
+    assert dc._replicated(thirty_samples_ten_mice)
+
+    six_arms_ten_mice = Design(
+        arms=tuple(f"arm{i}" for i in range(6)),
+        per_arm=tuple((f"arm{i}", ()) for i in range(6)),
+        n_titles=30,
+        n_subjects=10,
+    )
+    # Six arms over ten animals cannot hold two subjects each.
+    assert not dc._replicated(six_arms_ten_mice)
+    # Counting the thirty samples instead would have let it through.
+    assert dc._replicated(
+        Design(
+            arms=six_arms_ten_mice.arms,
+            per_arm=six_arms_ten_mice.per_arm,
+            n_titles=30,
+        )
+    )
+
+
+def test_deposits_sharing_subjects_are_one_experiment():
+    """One mission's animals, assayed per tissue, arrive as one accession
+    each; counting them separately multiplies the apparent evidence."""
+    groups = dc.shared_subjects(
+        {
+            "OSD-563": ("RR-10_FL-01", "RR-10_FL-03"),
+            "OSD-564": ("RR-10_FL-01", "RR-10_FL-03"),
+            "OSD-612": ("RR-10_FL-01", "RR-10_FL-03"),
+            "OSD-613": ("RRRM2_A", "RRRM2_B"),
+            "GSE1": (),
+        }
+    )
+    assert groups == [("OSD-563", "OSD-564", "OSD-612")]
+
+
+def test_a_cross_species_match_is_named_not_hidden():
+    """A mouse series matched to a human-annotated model goes through an
+    ortholog step that the identifiers do not show, so the route says so."""
+    human = dc.ModelIds(
+        "BIOMD1",
+        "",
+        frozenset({"P04637"}),
+        frozenset(),
+        frozenset({"P04637"}),
+        "Homo sapiens",
+    )
+    mouse_data = _cand(
+        "geo",
+        Measured("expression", True),
+        samples=("ctrl 0h", "ctrl 24h", "ctrl 48h"),
+        n_samples=3,
+        organism="Mus musculus",
+    )
+    row = dc.screen_dataset(mouse_data, [human], route="geo")
+    assert row["via"] == "regulon" and row["species"] == "ortholog"
+
+    human_data = _cand(
+        "geo",
+        Measured("expression", True),
+        samples=("ctrl 0h", "ctrl 24h", "ctrl 48h"),
+        n_samples=3,
+        organism="Homo sapiens",
+    )
+    assert (
+        dc.screen_dataset(human_data, [human], route="geo")["species"]
+        == "same"
+    )
+
+
+def test_a_metabolite_identity_carries_no_species_step():
+    """ATP is ATP in every organism, so a ChEBI match needs no ortholog."""
+    model = dc.ModelIds(
+        "BIOMD1",
+        "",
+        frozenset(),
+        frozenset({"chebi:15422"}),
+        frozenset(),
+        "Homo sapiens",
+    )
+    row = dc.screen_dataset(
+        _cand(
+            "metabolights",
+            Measured("metabolomics", False, ("chebi:15422",)),
+            factors=("Timepoint",),
+            organism="Mus musculus",
+        ),
+        [model],
+        route="ebi",
+    )
+    assert row["via"] == "direct" and row["species"] == "n/a"
+
+
+def test_the_same_species_count_is_what_informs_not_the_best_case():
+    """A row matching many deposits of which few share its organism has not
+    been matched within species; reporting the best case would say it had."""
+    models = [
+        dc.ModelIds(
+            "H1",
+            "",
+            frozenset({"P04637"}),
+            frozenset(),
+            frozenset({"P04637"}),
+            "Homo sapiens",
+        ),
+        dc.ModelIds(
+            "H2",
+            "",
+            frozenset({"P04637"}),
+            frozenset(),
+            frozenset({"P04637"}),
+            "Homo sapiens",
+        ),
+        dc.ModelIds(
+            "M1",
+            "",
+            frozenset({"P04637"}),
+            frozenset(),
+            frozenset({"P04637"}),
+            "Mus musculus",
+        ),
+    ]
+    row = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            samples=("ctrl 0h", "ctrl 24h", "ctrl 48h"),
+            n_samples=3,
+            organism="Mus musculus",
+        ),
+        models,
+        route="geo",
+    )
+    assert row["n_models"] == 3
+    assert row["n_same_species"] == 1
+
+
+def test_a_course_with_one_sample_per_cell_is_not_replicated():
+    """Two timepoints and two arms is four cells; four samples fill them
+    with one each, and one sample per cell is no replicate."""
+    row = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            samples=("ctrl 0h", "ctrl 24h", "TNF 0h", "TNF 24h"),
+            n_samples=4,
+        ),
+        _models(),
+        route="geo",
+    )
+    assert row["n_arms"] == 2 and row["n_timepoints"] == 2
+    assert row["contrast_kind"] == "" and not row["contrast"]
+
+
+def test_a_listed_protein_matches_by_accession():
+    """A deposit naming UniProt accessions pairs with a model carrying
+    them, in one spelling on both sides."""
+    row = dc.screen_dataset(
+        _cand(
+            "pride",
+            Measured("proteomics", False, ("uniprot:P04637",)),
+            factors=("time",),
+        ),
+        _models(),
+        route="ebi",
+    )
+    assert row["via"] == "direct"
+    assert row["direct_pairs"][0]["shared"] == ["uniprot:p04637"]
+
+
+def test_imaging_is_measured_but_matches_nothing():
+    row = dc.screen_dataset(
+        _cand("bioimages", Measured("imaging"), summary="0, 5, 10 min"),
+        _models(),
+        route="bioimages",
+    )
+    assert row["measured"] and not row["matched"]
+    assert row["via"] == "none"
+
+
+def test_a_mirror_survives_a_rescreen(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    row = dc.screen_dataset(
+        _cand(
+            "osdr",
+            Measured("expression", True),
+            accession="OSD-115",
+            mirrors="E-GEOD-12647",
+            factors=("time",),
+        ),
+        _models(),
+        route="osdr",
+    )
+    assert row["mirrors"] == "E-GEOD-12647"
+    assert dc.candidate_of(row).mirrors == "E-GEOD-12647"
+    (run / "rows.jsonl").write_text(json.dumps(row) + "\n")
+    assert dc.rescreen(run, _models()) == 1
+    again = json.loads((run / "rows.jsonl").read_text())
+    assert again["mirrors"] == "E-GEOD-12647"
+    assert dc.original_of("osdr", "OSD-115", "E-GEOD-12647") == (
+        "geo",
+        "GSE12647",
+    )
+    assert dc.original_of("osdr", "OSD-9", "E-MTAB-77") == (
+        "biostudies-arrayexpress",
+        "E-MTAB-77",
+    )
+
+
+def test_osdr_reads_only_genelab_counts():
+    """GeneLab's differential-expression table matches the generic
+    counts-file pattern and would be read as counts; only the pipeline's
+    counts files are a known layout."""
+    assert (
+        dc._osdr_loader(
+            ("GLDS-1_rna_seq_STAR_Unnormalized_Counts_GLbulkRNAseq.csv",)
+        )
+        == "glbulkrnaseq"
+    )
+    assert (
+        dc._osdr_loader(
+            ("GLDS-1_rna_seq_differential_expression_GLbulkRNAseq.csv",)
+        )
+        == "none"
+    )
+    assert dc._osdr_loader(()) == "none"
+
+
+def test_rows_from_earlier_gates_are_refused_not_misread():
+    import pandas as pd
+    import pytest
+
+    old = pd.DataFrame(
+        [{"timed": True, "measured": True, "matched": True, "loadable": True}]
+    )
+    with pytest.raises(ValueError, match="rescreen"):
+        dc.funnel(old)

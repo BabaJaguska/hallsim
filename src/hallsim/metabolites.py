@@ -1,5 +1,5 @@
-"""MetaboLights metabolite tables — the one route that reaches a model
-species by identity.
+"""Metabolite tables from both repositories — the one route that reaches a
+model species by identity.
 
 Every other reader arrives at a model through a proxy. A transcript is two
 translation steps and an mRNA half-life away from the protein a model
@@ -9,11 +9,18 @@ species carry ChEBI annotations, so a dataset quantity and a model quantity
 are joined by one accession being the other — no regulon, no sign
 convention, nothing in between.
 
-Reading ISA-Tab and fetching studies is ``metabolights-utils``, the
-repository's own package, so the assignment specification and the FTP
-layout stay its problem. What is here is everything above that: the ChEBI
-filter and curie keying, the numeric frame, the design a study's declared
-factors imply, and the group contrasts calibration consumes.
+Each repository's own package parses its own format, so neither
+specification is ours to track: ``metabolights-utils`` for MetaboLights
+ISA-Tab and its FTP layout, ``mwtab`` for Metabolomics Workbench. What is
+here is everything above that: the ChEBI keying, the numeric frame, the
+design a study's declared factors imply, and the group contrasts
+calibration consumes.
+
+The two differ in where ChEBI comes from. A MetaboLights assignment file
+names ChEBI accessions outright. mwTab names compounds and carries PubChem,
+InChIKey and KEGG, so :func:`chebi_for` resolves them structurally through
+UniChem — which turns out to reach *more* compounds than depositors\' own
+ChEBI annotation does.
 
 A study is two files, and the assignment file is only one of them. The
 assignment file is one row per measured feature with one column per
@@ -49,8 +56,10 @@ from hallsim.datasets import (
     TIME_FACTOR,
     Design,
     _UNIT_NAME,
+    _cached_json,
     _drop_identifiers,
     _strip_common,
+    _times,
     curie,
 )
 from hallsim.measurements import MeasuredDataset
@@ -62,6 +71,8 @@ _FACTOR = re.compile(r"^Factor Value\s*\[(?P<name>.+?)\]", re.I)
 _QUALIFIER = re.compile(
     r"^(Unit|Term Source REF|Term Accession Number)(\.\d+)?$", re.I
 )
+#: Precision qualifiers on a declared numeric value.
+_APPROXIMATE = re.compile(r"^\s*[~\u2248><\u2265\u2264]+\s*")
 
 
 def isa_frame(table) -> pd.DataFrame:
@@ -97,6 +108,7 @@ class MafTable:
     quantities: pd.DataFrame
     names: dict[str, str]
     features: int
+    keyed: int
     unannotated: int
     ambiguous: int
     other_namespace: dict[str, int]
@@ -107,8 +119,10 @@ class MafTable:
 
     @property
     def coverage(self) -> float:
-        """Share of the file's features that carry a ChEBI accession."""
-        return len(self.quantities) / self.features if self.features else 0.0
+        """Share of the file's measured features that reached a ChEBI
+        accession. Not the row count of ``quantities``, which can exceed
+        the feature count where one compound carries several accessions."""
+        return self.keyed / self.features if self.features else 0.0
 
     def summary(self) -> str:
         other = ", ".join(
@@ -116,7 +130,7 @@ class MafTable:
         )
         parts = [
             f"{self.features} features",
-            f"{len(self.quantities)} with a ChEBI id ({self.coverage:.0%})",
+            f"{self.keyed} keyed to ChEBI ({self.coverage:.0%})",
             f"{self.compounds} compounds",
             f"{self.quantities.shape[1]} samples",
         ]
@@ -199,6 +213,7 @@ def maf_quantities(frame: pd.DataFrame, samples) -> MafTable:
         quantities=values,
         names=names,
         features=len(frame),
+        keyed=int(chebi.sum()),
         unannotated=int((ids == "").sum()),
         ambiguous=int((candidates > 1).sum()),
         other_namespace=other,
@@ -239,60 +254,75 @@ def _unit_after(frame: pd.DataFrame, column: str) -> str:
     return ""
 
 
-def isa_design(
-    frame: pd.DataFrame, *, time_factor: str | None = None
+def factor_design(
+    samples: list[str],
+    factors: list[dict[str, str]],
+    *,
+    time_factor: str | None = None,
+    units: dict[str, str] | None = None,
+    subjects: list[str] | None = None,
 ) -> tuple[Design, dict[str, list[str]]]:
-    """The :class:`Design` a sample file declares, and its sample groups.
+    """The :class:`Design` a set of per-sample declared factors implies.
 
-    Arms come from the factors other than time, so an arm is a declared
-    condition rather than a string parsed out of a title — which is the
-    reason to prefer a repository that ships ISA-Tab. A factor value is one
-    token, and a token carried by a single sample is pruned by
-    :func:`~hallsim.datasets._drop_identifiers`, so a declared factor that
-    is really a per-sample identifier does not make every sample its own
-    arm. The time factor is named explicitly or found by its label; its
-    ``Unit`` column sets the clock.
+    ``samples[i]`` is a sample's name and ``factors[i]`` its
+    ``{factor name: value}``, which is what both repositories that ship
+    structured metadata give: ISA-Tab as ``Factor Value[...]`` columns and
+    mwTab as a parsed factor dict per sample. An arm is therefore a
+    declared condition rather than a string parsed out of a title.
 
-    Returns the design and ``{group_label: [sample name, ...]}``, keyed the
-    way :meth:`MeasuredDataset.arm_deltas` expects to look groups up.
+    A factor value is one token, and a token carried by a single sample is
+    pruned by :func:`~hallsim.datasets._drop_identifiers`, so a declared
+    factor that is really a per-sample identifier does not make every
+    sample its own arm; a factor constant across every sample distinguishes
+    nothing and is dropped by :func:`~hallsim.datasets._strip_common`.
+
+    The time factor is named explicitly or found by its label. Its value is
+    read with the same parser that reads times out of sample titles, so
+    ``24``, ``24 h`` and ``day 7`` all work, and ``units`` supplies the unit
+    where the format declares it in a separate field.
     """
-    name_column = next(
-        (c for c in frame.columns if c.lower() == "sample name"), None
-    )
-    if name_column is None:
-        raise ValueError("the sample file has no Sample Name column")
-    factors = {
-        m.group("name").strip(): c
-        for c in frame.columns
-        if (m := _FACTOR.match(c))
-    }
+    names = sorted({k for f in factors for k in f})
     if time_factor is None:
-        time_factor = next((n for n in factors if TIME_FACTOR.search(n)), None)
-    elif time_factor not in factors:
+        time_factor = next((n for n in names if TIME_FACTOR.search(n)), None)
+    elif time_factor not in names:
         raise ValueError(
-            f"no Factor Value[{time_factor}] column; this file declares "
-            f"{sorted(factors)}"
+            f"no factor named {time_factor!r}; these declare {names}"
         )
 
-    other = [factors[n] for n in factors if n != time_factor]
-    tokens = [
-        [v for v in row if v] for row in frame[other].fillna("").values
-    ] or [[] for _ in range(len(frame))]
+    other = [n for n in names if n != time_factor]
+    tokens = [[f.get(n, "").strip() for n in other] for f in factors]
+    tokens = [[v for v in row if v] for row in tokens]
     labels = _strip_common(_drop_identifiers(tokens))
 
-    unit, times = "", pd.Series([None] * len(frame), index=frame.index)
-    if time_factor is not None:
-        column = factors[time_factor]
-        raw = _unit_after(frame, column)
-        unit = _UNIT_NAME.get(raw.rstrip("s"), raw)
-        times = pd.to_numeric(frame[column], errors="coerce")
+    unit = ""
+    times: list[float | None] = []
+    declared = (units or {}).get(time_factor, "") if time_factor else ""
+    for f in factors:
+        raw = f.get(time_factor, "").strip() if time_factor else ""
+        # A declared duration is often approximate — NASA writes a mission
+        # length as "~30" days — and the qualifier is about precision, not
+        # about a different quantity, so it is dropped before the number is
+        # read rather than costing the study its time course.
+        raw = _APPROXIMATE.sub("", raw).strip()
+        found, _ = _times(raw)
+        if found:
+            value, u = found[0]
+            times.append(value)
+            unit = unit or _UNIT_NAME.get(u, u)
+            continue
+        try:
+            times.append(float(raw))
+        except ValueError:
+            times.append(None)
+    if not unit and declared:
+        unit = _UNIT_NAME.get(declared.lower().rstrip("s"), declared.lower())
 
     groups: dict[str, list[str]] = {}
     per_arm: dict[str, set[float]] = {}
-    for label, t, sample in zip(labels, times, frame[name_column]):
+    for label, t, sample in zip(labels, times, samples):
         arm = " / ".join(label).strip(" /") or "all"
         per_arm.setdefault(arm, set())
-        if pd.isna(t):
+        if t is None:
             key = arm
         else:
             per_arm[arm].add(float(t))
@@ -316,9 +346,54 @@ def isa_design(
         control=control,
         per_arm=tuple((a, tuple(sorted(per_arm[a]))) for a in arms),
         time_unit=unit,
-        n_titles=len(frame),
+        n_titles=len(samples),
+        n_subjects=len({s for s in subjects if s}) if subjects else 0,
     )
     return design, groups
+
+
+def isa_design(
+    frame: pd.DataFrame, *, time_factor: str | None = None
+) -> tuple[Design, dict[str, list[str]]]:
+    """The :class:`Design` an ISA-Tab sample file declares, and its groups.
+
+    Reads the ``Factor Value[...]`` columns and the ``Unit`` column that
+    qualifies each, then hands them to :func:`factor_design`.
+    """
+    name_column = next(
+        (c for c in frame.columns if c.lower() == "sample name"), None
+    )
+    if name_column is None:
+        raise ValueError("the sample file has no Sample Name column")
+    columns = {
+        m.group("name").strip(): c
+        for c in frame.columns
+        if (m := _FACTOR.match(c))
+    }
+    if time_factor is not None and time_factor not in columns:
+        raise ValueError(
+            f"no Factor Value[{time_factor}] column; this file declares "
+            f"{sorted(columns)}"
+        )
+    factors = [
+        {n: str(row[c] or "") for n, c in columns.items()}
+        for _, row in frame.fillna("").iterrows()
+    ]
+    units = {n: _unit_after(frame, c) for n, c in columns.items()}
+    source = next(
+        (c for c in frame.columns if c.lower() == "source name"), None
+    )
+    return factor_design(
+        [str(s) for s in frame[name_column]],
+        factors,
+        time_factor=time_factor,
+        units=units,
+        subjects=(
+            [str(s).strip() for s in frame[source].fillna("")]
+            if source
+            else None
+        ),
+    )
 
 
 def assay_samples(model) -> list[str]:
@@ -358,7 +433,7 @@ class MetaboliteDataset(MeasuredDataset):
         # Several features can carry one compound on unrelated scales. The
         # scale cancels inside each feature's ratio, so the ratios average
         # and the intensities do not.
-        return per_feature.groupby(level=0).mean().dropna()
+        return per_feature.groupby(level=0).mean()
 
     def _reduce_variance(self, per_feature: pd.Series) -> pd.Series:
         grouped = per_feature.groupby(level=0)
@@ -443,6 +518,30 @@ class MetaboliteDataset(MeasuredDataset):
         return cls.from_study(model, assay=assay, time_factor=time_factor)
 
     @classmethod
+    def from_workbench(
+        cls, study, *, time_factor: str | None = None, timeout: float = 30.0
+    ) -> "MetaboliteDataset":
+        """Build from a Metabolomics Workbench study or a local mwTab file.
+
+        The second metabolomics repository, and the one that needs a
+        crosswalk: mwTab carries PubChem, InChIKey and KEGG identifiers but
+        not ChEBI, so :func:`chebi_for` resolves them structurally through
+        UniChem. A compound may resolve to several ChEBI accessions, which
+        is ChEBI's protonation granularity rather than uncertainty, so all
+        of them are kept and only the one a model annotates will match.
+        """
+        table = read_mwtab(study, timeout=timeout)
+        design, groups = mwtab_design(study, time_factor=time_factor)
+        present = set(table.quantities.columns)
+        groups = {k: [s for s in v if s in present] for k, v in groups.items()}
+        return cls(
+            quantities=table.quantities,
+            sample_groups={k: v for k, v in groups.items() if v},
+            names=table.names,
+            design=design,
+        )
+
+    @classmethod
     def from_maf(
         cls,
         maf_path,
@@ -461,3 +560,196 @@ class MetaboliteDataset(MeasuredDataset):
             sample_groups=sample_groups,
             names=table.names,
         )
+
+
+# ── Metabolomics Workbench ──────────────────────────────────────────
+
+WORKBENCH_REST = "https://www.metabolomicsworkbench.org/rest/study/study_id"
+UNICHEM = "https://www.ebi.ac.uk/unichem/api/v1/compounds"
+#: UniChem's source numbers for the identifiers mwTab carries. KEGG is
+#: absent from UniChem, so a compound known only by a KEGG id does not
+#: resolve.
+UNICHEM_SOURCE = {"pubchem": 22, "hmdb": 18, "lipidmaps": 33}
+#: Where mwTab keeps the quantities, by assay.
+MWTAB_BLOCKS = ("MS_METABOLITE_DATA", "NMR_METABOLITE_DATA")
+
+
+def chebi_for(query: str, source: str = "", *, timeout: float = 30.0):
+    """Every ChEBI accession UniChem links to one compound.
+
+    ``source`` empty treats ``query`` as an InChIKey, which is a structural
+    key and the most reliable route; otherwise it names a source in
+    :data:`UNICHEM_SOURCE`.
+
+    Several accessions for one compound is normal and is kept, not treated
+    as ambiguity: ChEBI models protonation states as separate entities, so
+    L-alanine is both ``CHEBI:16977`` and ``CHEBI:57972`` and a model
+    annotates one of them. That is a different thing from a depositor who
+    could not tell two compounds apart, which
+    :func:`maf_quantities` drops.
+    """
+    if not query:
+        return ()
+    body = (
+        {"type": "inchikey", "compound": query}
+        if not source
+        else {
+            "type": "sourceID",
+            "compound": query,
+            "sourceID": UNICHEM_SOURCE[source],
+        }
+    )
+
+    def fetch():
+        import json as _json
+        import urllib.request
+
+        request = urllib.request.Request(
+            UNICHEM,
+            data=_json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as fh:
+            return _json.load(fh)
+
+    # The cache stores whatever the fetch returns, so a timeout must raise
+    # rather than answer "no compound": otherwise one bad request records
+    # a permanent false negative.
+    try:
+        payload = _cached_json(
+            f"unichem {source or 'inchikey'} {query}", fetch
+        )
+    except Exception as exc:  # noqa: BLE001 - the id stays unresolved
+        log.info("unichem %s %s: %s", source or "inchikey", query, exc)
+        return ()
+    found = {
+        s["compoundId"]
+        for c in payload.get("compounds", [])
+        for s in c.get("sources", [])
+        if s.get("shortName") == "chebi"
+    }
+    return tuple(sorted(curie("chebi", i) for i in found))
+
+
+def mwtab_chebi(metabolites, *, timeout: float = 30.0) -> dict:
+    """``{metabolite name: (chebi curie, ...)}`` for an mwTab metabolite
+    block, preferring the InChIKey and falling back to the source ids it
+    carries."""
+    out: dict[str, tuple] = {}
+    for record in metabolites:
+        # mwtab hands back a DuplicatesDict whose .get() answers the
+        # default for keys it holds, so normalise before reading.
+        row = dict(record)
+        name = str(row.get("Metabolite", "")).strip()
+        if not name or name in out:
+            continue
+        found: tuple = ()
+        for key, source in (
+            ("inchi_key", ""),
+            ("pubchem_id", "pubchem"),
+            ("hmdb_id", "hmdb"),
+            ("lipidmaps_id", "lipidmaps"),
+        ):
+            value = str(row.get(key, "") or "").strip()
+            if value:
+                found = chebi_for(value, source, timeout=timeout)
+            if found:
+                break
+        out[name] = found
+    return out
+
+
+def read_mwtab(source, *, timeout: float = 30.0) -> MafTable:
+    """A Metabolomics Workbench study as ChEBI-keyed quantities.
+
+    ``source`` is a local mwTab file or a study accession, which is
+    fetched from the repository's REST interface.
+
+    mwTab names compounds and carries PubChem, InChIKey and KEGG
+    identifiers but not ChEBI, so the join is made through UniChem's
+    structural cross-references rather than by matching names. A compound
+    that resolves to nothing is counted, and KEGG-only compounds are
+    expected among them because UniChem does not index KEGG.
+    """
+    import mwtab
+
+    path = Path(str(source))
+    if not path.exists():
+        path = _fetch_mwtab(str(source), timeout=timeout)
+    parsed = next(mwtab.read_files(str(path)))
+    name = next((k for k in MWTAB_BLOCKS if k in parsed), None)
+    if name is None:
+        raise ValueError(f"{source} carries no metabolite data block")
+    block = dict(parsed[name])
+    data = [dict(r) for r in block.get("Data") or []]
+    if not data:
+        raise ValueError(f"{source} declares no measured values")
+
+    resolved = mwtab_chebi(block.get("Metabolites") or [], timeout=timeout)
+    if not resolved:
+        raise ValueError(f"{source} declares no metabolite identifiers")
+    frame = pd.DataFrame(data).set_index("Metabolite")
+    values = frame.apply(pd.to_numeric, errors="coerce")
+    values = values.where(values > 0)
+
+    rows, index, names = [], [], {}
+    for name, row in values.iterrows():
+        for key in resolved.get(str(name).strip(), ()):
+            rows.append(row)
+            index.append(key)
+            names.setdefault(key, str(name).strip())
+    quantities = (
+        pd.DataFrame(rows, index=index)
+        if rows
+        else pd.DataFrame(columns=values.columns)
+    )
+
+    table = MafTable(
+        quantities=quantities,
+        names=names,
+        features=len(values),
+        keyed=sum(1 for v in resolved.values() if v),
+        unannotated=sum(1 for v in resolved.values() if not v),
+        ambiguous=0,
+        other_namespace={},
+    )
+    log.info("%s: %s", path.name, table.summary())
+    return table
+
+
+def _fetch_mwtab(accession: str, *, timeout: float = 30.0) -> Path:
+    import urllib.request
+
+    from hallsim.io import record_checksum
+
+    dest = Path.home() / ".cache" / "hallsim" / "workbench"
+    dest.mkdir(parents=True, exist_ok=True)
+    target = dest / f"{accession}.mwtab.txt"
+    if target.exists() and target.stat().st_size:
+        return target
+    url = f"{WORKBENCH_REST}/{accession}/mwtab/txt"
+    with urllib.request.urlopen(url, timeout=timeout) as fh:
+        blob = fh.read()
+    if not any(k.encode() in blob for k in MWTAB_BLOCKS):
+        raise LookupError(f"{accession}: the repository returned no mwTab")
+    target.write_bytes(blob)
+    record_checksum(target)
+    return target
+
+
+def mwtab_design(source, *, time_factor: str | None = None):
+    """The :class:`Design` a Metabolomics Workbench study declares, and its
+    sample groups, from the factor dictionary it carries per sample."""
+    import mwtab
+
+    path = Path(str(source))
+    if not path.exists():
+        path = _fetch_mwtab(str(source))
+    parsed = next(mwtab.read_files(str(path)))
+    records = parsed.get("SUBJECT_SAMPLE_FACTORS") or []
+    if not records:
+        raise ValueError(f"{source} declares no SUBJECT_SAMPLE_FACTORS")
+    rows = [dict(r) for r in records]
+    samples = [str(r.get("Sample ID", "")).strip() for r in rows]
+    factors = [dict(r.get("Factors") or {}) for r in rows]
+    return factor_design(samples, factors, time_factor=time_factor)

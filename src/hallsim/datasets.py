@@ -112,6 +112,10 @@ class Design:
     per_arm: tuple[tuple[str, tuple[float, ...]], ...] = ()
     time_unit: str = ""
     n_titles: int = 0
+    #: Distinct subjects behind the samples, where the deposit names them.
+    #: Two samples from one animal are one observation, so replication is
+    #: counted here and not in the sample count. Zero means unstated.
+    n_subjects: int = 0
 
     @property
     def timepoints(self) -> tuple[float, ...]:
@@ -388,6 +392,9 @@ class DatasetCandidate:
     #: than a series (Zenodo, a paper's supplement); which of them is a
     #: table decides the loader.
     files: tuple[str, ...] = ()
+    #: The accession this deposit mirrors, where it declares one. OSDR
+    #: re-hosts studies from GEO and ArrayExpress and names the original.
+    mirrors: str = ""
     measured: Measured = field(default_factory=Measured)
     #: The paper the deposit belongs to, when the repository says.
     pubmed: str = ""
@@ -842,6 +849,133 @@ def _ebi_source(name: str):
         f"({dom.modality})."
     )
     return search
+
+
+# ── NASA Open Science Data Repository (ex-GeneLab) ───────────────────
+
+OSDR_SEARCH = "https://osdr.nasa.gov/osdr/data/search"
+OSDR_FILES = "https://osdr.nasa.gov/osdr/data/osd/files"
+OSDR_DOWNLOAD = "https://osdr.nasa.gov/geode-py/ws/studies/{}/download"
+#: OSDR's assay measurement types by the quantity they measure. A study
+#: running several assays joins their types with a run of spaces.
+OSDR_MODALITY = (
+    ("transcription profiling", "expression", True),
+    ("protein expression profiling", "proteomics", True),
+    ("metabolite profiling", "metabolomics", False),
+    ("dna methylation profiling", "methylation", True),
+    ("genome sequencing", "genotype", True),
+    ("amplicon sequencing", "other", False),
+    ("metagenomic sequencing", "other", False),
+)
+#: GeneLab's standardised bulk RNA-seq pipeline writes the same file names
+#: for every study it processes, so its output has a fixed layout — unlike
+#: an author's upload.
+#: GeneLab's standardised bulk RNA-seq pipeline writes the same file names
+#: for every study it processes. Whether a study ships normalised counts
+#: varies by processing vintage — the brain studies ship only unnormalised —
+#: so readability is decided by :data:`GL_COUNTS` and the normalisation the
+#: reader applies by :data:`GL_NORMALIZED`.
+GL_COUNTS = re.compile(r"_Counts(_[A-Za-z]+)?_GLbulkRNAseq\.csv$", re.I)
+#: "Unnormalized" contains "normalized", so the boundary is load-bearing.
+GL_NORMALIZED = re.compile(r"(?<![A-Za-z])Normalized_Counts.*\.csv$", re.I)
+_OSDR_SPLIT = re.compile(r"\s{2,}")
+
+
+def osdr_measured(measurement: str) -> Measured:
+    """What an OSDR study measured, from its assay measurement type. A
+    multi-assay study is named by the first type a reader could use."""
+    parts = [p.strip().lower() for p in _OSDR_SPLIT.split(measurement or "")]
+    for prefix, modality, complete in OSDR_MODALITY:
+        if any(p.startswith(prefix) for p in parts):
+            return Measured(modality, complete)
+    return Measured("unknown", False)
+
+
+def _osdr_candidate(entry: dict) -> DatasetCandidate:
+    src = entry.get("_source", entry)
+    accession = str(src.get("Accession") or "").strip()
+    factors = tuple(
+        f.strip()
+        for f in _OSDR_SPLIT.split(str(src.get("Study Factor Name") or ""))
+        if f.strip()
+    )
+    # Ground against flight is the contrast the programme cares about and
+    # the repository states it per study, so it is a factor like any other.
+    project = str(src.get("Project Type") or "").strip()
+    if project:
+        factors = factors + (f"Project:{project}",)
+    return DatasetCandidate(
+        source="osdr",
+        accession=accession,
+        title=str(src.get("Study Title") or ""),
+        kind=str(src.get("Study Assay Technology Type") or ""),
+        organism=str(src.get("organism") or ""),
+        n_samples=0,
+        platform=str(src.get("Study Assay Technology Platform") or ""),
+        url=f"https://osdr.nasa.gov/bio/repo/data/studies/{accession}",
+        summary=str(src.get("Study Description") or ""),
+        factors=factors,
+        mirrors=str(src.get("Data Source Accession") or "").strip(),
+        measured=osdr_measured(str(src.get("Study Assay Measurement Type"))),
+    )
+
+
+def osdr_page(
+    term: str = "",
+    *,
+    start: int = 0,
+    size: int = 100,
+    timeout: float = 90.0,
+) -> tuple[int, list[DatasetCandidate]]:
+    """``(hit count, candidates)`` for one page of OSDR's study index."""
+    payload = _get_json(
+        OSDR_SEARCH,
+        {
+            "term": term,
+            "from": start,
+            "size": size,
+            "type": "cgene",
+        },
+        timeout,
+    )
+    hits = payload.get("hits", {})
+    return int(hits.get("total") or 0), [
+        _osdr_candidate(h) for h in hits.get("hits", [])
+    ]
+
+
+def iter_osdr(*, page: int = 100, timeout: float = 90.0):
+    """Every OSDR study, page by page. The corpus is small enough to
+    enumerate whole, so no query narrows it."""
+    start, total = 0, None
+    while total is None or start < total:
+        total, cands = osdr_page(start=start, size=page, timeout=timeout)
+        if not cands:
+            break
+        for cand in cands:
+            yield cand
+        start += len(cands)
+
+
+def osdr_files(accession: str, *, timeout: float = 90.0) -> tuple[str, ...]:
+    """Every file name an OSDR study holds."""
+    payload = _get_json(
+        f"{OSDR_FILES}/{accession.replace('OSD-', '')}", {}, timeout
+    )
+    out: list[str] = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("file_name"), str):
+                out.append(node["file_name"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return tuple(dict.fromkeys(out))
 
 
 def search_bioimages(

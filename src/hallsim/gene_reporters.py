@@ -972,7 +972,11 @@ def counts_to_log_cpm(counts: pd.DataFrame) -> pd.DataFrame:
 
 
 def read_counts_table(
-    path_or_frame, *, taxid: int | None = None, timeout: float = 60.0
+    path_or_frame,
+    *,
+    taxid: int | None = None,
+    timeout: float = 60.0,
+    normalized: bool = False,
 ) -> pd.DataFrame:
     """A gene-by-sample counts table as a log2-CPM frame indexed by gene
     symbol, whatever the table indexes its rows by.
@@ -984,6 +988,10 @@ def read_counts_table(
     being non-numeric. Counts for rows that resolve to the same symbol are
     summed, which is the additive thing to do before normalising, and only
     then converted.
+
+    ``normalized=True`` for a table a pipeline already library-size
+    corrected, such as GeneLab's ``*_Normalized_Counts_GLbulkRNAseq.csv``:
+    the log is taken without dividing by depth again.
     """
     if isinstance(path_or_frame, pd.DataFrame):
         frame = path_or_frame.copy()
@@ -1022,7 +1030,13 @@ def read_counts_table(
         raise ValueError(f"no {kind} identifier resolved to a gene symbol")
     counts = counts.loc[list(genes)]
     counts.index = [genes[i] for i in counts.index]
-    return counts_to_log_cpm(counts.groupby(level=0).sum())
+    summed = counts.groupby(level=0).sum()
+    if normalized:
+        # A pipeline that already corrected for library size — GeneLab's
+        # bulk RNA-seq output is DESeq2 median-of-ratios — must not be
+        # divided by depth a second time; only the log remains.
+        return np.log2(summed + 1.0)
+    return counts_to_log_cpm(summed)
 
 
 def fetch_geo_counts(
