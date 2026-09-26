@@ -23,6 +23,10 @@ _LEVELS = [logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG]
 )
 def simulate(verbose, quiet):
     """HallSim simulation commands."""
+    _set_logging(verbose, quiet)
+
+
+def _set_logging(verbose: int, quiet: bool) -> None:
     level = _LEVELS[0 if quiet else min(1 + verbose, len(_LEVELS) - 1)]
     # force=True so the level a user asked for wins over any basicConfig a
     # demo module ran at import; without a handler every log.warning arrives
@@ -35,6 +39,82 @@ def simulate(verbose, quiet):
         force=True,
     )
     logging.getLogger("hallsim").setLevel(level)
+
+
+@click.group()
+@click.version_option(package_name="hallsim")
+@click.option(
+    "-v",
+    "--verbose",
+    count=True,
+    help="Show what the framework decided (-v) and how (-vv).",
+)
+@click.option(
+    "-q", "--quiet", is_flag=True, help="Errors only; suppress warnings."
+)
+def supply(verbose, quiet):
+    """Where models and data come from: the repositories, the literature
+    and the census. Nothing here runs a simulation."""
+    _set_logging(verbose, quiet)
+
+
+@supply.command("mechanisms")
+@click.argument("symbols", nargs=-1)
+@click.option(
+    "--model",
+    default=None,
+    help="A BioModels id or SBML path: use its annotated proteins as the "
+    "symbols, and list what the literature says among them and one step "
+    "outside them.",
+)
+@click.option(
+    "--kind",
+    default=None,
+    help="One statement type: Phosphorylation, Dephosphorylation, "
+    "Activation, Inhibition, IncreaseAmount, Complex, ...",
+)
+@click.option(
+    "--min-evidence",
+    type=int,
+    default=2,
+    help="Drop mechanisms attested by fewer sentences than this.",
+)
+@click.option("--limit", type=int, default=25, help="Rows per section.")
+def mechanisms_cmd(symbols, model, kind, min_evidence, limit):
+    """Literature-mined mechanisms from INDRA's database, each with its
+    evidence count, a sentence and the paper it came from.
+
+    Two SYMBOLS list what the first does to the second. More symbols, or
+    --model, list the neighbourhood: mechanisms among those species, which
+    the model may already carry, then mechanisms reaching one step outside
+    them, which are the candidate pieces to compose. Kinetics are never
+    in the answer; a piece's rates stay unknown until calibrated.
+    """
+    from hallsim.mechanisms import around, mechanisms, model_symbols
+
+    symbols = list(symbols)
+    if model:
+        from hallsim.sbml_import import process_from_sbml
+
+        symbols += model_symbols(process_from_sbml(model, name="model"))
+        click.echo(f"{len(symbols)} annotated proteins: {' '.join(symbols)}")
+    if not symbols:
+        raise click.UsageError("give SYMBOLS or --model")
+    if len(symbols) == 2 and not model:
+        found = mechanisms(subject=symbols[0], object=symbols[1], kind=kind)
+        found = [m for m in found if m.evidence >= min_evidence]
+        click.echo(f"{len(found)} mechanisms, {symbols[0]} on {symbols[1]}")
+        for m in found[:limit]:
+            click.echo(f"  {m}")
+        return
+    hood = around(symbols, kind=kind, min_evidence=min_evidence)
+    for title, rows in (
+        ("among the model's species", hood.among),
+        ("one step outside, candidate pieces", hood.outside),
+    ):
+        click.echo(f"\n{len(rows)} mechanisms {title}")
+        for m in rows[:limit]:
+            click.echo(f"  {m}")
 
 
 @simulate.group("demo")

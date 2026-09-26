@@ -85,3 +85,35 @@ class RunningIntegral(Process):
         if self.tau is not None:
             val = val - state["integral"] / self.tau
         return {"integral": val}
+
+
+def transcript_pool(
+    composite,
+    observable: str,
+    *,
+    tau: float,
+    name: str = "mrna",
+    timescale: float | None = None,
+):
+    """``composite`` with a transcript pool driven by ``observable``: the
+    leaky integral ``dm/dt = a − m/τ`` on ``<name>/integral``, which is the
+    mRNA of a gene transcribed in proportion to an activity ``a`` and
+    decaying with time constant ``τ``, the transcription gain cancelling in
+    a log2 fold change. A transcript trails and smooths its driver, so a
+    readout of a kinase or factor activity against measured transcripts
+    reads this path rather than the activity itself. ``τ`` is a parameter
+    to calibrate, held out across deposits.
+    """
+    from hallsim.composite import Composite
+
+    pool = RunningIntegral(power=1.0, tau=tau, timescale=timescale)
+    return Composite(
+        processes={**composite.processes, name: pool},
+        topology={
+            **composite.topology,
+            name: {"source": observable, "integral": f"{name}/integral"},
+        },
+        initial=composite.initial,
+        validate=False,
+        semantic_validation={"check_semantics": False},
+    )

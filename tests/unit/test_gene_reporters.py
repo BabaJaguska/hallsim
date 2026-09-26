@@ -782,3 +782,87 @@ class TestSeriesMatrixScale:
         )
         with pytest.raises(ValueError, match="linear signal"):
             ds.delta("trt", "ctrl")
+
+    def test_the_stated_method_is_checked_against_the_range(self, caplog):
+        import logging
+
+        import pandas as pd
+
+        from hallsim import gene_reporters as gr
+
+        assert gr.stated_scale("RMA, log2 transformed") == "log2"
+        assert gr.stated_scale("MAS 5.0 signal, GCOS") == "linear"
+        assert gr.stated_scale("normalized") == ""
+        # Values within the log2 range but a header claiming linear signal:
+        # the range decides, the disagreement is logged.
+        small = pd.DataFrame({"GSM1": [11.5, 2.0]}, index=["P1", "P2"])
+        with caplog.at_level(logging.WARNING, logger=gr.log.name):
+            gr.as_log2(small, source="GSE9", note="MAS 5.0")
+        assert "GSE9" in caplog.text and "disagree" in caplog.text
+
+
+class TestConcordanceScope:
+    """A contrast the model is silent on is outside its scope, not a row of
+    mismatches; an undefined rank is NaN, not 0; and a time course is
+    compared by rank over time, where a readout that trails its driver
+    shows as a negative rank without a lag and a positive one with it."""
+
+    def test_no_predicted_change_is_out_of_scope(self):
+        import math
+
+        import pandas as pd
+
+        from hallsim.gene_reporters import Readout, compute_concordance
+
+        reps = [Readout(path="erk", key=g, sign=+1) for g in ("FOS", "EGR1")]
+        out = compute_concordance(
+            delta_observables={"erk": 0.0},
+            delta_gene_expression=pd.Series({"FOS": 0.4, "EGR1": -0.2}),
+            reporters=reps,
+        )
+        assert out.predicted_change is False and out.n_compared == 2
+        assert math.isnan(out.sign_agreement) and math.isnan(out.spearman_r)
+        scored = compute_concordance(
+            delta_observables={"erk": 0.3},
+            delta_gene_expression=pd.Series({"FOS": 0.4, "EGR1": -0.2}),
+            reporters=reps,
+        )
+        assert scored.predicted_change is True
+        # One observable over several genes is a constant input: undefined.
+        assert math.isnan(scored.spearman_r)
+
+    def test_time_course_rank_sees_the_lag(self):
+        import numpy as np
+        import pandas as pd
+
+        from hallsim.gene_reporters import (
+            peak_concordance,
+            time_course_concordance,
+        )
+
+        t = np.array([5.0, 10.0, 15.0, 30.0, 45.0, 60.0, 90.0])
+        early = pd.Series(np.exp(-(t - 5.0) / 20.0), index=t)
+        late = pd.DataFrame(
+            {tt: [np.exp(-((tt - 45.0) ** 2) / 800.0)] for tt in t},
+            index=["FOS"],
+        )
+        now = time_course_concordance(early, late)
+        later = time_course_concordance(early, late, lag=40.0)
+        assert now.n_times == 7 and now.per_gene["FOS"] < 0
+        assert later.per_gene["FOS"] > now.per_gene["FOS"]
+        peaks_sim = pd.Series({"a": 0.2, "b": 0.6, "c": 1.0})
+        peaks_data = pd.Series({"c": 3.0, "a": 1.0, "b": 2.0, "d": 9.0})
+        assert peak_concordance(peaks_sim, peaks_data) == 1.0
+
+    def test_a_platform_that_maps_no_probe_raises(self, tmp_path):
+        from hallsim import gene_reporters as gr
+
+        matrix = tmp_path / "m.txt"
+        matrix.write_text(
+            '!Series_platform_id\t"GPL1"\n!series_matrix_table_begin\n'
+            '"ID_REF"\t"GSM1"\nP1\t3.0\n!series_matrix_table_end\n'
+        )
+        platform = tmp_path / "p.txt"
+        platform.write_text("ID\tgene_assignment\nQ1\tNM_1 // GENE1 // g\n")
+        with pytest.raises(ValueError, match="none of 1 probes"):
+            gr.load_gene_expression(matrix, platform)

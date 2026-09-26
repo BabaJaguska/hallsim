@@ -686,15 +686,48 @@ def summarize_reporters(
 LOG2_CEILING = 64.0
 
 
+_STATED_LOG2 = re.compile(
+    r"\blog[\s-]?2\b|\brma\b|\bgcrma\b|\bscan\b|\bvsn\b", re.I
+)
+_STATED_LINEAR = re.compile(
+    r"\bmas\s?5(?:\.0)?\b|\bgcos\b|\bplier\b|\blinear\b", re.I
+)
+
+
+def stated_scale(note: str) -> str:
+    """What a deposit's free-text processing line claims about its scale:
+    ``"log2"``, ``"linear"``, or ``""`` when it names neither. Evidence to
+    log beside the value range, never the decision."""
+    if _STATED_LOG2.search(note or ""):
+        return "log2"
+    if _STATED_LINEAR.search(note or ""):
+        return "linear"
+    return ""
+
+
 def as_log2(
     table: pd.DataFrame, *, source: str = "", note: str = ""
 ) -> pd.DataFrame:
     """``table`` on a log2 scale, whatever scale it arrived on. A table whose
     largest value exceeds :data:`LOG2_CEILING` is linear signal and is
-    logged with a floor of 1; one within it is taken as already log2."""
+    logged with a floor of 1; one within it is taken as already log2. The
+    value range decides; ``note``, the deposit's own processing line, is
+    read for what it claims and a disagreement is logged."""
     values = table.apply(pd.to_numeric, errors="coerce")
     top = float(np.nanmax(values.values)) if values.size else 0.0
-    if top <= LOG2_CEILING:
+    found = "linear" if top > LOG2_CEILING else "log2"
+    claimed = stated_scale(note)
+    if claimed and claimed != found:
+        log.warning(
+            "%s: the processing line says %s (%s) but the values reach "
+            "%.0f, which is %s; the values decide and the two disagree",
+            source or "expression table",
+            claimed,
+            note[:80],
+            top,
+            found,
+        )
+    if found == "log2":
         return values
     log.warning(
         "%s: values reach %.0f, a linear signal (%s); taking log2 with a "
@@ -773,6 +806,12 @@ def load_gene_expression(
     probe_to_gene = probe_gene_map(plat, taxid=taxid)
 
     common = expr.index.intersection(probe_to_gene.keys())
+    if len(common) == 0:
+        raise ValueError(
+            f"{Path(series_matrix_path).name}: none of {len(expr)} probes "
+            "maps to a gene through the platform table's columns "
+            f"{list(plat.columns)[:8]}; its annotation was not read"
+        )
     expr = expr.loc[common].copy()
     expr["__gene__"] = [probe_to_gene[p] for p in expr.index]
     return expr.groupby("__gene__").mean(numeric_only=True)
@@ -1361,6 +1400,11 @@ class ConcordanceResult:
     #: Mean |Δ_data|: the error of predicting no change at all, the floor
     #: any model's ``mean_abs_error`` has to beat.
     null_abs_error: float = 0.0
+    #: False when the model predicts no change at all for this contrast —
+    #: a pathway silent without its ligand under an inhibitor alone — so
+    #: the contrast lies outside what the model can be scored on and the
+    #: scores are NaN rather than a row of mismatches.
+    predicted_change: bool = True
 
     def __str__(self) -> str:
         lines = [
@@ -1434,17 +1478,107 @@ def compute_concordance(
     n = len(rows)
     if n == 0:
         return ConcordanceResult(condition_name=condition_name)
-    from scipy.stats import spearmanr
-
     sims, datas = np.asarray(sims), np.asarray(datas)
+    if np.all(np.abs(sims) < NO_CHANGE):
+        return ConcordanceResult(
+            condition_name=condition_name,
+            rows=rows,
+            sign_agreement=float("nan"),
+            spearman_r=float("nan"),
+            n_compared=n,
+            mean_abs_error=float(np.mean(np.abs(datas))),
+            null_abs_error=float(np.mean(np.abs(datas))),
+            predicted_change=False,
+        )
     sa = float(np.mean([r.sign_match for r in rows]))
-    rho, _ = spearmanr(sims, datas)
     return ConcordanceResult(
         condition_name=condition_name,
         rows=rows,
         sign_agreement=sa,
-        spearman_r=float(rho) if np.isfinite(rho) else 0.0,
+        spearman_r=_spearman(sims, datas),
         n_compared=n,
         mean_abs_error=float(np.mean(np.abs(sims - datas))),
         null_abs_error=float(np.mean(np.abs(datas))),
     )
+
+
+#: Below this a simulated change is no change: the model is silent on the
+#: contrast rather than wrong about it.
+NO_CHANGE = 1e-12
+
+
+def _spearman(a, b) -> float:
+    """Spearman's ρ, NaN where it is undefined — a constant input or fewer
+    than three pairs — never a silent 0.0."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    keep = np.isfinite(a) & np.isfinite(b)
+    if keep.sum() < 3 or np.ptp(a[keep]) == 0 or np.ptp(b[keep]) == 0:
+        return float("nan")
+    from scipy.stats import spearmanr
+
+    return float(spearmanr(a[keep], b[keep])[0])
+
+
+@dataclass
+class TimeCourseConcordance:
+    """Rank agreement over a time course. ``per_gene`` is Spearman's ρ of
+    the simulated change against each gene's measured log2 fold change
+    across the shared timepoints, ``pooled`` the same over every gene × time
+    pair, ``n_times`` how many timepoints were shared."""
+
+    condition_name: str
+    per_gene: pd.Series
+    pooled: float
+    n_times: int
+
+    @property
+    def mean_per_gene(self) -> float:
+        return (
+            float(self.per_gene.mean()) if len(self.per_gene) else float("nan")
+        )
+
+
+def time_course_concordance(
+    delta_sim: pd.Series,
+    delta_data: pd.DataFrame,
+    *,
+    condition_name: str = "",
+    lag: float = 0.0,
+) -> TimeCourseConcordance:
+    """Compare a simulated observable's change over time against measured
+    log2 fold changes gene by gene, by rank over time.
+
+    ``delta_sim`` is indexed by time; ``delta_data`` is ``gene × time`` on
+    the measured timepoints, and the simulation is interpolated onto them.
+    ``lag`` reads the simulation that much earlier, for a readout that
+    trails its driver. Pointwise sign agreement cannot tell a model from
+    "up everywhere" on a ligand arm; the ranks over time can.
+    """
+    times = np.asarray(delta_data.columns, float)
+    st = np.asarray(delta_sim.index, float)
+    order = np.argsort(st)
+    sim = np.interp(
+        np.clip(times - lag, st.min(), st.max()),
+        st[order],
+        np.asarray(delta_sim, float)[order],
+    )
+    per_gene = pd.Series(
+        {g: _spearman(sim, row.values) for g, row in delta_data.iterrows()},
+        dtype=float,
+    )
+    pooled = _spearman(
+        np.tile(sim, len(delta_data)), delta_data.values.ravel()
+    )
+    return TimeCourseConcordance(condition_name, per_gene, pooled, len(times))
+
+
+def peak_concordance(sim_peaks: pd.Series, data_peaks: pd.Series) -> float:
+    """Spearman's ρ of peak simulated response against peak measured
+    response across arms, aligned on the arm index: the cross-arm test that
+    needs no lag and no fitted gain."""
+    both = pd.concat(
+        [sim_peaks.rename("sim"), data_peaks.rename("data")],
+        axis=1,
+        join="inner",
+    )
+    return _spearman(both["sim"], both["data"])

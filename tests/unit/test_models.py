@@ -475,3 +475,40 @@ def test_hallmark_intents_suggest_the_hand_placed_mappings():
     driven = [m for m in dns if DP14_MTOR_PHOS_RATE_NAME in m.param_name]
     assert driven and "driven through port" in driven[0].description
     assert suggested["Stem Cell Exhaustion"].mappings == []
+
+
+def test_a_transcript_pool_trails_its_driver():
+    """The leaky integral composed on an observable is an mRNA pool: it
+    rises while its driver is up, peaks after the driver does, and decays
+    with its own time constant."""
+    import jax.numpy as jnp
+
+    from hallsim.composite import Composite
+    from hallsim.models.running_integral import transcript_pool
+    from hallsim.process import Port, PortRole, Process
+    from hallsim.scheduler import Scheduler
+
+    class Decay(Process):
+        rate: float = 0.5
+
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def derivative(self, t, state):
+            return {"x": -self.rate * state["x"]}
+
+    base = Composite(
+        processes={"a": Decay()},
+        topology={"a": {"x": "cell/x"}},
+        initial={"cell/x": 1.0},
+        semantic_validation=False,
+    )
+    comp = transcript_pool(base, "cell/x", tau=2.0)
+    assert "mrna/integral" in comp.store_keys()
+    res = Scheduler().run(comp, t_span=(0.0, 12.0))
+    keys = list(res.keys)
+    x = jnp.asarray(res.ys)[:, keys.index("cell/x")]
+    m = jnp.asarray(res.ys)[:, keys.index("mrna/integral")]
+    assert float(m[0]) == 0.0 and float(m.max()) > 0.0
+    assert int(jnp.argmax(m)) > int(jnp.argmax(x))
+    assert float(m[-1]) < 0.2 * float(m.max())

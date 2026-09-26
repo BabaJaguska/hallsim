@@ -118,6 +118,7 @@ Documentation = "https://github.com/BabaJaguska/HallSim#readme"
 
 [project.scripts]
 simulate = "hallsim.cli:simulate"
+supply = "hallsim.cli:supply"
 
 [tool.black]
 line-length = 79
