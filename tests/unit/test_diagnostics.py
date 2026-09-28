@@ -14,7 +14,7 @@ from hallsim.diagnostics import (
     coupling_source_verdict,
     recommend_coupling_source,
     rest_timescale,
-    screen_process,
+    screen,
     screen_sensitivity,
 )
 from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
@@ -77,14 +77,16 @@ def test_check_tunability_opt_out_skips_gradient():
         name="gz06",
         parameters={GZ06_PSI_NAME: GZ06_PSI_PUBLISHED},
     )
-    report = screen_process(gz, t_end=100.0, check_tunability=False)
+    (report,) = screen(
+        single_process_composite(gz), t_end=100.0, check_tunability=False
+    )
     assert report.tunes is None
 
 
 def test_bad_scheduler_kwarg_raises_instead_of_flagging_the_model():
     """A caller error must not come back as a verdict about the model.
 
-    ``screen_process`` takes ``**sched_kwargs``; passing an unknown one
+    ``screen`` takes ``**sched_kwargs``; passing an unknown one
     (e.g. ``scheduler_kwargs=``) used to surface as EXPLODING +
     FRAMEWORK-SUSPECT, indistinguishable from a model that won't integrate.
     """
@@ -94,8 +96,10 @@ def test_bad_scheduler_kwarg_raises_instead_of_flagging_the_model():
         parameters={GZ06_PSI_NAME: GZ06_PSI_PUBLISHED},
     )
     with pytest.raises(TypeError, match="scheduler_kwargs"):
-        screen_process(
-            gz, t_end=10.0, scheduler_kwargs={"auto_stiffness": False}
+        screen(
+            single_process_composite(gz),
+            t_end=10.0,
+            scheduler_kwargs={"auto_stiffness": False},
         )
 
 
@@ -185,13 +189,19 @@ class _Kicked(Process):
 
 
 def test_rest_state_is_not_flagged():
-    r = screen_process(_AtRest(), t_end=5.0, check_tunability=False)
+    (r,) = screen(
+        single_process_composite(_AtRest()), t_end=5.0, check_tunability=False
+    )
     assert not r.not_at_rest
     assert r.rest_tau == float("inf")
 
 
 def test_far_from_rest_is_flagged_but_still_ok():
-    r = screen_process(_FarFromRest(), t_end=5.0, check_tunability=False)
+    (r,) = screen(
+        single_process_composite(_FarFromRest()),
+        t_end=5.0,
+        check_tunability=False,
+    )
     assert r.not_at_rest
     assert r.rest_state.endswith("x")
     assert r.rest_tau == pytest.approx(100 / (1e5 * 99), rel=1e-6)
@@ -202,7 +212,11 @@ def test_far_from_rest_is_flagged_but_still_ok():
 
 
 def test_live_stimulus_is_named_rather_than_called_disequilibrium():
-    r = screen_process(_Kicked(), t_end=5.0, check_tunability=False)
+    (r,) = screen(
+        single_process_composite(_Kicked()),
+        t_end=5.0,
+        check_tunability=False,
+    )
     assert r.not_at_rest
     assert "time-dependent term is live at t=0" in r.detail
 
@@ -231,7 +245,7 @@ def test_driven_edge_is_undriven_not_vanishing():
     screen having no driver, not the component having no dynamics — it must
     not fail the constituents-first assertion agents are told to write."""
     edge = HillEdge(hi=1.0, K=(1.0,), n=(2.0,))
-    report = screen_process(edge, t_end=100.0)
+    (report,) = screen(single_process_composite(edge), t_end=100.0)
     assert report.undriven and not report.vanishing, report
     assert report.ok
     assert report.max_abs > 0.0  # flags measured on the driven run
@@ -240,7 +254,11 @@ def test_driven_edge_is_undriven_not_vanishing():
 
 def test_probe_does_not_rescue_a_genuinely_vanishing_process():
     """The probe reclassifies only when the drive actually wakes the model."""
-    report = screen_process(_DeadDecay(), t_end=10.0, check_tunability=False)
+    (report,) = screen(
+        single_process_composite(_DeadDecay()),
+        t_end=10.0,
+        check_tunability=False,
+    )
     assert report.vanishing and not report.undriven, report
     assert not report.ok
 
@@ -249,8 +267,8 @@ def test_solo_screen_does_not_warn_about_its_own_unfed_inputs(caplog):
     """A lone process has unfed INPUTs by construction; warning about them on
     every screen is noise that trains agents to ignore validation."""
     with caplog.at_level(logging.WARNING):
-        screen_process(
-            HillEdge(hi=1.0, K=(1.0,), n=(2.0,)),
+        screen(
+            single_process_composite(HillEdge(hi=1.0, K=(1.0,), n=(2.0,))),
             t_end=100.0,
             check_tunability=False,
         )
@@ -265,7 +283,7 @@ def test_gz06_flagged_tolerance_sensitive():
         name="gz06",
         parameters={GZ06_PSI_NAME: GZ06_PSI_PUBLISHED},
     )
-    report = screen_process(gz, t_end=100.0)  # native hours
+    (report,) = screen(single_process_composite(gz), t_end=100.0)  # hours
     assert report.tolerance_sensitive, report
     assert report.tol_rel_diff > 1.0  # loose vs tight wildly disagree
     assert not report.ok
@@ -408,7 +426,6 @@ def test_agreement_treats_sub_floor_noise_as_a_level():
 def test_screen_takes_an_absolute_tolerance():
     """A caller's ``atol`` reaches every run of the screen, including the
     tunability check, instead of colliding with the default."""
-    from hallsim.diagnostics import screen_process
     from hallsim.process import Port, PortRole, Process
 
     class MolarDecay(Process):
@@ -420,7 +437,9 @@ def test_screen_takes_an_absolute_tolerance():
         def derivative(self, t, state):
             return {"x": -self.rate * state["x"]}
 
-    report = screen_process(MolarDecay(), 5.0, atol=1e-18, n_save=50)
+    (report,) = screen(
+        single_process_composite(MolarDecay()), 5.0, atol=1e-18, n_save=50
+    )
     assert report.ok, report.detail
     assert report.tunes is not False
 
@@ -445,12 +464,12 @@ def test_agreed_growth_is_growth_not_divergence(tmp_path):
     """``dX/dt = X`` grows e^10 over ten units, past the exploding threshold
     and still rising; the independent integrator reaches the same peak, so
     the report says growing, not exploding, and blames no framework."""
-    from hallsim.diagnostics import screen_process
     from hallsim.sbml_import import process_from_sbml
 
     path = tmp_path / "grow.xml"
     path.write_text(GROWTH_SBML)
-    report = screen_process(process_from_sbml(str(path), name="g"), 10.0)
+    proc = process_from_sbml(str(path), name="g")
+    (report,) = screen(single_process_composite(proc), 10.0)
     assert report.growing and not report.exploding
     assert not report.framework_suspect and not report.blocking
     assert any("growth" in a for a in report.advisories)
@@ -483,12 +502,12 @@ def test_an_undefined_assigned_quantity_is_named_not_called_divergence(
     """``frac = A/(A+B)`` is 0/0 at t = 0 and defined once A is produced;
     the integrated states are finite throughout, so the screen reports the
     undefined quantity by name and does not call the model exploding."""
-    from hallsim.diagnostics import screen_process
     from hallsim.sbml_import import process_from_sbml
 
     path = tmp_path / "frac.xml"
     path.write_text(UNDEFINED_FRACTION_SBML)
-    report = screen_process(process_from_sbml(str(path), name="f"), 5.0)
+    proc = process_from_sbml(str(path), name="f")
+    (report,) = screen(single_process_composite(proc), 5.0)
     assert not report.exploding and not report.framework_suspect
     assert report.undefined_assigned == ("f/frac",)
     assert any("undefined" in a for a in report.advisories)
@@ -519,5 +538,115 @@ def test_field_level_tunability_catches_a_non_finite_parameter_derivative():
     class Fine(Root):
         k: float = 0.5
 
-    assert _tunes(Root(), 1.0) == (False, False)
-    assert _tunes(Fine(), 1.0) == (True, False)
+    assert _tunes(single_process_composite(Root()), 1.0) == (False, False)
+    assert _tunes(single_process_composite(Fine()), 1.0) == (True, False)
+
+
+def test_a_process_with_no_integrated_state_screens_clean():
+    """A forcing source assigns from its inputs and integrates nothing;
+    the screen says so instead of judging an empty state slice, so a
+    composite with a dose drive can be screened member by member."""
+    from hallsim.models.forcing import PulseSource
+
+    (report,) = screen(single_process_composite(PulseSource()), 10.0)
+    assert report.ok and not report.vanishing
+    assert "no integrated state" in report.detail
+
+
+def test_states_that_never_leave_zero_are_named():
+    """A state stuck at zero over the whole screen strands the parameters
+    reachable only through it; the report names it."""
+    from hallsim.process import Port, PortRole, Process
+
+    class Stranded(Process):
+        rate: float = 0.5
+
+        def ports_schema(self):
+            return {
+                "x": Port(role=PortRole.EVOLVED, default=1.0),
+                "y": Port(role=PortRole.EVOLVED, default=0.0),
+            }
+
+        def derivative(self, t, state):
+            return {"x": -self.rate * state["x"], "y": 0.0 * state["y"]}
+
+    (report,) = screen(single_process_composite(Stranded()), 10.0)
+    assert any(k.endswith("/y") for k in report.constant_zero), report
+    assert not any(k.endswith("/x") for k in report.constant_zero)
+    assert "never leaves zero" in report.detail
+
+
+class _Decay(Process):
+    rate: float = 0.5
+
+    def ports_schema(self):
+        return {"x": Port(role=PortRole.EVOLVED, default=4.0)}
+
+    def derivative(self, t, state):
+        return {"x": -self.rate * state["x"]}
+
+
+class _Driven(Process):
+    """Moves only when its INPUT is fed."""
+
+    def ports_schema(self):
+        return {
+            "x": Port(role=PortRole.EVOLVED, default=0.0),
+            "u": Port(role=PortRole.INPUT, default=0.0),
+        }
+
+    def derivative(self, t, state):
+        return {"x": state["u"] - state["x"]}
+
+
+def test_a_member_is_screened_from_the_composites_start():
+    """The declared start is what runs, so it is what gets screened, and the
+    report says when that differs from the member's own port defaults."""
+    from hallsim.composite import Composite
+
+    comp = Composite(
+        processes={"d": _Decay()},
+        topology={"d": {"x": "c/x"}},
+        initial={"c/x": 100.0},
+        semantic_validation=False,
+    )
+    (moved,) = screen(comp, 5.0, check_tunability=False)
+    assert moved.max_abs == pytest.approx(100.0)
+    assert "composite's start" in moved.detail
+
+    (own,) = screen(
+        single_process_composite(_Decay(), "d"), 5.0, check_tunability=False
+    )
+    assert own.max_abs == pytest.approx(4.0)
+    assert "composite's start" not in own.detail
+
+
+def test_a_coupled_input_takes_the_composites_value_not_a_probe():
+    from hallsim.composite import Composite
+
+    comp = Composite(
+        processes={"d": _Decay(), "w": _Driven()},
+        topology={"d": {"x": "c/x"}, "w": {"x": "c/w", "u": "c/x"}},
+        initial={"c/x": 7.0},
+        semantic_validation=False,
+    )
+    (w,) = screen(comp, {"w": 5.0}, check_tunability=False)
+    assert w.name == "w"
+    assert w.max_abs == pytest.approx(7.0)
+    assert not w.undriven and not w.vanishing
+
+
+def test_one_window_screens_every_member_and_a_dict_only_the_named():
+    from hallsim.composite import Composite
+
+    comp = Composite(
+        processes={"d": _Decay(), "w": _Driven()},
+        topology={"d": {"x": "c/x"}, "w": {"x": "c/w", "u": "c/x"}},
+        semantic_validation=False,
+    )
+    every = screen(comp, 5.0, check_tunability=False)
+    assert [r.name for r in every] == ["d", "w"]
+    named = screen(comp, {"d": 5.0}, check_tunability=False)
+    assert [r.name for r in named] == ["d"]
+    with pytest.raises(ValueError, match="no continuous process named"):
+        screen(comp, {"nope": 1.0}, check_tunability=False)

@@ -10,6 +10,7 @@ import sympy
 
 from hallsim.process import Port, PortRole, Process
 from hallsim.sbml_events import SBMLEvent
+from hallsim.sbml_math import TIME
 from hallsim.store import build_initial_store
 
 
@@ -67,23 +68,22 @@ class TestAssignmentTargetDefaults:
         assert float(store["m/S1"]) == 1e-26, "the owner seeds the path"
 
 
-def test_a_composite_that_cannot_build_is_not_reported_as_exploding():
+def test_a_composite_that_cannot_build_fails_at_construction():
     """Dwivedi2014 was rejected as `EXPLODING max|y|=inf` for a
     construction error it never got past. A model that never ran did not blow
-    up, and `EXPLODING` sends the reader to solver tolerances."""
-    from hallsim.diagnostics import screen_process
+    up: the store is assembled when the composite is built, so the error is
+    the caller's, with its cause, before any screen can misread it."""
+    import pytest
+
+    from hallsim.composite import single_process_composite
 
     class _Unbuildable(_Owner):
         def ports_schema(self):
             # A non-numeric default: the store cannot be assembled from it.
             return {"S1": Port(role=PortRole.EVOLVED, default="not a number")}
 
-    r = screen_process(_Unbuildable(), t_end=1.0)
-    assert r.did_not_construct is True
-    assert r.exploding is False
-    assert r.ok is False
-    assert "did not build" in r.detail
-    assert "DID-NOT-CONSTRUCT" in str(r)
+    with pytest.raises(TypeError, match="not a number"):
+        single_process_composite(_Unbuildable())
 
 
 # ── event math through sympy, on the owner's clock ──────────────────
@@ -287,3 +287,118 @@ def test_a_pulse_on_an_event_set_species_takes_the_protocol_dose(tmp_path):
     assert processes[src].dose == 2.0
     assert topology["m"]["X"] == f"{src}/signal"
     assert processes["m"].protocol() == []
+
+
+# --- SBML event delays -----------------------------------------------------
+# COPASI writes <delay>0</delay> on every event it exports, so the presence of
+# a delay element is not evidence of a delay.
+#
+# These drive _delay_seconds through stub objects rather than libsbml Events.
+# libsbml segfaults the interpreter when an Event is assembled through its own
+# API outside a fully-populated document, which is a fault in the library, not
+# a reason to leave the branching untested. The real-deposit path is exercised
+# by importing BIOMD0000000632, which is a network test.
+
+
+class _Math:
+    def __init__(self, number):
+        self._number = number
+
+    def isNumber(self):
+        return self._number is not None
+
+
+class _Delay:
+    def __init__(self, math):
+        self._math = math
+
+    def isSetMath(self):
+        return self._math is not None
+
+    def getMath(self):
+        return self._math
+
+
+class _Event:
+    def __init__(self, delay):
+        self._delay = delay
+
+    def getDelay(self):
+        return self._delay
+
+
+def test_absent_delay_reads_as_zero(monkeypatch):
+    from hallsim import sbml_events
+
+    assert sbml_events._delay_seconds(_Event(None)) == 0.0
+    assert sbml_events._delay_seconds(_Event(_Delay(None))) == 0.0
+
+
+def test_constant_delay_reads_its_value(monkeypatch):
+    import libsbml
+
+    from hallsim import sbml_events
+
+    monkeypatch.setattr(libsbml, "formulaToL3String", lambda m: str(m._number))
+    # the COPASI-emitted form: a delay element whose math is a literal zero
+    assert sbml_events._delay_seconds(_Event(_Delay(_Math(0.0)))) == 0.0
+    assert sbml_events._delay_seconds(_Event(_Delay(_Math(5.0)))) == 5.0
+
+
+def test_nonconstant_delay_is_nan_so_it_is_rejected():
+    import math
+
+    from hallsim import sbml_events
+
+    # a state- or time-dependent delay is not a number; NaN compares unequal
+    # to zero, so the caller rejects it rather than silently dropping it
+    assert math.isnan(sbml_events._delay_seconds(_Event(_Delay(_Math(None)))))
+
+
+# --- Event trigger pathologies ---------------------------------------------
+# Both are properties of the trigger expressions alone, so triage decides them
+# without integrating anything. Both were originally found by a referee running
+# tolerance sweeps in COPASI on Stucki 2005 (BIOMD0000001059).
+
+
+class _Ev:
+    def __init__(self, name, trigger):
+        self._name = name
+        self._trigger = trigger
+
+
+_cascade, _c3 = sympy.symbols("cascade c3")
+
+
+def test_complementary_triggers_sharing_a_boundary_are_caught():
+    from hallsim.sbml_events import trigger_pathologies
+
+    # cascade <= 20 (and c3 >= 4.5)   vs   cascade > 20
+    a = _Ev("latch_on", sympy.And(_cascade <= 20.0, _c3 >= 4.5))
+    b = _Ev("latch_off", _cascade > 20.0)
+    found = trigger_pathologies([a, b])
+    assert any("round-off" in f and "hysteresis" in f for f in found), found
+
+
+def test_a_hysteresis_band_is_not_flagged():
+    from hallsim.sbml_events import trigger_pathologies
+
+    # arm at 20, disarm at 18 — no value satisfies both, so no chatter
+    a = _Ev("arm", _cascade > 20.0)
+    b = _Ev("disarm", _cascade < 18.0)
+    assert trigger_pathologies([a, b]) == []
+
+
+def test_equality_against_time_is_caught():
+    from hallsim.sbml_events import trigger_pathologies
+
+    ev = _Ev("release", sympy.Eq(TIME, 2000.0))
+    found = trigger_pathologies([ev])
+    assert any("equality against time" in f for f in found), found
+
+
+def test_a_time_threshold_crossing_is_not_flagged():
+    from hallsim.sbml_events import trigger_pathologies
+
+    ev = _Ev("release", sympy.Ge(TIME, 2000.0))
+    assert trigger_pathologies([ev]) == []

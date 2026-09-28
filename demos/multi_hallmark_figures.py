@@ -406,7 +406,6 @@ def fig_trajectories(args):
             comp,
             t_span=(0.0, 50.0),
             macro_dt=5.0,
-            y0=comp.initial_state_vec(),
             save_dt=1.0,
         )
 
@@ -471,7 +470,6 @@ def fig_reporter_levels(args):
             comp,
             t_span=(0.0, t_end),
             macro_dt=macro_dt,
-            y0=comp.initial_state_vec(),
             save_dt=macro_dt,
         )
         trajs = jnp.stack([res.ys[..., i] for i in problem._reporter_indices])
@@ -850,10 +848,9 @@ def _population_run(problem, params, cond_name, n_cells, seed):
     y0 = comp.initial_state_vec()
     span = problem.t_end - problem.t_start
     return Scheduler(**problem.scheduler_kwargs).run(
-        comp,
+        comp.with_initial(jnp.tile(y0[None], (n_cells, 1))),
         t_span=(problem.t_start, problem.t_end),
         macro_dt=problem.macro_dt,
-        y0=jnp.tile(y0[None], (n_cells, 1)),
         save_dt=max(1e-6, span / max(1, problem.n_save - 1)),
         seed=seed,
     )

@@ -164,9 +164,10 @@ def _perturbed(composite, key, spread: float):
 
     Multiplicative, so signs and zeros survive — a rate constant moves by up
     to ``10**±spread`` but stays a rate constant. Static leaves (names, index
-    maps, port defaults) are structure and are left alone.
+    maps, port defaults) are structure and the declared start is where the
+    search begins, so both are left alone.
     """
-    params, static = eqx.partition(composite, eqx.is_inexact_array)
+    params, static = eqx.partition(composite.processes, eqx.is_inexact_array)
     leaves, treedef = jtu.tree_flatten(params)
     if not leaves:
         return composite
@@ -174,7 +175,8 @@ def _perturbed(composite, key, spread: float):
         key, (len(leaves),), minval=-spread, maxval=spread
     )
     scaled = [leaf * factors[i] for i, leaf in enumerate(leaves)]
-    return eqx.combine(jtu.tree_unflatten(treedef, scaled), static)
+    processes = eqx.combine(jtu.tree_unflatten(treedef, scaled), static)
+    return eqx.tree_at(lambda c: c.processes, composite, processes)
 
 
 def infer_conservation_laws(

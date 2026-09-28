@@ -927,3 +927,31 @@ class TestAffineUnitsAreRejected:
 
         with pytest.raises(ValueError, match="incompatible"):
             conversion_factor("uM", "second")
+
+
+def test_an_edge_that_reads_the_path_it_drives_is_flagged():
+    """A flux on a path driven by that same path is feedback by
+    construction; the graph analyzer names it before a run does."""
+    from hallsim.process import Port, PortRole, Process
+    from hallsim.validation import GraphAnalyzer
+
+    class SelfFlux(Process):
+        def ports_schema(self):
+            return {
+                "source": Port(role=PortRole.INPUT, default=0.0),
+                "target": Port(role=PortRole.EVOLVED, default=0.0),
+            }
+
+        def derivative(self, t, state):
+            return {"target": 0.1 * state["source"]}
+
+    results = GraphAnalyzer().analyze(
+        {"edge": SelfFlux()},
+        {"edge": {"source": "cell/x", "target": "cell/x"}},
+    )
+    assert any("feedback by construction" in r.message for r in results)
+    clean = GraphAnalyzer().analyze(
+        {"edge": SelfFlux()},
+        {"edge": {"source": "cell/u", "target": "cell/x"}},
+    )
+    assert not any("feedback by construction" in r.message for r in clean)

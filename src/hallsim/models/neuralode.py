@@ -509,8 +509,11 @@ def simulate_conditioned(
     y0_range: tuple[float, float] = (0.0, 1.0),
     key: jax.Array | None = None,
     cache_key: str | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Trajectories from a known input-conditioned RHS, for recovery fits.
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """``(ts, ys, us)``: trajectories from a known input-conditioned RHS,
+    for recovery fits, on the grid they were actually saved on. That grid
+    is ``ts`` unless the Scheduler's anti-aliasing refined it, so pair
+    ``ys`` with the returned times, never with the request.
 
     Each input's dynamics run through :class:`hallsim.scheduler.Scheduler`
     with ``auto_stiffness`` — so stiff regimes (e.g. near a bifurcation) are
@@ -556,8 +559,15 @@ def simulate_conditioned(
     )
     if cache_path is not None and cache_path.is_file():
         with np.load(cache_path) as z:
-            log.info("cached trajectories: %s", cache_path.name)
-            return jnp.asarray(z["ys"]), jnp.asarray(z["us"])
+            # A cache written before the grid was saved is recomputed: the
+            # grid is the part a caller cannot reconstruct.
+            if "ts" in z.files:
+                log.info("cached trajectories: %s", cache_path.name)
+                return (
+                    jnp.asarray(z["ts"]),
+                    jnp.asarray(z["ys"]),
+                    jnp.asarray(z["us"]),
+                )
     inputs = jnp.asarray(inputs)
     dim = _probe_dim(rhs_for_input(inputs[0]), ts)
     fields = tuple(f"v{i}" for i in range(dim))
@@ -609,7 +619,10 @@ def simulate_conditioned(
 
     _t0 = time.time()
     res = Scheduler(auto_stiffness=True).run(
-        comp, t_span=(t0, t1), y0=y0, macro_dt=t1 - t0, save_dt=save_dt
+        comp.with_initial(y0),
+        t_span=(t0, t1),
+        macro_dt=t1 - t0,
+        save_dt=save_dt,
     )
     traj = jnp.stack([res.get(f"m/{f}") for f in fields], axis=-1)
     ys_out = jnp.moveaxis(traj, 0, 1)  # (n_inputs*n_ics, T, dim)
@@ -618,10 +631,15 @@ def simulate_conditioned(
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache_path.with_suffix(".tmp.npz")
-        np.savez_compressed(tmp, ys=np.asarray(ys_out), us=np.asarray(us_out))
+        np.savez_compressed(
+            tmp,
+            ts=np.asarray(res.ts),
+            ys=np.asarray(ys_out),
+            us=np.asarray(us_out),
+        )
         tmp.replace(cache_path)
         log.info("cached trajectories -> %s", cache_path.name)
-    return ys_out, us_out
+    return jnp.asarray(res.ts), ys_out, us_out
 
 
 def _probe_dim(rhs, ts) -> int:

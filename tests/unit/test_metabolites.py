@@ -397,13 +397,13 @@ def test_a_failed_lookup_is_not_cached_as_no_compound(monkeypatch, tmp_path):
     """One timeout must not record a permanent false negative."""
     import urllib.request
 
-    from hallsim import datasets
+    from hallsim.search import fetch
 
-    monkeypatch.setattr(datasets, "_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(fetch, "CACHE_ROOT", tmp_path)
 
     def down(*a, **k):
         raise OSError("unreachable")
 
     monkeypatch.setattr(urllib.request, "urlopen", down)
     assert metabolites.chebi_for("602", "pubchem") == ()
-    assert list(tmp_path.glob("*.json")) == []
+    assert list(tmp_path.rglob("*.json")) == []

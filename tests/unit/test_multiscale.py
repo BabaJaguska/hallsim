@@ -1221,7 +1221,9 @@ class TestSchedulerEvent:
         y0 = composite.initial_state_vec()
         population = jnp.stack([y0, y0])
         plan = scheduler.plan(composite, (0.0, 6.0), macro_dt=1.0)
-        result = scheduler.run(plan, y0=population)
+        result = scheduler.run(
+            plan, params_from=composite.with_initial(population)
+        )
         assert jnp.allclose(result.get("pool/x")[-1], 6.0)
         assert jnp.allclose(result.get("state/flag")[-1], 1.0)
         assert jnp.allclose(result.get("state/count")[-1], 3.0)
@@ -1443,7 +1445,10 @@ class TestSchedulerBatchedGuards:
             .set(x0)
         )
         run = lambda y: Scheduler().run(  # noqa: E731
-            composite, t_span=(0.0, 10.0), macro_dt=1.0, save_dt=1.0, y0=y
+            composite.with_initial(y),
+            t_span=(0.0, 10.0),
+            macro_dt=1.0,
+            save_dt=1.0,
         )
         batched = run(y0)
         for m in range(4):
@@ -1484,7 +1489,10 @@ class TestSchedulerBatchedGuards:
             .set(x0)
         )
         run = lambda y: Scheduler().run(  # noqa: E731
-            composite, t_span=(0.0, 10.0), macro_dt=1.0, save_dt=1.0, y0=y
+            composite.with_initial(y),
+            t_span=(0.0, 10.0),
+            macro_dt=1.0,
+            save_dt=1.0,
         )
         batched = run(y0)
         for path in ("pool/x", "state/flag", "pool/y", "stats/count"):
@@ -1565,7 +1573,6 @@ def test_nyquist_guardrail_reduces_on_coarse_grid(caplog):
             comp,
             t_span=(0.0, 1.0),
             macro_dt=0.5,
-            y0=comp.initial_state_vec(),
             save_dt=0.2,  # > period/2 (≈0.157) → below Nyquist; divides t_span
         )
     assert s._warned_save_res
@@ -1583,7 +1590,6 @@ def test_nyquist_guardrail_silent_on_fine_grid():
         comp,
         t_span=(0.0, 1.0),
         macro_dt=0.5,
-        y0=comp.initial_state_vec(),
         save_dt=0.02,  # < period/10 → already fine for a raw amplitude readout
     )
     assert not s._warned_save_res
@@ -1597,7 +1603,6 @@ def test_nyquist_guardrail_opt_out():
         comp,
         t_span=(0.0, 1.0),
         macro_dt=0.5,
-        y0=comp.initial_state_vec(),
         save_dt=0.2,
         antialias=False,
     )
@@ -1758,7 +1763,7 @@ class TestBatchedAssignedPaths:
         y0 = jnp.stack([comp.initial_state_vec()] * 4)
         y0 = y0.at[:, keys.index("c/s")].set(jnp.array([0.1, 0.4, 0.7, 1.0]))
         with pytest.raises(ValueError, match="only on ASSIGNED"):
-            Scheduler().run(comp, (0.0, 1.0), macro_dt=1.0, y0=y0)
+            Scheduler().run(comp.with_initial(y0), (0.0, 1.0), macro_dt=1.0)
 
     def test_a_real_population_runs_and_its_assigned_values_are_overwritten(
         self,
@@ -1775,7 +1780,7 @@ class TestBatchedAssignedPaths:
             jnp.array([0.1, 0.4, 0.7, 1.0])
         )
         run = lambda y: Scheduler().run(  # noqa: E731
-            comp, (0.0, 1.0), macro_dt=1.0, y0=y
+            comp.with_initial(y), (0.0, 1.0), macro_dt=1.0
         )
         clean, overwritten = run(real), run(messy)
         assert jnp.allclose(overwritten.get("c/x"), clean.get("c/x"))
@@ -1788,7 +1793,7 @@ class TestBatchedAssignedPaths:
         just the default and blocks nothing."""
         comp = self._composite()
         y0 = jnp.stack([comp.initial_state_vec()] * 4)
-        res = Scheduler().run(comp, (0.0, 1.0), macro_dt=1.0, y0=y0)
+        res = Scheduler().run(comp.with_initial(y0), (0.0, 1.0), macro_dt=1.0)
         assert res.ys[-1].shape[0] == 4
 
 
@@ -1829,7 +1834,7 @@ class TestFixedStep:
             jnp.array([0.1, 1.0, 10.0, 100.0])
         )
         res = Scheduler(fixed_dt=0.01).run(
-            comp, t_span=(0.0, 1.0), macro_dt=0.5, y0=y0, save_dt=0.5
+            comp.with_initial(y0), t_span=(0.0, 1.0), macro_dt=0.5, save_dt=0.5
         )
         groups = [
             d
@@ -2063,9 +2068,9 @@ def test_plan_and_run_agree_with_the_plan_free_call():
     assert isinstance(plan, RunPlan)
     assert plan.composite is comp
 
-    y0 = jnp.array([3.0, 1.0])
-    direct = sched.run(comp, (0.0, 2.0), macro_dt=1.0, save_dt=0.5, y0=y0)
-    via = sched.run(plan, y0=y0)
+    started = comp.with_initial(jnp.array([3.0, 1.0]))
+    direct = sched.run(started, (0.0, 2.0), macro_dt=1.0, save_dt=0.5)
+    via = sched.run(plan, params_from=started)
     assert jnp.array_equal(direct.ys, via.ys)
     assert jnp.array_equal(direct.ts, via.ts)
 
@@ -2614,9 +2619,9 @@ def test_a_model_that_turns_stiff_is_rerouted_to_the_implicit_solver(caplog):
 
 
 def test_each_composite_runs_from_its_own_initial_state():
-    """Two composites of one structure that differ only in ``initial``,
-    through one Scheduler with ``y0`` omitted, start where each says.
-    ``initial`` is static, so the plan memo cannot see it change."""
+    """Two composites of one structure that differ only in their start,
+    through one Scheduler, start where each says: the plan memo is shared
+    across starts, so execution must read the handed composite's."""
     from hallsim.handles import with_handles
     from hallsim.scheduler import Scheduler
 
@@ -2634,4 +2639,40 @@ def test_each_composite_runs_from_its_own_initial_state():
     assert float(jnp.asarray(first.ys)[0, 0]) == pytest.approx(1.0)
     assert float(jnp.asarray(second.ys)[0, 0]) == pytest.approx(3.0)
     # A handle-applied variant keeps the base composite's initial state.
-    assert with_handles(build(3.0), {}, registry={}).initial == {"cell/x": 3.0}
+    kept = with_handles(build(3.0), {}, registry={}).initial_state()
+    assert float(kept["cell/x"]) == 3.0
+
+
+def test_a_time_triggered_event_fires_at_its_time_not_the_next_macro_step():
+    """A process that names its trigger time as a discontinuity makes it a
+    sync point, so an event due 3 s into a 10 s macro step fires at 3 s,
+    and a pair of events inside one macro step are both seen."""
+    from hallsim.scheduler import Scheduler
+
+    class Kick(Process):
+        kind: ProcessKind = ProcessKind.EVENT
+
+        def ports_schema(self):
+            return {"flag": Port(role=PortRole.LATCHED, default=0.0)}
+
+        def condition(self, t, state):
+            return t > 3.0
+
+        def handler(self, t, state):
+            return {"flag": 1.0}
+
+        def discontinuity_times(self):
+            return (3.0 + 1e-9,)
+
+    comp = Composite(
+        processes={"a": ContinuousDecay(), "k": Kick()},
+        topology={"a": {"x": "cell/x"}, "k": {"flag": "cell/flag"}},
+        semantic_validation=False,
+    )
+    result = Scheduler().run(comp, t_span=(0.0, 20.0), macro_dt=10.0)
+    assert result.events, "the event never fired"
+    ev = result.events[0]
+    fired_at = float(
+        next(v for k, v in vars(ev).items() if k in ("time", "t", "t_fired"))
+    )
+    assert fired_at == pytest.approx(3.0, abs=1e-6), vars(ev)

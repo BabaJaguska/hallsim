@@ -30,13 +30,13 @@ def test_jacfwd_works_after_an_eager_run():
     sched = Scheduler()
     y0 = jnp.array([2.0])
     eager = sched.run(
-        comp, t_span=(0.0, 1.0), macro_dt=1.0, save_dt=1.0, y0=y0
+        comp.with_initial(y0), t_span=(0.0, 1.0), macro_dt=1.0, save_dt=1.0
     )
     assert np.isfinite(np.asarray(eager.ys)).all()
 
     def final(y):
         return sched.run(
-            comp, t_span=(0.0, 1.0), macro_dt=1.0, save_dt=1.0, y0=y
+            comp.with_initial(y), t_span=(0.0, 1.0), macro_dt=1.0, save_dt=1.0
         ).ys[-1]
 
     jac = jax.jacfwd(final)(y0)

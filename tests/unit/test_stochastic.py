@@ -189,7 +189,7 @@ def test_batched_stochastic_members_draw_independent_noise(tmp_path):
     y0 = jnp.stack([composite.initial_state_vec()] * 3)
 
     def run(seed):
-        return Scheduler().run(composite, y0=y0, seed=seed, **_SPAN)
+        return Scheduler().run(composite.with_initial(y0), seed=seed, **_SPAN)
 
     result = run(3)
     ys = np.asarray(result.ys)
@@ -247,7 +247,7 @@ def test_eager_lane_is_seeded_and_refuses_a_batch(tmp_path):
     assert np.all(first.ys[:, 0] + first.ys[:, 1] == 10)
     y0 = jnp.stack([composite.initial_state_vec()] * 2)
     with pytest.raises(ValueError, match="unbatched"):
-        eager.run(composite, y0=y0, **_SPAN)
+        eager.run(composite.with_initial(y0), **_SPAN)
 
 
 @pytest.mark.parametrize("provider", [None, lambda t, state: None])
@@ -454,7 +454,7 @@ def test_batch_lanes_draw_the_same_population(tmp_path):
     key = jax.random.PRNGKey(3)
     runs = {
         mode: Scheduler(batch_mode=mode).run(
-            composite, y0=y0, key=key, **BATCH_RUN
+            composite.with_initial(y0), key=key, **BATCH_RUN
         )
         for mode in ("vectorized", "threaded", "auto")
     }
@@ -474,11 +474,11 @@ def test_a_threaded_batch_falls_back_under_a_trace(tmp_path):
 
     @jax.jit
     def traced(key):
-        return sched.run(composite, y0=y0, key=key, **BATCH_RUN).ys
+        return sched.run(composite.with_initial(y0), key=key, **BATCH_RUN).ys
 
     key = jax.random.PRNGKey(5)
     eager = Scheduler(batch_mode="vectorized").run(
-        composite, y0=y0, key=key, **BATCH_RUN
+        composite.with_initial(y0), key=key, **BATCH_RUN
     )
     assert np.array_equal(np.asarray(traced(key)), np.asarray(eager.ys))
 

@@ -522,7 +522,7 @@ class TestFetchGeoSeries:
             gr.load_gene_expression(matrix, platform)
 
     def test_urls_follow_geo_layout(self):
-        from hallsim.gene_reporters import geo_series_urls
+        from hallsim.search.datasets import geo_series_urls
 
         matrix, soft = geo_series_urls("GSE248823")
         assert matrix.endswith(
@@ -866,3 +866,38 @@ class TestConcordanceScope:
         platform.write_text("ID\tgene_assignment\nQ1\tNM_1 // GENE1 // g\n")
         with pytest.raises(ValueError, match="none of 1 probes"):
             gr.load_gene_expression(matrix, platform)
+
+    def test_no_change_is_judged_against_the_readout_scale(self):
+        import math
+
+        import numpy as np
+        import pandas as pd
+
+        from hallsim.gene_reporters import (
+            Readout,
+            compute_concordance,
+            time_course_concordance,
+        )
+
+        reps = [Readout(path="pool", key=g, sign=+1) for g in ("FOS", "EGR1")]
+        data = pd.Series({"FOS": 0.4, "EGR1": -0.2})
+        # A readout of size 400 that moves by 1e-10 has not moved.
+        noise = compute_concordance(
+            delta_observables={"pool": 1e-10},
+            delta_gene_expression=data,
+            reporters=reps,
+            scale=400.0,
+        )
+        assert noise.predicted_change is False
+        assert compute_concordance(
+            delta_observables={"pool": 1e-10},
+            delta_gene_expression=data,
+            reporters=reps,
+        ).predicted_change
+        t = np.array([5.0, 15.0, 30.0, 60.0])
+        flat = time_course_concordance(
+            pd.Series([1e-10, 2e-10, 1e-10, 0.0], index=t),
+            pd.DataFrame({tt: [0.3] for tt in t}, index=["FOS"]),
+            scale=400.0,
+        )
+        assert flat.predicted_change is False and math.isnan(flat.pooled)

@@ -236,7 +236,7 @@ def train_stages(checkpoint=None):
     ).reshape(-1, 2)
     ts = jnp.linspace(0.0, TRAIN["t_data"], TRAIN["n_data"])
     t0 = time.time()
-    ys, us = simulate_conditioned(
+    ts, ys, us = simulate_conditioned(
         gz_rhs,
         ts,
         inputs,
@@ -335,7 +335,6 @@ def _run_traj(comp, t_end=4.0):
     r = Scheduler(auto_stiffness=True).run(
         comp,
         t_span=(0.0, t_end),
-        y0=comp.initial_state_vec(),
         macro_dt=0.05,
         save_dt=0.01,
     )
@@ -598,7 +597,6 @@ def _ddb2_for_severity(comp_processes, severity):
     r = Scheduler(auto_stiffness=True).run(
         comp,
         t_span=(0.0, GRID.t_end),
-        y0=comp.initial_state_vec(),
         macro_dt=GRID.macro_dt,
         save_dt=GRID.save_dt,
     )

@@ -93,7 +93,7 @@ def _flatten_subcomposites(
                     f"({outer_key}.<process>), or pass rewire= to redirect "
                     f"a store path."
                 )
-            for q, v in item.initial.items():
+            for q, v in item.initial_state().items():
                 flat_initial[q if q.startswith(prefix) else prefix + q] = v
             for sub_name, sub_proc in item.processes.items():
                 merged_name = f"{outer_key}.{sub_name}"
@@ -530,6 +530,14 @@ class _FlatRHS(eqx.Module):
         return jnp.zeros_like(y_vec).at[..., cols].add(vals * facs)
 
 
+def _broadcast_values(state: dict) -> dict:
+    """``state`` with every value on one shape, so a ``(batch,)`` entry
+    makes the whole start a population."""
+    if len({jnp.shape(v) for v in state.values()}) > 1:
+        return dict(zip(state, jnp.broadcast_arrays(*state.values())))
+    return state
+
+
 def _compose_events(processes: dict, topology: dict) -> tuple[dict, dict]:
     """Expand any member process's imported events into EVENT processes.
 
@@ -643,7 +651,7 @@ class Composite(eqx.Module):
 
     processes: dict[str, Process]
     topology: dict[str, dict[str, str]]
-    initial: dict[str, float] = eqx.field(static=True, default_factory=dict)
+    initial: jnp.ndarray
 
     def __init__(
         self,
@@ -686,7 +694,7 @@ class Composite(eqx.Module):
         flat_topology = self.topology
         # A sub-composite's own initial= carries its namespace prefix; an
         # explicit initial= on this composite is the caller's last word.
-        self.initial = {**sub_initial, **dict(initial or {})}
+        declared = {**sub_initial, **dict(initial or {})}
         if validate:
             errors = validate_topology(flat_processes, flat_topology)
             if errors:
@@ -713,6 +721,7 @@ class Composite(eqx.Module):
                 raise ValueError(f"Semantic validation failed:\n{report}")
             if report.warnings:
                 log.warning("Semantic validation warnings:\n%s", report)
+        self.initial = self._resolve_start(declared)
 
     # -----------------------------------------------------------------
     # State flattening: dict ↔ array
@@ -760,13 +769,37 @@ class Composite(eqx.Module):
         return jnp.stack([jnp.asarray(v) for v in vals], axis=-1)
 
     def initial_state_vec(self, keys: list[str] | None = None) -> jnp.ndarray:
-        """Initial state as a flat ``(n_vars,)`` tensor — the default y0 for
-        ``Scheduler.run``, whose public API takes a tensor, not a dict.
+        """The starting state as ``(n_vars,)``, or ``(batch, n_vars)`` for a
+        population, in :meth:`store_keys` order or in ``keys``.
 
-        Override a value with ``y0.at[keys.index("path")].set(v)``; batch a
-        population with ``jnp.broadcast_to(y0, (batch, n_vars))``.
+        This is the composite's start, the one every run, screen and fit
+        begins from; :meth:`with_initial` changes it.
         """
-        return self.flatten(self.initial_state(), keys)
+        if keys is None or list(keys) == self.store_keys():
+            return self.initial
+        idx = self.store_index()
+        return self.initial[..., jnp.asarray([idx[k] for k in keys])]
+
+    def _resolve_start(self, declared: dict) -> jnp.ndarray:
+        """Port defaults under ``declared``, as one flat array; ``(batch,)``
+        values broadcast every other path to the population."""
+        state = build_initial_store(
+            self.processes, self.topology, dict(declared)
+        )
+        return self.flatten(_broadcast_values(state))
+
+    def _check_paths(self, paths) -> None:
+        known = self.store_paths()
+        unknown = sorted(p for p in paths if p not in known)
+        if unknown:
+            sample = sorted(known)[:8]
+            raise KeyError(
+                f"no store path named {unknown!r} in this composite, so "
+                "setting it would change nothing and every arm would start "
+                f"identically. It has {len(known)} paths, e.g. {sample}. "
+                "Paths are '<process-or-namespace>/<species>'; "
+                "`store_keys()` lists them all."
+            )
 
     def unflatten(
         self,
@@ -1045,10 +1078,64 @@ class Composite(eqx.Module):
             procs[name] = write_param(procs[name], field, value)
         return eqx.tree_at(lambda c: c.processes, self, procs)
 
+    def with_initial(self, overrides: dict[str, Any]) -> "Composite":
+        """A copy with initial store values changed, keyed by store path::
+
+            comp = comp.with_initial({"kok/Rec": 2982.3})            # set
+            comp = comp.with_initial({"kok/Rec": lambda r: 1.5 * r})  # scale
+
+        A value is either the new value outright, or a callable taking the
+        path's currently resolved initial value and returning the new one.
+        The callable form is how a *relative* change — a gene dosage, a fold
+        change on a measured baseline — is written without the caller first
+        resolving port defaults by hand, which is the step that otherwise
+        leaks :func:`~hallsim.store.build_initial_store` into every script.
+
+        The initial-state analogue of :meth:`with_params`, and the reason to
+        prefer it over building ``y0``: it travels *with* the composite, so
+        the screen, the calibrator and every ``Scheduler.run`` see the same
+        start. A ``y0`` assembled at one call site is visible only there, and
+        anything downstream that re-derives the start from the composite
+        silently uses the unmodified value.
+
+        **A dosage on an initial amount is not a dosage.** Where a species
+        turns over, its synthesis and degradation rates set the steady state,
+        so a scaled starting amount decays back to the unscaled one and is
+        worth nothing at long times. Scale the synthesis rate with
+        :meth:`with_params` for a dosage, and use this method for a genuine
+        initial condition.
+
+        A value may be traced, so a starting value can be fitted or
+        differentiated through, and a ``(batch,)`` value makes every run of
+        the composite a population run. A full ``(n_vars,)`` or
+        ``(batch, n_vars)`` array in :meth:`store_keys` order is accepted in
+        place of the dict, for continuing from a trajectory's last state.
+        """
+        if not isinstance(overrides, dict):
+            start = jnp.asarray(overrides)
+            n = len(self.store_keys())
+            if start.shape[-1:] != (n,):
+                raise ValueError(
+                    f"a start vector needs {n} entries in `store_keys()` "
+                    f"order along its last axis; got shape {start.shape}."
+                )
+            return eqx.tree_at(lambda c: c.initial, self, start)
+        self._check_paths(overrides)
+        state = self.initial_state()
+        state.update(
+            {
+                p: (v(state[p]) if callable(v) else v)
+                for p, v in overrides.items()
+            }
+        )
+        return eqx.tree_at(
+            lambda c: c.initial, self, self.flatten(_broadcast_values(state))
+        )
+
     def initial_state(self) -> dict[str, jnp.ndarray]:
-        """All process port defaults merged into one
-        ``{store_path: jnp.ndarray}`` store."""
-        return build_initial_store(self.processes, self.topology, self.initial)
+        """The starting state as ``{store_path: value}``, with ``(batch,)``
+        values for a population."""
+        return self.unflatten(self.initial)
 
     # -----------------------------------------------------------------
     # Introspection

@@ -158,17 +158,14 @@ class ViewModel:
 
     def _trajectory(self, severities):
         comp = self._with_severities(self.base, severities)
-        res = self._scheduler.run(
-            comp, y0=comp.initial_state_vec(), **self._run_kwargs()
-        )
+        res = self._scheduler.run(comp, **self._run_kwargs())
         return res.ts, res.ys
 
     def _population(self, severities, key):
         comp = self._with_severities(self.stochastic_base, severities)
         y0 = comp.initial_state_vec()
         res = self._scheduler.run(
-            comp,
-            y0=jnp.tile(y0[None], (self.n_cells, 1)),
+            comp.with_initial(jnp.tile(y0[None], (self.n_cells, 1))),
             key=key,
             **self._run_kwargs(),
         )

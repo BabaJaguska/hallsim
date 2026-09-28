@@ -235,7 +235,6 @@ def coupling_response(
             (0.0, t_end),
             macro_dt=t_end,
             save_dt=t_end,
-            y0=comp.initial_state_vec(),
         )
         values.append(float(np.asarray(res.ys)[-1, idx[key]]))
     v = np.asarray(values)
@@ -350,11 +349,10 @@ def reporter_rank(
     for scale in (1.0, 0.3, 3.0):
         try:
             res = sched.run(
-                comp,
+                comp.with_initial(jnp.asarray(y0 * scale)),
                 (0.0, t_end),
                 macro_dt=t_end,
                 save_dt=t_end / n_save,
-                y0=jnp.asarray(y0 * scale),
             )
             runs.append(np.asarray(res.ys))
         except Exception:
@@ -528,7 +526,6 @@ def persistence(
         (0.0, t_end),
         macro_dt=t_end,
         save_dt=t_end / n_save,
-        y0=comp.initial_state_vec(),
     )
     ts, ys = np.asarray(res.ts), np.asarray(res.ys)[:, idx[key]]
     base_y = ys[0]
@@ -567,7 +564,8 @@ def triage_process(
     cannot discriminate. Flags rather than blocks — a saturated module is
     still usable at a different operating point.
     """
-    from hallsim.diagnostics import screen_process
+    from hallsim.composite import single_process_composite
+    from hallsim.diagnostics import screen
 
     label = name or getattr(process, "name", type(process).__name__)
     blockers: list[str] = []
@@ -649,7 +647,7 @@ def triage_process(
 
     report = None
     try:
-        report = screen_process(process, t_end)
+        (report,) = screen(single_process_composite(process), t_end)
         if report.blocking:
             blockers.append(f"numerical screen: {report}")
         else:
@@ -758,8 +756,13 @@ def triage_sbml(
     An import that raises is itself a reject — that is the cheapest possible
     verdict and the most common one on an uncurated candidate.
     """
-    from hallsim.sbml_import import _resolve_source, process_from_sbml
+    from hallsim.sbml_import import (
+        _extract_native_time_seconds,
+        _resolve_source,
+        process_from_sbml,
+    )
 
+    xml_path = None
     try:
         xml_path, _ = _resolve_source(model_id, name)
         process = process_from_sbml(model_id, name=name)
@@ -768,6 +771,11 @@ def triage_sbml(
             name=str(model_id),
             status="reject",
             blockers=(f"import failed: {type(exc).__name__}: {exc}",),
+            time_unit_declared=(
+                False
+                if xml_path is None
+                else _extract_native_time_seconds(str(xml_path))[1]
+            ),
         )
     return triage_process(
         process,
@@ -831,7 +839,6 @@ def published_fit_chi2(
     reported: float | None = None,
     rtol: float = 0.01,
     save_dt: float | None = None,
-    y0=None,
     scheduler=None,
 ) -> FitReport:
     """``χ² = Σ ((sim − obs) / sd)²`` against the data the model was fitted to.
@@ -881,9 +888,8 @@ def published_fit_chi2(
     if t_end <= 0:
         raise ValueError("observation times must span a positive interval")
     dt = save_dt if save_dt is not None else t_end / 400.0
-    y0 = composite.initial_state_vec() if y0 is None else y0
     result = (scheduler or Scheduler()).run(
-        composite, t_span=(0.0, t_end), macro_dt=t_end, y0=y0, save_dt=dt
+        composite, t_span=(0.0, t_end), macro_dt=t_end, save_dt=dt
     )
     ts = np.asarray(result.ts)
 

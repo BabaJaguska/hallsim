@@ -1,29 +1,27 @@
-"""Where the data is: dataset search, mirrored on :mod:`hallsim.discovery`.
+"""Where the data is: dataset search, mirrored on :mod:`hallsim.search.models`.
 
-A calibration needs a time course of quantities a composite carries, taken
+A calibration needs a time course of quantities a model carries, taken
 under conditions it can represent. :func:`search_for_dataset` asks the
 repositories: GEO and Zenodo, and through EBI Search PRIDE, MetaboLights,
 Metabolomics Workbench and ArrayExpress, with the BioImage Archive through
-BioStudies. Each hit says what kind of data it is, what it measured
-(:class:`Measured`) and how its samples are arranged (:class:`Design`,
-read from the sample titles by :func:`parse_design`: arms, a control arm
-when one is named, timepoints). :func:`datasets_of` lists a paper's own
-data through Europe PMC, which is the quantity its model was built to
-predict. :func:`coverage` says which of a composite's annotated store
-paths a hit measures, and :func:`search_measuring` keeps the hits a
-composite can be scored on, the way :func:`hallsim.discovery.search_producing`
-keeps the deposits that emit a quantity. :func:`platform_head` reads an
-expression platform's table head so a hit can be checked against that
-loader before anything large is downloaded.
+BioStudies; NASA's OSDR is enumerated whole. Each hit says what kind of
+data it is, what it measured (:class:`Measured`) and how its samples are
+arranged (:class:`Design`, read from the sample titles by
+:func:`parse_design`: arms, a control arm when one is named, timepoints).
+:func:`datasets_of` lists a paper's own data through Europe PMC, which is
+the quantity its model was built to predict. :func:`resolve_perturbation`
+turns an arm label into a ChEBI id and its targets, or a gene into its
+UniProt accession. :func:`platform_head` reads an expression platform's
+table head so a hit can be checked against a loader before anything
+large is downloaded.
 """
 
 from __future__ import annotations
 
 
 import gzip
-import hashlib
-import json
 import logging
+import os
 import re
 import threading
 import time
@@ -33,13 +31,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
+import ppx
 
-from hallsim.discovery import USER_AGENT, _get_json
-from hallsim.gene_reporters import SYMBOL, choose_annotation, geo_series_urls
+from hallsim.search.fetch import (
+    USER_AGENT,
+    cache_dir,
+    cached_index,
+    cached_json,
+    get_json,
+    is_junk_archive_entry,
+    retrying,
+)
 
 log = logging.getLogger(__name__)
 
-GEO_EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+#: NCBI asks every E-utilities client for a contact address and offers a
+#: higher rate to a registered key; both are read from the environment.
+NCBI_EMAIL = "hallsim-search@users.noreply.github.com"
 GEO_ACCESSION_URL = "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={}"
 ZENODO_RECORDS = "https://zenodo.org/api/records"
 EBI_SEARCH = "https://www.ebi.ac.uk/ebisearch/ws/rest"
@@ -145,6 +153,30 @@ class Design:
             unit = f" {self.time_unit}" if self.time_unit else ""
             return f"{arms}, {self.n_timepoints} timepoints{unit}"
         return f"{arms}, no timepoints in the titles"
+
+    def to_dict(self) -> dict:
+        return {
+            "arms": list(self.arms),
+            "control": self.control,
+            "per_arm": [[a, list(ts)] for a, ts in self.per_arm],
+            "time_unit": self.time_unit,
+            "n_titles": self.n_titles,
+            "n_subjects": self.n_subjects,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Design":
+        return cls(
+            arms=tuple(d.get("arms", ())),
+            control=d.get("control"),
+            per_arm=tuple(
+                (a, tuple(float(t) for t in ts))
+                for a, ts in d.get("per_arm", ())
+            ),
+            time_unit=d.get("time_unit", ""),
+            n_titles=int(d.get("n_titles", 0)),
+            n_subjects=int(d.get("n_subjects", 0)),
+        )
 
 
 _UNIT_HOURS = {
@@ -371,6 +403,113 @@ def parse_design(samples) -> Design:
     )
 
 
+#: A unit word inside a column header: ``Time (min)``, ``time_h``.
+_UNIT_WORD = re.compile(
+    r"(?<![A-Za-z])(sec|s|min|hrs?|h|hours?|days?|d|wks?|w|weeks?|mo|"
+    r"months?|yrs?|y|years?)(?![A-Za-z])",
+    re.I,
+)
+#: Files the table reader opens.
+TABLE_SUFFIXES = (".csv", ".tsv", ".txt", ".tab", ".dat", ".xlsx", ".xls")
+
+
+def read_table(path, *, n_rows: int = 5000) -> "pd.DataFrame | None":
+    """A delimited or spreadsheet file as a frame, the delimiter sniffed;
+    ``None`` when it is not a table."""
+    path = str(path)
+    try:
+        if path.lower().endswith((".xlsx", ".xls")):
+            return pd.read_excel(path, nrows=n_rows)
+        frame = pd.read_csv(
+            path,
+            sep=None,
+            engine="python",
+            nrows=n_rows,
+            comment="#",
+            encoding_errors="replace",
+        )
+    except Exception as exc:  # noqa: BLE001 - not a table
+        log.info("%s: not read as a table (%s)", path, exc)
+        return None
+    return frame if frame.shape[1] >= 2 else None
+
+
+def design_of_table(frame) -> Design | None:
+    """The design a long-form table states: its time column gives the
+    timepoints, its text columns with a few distinct values give the arms.
+    ``None`` when no column reads as time. A wide table — time down the
+    first column, one series per column — is one unperturbed arm."""
+    if frame is None or frame.empty:
+        return None
+    n = len(frame)
+    time_col = None
+    for col in frame.columns:
+        # ``time_min`` and ``Time (h)`` both name a time axis; the
+        # underscore is a word character, so it is read as a space.
+        head = re.sub(r"[_\-]+", " ", str(col)).strip()
+        if not (TIME_FACTOR.search(head) or head.lower() == "t"):
+            continue
+        values = pd.to_numeric(frame[col], errors="coerce")
+        if values.notna().sum() >= max(2, n // 2) and values.nunique() >= 2:
+            time_col = col
+            break
+    if time_col is None:
+        return None
+    times = pd.to_numeric(frame[time_col], errors="coerce")
+    unit = ""
+    if m := _UNIT_WORD.search(re.sub(r"[_\-]+", " ", str(time_col))):
+        unit = _UNIT_NAME.get(m.group(1).lower().rstrip("s"), "") or (
+            _UNIT_NAME.get(m.group(1).lower(), "")
+        )
+    arm_cols = [
+        c
+        for c in frame.columns
+        if c != time_col
+        and not pd.api.types.is_numeric_dtype(frame[c])
+        and 2 <= frame[c].nunique(dropna=True) <= max(2, n // 2)
+    ]
+    labels = (
+        frame[arm_cols].astype(str).agg(" ".join, axis=1)
+        if arm_cols
+        else pd.Series([""] * n, index=frame.index)
+    )
+    per_arm: dict[str, set] = {}
+    for arm, t_val in zip(labels, times):
+        per_arm.setdefault(arm, set())
+        if pd.notna(t_val):
+            per_arm[arm].add(round(float(t_val), 6))
+    arms = tuple(sorted(per_arm))
+    control = next(
+        (
+            a
+            for a in arms
+            if any(tok.lower() in CONTROL_WORDS for tok in a.split())
+        ),
+        None,
+    )
+    return Design(
+        arms=arms,
+        control=control,
+        per_arm=tuple((a, tuple(sorted(per_arm[a]))) for a in arms),
+        time_unit=unit,
+        n_titles=n,
+    )
+
+
+def table_design(paths) -> Design | None:
+    """The richest design among ``paths`` read as tables: the one with the
+    most timepoints, arms breaking the tie."""
+    best = None
+    for path in paths:
+        design = design_of_table(read_table(path))
+        if design is None:
+            continue
+        key = (design.n_timepoints, len(design.arms))
+        if best is None or key > (best.n_timepoints, len(best.arms)):
+            best = design
+    return best
+
+
 # ── Candidates ──────────────────────────────────────────────────────
 
 
@@ -403,6 +542,14 @@ class DatasetCandidate:
     #: Study factors the repository declares (MetaboLights, Metabolomics
     #: Workbench), the conditions in a form the titles may not carry.
     factors: tuple[str, ...] = ()
+    #: The design as the source states it — a measurement table, a curated
+    #: subset listing, an assay-group summary — where a source does not
+    #: leave it to the sample titles.
+    stated: Design | None = None
+    #: The curated record the design was read from, when it is not the
+    #: deposit itself: a GEO DataSet over a series, an Expression Atlas
+    #: experiment over an ArrayExpress or GEO deposit.
+    curated: str = ""
 
     @property
     def short_kind(self) -> str:
@@ -428,7 +575,93 @@ class DatasetCandidate:
 
     @property
     def design(self) -> Design:
+        if self.stated is not None:
+            return self.stated
         return parse_design(self.samples)
+
+
+def _entrez():
+    """Biopython's E-utilities client, identified as NCBI asks."""
+    from Bio import Entrez
+
+    Entrez.email = os.environ.get("NCBI_EMAIL", NCBI_EMAIL)
+    Entrez.tool = USER_AGENT
+    key = os.environ.get("NCBI_API_KEY")
+    if key:
+        Entrez.api_key = key
+    return Entrez
+
+
+def esearch(
+    term: str, *, db: str = "gds", history: bool = False, retmax: int = 25
+) -> dict:
+    """An E-utilities search, parsed: ``Count``, ``IdList`` and, with
+    ``history``, the ``WebEnv`` and ``QueryKey`` that page it."""
+    Entrez = _entrez()
+
+    def call():
+        with Entrez.esearch(
+            db=db, term=term, retmax=retmax, usehistory="y" if history else "n"
+        ) as handle:
+            return Entrez.read(handle)
+
+    return retrying(call)
+
+
+def esummary(
+    *,
+    db: str = "gds",
+    ids=None,
+    webenv: str | None = None,
+    query_key: str | None = None,
+    retstart: int = 0,
+    retmax: int = 300,
+) -> list[dict]:
+    """E-utilities document summaries, by id or by history page. Pacing
+    to NCBI's limit and the XML parsing are Biopython's."""
+    Entrez = _entrez()
+    kw: dict = {"db": db, "retstart": retstart, "retmax": retmax}
+    if ids is not None:
+        kw["id"] = ",".join(str(i) for i in ids)
+    else:
+        kw.update(WebEnv=webenv, query_key=query_key)
+
+    def call():
+        with Entrez.esummary(**kw) as handle:
+            return list(Entrez.read(handle))
+
+    return retrying(call)
+
+
+def _geo_candidates(records) -> list[DatasetCandidate]:
+    out = []
+    for r in records:
+        gpl = str(r.get("GPL") or "")
+        pubmed = [str(int(p)) for p in (r.get("PubMedIds") or [])]
+        files = tuple(
+            f.strip() for f in str(r.get("suppFile") or "").split(",") if f
+        )
+        kind = str(r.get("gdsType") or "")
+        out.append(
+            DatasetCandidate(
+                source="geo",
+                accession=str(r["Accession"]),
+                title=str(r.get("title") or ""),
+                kind=kind,
+                organism=str(r.get("taxon") or ""),
+                n_samples=int(r.get("n_samples") or 0),
+                platform=";".join(f"GPL{g}" for g in gpl.split(";") if g),
+                url=GEO_ACCESSION_URL.format(r["Accession"]),
+                summary=str(r.get("summary") or ""),
+                samples=tuple(
+                    str(s.get("Title") or "") for s in (r.get("Samples") or [])
+                ),
+                files=files,
+                measured=geo_measured(kind),
+                pubmed=pubmed[0] if pubmed else "",
+            )
+        )
+    return out
 
 
 def search_geo(
@@ -438,98 +671,29 @@ def search_geo(
     organism: str | None = None,
     timeout: float = 30.0,
 ) -> list[DatasetCandidate]:
-    """GEO series matching ``query`` (all fields), newest first, through the
-    keyless E-utilities."""
+    """GEO series matching ``query`` (all fields), newest first."""
     term = f"({query}) AND gse[EntryType]"
     if organism:
         term += f' AND "{organism}"[Organism]'
-    found = _get_json(
-        f"{GEO_EUTILS}/esearch.fcgi",
-        {"db": "gds", "term": term, "retmax": limit, "retmode": "json"},
-        timeout,
-    )["esearchresult"]
-    ids = found.get("idlist", [])
-    log.info("geo '%s': %s hits", query, found.get("count", "?"))
+    found = esearch(term, retmax=limit)
+    ids = list(found.get("IdList", []))
+    log.info("geo '%s': %s hits", query, found.get("Count", "?"))
     if not ids:
         return []
     return geo_summaries(ids, timeout=timeout)
 
 
-class PageTooLarge(LookupError):
-    """E-utilities will not convert a summary page above 10 MB to JSON."""
-
-
-def _retrying(fetch, tries: int = 4, pause: float = 2.0, fatal=()):
-    """Call ``fetch`` again after a transient failure, waiting longer each
-    time; the keyless services answer 429 under load. An exception of a
-    ``fatal`` type is raised at once."""
-    for attempt in range(tries):
-        try:
-            return fetch()
-        except Exception as exc:  # noqa: BLE001 - retried, then raised
-            if isinstance(exc, fatal) or attempt == tries - 1:
-                raise
-            log.info("retrying after %s", str(exc)[:160])
-            time.sleep(pause * (2**attempt))
-
-
-def _geo_candidates(result: dict) -> list[DatasetCandidate]:
-    out = []
-    for uid in result.get("uids", []):
-        r = result[uid]
-        gpl = str(r.get("gpl", ""))
-        pubmed = r.get("pubmedids") or []
-        files = tuple(
-            f.strip() for f in str(r.get("suppfile") or "").split(",") if f
-        )
-        out.append(
-            DatasetCandidate(
-                source="geo",
-                accession=r["accession"],
-                title=r.get("title", ""),
-                kind=r.get("gdstype", ""),
-                organism=r.get("taxon", ""),
-                n_samples=int(r.get("n_samples", 0) or 0),
-                platform=";".join(f"GPL{g}" for g in gpl.split(";") if g),
-                url=GEO_ACCESSION_URL.format(r["accession"]),
-                summary=r.get("summary", ""),
-                samples=tuple(
-                    s.get("title", "") for s in r.get("samples", [])
-                ),
-                files=files,
-                measured=geo_measured(r.get("gdstype", "")),
-                pubmed=str(pubmed[0]) if pubmed else "",
-            )
-        )
-    return out
-
-
 def geo_summaries(uids, *, timeout: float = 30.0) -> list[DatasetCandidate]:
-    """The series behind GEO document ids, one esummary call."""
-    result = _retrying(
-        lambda: _get_json(
-            f"{GEO_EUTILS}/esummary.fcgi",
-            {"db": "gds", "id": ",".join(uids), "retmode": "json"},
-            timeout,
-        )
-    )["result"]
-    return _geo_candidates(result)
+    """The series behind GEO document ids, one summary call."""
+    return _geo_candidates(esummary(ids=uids))
 
 
 def geo_by_accession(
     accession: str, *, timeout: float = 30.0
 ) -> DatasetCandidate | None:
     """One GEO series by accession, or ``None``."""
-    found = _get_json(
-        f"{GEO_EUTILS}/esearch.fcgi",
-        {
-            "db": "gds",
-            "term": f"{accession}[ACCN] AND gse[EntryType]",
-            "retmode": "json",
-        },
-        timeout,
-    )["esearchresult"]
-    ids = found.get("idlist", [])
+    found = esearch(f"{accession}[ACCN] AND gse[EntryType]", retmax=1)
+    ids = list(found.get("IdList", []))
     if not ids:
         return None
     hits = geo_summaries(ids[:1], timeout=timeout)
@@ -539,90 +703,237 @@ def geo_by_accession(
 def iter_geo(
     organisms=("Homo sapiens", "Mus musculus"),
     *,
+    entry: str = "gse",
     page: int = 300,
     start: int = 0,
     timeout: float = 60.0,
-    pause: float = 0.35,
     on_page=None,
+    designs: bool = True,
 ):
-    """Every GEO series for ``organisms`` from offset ``start``, through
-    the E-utilities history server: one search, then summaries page by
-    page at the keyless rate. ``on_page(offset)`` is called after each
-    page, with the offset of the next, so a caller can resume. A history
-    the server has let go is searched again."""
+    """Every GEO series (``entry="gse"``) or curated DataSet (``"gds"``)
+    for ``organisms`` from offset ``start``, through the E-utilities
+    history server: one search, then summaries page by page at the rate
+    Biopython keeps. ``on_page(offset)`` is called after each page, with
+    the offset of the next, so a caller can resume. A history the server
+    has let go is searched again. A DataSet with a time subset gets its
+    design read from its SOFT header when ``designs``."""
     term = (
         "("
         + " OR ".join(f'"{o}"[Organism]' for o in organisms)
-        + ") AND gse[EntryType]"
+        + f") AND {entry}[EntryType]"
+    )
+    shape = (
+        _geo_candidates
+        if entry == "gse"
+        else lambda records: _gds_candidates(
+            records, designs=designs, timeout=timeout
+        )
     )
 
     def history() -> dict:
-        return _get_json(
-            f"{GEO_EUTILS}/esearch.fcgi",
-            {
-                "db": "gds",
-                "term": term,
-                "usehistory": "y",
-                "retmax": 0,
-                "retmode": "json",
-            },
-            timeout,
-        )["esearchresult"]
+        return esearch(term, history=True, retmax=0)
 
-    def summaries(search: dict, offset: int, size: int) -> dict:
-        payload = _get_json(
-            f"{GEO_EUTILS}/esummary.fcgi",
-            {
-                "db": "gds",
-                "query_key": search["querykey"],
-                "WebEnv": search["webenv"],
-                "retstart": offset,
-                "retmax": size,
-                "retmode": "json",
-            },
-            timeout,
-        )
-        if "result" not in payload:
-            text = str(payload)[:200]
-            if "max size" in text:
-                raise PageTooLarge(text)
-            raise LookupError(text)
-        return payload["result"]
-
-    def fetch(search: dict, offset: int, size: int) -> list:
-        try:
-            result = _retrying(
-                lambda: summaries(search, offset, size), fatal=PageTooLarge
+    def fetch(search: dict, offset: int) -> list:
+        return shape(
+            esummary(
+                webenv=str(search["WebEnv"]),
+                query_key=str(search["QueryKey"]),
+                retstart=offset,
+                retmax=page,
             )
-        except PageTooLarge:
-            if size == 1:
-                raise
-            # A page the converter refuses is fetched in quarters; a
-            # series with thousands of samples makes one page that big.
-            step = max(size // 4, 1)
-            out = []
-            for sub in range(offset, offset + size, step):
-                time.sleep(pause)
-                out += fetch(search, sub, min(step, offset + size - sub))
-            return out
-        return _geo_candidates(result)
+        )
 
     search = history()
-    count = int(search.get("count", 0))
-    log.info("geo: %d series for %s", count, ", ".join(organisms))
+    count = int(search.get("Count", 0))
+    log.info("geo: %d %s for %s", count, entry, ", ".join(organisms))
     offset = start
     while offset < count:
-        time.sleep(pause)
         try:
-            found = fetch(search, offset, page)
+            found = fetch(search, offset)
         except Exception as exc:  # noqa: BLE001 - the history expired
             log.info("geo: searching again at %d (%s)", offset, str(exc)[:120])
             search = history()
-            found = fetch(search, offset, page)
+            found = fetch(search, offset)
         yield from found
         offset += page
         if on_page is not None:
             on_page(offset)
+
+
+GEO_DATASETS = "https://ftp.ncbi.nlm.nih.gov/geo/datasets"
+GDS_URL = "https://www.ncbi.nlm.nih.gov/sites/GDSbrowser?acc={}"
+
+
+def gds_subsets(
+    accession: str, *, timeout: float = 60.0
+) -> list[tuple[str, str, tuple[str, ...]]]:
+    """``(type, description, sample ids)`` for every subset a GEO DataSet
+    declares, read from the head of its SOFT file and stopped before the
+    table, so it costs kilobytes."""
+    base = f"{GEO_DATASETS}/{accession[:3]}{accession[3:-3]}nnn/{accession}"
+    url = f"{base}/soft/{accession}.soft.gz"
+    out: list[tuple[str, str, tuple[str, ...]]] = []
+    current: dict = {}
+
+    def flush():
+        if current.get("type"):
+            out.append(
+                (
+                    current["type"],
+                    current.get("description", ""),
+                    tuple(current.get("samples", ())),
+                )
+            )
+
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with gzip.open(resp, "rt", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("!dataset_table_begin"):
+                    break
+                if line.startswith("^SUBSET"):
+                    flush()
+                    current = {}
+                elif line.startswith("!subset_type"):
+                    current["type"] = line.split("=", 1)[1].strip().lower()
+                elif line.startswith("!subset_description"):
+                    current["description"] = line.split("=", 1)[1].strip()
+                elif line.startswith("!subset_sample_id"):
+                    current["samples"] = [
+                        s.strip()
+                        for s in line.split("=", 1)[1].split(",")
+                        if s.strip()
+                    ]
+    flush()
+    return out
+
+
+def gds_design(subsets) -> Design:
+    """The design a DataSet's subsets state: time subsets give the
+    timepoints, the other subset types give the arms, and sample
+    membership joins them. A time-typed subset with no number in it —
+    "young", "middle age" — is a group, not a point on an axis."""
+    times: dict[str, tuple[float, str]] = {}
+    arm_of: dict[str, list[str]] = {}
+    for kind, description, samples in subsets:
+        found = []
+        if TIME_FACTOR.search(kind):
+            found, _ = _times(description)
+            if not found:
+                # A description with no unit: "0", "6", "24" are still an
+                # ordered axis, read as unitless ordinals.
+                m = re.search(r"\d+(?:[.,]\d+)?", description)
+                if m:
+                    found = [(float(m.group(0).replace(",", ".")), "")]
+        if found:
+            for s in samples:
+                times[s] = found[0]
+            continue
+        for s in samples:
+            arm_of.setdefault(s, []).append(description)
+    units = {u for _, u in times.values() if u}
+    conv = {u: 1.0 for u in units}
+    time_unit = ""
+    if len({_UNIT_NAME.get(u, u) for u in units}) > 1:
+        conv = {u: _UNIT_HOURS.get(u, 1.0) for u in units}
+        time_unit = "h"
+    elif units:
+        time_unit = _UNIT_NAME.get(next(iter(units)), "")
+    samples = set(times) | set(arm_of)
+    per_arm: dict[str, set] = {}
+    for s in samples:
+        arm = " ".join(arm_of.get(s, []))
+        per_arm.setdefault(arm, set())
+        if s in times:
+            v, u = times[s]
+            per_arm[arm].add(round(v * conv.get(u, 1.0), 6))
+    arms = tuple(sorted(per_arm))
+    control = next(
+        (
+            a
+            for a in arms
+            if any(tok.lower() in CONTROL_WORDS for tok in a.split())
+        ),
+        None,
+    )
+    return Design(
+        arms=arms,
+        control=control,
+        per_arm=tuple((a, tuple(sorted(per_arm[a]))) for a in arms),
+        time_unit=time_unit,
+        n_titles=len(samples),
+    )
+
+
+def _gds_candidates(
+    records, *, designs: bool = True, timeout: float = 60.0
+) -> list[DatasetCandidate]:
+    """DataSet summaries as candidates for the series they curate. The
+    candidate *is* the series — that is where the data lives — with the
+    DataSet's subset types as factors and, for one with a time subset, the
+    design its subsets state."""
+    out = []
+    for r in records:
+        gds = str(r.get("Accession") or "")
+        gse = str(r.get("GSE") or "").split(";")[0]
+        if not gse:
+            continue
+        types = tuple(
+            dict.fromkeys(
+                s.strip().lower()
+                for s in str(r.get("SSInfo") or "").split(";")
+                if s.strip()
+            )
+        )
+        stated = None
+        if designs and any(TIME_FACTOR.search(k) for k in types):
+            try:
+                _geo_throttle()
+                stated = gds_design(gds_subsets(gds, timeout=timeout))
+            except Exception as exc:  # noqa: BLE001 - the summary stands
+                log.info("%s: subsets not read (%s)", gds, exc)
+        pubmed = [str(int(p)) for p in (r.get("PubMedIds") or [])]
+        gpl = str(r.get("GPL") or "")
+        kind = str(r.get("gdsType") or "")
+        out.append(
+            DatasetCandidate(
+                source="geo",
+                accession=f"GSE{gse}",
+                title=str(r.get("title") or ""),
+                kind=kind,
+                organism=str(r.get("taxon") or ""),
+                n_samples=int(r.get("n_samples") or 0),
+                platform=";".join(f"GPL{g}" for g in gpl.split(";") if g),
+                url=GDS_URL.format(gds),
+                summary=str(r.get("summary") or ""),
+                measured=geo_measured(kind),
+                pubmed=pubmed[0] if pubmed else "",
+                factors=types,
+                stated=stated,
+                curated=gds,
+            )
+        )
+    return out
+
+
+def search_geo_datasets(
+    query: str,
+    limit: int = 25,
+    *,
+    organism: str | None = None,
+    timeout: float = 30.0,
+) -> list[DatasetCandidate]:
+    """GEO's curated DataSets matching ``query``: each is a series whose
+    subsets a curator has typed — ``time``, ``agent``, ``infection`` — so
+    a time course is declared rather than read from sample titles."""
+    term = f"({query}) AND gds[EntryType]"
+    if organism:
+        term += f' AND "{organism}"[Organism]'
+    found = esearch(term, retmax=limit)
+    ids = list(found.get("IdList", []))
+    log.info("geo datasets '%s': %s hits", query, found.get("Count", "?"))
+    if not ids:
+        return []
+    return _gds_candidates(esummary(ids=ids), timeout=timeout)
 
 
 def search_zenodo(
@@ -637,7 +948,7 @@ def search_zenodo(
     added to the query as a term. Each hit lists its files; a data table
     among them is what the loader can read."""
     q = f"{query} {organism}" if organism else query
-    payload = _get_json(
+    payload = get_json(
         ZENODO_RECORDS,
         {"q": q, "type": "dataset", "size": limit},
         timeout,
@@ -662,7 +973,7 @@ def search_zenodo(
                 url=h.get("doi_url")
                 or h.get("links", {}).get("html", "")
                 or f"https://zenodo.org/records/{h.get('id', '')}",
-                summary=" ".join(summary.split())[:400],
+                summary=" ".join(summary.split()),
                 files=tuple(f.get("key", "") for f in h.get("files", [])),
                 measured=Measured("table"),
             )
@@ -770,7 +1081,7 @@ def _ebi_candidate(dom: EbiDomain, entry: dict) -> DatasetCandidate:
         n_samples=0,
         platform="",
         url=dom.url.format(entry.get("id", "")),
-        summary=_first(f, "description")[:400],
+        summary=_first(f, "description"),
         measured=Measured(dom.modality, dom.complete, ids),
         pubmed=_first(f, "PUBMED"),
         factors=factors,
@@ -787,7 +1098,7 @@ def ebi_page(
 ) -> tuple[int, list[DatasetCandidate]]:
     """``(hit count, candidates)`` for one page of an EBI Search domain.
     ``"*:*"`` is every entry, the census's enumeration."""
-    payload = _get_json(
+    payload = get_json(
         f"{EBI_SEARCH}/{dom.domain}",
         {
             "query": query,
@@ -816,7 +1127,7 @@ def iter_ebi(
     one pause per page. ``on_page(offset)`` is called after each page with
     the offset of the next, so a caller can resume."""
     while True:
-        total, page = _retrying(
+        total, page = retrying(
             lambda: ebi_page(dom, query, start=start, timeout=timeout)
         )
         yield from page
@@ -930,7 +1241,7 @@ def osdr_page(
     timeout: float = 90.0,
 ) -> tuple[int, list[DatasetCandidate]]:
     """``(hit count, candidates)`` for one page of OSDR's study index."""
-    payload = _get_json(
+    payload = get_json(
         OSDR_SEARCH,
         {
             "term": term,
@@ -961,7 +1272,7 @@ def iter_osdr(*, page: int = 100, timeout: float = 90.0):
 
 def osdr_files(accession: str, *, timeout: float = 90.0) -> tuple[str, ...]:
     """Every file name an OSDR study holds."""
-    payload = _get_json(
+    payload = get_json(
         f"{OSDR_FILES}/{accession.replace('OSD-', '')}", {}, timeout
     )
     out: list[str] = []
@@ -980,9 +1291,6 @@ def osdr_files(accession: str, *, timeout: float = 90.0) -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
-PRIDE_ARCHIVE = "https://www.ebi.ac.uk/pride/ws/archive/v3"
-
-
 def _walk_paths(node, key: str, out: list) -> None:
     if isinstance(node, dict):
         if isinstance(node.get(key), str):
@@ -994,31 +1302,54 @@ def _walk_paths(node, key: str, out: list) -> None:
             _walk_paths(item, key, out)
 
 
+def biostudies_study(accession: str, *, timeout: float = 60.0) -> dict:
+    """A BioStudies study record, kept on disk: the file list and the
+    declared factors both come from it."""
+    return cached_json(
+        f"study biostudies {accession}",
+        lambda: get_json(f"{BIOSTUDIES}/studies/{accession}", {}, timeout),
+    )
+
+
 def biostudies_files(
     accession: str, *, timeout: float = 60.0
 ) -> tuple[str, ...]:
     """Every file an ArrayExpress or BioStudies deposit holds."""
-    payload = _get_json(f"{BIOSTUDIES}/studies/{accession}", {}, timeout)
     out: list[str] = []
-    _walk_paths(payload, "path", out)
+    _walk_paths(biostudies_study(accession, timeout=timeout), "path", out)
+    return tuple(dict.fromkeys(out))
+
+
+def _walk_attributes(node, out: list) -> None:
+    if isinstance(node, dict):
+        name = str(node.get("name") or "").lower()
+        if name.startswith(("experimental factor", "experimental design")):
+            value = str(node.get("value") or "").strip()
+            if value:
+                out.append(value)
+        for value in node.values():
+            _walk_attributes(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _walk_attributes(item, out)
+
+
+def biostudies_factors(
+    accession: str, *, timeout: float = 60.0
+) -> tuple[str, ...]:
+    """The experimental factors and designs an ArrayExpress study declares
+    (``time``, ``compound``, ``time series design``), from the attributes
+    of its BioStudies record. The EBI Search index carries none of them,
+    so this is one request per study."""
+    out: list[str] = []
+    _walk_attributes(biostudies_study(accession, timeout=timeout), out)
     return tuple(dict.fromkeys(out))
 
 
 def pride_files(accession: str, *, timeout: float = 60.0) -> tuple[str, ...]:
-    """Every file a PRIDE project holds."""
-    payload = _get_json(
-        f"{PRIDE_ARCHIVE}/projects/{accession}/files",
-        {"pageSize": 500, "page": 0},
-        timeout,
-    )
-    entries = (
-        payload if isinstance(payload, list) else payload.get("content", [])
-    )
-    return tuple(
-        dict.fromkeys(
-            str(e.get("fileName") or "") for e in entries if e.get("fileName")
-        )
-    )
+    """Every file a PRIDE project holds, listed through ``ppx``."""
+    project = ppx.find_project(accession, local=cache_dir("ppx") / accession)
+    return tuple(dict.fromkeys(str(f) for f in project.remote_files()))
 
 
 #: GEO's E-utilities summary names a series' supplementary files by type
@@ -1072,7 +1403,7 @@ def geo_files(accession: str, *, timeout: float = 30.0) -> tuple[str, ...]:
         with urllib.request.urlopen(request, timeout=timeout) as fh:
             return supplementary_names(fh.read().decode("utf-8", "replace"))
 
-    return _retrying(fetch, tries=3, fatal=(LookupError,))
+    return retrying(fetch, tries=3, fatal=(LookupError,))
 
 
 _FILE_LISTERS = {
@@ -1096,7 +1427,7 @@ def study_files(cand: "DatasetCandidate", *, timeout: float = 15.0) -> tuple:
     fetch = _FILE_LISTERS.get(cand.source)
     if fetch is None:
         return cand.files
-    listed = _cached_json(
+    listed = cached_json(
         f"files {cand.source} {cand.accession}",
         lambda: list(fetch(cand.accession, timeout=timeout)),
     )
@@ -1114,7 +1445,7 @@ def search_bioimages(
     search API: live-cell time-lapse and screens, the modality that
     resolves a single cell's trajectory."""
     q = f"{query} {organism}" if organism else query
-    payload = _get_json(
+    payload = get_json(
         f"{BIOSTUDIES}/search",
         {"query": q, "facet.collection": "BioImages", "pageSize": limit},
         timeout,
@@ -1131,15 +1462,289 @@ def search_bioimages(
             platform="",
             url=f"https://www.ebi.ac.uk/biostudies/BioImages/studies/"
             f"{h.get('accession', '')}",
-            summary=(h.get("content") or "")[:400],
+            summary=h.get("content") or "",
             measured=Measured("imaging"),
         )
         for h in payload.get("hits", [])
     ]
 
 
+ATLAS = "https://www.ebi.ac.uk/gxa"
+_ATLAS_CONTRAST = re.compile(
+    r"^'(?P<test>.+?)' vs '(?P<ref>.+?)'"
+    r"(?: in '(?P<context>.+?)')?(?: at '(?P<time>.+?)')?$"
+)
+_ATLAS_ACCESSION = re.compile(r"^E-GEOD-(\d+)$")
+
+
+def atlas_experiments(refresh: bool = False) -> list[dict]:
+    """Every Expression Atlas experiment — accession, description, species,
+    technology, declared factors — from the one listing the site serves,
+    cached like a repository index."""
+    return cached_index(
+        "expression-atlas",
+        lambda: get_json(f"{ATLAS}/json/experiments", {}, 120.0).get(
+            "experiments", []
+        ),
+        refresh=refresh,
+    )
+
+
+def atlas_experiment(accession: str, *, timeout: float = 60.0) -> dict:
+    """One experiment's record with its assay groups or contrasts."""
+    return cached_json(
+        f"atlas experiment {accession}",
+        lambda: get_json(f"{ATLAS}/json/experiments/{accession}", {}, timeout),
+    )
+
+
+def atlas_design(record: dict) -> Design | None:
+    """The design an Atlas experiment states. A baseline experiment lists
+    assay groups with their factor values; a differential one lists
+    contrasts as ``'test' vs 'reference' in 'context' at 'time'``. Either
+    way the time-like factor gives the timepoints and the rest the arms."""
+    groups: list[tuple[str, list[tuple[float, str]], int]] = []
+    for header in record.get("columnHeaders") or []:
+        summary = header.get("assayGroupSummary")
+        if summary is not None:
+            arm, found = [], []
+            for prop in summary.get("properties") or []:
+                if prop.get("contrastPropertyType") != "FACTOR":
+                    continue
+                name = str(prop.get("propertyName") or "")
+                value = str(prop.get("testValue") or "")
+                if TIME_FACTOR.search(name):
+                    times, _ = _times(value)
+                    found += times
+                else:
+                    arm.append(value)
+            groups.append(
+                (" ".join(arm), found, int(summary.get("replicates") or 1))
+            )
+            continue
+        m = _ATLAS_CONTRAST.match(str(header.get("displayName") or ""))
+        if not m:
+            continue
+        found, _ = _times(m.group("time") or "")
+        context = m.group("context") or ""
+        for side, key in (
+            ("test", "testAssayGroup"),
+            ("ref", "referenceAssayGroup"),
+        ):
+            n = int((header.get(key) or {}).get("replicates") or 1)
+            groups.append((f"{m.group(side)} {context}".strip(), found, n))
+    if not groups:
+        return None
+    units = {u for _, found, _ in groups for _, u in found if u}
+    conv = {u: 1.0 for u in units}
+    time_unit = ""
+    if len({_UNIT_NAME.get(u, u) for u in units}) > 1:
+        conv = {u: _UNIT_HOURS.get(u, 1.0) for u in units}
+        time_unit = "h"
+    elif units:
+        time_unit = _UNIT_NAME.get(next(iter(units)), "")
+    per_arm: dict[str, set] = {}
+    n_titles = 0
+    for arm, found, n in groups:
+        per_arm.setdefault(arm, set())
+        for v, u in found:
+            per_arm[arm].add(round(v * conv.get(u, 1.0), 6))
+        n_titles += n
+    arms = tuple(sorted(per_arm))
+    control = next(
+        (
+            a
+            for a in arms
+            if any(tok.lower() in CONTROL_WORDS for tok in a.split())
+        ),
+        None,
+    )
+    return Design(
+        arms=arms,
+        control=control,
+        per_arm=tuple((a, tuple(sorted(per_arm[a]))) for a in arms),
+        time_unit=time_unit,
+        n_titles=n_titles,
+    )
+
+
+def _atlas_candidate(
+    rec: dict, *, designs: bool = True, timeout: float = 60.0
+) -> DatasetCandidate:
+    """An Atlas experiment as a candidate for the deposit it curates: an
+    ``E-GEOD`` accession is the GEO series, an ``E-MTAB`` the ArrayExpress
+    deposit, anything else stays the Atlas's own."""
+    acc = str(rec.get("experimentAccession") or "")
+    tech = " ".join(str(x) for x in (rec.get("technologyType") or [])).lower()
+    if "proteom" in tech:
+        kind, measured = "proteomics", Measured("proteomics", True)
+    elif "array" in tech:
+        kind = "Expression profiling by array"
+        measured = Measured("expression", True)
+    else:
+        kind = "Expression profiling by high throughput sequencing"
+        measured = Measured("expression", True)
+    if m := _ATLAS_ACCESSION.match(acc):
+        source, accession = "geo", f"GSE{m.group(1)}"
+    elif acc.startswith("E-MTAB-"):
+        source, accession = "biostudies-arrayexpress", acc
+    else:
+        source, accession = "expression-atlas", acc
+    factors = tuple(str(f) for f in (rec.get("experimentalFactors") or []))
+    stated = None
+    if designs and any(TIME_FACTOR.search(f) for f in factors):
+        try:
+            stated = atlas_design(atlas_experiment(acc, timeout=timeout))
+        except Exception as exc:  # noqa: BLE001 - the listing stands
+            log.info("%s: design not read (%s)", acc, exc)
+    return DatasetCandidate(
+        source=source,
+        accession=accession,
+        title=str(rec.get("experimentDescription") or ""),
+        kind=kind,
+        organism=str(rec.get("species") or ""),
+        n_samples=int(rec.get("numberOfAssays") or 0),
+        platform="",
+        url=f"{ATLAS}/experiments/{acc}",
+        summary=str(rec.get("experimentDescription") or ""),
+        measured=measured,
+        factors=factors,
+        stated=stated,
+        curated=acc,
+    )
+
+
+def search_expression_atlas(
+    query: str,
+    limit: int = 25,
+    *,
+    organism: str | None = None,
+    timeout: float = 30.0,
+) -> list[DatasetCandidate]:
+    """Expression Atlas experiments matching ``query`` by description,
+    with their declared factors and, where time is one, the design."""
+    from hallsim.search.models import term_score
+
+    scored = []
+    for rec in atlas_experiments():
+        if organism and str(rec.get("species") or "") != organism:
+            continue
+        score = term_score(
+            query,
+            str(rec.get("experimentDescription") or ""),
+            str(rec.get("experimentAccession") or ""),
+        )
+        if score:
+            scored.append((score, rec))
+    scored.sort(key=lambda sr: -sr[0])
+    log.info("expression atlas '%s': %d candidates", query, len(scored))
+    return [_atlas_candidate(r, timeout=timeout) for _, r in scored[:limit]]
+
+
+def iter_expression_atlas(
+    *, designs: bool = True, timeout: float = 60.0, pause: float = 0.2
+):
+    """Every Atlas experiment, designs read for those declaring time."""
+    for rec in atlas_experiments():
+        yield _atlas_candidate(rec, designs=designs, timeout=timeout)
+        if designs:
+            time.sleep(pause)
+
+
+OMICSDI = "https://www.omicsdi.org/ws"
+#: OmicsDI's omics types by the quantity they measure.
+OMICSDI_MODALITY = (
+    ("transcriptomics", "expression", True),
+    ("proteomics", "proteomics", True),
+    ("metabolomics", "metabolomics", False),
+    ("lipidomics", "metabolomics", False),
+    ("genomics", "genotype", True),
+    ("models", "model", False),
+)
+#: OmicsDI's names for repositories this package names otherwise.
+OMICSDI_SOURCE = {
+    "metabolights_dataset": "metabolights",
+    "atlas-experiments": "expression-atlas",
+}
+
+
+def omicsdi_measured(omics_types) -> Measured:
+    for t in omics_types:
+        for prefix, modality, complete in OMICSDI_MODALITY:
+            if str(t).lower().startswith(prefix):
+                return Measured(modality, complete)
+    return Measured("unknown", False)
+
+
+def search_omicsdi(
+    query: str,
+    limit: int = 25,
+    *,
+    organism: str | None = None,
+    timeout: float = 30.0,
+    enrich: bool = True,
+) -> list[DatasetCandidate]:
+    """EBI's OmicsDI, one index over 29 repositories — GEO, ArrayExpress,
+    PRIDE, MetaboLights, Metabolomics Workbench, Expression Atlas, the
+    BioImage Archive, LINCS, MassIVE and more — searched once. Models are
+    left to the model search. A GEO hit is read again from GEO so its
+    sample titles, and so its design, come along; the index carries
+    neither. ``organism`` filters the hits by the names the index lists."""
+    size = limit * 4 if organism else limit
+    payload = get_json(
+        f"{OMICSDI}/dataset/search",
+        {"query": query, "size": size, "start": 0},
+        timeout,
+    )
+    log.info("omicsdi '%s': %s hits", query, payload.get("count", "?"))
+    out: list[DatasetCandidate] = []
+    for h in payload.get("datasets", []):
+        names = [str(o.get("name") or "") for o in (h.get("organisms") or [])]
+        if organism and organism not in names:
+            continue
+        types = [str(x) for x in (h.get("omicsType") or [])]
+        measured = omicsdi_measured(types)
+        if measured.modality == "model":
+            continue
+        raw_source = str(h.get("source") or "")
+        source = OMICSDI_SOURCE.get(raw_source, raw_source)
+        accession = str(h.get("id") or "")
+        cand = DatasetCandidate(
+            source=source,
+            accession=accession,
+            title=str(h.get("title") or ""),
+            kind="; ".join(types),
+            organism="; ".join(n for n in names if n),
+            n_samples=0,
+            platform="",
+            url=f"https://www.omicsdi.org/dataset/{raw_source}/{accession}",
+            summary=str(h.get("description") or ""),
+            measured=measured,
+        )
+        if enrich and source == "geo":
+            try:
+                cand = geo_by_accession(accession, timeout=timeout) or cand
+            except Exception as exc:  # noqa: BLE001 - the index stands
+                log.info("%s: not read from GEO (%s)", accession, exc)
+        out.append(cand)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _search_petab(*a, **kw):
+    """Late import: `attached` builds on the candidates defined here."""
+    from hallsim.search.attached import search_petab
+
+    return search_petab(*a, **kw)
+
+
 SOURCES = {
+    "omicsdi": search_omicsdi,
     "geo": search_geo,
+    "geo-datasets": search_geo_datasets,
+    "expression-atlas": search_expression_atlas,
+    "petab": _search_petab,
     "zenodo": search_zenodo,
     "pride": _ebi_source("pride"),
     "metabolights": _ebi_source("metabolights"),
@@ -1149,15 +1754,23 @@ SOURCES = {
 }
 
 
+#: What a search asks when no source is named: the one index over the
+#: repositories, then the sources it does not carry — Zenodo, GEO's
+#: curated DataSets, the PEtab collection. ``list(SOURCES)`` asks every
+#: repository directly.
+DEFAULT_SOURCES = ("omicsdi", "zenodo", "geo-datasets", "petab")
+
+
 def search_for_dataset(
     query: str,
     limit: int = 25,
     sources: list[str] | None = None,
     **kwargs,
 ) -> list[DatasetCandidate]:
-    """Search every registered data repository for ``query``. A source that
-    errors is logged and skipped."""
-    names = sources if sources is not None else list(SOURCES)
+    """Search the data repositories for ``query``: :data:`DEFAULT_SOURCES`
+    unless ``sources`` names others. A source that errors is logged and
+    skipped."""
+    names = sources if sources is not None else list(DEFAULT_SOURCES)
     found: list[DatasetCandidate] = []
     for name in names:
         search = SOURCES.get(name)
@@ -1244,7 +1857,7 @@ def _links(payload: dict):
 
 def supplement_files(accession: str, *, timeout: float = 30.0) -> tuple:
     """The file names of a BioStudies bundle (a paper's supplement)."""
-    study = _get_json(f"{BIOSTUDIES}/studies/{accession}", {}, timeout)
+    study = get_json(f"{BIOSTUDIES}/studies/{accession}", {}, timeout)
     names: list[str] = []
 
     def walk(node):
@@ -1265,17 +1878,35 @@ def supplement_files(accession: str, *, timeout: float = 30.0) -> tuple:
     return tuple(n for n in names if n)
 
 
-def pmc_supplement_files(pmcid: str, *, timeout: float = 120.0) -> tuple:
-    """The file names inside a paper's Europe PMC supplementary archive,
-    nested archives opened one level; cached, since the archive is the
-    whole supplement."""
+#: A supplement table larger than this is left in the archive.
+MAX_TABLE_BYTES = 20 * 1024 * 1024
+
+
+def pmc_supplement(
+    pmcid: str, *, timeout: float = 120.0
+) -> tuple[tuple[str, ...], tuple[Path, ...]]:
+    """A paper's Europe PMC supplementary archive: the file names inside
+    it, nested archives opened one level, and the tables it holds,
+    extracted beside the cache. Both are kept, since the archive is the
+    whole supplement and one download serves both."""
     import io
     import zipfile
+
+    dest = cache_dir("europepmc") / pmcid / "tables"
+    marker = dest / ".extracted"
+
+    def keep(name: str, data: bytes) -> None:
+        if not name.lower().endswith(TABLE_SUFFIXES):
+            return
+        if len(data) > MAX_TABLE_BYTES or is_junk_archive_entry(name):
+            return
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / name.replace("/", "__")).write_bytes(data)
 
     def fetch():
         request = urllib.request.Request(
             f"{EUROPEPMC}/{pmcid}/supplementaryFiles",
-            headers={"User-Agent": "hallsim"},
+            headers={"User-Agent": USER_AGENT},
         )
         with urllib.request.urlopen(request, timeout=timeout) as fh:
             blob = fh.read()
@@ -1284,18 +1915,40 @@ def pmc_supplement_files(pmcid: str, *, timeout: float = 120.0) -> tuple:
             with zipfile.ZipFile(io.BytesIO(blob)) as archive:
                 for info in archive.infolist():
                     names.append(info.filename)
+                    if info.is_dir():
+                        continue
                     if not info.filename.lower().endswith(".zip"):
+                        keep(info.filename, archive.read(info))
                         continue
                     try:
                         inner = zipfile.ZipFile(io.BytesIO(archive.read(info)))
                     except zipfile.BadZipFile:
                         continue
-                    names += [f"{info.filename}/{n}" for n in inner.namelist()]
+                    for member in inner.infolist():
+                        names.append(f"{info.filename}/{member.filename}")
+                        if not member.is_dir():
+                            keep(member.filename, inner.read(member))
         except zipfile.BadZipFile:
-            return []
+            names = []
+        dest.mkdir(parents=True, exist_ok=True)
+        marker.touch()
         return names
 
-    return tuple(_cached_json(f"pmc supplement {pmcid}", fetch))
+    key = f"pmc supplement {pmcid}"
+    if marker.exists():
+        names = cached_json(key, fetch)
+    else:
+        # Names cached by a run that did not extract tables: one more
+        # download extracts them, and the names it lists are the same.
+        names = fetch()
+        names = cached_json(key, lambda: names)
+    tables = tuple(sorted(p for p in dest.iterdir() if p.name != ".extracted"))
+    return tuple(names), tables
+
+
+def pmc_supplement_files(pmcid: str, *, timeout: float = 120.0) -> tuple:
+    """The file names inside a paper's supplementary archive."""
+    return pmc_supplement(pmcid, timeout=timeout)[0]
 
 
 def iter_bioimages(*, page: int = 100, timeout: float = 30.0):
@@ -1303,7 +1956,7 @@ def iter_bioimages(*, page: int = 100, timeout: float = 30.0):
     facet, page by page."""
     number = 1
     while True:
-        payload = _get_json(
+        payload = get_json(
             f"{BIOSTUDIES}/search",
             {
                 "facet.collection": "BioImages",
@@ -1324,7 +1977,7 @@ def iter_bioimages(*, page: int = 100, timeout: float = 30.0):
                 platform="",
                 url=f"https://www.ebi.ac.uk/biostudies/BioImages/studies/"
                 f"{h.get('accession', '')}",
-                summary=(h.get("content") or "")[:400],
+                summary=h.get("content") or "",
                 measured=Measured("imaging"),
             )
         total = int(payload.get("totalHits", 0))
@@ -1338,7 +1991,7 @@ def paper_data(
 ) -> PaperData:
     """Europe PMC's view of one paper: flags from its record, data links."""
     pmid = str(pubmed).strip()
-    core = _get_json(
+    core = get_json(
         f"{EUROPEPMC}/search",
         {
             "query": f"EXT_ID:{pmid} AND SRC:MED",
@@ -1349,7 +2002,7 @@ def paper_data(
     )
     results = core.get("resultList", {}).get("result", [])
     rec = results[0] if results else {}
-    links = _get_json(
+    links = get_json(
         f"{EUROPEPMC}/MED/{pmid}/datalinks", {"format": "json"}, timeout
     )
     datasets: dict[str, DatasetCandidate] = {}
@@ -1400,10 +2053,11 @@ def paper_data(
     if has_supplement and pmcid and not bundled:
         # The supplement exists but no BioStudies bundle is linked: Europe
         # PMC serves it as one archive.
-        files = ()
+        files, stated = (), None
         if with_files:
             try:
-                files = pmc_supplement_files(pmcid, timeout=timeout)
+                files, tables = pmc_supplement(pmcid, timeout=timeout)
+                stated = table_design(tables)
             except Exception as exc:  # noqa: BLE001 - a dead archive
                 log.info("supplement %s: no file list (%s)", pmcid, exc)
         datasets[pmcid] = DatasetCandidate(
@@ -1419,6 +2073,7 @@ def paper_data(
             files=files,
             measured=Measured("supplement"),
             pubmed=pmid,
+            stated=stated,
         )
     return PaperData(
         pubmed=pmid,
@@ -1454,6 +2109,8 @@ class Perturbation:
     mechanism: str = ""
 
 
+#: A gene symbol: HGNC-style, at most 15 characters.
+SYMBOL = re.compile(r"^(?:[A-Z][A-Z0-9-]{0,14}|C[0-9XY]+orf[0-9]+)$")
 _GENE_EDIT = re.compile(
     r"\b(?:si|sh|KO|KD|OE|del|Δ|crispr|knock(?:out|down)|mutant|null|"
     r"overexpress(?:ion|ing)?|-/-|\+/-)\b",
@@ -1461,25 +2118,10 @@ _GENE_EDIT = re.compile(
 )
 
 
-def _cache_dir() -> Path:
-    path = Path.home() / ".cache" / "hallsim" / "datasets"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _cached_json(key: str, fetch):
-    path = _cache_dir() / (hashlib.sha1(key.encode()).hexdigest() + ".json")
-    if path.exists():
-        return json.loads(path.read_text())
-    value = fetch()
-    path.write_text(json.dumps(value))
-    return value
-
-
 def _chebi(label: str, timeout: float) -> tuple[str, str]:
-    payload = _cached_json(
+    payload = cached_json(
         f"ols chebi {label.lower()}",
-        lambda: _get_json(
+        lambda: get_json(
             OLS_SEARCH,
             {"q": label, "ontology": "chebi", "rows": 1, "type": "class"},
             timeout,
@@ -1492,9 +2134,9 @@ def _chebi(label: str, timeout: float) -> tuple[str, str]:
 
 
 def _chembl_targets(label: str, timeout: float) -> tuple[list[str], str]:
-    mols = _cached_json(
+    mols = cached_json(
         f"chembl molecule {label.lower()}",
-        lambda: _get_json(
+        lambda: get_json(
             f"{CHEMBL}/molecule.json",
             {
                 "molecule_synonyms__molecule_synonym__iexact": label,
@@ -1506,9 +2148,9 @@ def _chembl_targets(label: str, timeout: float) -> tuple[list[str], str]:
     if not mols:
         return [], ""
     chembl_id = mols[0]["molecule_chembl_id"]
-    mechs = _cached_json(
+    mechs = cached_json(
         f"chembl mechanism {chembl_id}",
-        lambda: _get_json(
+        lambda: get_json(
             f"{CHEMBL}/mechanism.json",
             {"molecule_chembl_id": chembl_id, "limit": 20},
             timeout,
@@ -1521,9 +2163,9 @@ def _chembl_targets(label: str, timeout: float) -> tuple[list[str], str]:
             names.append(mech["mechanism_of_action"])
         if not tid:
             continue
-        target = _cached_json(
+        target = cached_json(
             f"chembl target {tid}",
-            lambda tid=tid: _get_json(
+            lambda tid=tid: get_json(
                 f"{CHEMBL}/target/{tid}.json", {}, timeout
             ),
         )
@@ -1535,9 +2177,9 @@ def _chembl_targets(label: str, timeout: float) -> tuple[list[str], str]:
 
 
 def _gene_uniprot(symbol: str, timeout: float) -> list[str]:
-    payload = _cached_json(
+    payload = cached_json(
         f"mygene {symbol.upper()}",
-        lambda: _get_json(
+        lambda: get_json(
             MYGENE_QUERY,
             {
                 "q": f"symbol:{symbol}",
@@ -1597,85 +2239,18 @@ def resolve_perturbation(label: str, *, timeout: float = 30.0) -> Perturbation:
     )
 
 
-# ── Coverage of a composite ─────────────────────────────────────────
+# ── GEO's files ─────────────────────────────────────────────────────
+
+GEO_SERIES = "https://ftp.ncbi.nlm.nih.gov/geo/series"
 
 
-@dataclass(frozen=True)
-class Coverage:
-    """Which of a composite's annotated store paths a dataset measures,
-    and through what: ``direct`` (the path's own id is measured),
-    ``complete`` (the modality measures every quantity of the path's
-    kind), ``regulon`` (a transcriptome reads a transcription factor
-    through its targets), or ``none``."""
-
-    paths: tuple[str, ...] = ()
-    via: str = "none"
-
-    def __bool__(self) -> bool:
-        return bool(self.paths)
-
-
-def coverage(candidate: DatasetCandidate, composite, ontmap=None) -> Coverage:
-    """What ``candidate`` measures of ``composite``, by ontology."""
-    from hallsim.reporter_wiring import store_ontology_map, tf_observables
-
-    ontmap = store_ontology_map(composite) if ontmap is None else ontmap
-    m = candidate.measured
-    measured_ids = {i.lower() for i in m.ids}
-
-    def with_ns(ns: str) -> list[str]:
-        return sorted(p for p, o in ontmap.items() if ns in o)
-
-    def listed(ns: str) -> list[str]:
-        return sorted(
-            p
-            for p, o in ontmap.items()
-            if ns in o and curie(ns, o[ns]).lower() in measured_ids
-        )
-
-    if m.modality == "proteomics":
-        hit = listed("uniprot")
-        if hit:
-            return Coverage(tuple(hit), "direct")
-        if m.complete:
-            return Coverage(tuple(with_ns("uniprot")), "complete")
-    elif m.modality == "metabolomics":
-        hit = listed("chebi")
-        if hit:
-            return Coverage(tuple(hit), "direct")
-        if m.complete:
-            return Coverage(tuple(with_ns("chebi")), "complete")
-    elif m.modality == "expression" and m.complete:
-        return Coverage(
-            tuple(sorted(tf_observables(composite, ontmap))), "regulon"
-        )
-    elif m.modality == "imaging":
-        hit = listed("uniprot")
-        if hit:
-            return Coverage(tuple(hit), "direct")
-    return Coverage()
-
-
-def search_measuring(
-    query: str, composite, *, limit: int = 25, sources=None, **kwargs
-) -> list[tuple[DatasetCandidate, Coverage]]:
-    """Search every repository for ``query`` and keep the hits that
-    measure something ``composite`` carries, best covered and longest time
-    course first."""
-    from hallsim.reporter_wiring import store_ontology_map
-
-    ontmap = store_ontology_map(composite)
-    hits = search_for_dataset(query, limit=limit, sources=sources, **kwargs)
-    kept = []
-    for hit in hits:
-        cov = coverage(hit, composite, ontmap)
-        if cov:
-            kept.append((hit, cov))
-    kept.sort(key=lambda hc: (-len(hc[1].paths), -hc[0].design.n_timepoints))
-    return kept
-
-
-# ── The expression loader's check ───────────────────────────────────
+def geo_series_urls(accession: str) -> tuple[str, str]:
+    """The series-matrix and family-SOFT URLs GEO serves for ``accession``."""
+    base = f"{GEO_SERIES}/{accession[:3]}{accession[3:-3]}nnn/{accession}"
+    return (
+        f"{base}/matrix/{accession}_series_matrix.txt.gz",
+        f"{base}/soft/{accession}_family.soft.gz",
+    )
 
 
 def platform_head(
@@ -1703,16 +2278,3 @@ def platform_head(
     if not lines:
         return pd.DataFrame()
     return pd.read_csv(StringIO("".join(lines)), sep="\t", dtype=str)
-
-
-def loader_route(frame: pd.DataFrame) -> str:
-    """How :func:`hallsim.gene_reporters.load_gene_expression` would map
-    this platform's probes to genes, or why it cannot."""
-    if frame.empty or "ID" not in frame.columns:
-        return "no platform table in the series' SOFT"
-    try:
-        col, route = choose_annotation(frame)
-    except ValueError as exc:
-        return f"the loader cannot map it: {exc}"
-    via = " via MyGene.info" if route == "accession" else ""
-    return f"the loader reads {route}s from column {col!r}{via}"

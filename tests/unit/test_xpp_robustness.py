@@ -7,7 +7,7 @@ know. None is exotic — they are what published .ode files actually contain.
 
 import pytest
 
-from hallsim.discovery import _is_junk_archive_entry
+from hallsim.search.fetch import is_junk_archive_entry
 from hallsim.xpp_import import process_from_xpp
 
 MINIMAL = """% Spike adaptation by an erg-like K+ current.
@@ -39,13 +39,13 @@ class TestJunkArchiveEntries:
         ],
     )
     def test_debris_is_rejected(self, name):
-        assert _is_junk_archive_entry(name)
+        assert is_junk_archive_entry(name)
 
     @pytest.mark.parametrize(
         "name", ["model.ode", "sub/model.ode", "a_._b/model.ode"]
     )
     def test_real_files_are_kept(self, name):
-        assert not _is_junk_archive_entry(name)
+        assert not is_junk_archive_entry(name)
 
 
 class TestPercentLines:

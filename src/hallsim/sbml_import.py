@@ -23,6 +23,7 @@ import sympy
 
 from hallsim.imported import ImportedODEProcess
 from hallsim.process import Port, PortRole, ReactionChannel
+from hallsim.search.models import download_biomodel_main, download_jws_model
 from hallsim.sbml_core import (  # noqa: F401  (re-exported)
     SBMLCore,
     UnsupportedSBMLFeatureError,
@@ -711,97 +712,6 @@ class SBMLProcess(ImportedODEProcess):
         return base
 
 
-def _atomic_write(out_path: str, write) -> None:
-    """``write(tmp_path)`` into the destination directory, then rename.
-
-    A reader in another process sees either the old file or the new one, never
-    a half-written document.
-    """
-    import os
-    import tempfile
-
-    fd, tmp = tempfile.mkstemp(
-        dir=os.path.dirname(out_path), prefix=".tmp-", suffix=".xml"
-    )
-    os.close(fd)
-    try:
-        write(tmp)
-        os.replace(tmp, out_path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
-def _download_biomodel_to_cache(model_id) -> str:
-    """Fetch SBML XML for a BioModels ID and cache it under
-    ``~/.cache/hallsim/biomodels``. Returns the cached path.
-
-    Subsequent calls with the same ID reuse the cached file (BioModels
-    IDs are immutable post-curation), so this is a one-time download per
-    model per machine.
-    """
-    import os
-
-    from hallsim.discovery import _accession
-
-    cache_dir = os.path.expanduser("~/.cache/hallsim/biomodels")
-    os.makedirs(cache_dir, exist_ok=True)
-    if isinstance(model_id, int):
-        fname = f"BIOMD{model_id:010d}.xml"
-    else:
-        fname = f"{model_id}.xml"
-    cache_path = os.path.join(cache_dir, fname)
-    if not os.path.exists(cache_path):
-        xml = _fetch_biomodel_main(_accession(model_id))
-        # Atomic, so an interrupted or concurrent download cannot leave a
-        # truncated file that every later run then trusts.
-        _atomic_write(cache_path, lambda p: open(p, "w").write(xml))
-    return cache_path
-
-
-def _fetch_biomodel_main(accession: str, timeout: float = 60.0) -> str:
-    """The text of a deposit's main SBML file.
-
-    Older curated deposits name it ``<accession>_url.xml``; newer ones keep
-    the author's filename (BIOMD0000001044 is ``Csikasz-Nagy2006.xml``) and
-    the conventional name answers HTTP 400. The record says which file is
-    main, so that is read when the convention fails.
-    """
-    import urllib.error
-    import urllib.parse
-    import urllib.request
-
-    from hallsim.discovery import (
-        BIOMODELS_DOWNLOAD,
-        USER_AGENT,
-        biomodels_record,
-    )
-
-    base = BIOMODELS_DOWNLOAD.format(model_id=accession)
-
-    def fetch(name: str) -> str:
-        query = urllib.parse.urlencode({"filename": name})
-        request = urllib.request.Request(
-            f"{base}?{query}", headers={"User-Agent": USER_AGENT}
-        )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.read().decode("utf-8")
-
-    try:
-        return fetch(f"{accession}_url.xml")
-    except urllib.error.HTTPError as first:
-        record = biomodels_record(accession, timeout=timeout)
-        main = [
-            f.get("name", "")
-            for f in ((record.get("files") or {}).get("main") or [])
-            if f.get("name")
-        ]
-        sbml = [n for n in main if n.lower().endswith((".xml", ".sbml"))]
-        if not sbml:
-            raise first
-        return fetch(sbml[0])
-
-
 def _extract_compartment_names(xml_path: str) -> frozenset[str]:
     """Compartment ids. They reach ``parameters`` as sizes, but a compartment
     volume is geometry: it scales every rate at once, so it is the most
@@ -1164,32 +1074,6 @@ def _detect_inert_sinks(xml_path: str) -> set[str]:
     return sinks
 
 
-JWS_SBML_URL = "https://jjj.bio.vu.nl/models/{slug}/sbml/"
-
-
-def _download_jws_to_cache(slug: str) -> str:
-    """Fetch a JWS Online model's SBML and cache it under
-    ``~/.cache/hallsim/jws``. Returns the cached path."""
-    import urllib.request
-    from pathlib import Path
-
-    out = Path.home() / ".cache" / "hallsim" / "jws" / f"{slug}.xml"
-    if out.exists():
-        return str(out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(
-        JWS_SBML_URL.format(slug=slug), timeout=60
-    ) as fh:
-        body = fh.read()
-    if b"<sbml" not in body[:4000]:
-        raise ValueError(
-            f"JWS model {slug!r} did not return SBML — check the slug at "
-            f"https://jjj.bio.vu.nl/models/{slug}/"
-        )
-    out.write_bytes(body)
-    return str(out)
-
-
 def _resolve_source(model_id, name):
     """``(xml_path, name)`` for a local path, a BioModels ID, ``jws:<slug>``
     or a ``PMC`` id.
@@ -1218,11 +1102,11 @@ def _resolve_source(model_id, name):
         slug = model_id.split(":", 1)[1]
         name = name or f"jws_{slug}"
         log.info(f"Fetching JWS Online '{slug}' as '{name}'...")
-        return _download_jws_to_cache(slug), name
+        return str(download_jws_model(slug)), name
     if isinstance(model_id, str) and re.fullmatch(r"PMC\d+", model_id):
         # A paper, not a deposit: the model is in its supplement, which is
         # what a Europe PMC search hit points at.
-        from hallsim.literature import supplementary_model_files
+        from hallsim.search.literature import supplementary_model_files
 
         files = [
             str(p)
@@ -1232,7 +1116,8 @@ def _resolve_source(model_id, name):
         if not files:
             raise LookupError(
                 f"{model_id} deposited no SBML or COPASI file in its "
-                "supplement; hallsim.literature.supplementary_model_files "
+                "supplement; hallsim.search.literature."
+                "supplementary_model_files "
                 "lists what it holds."
             )
         if len(files) > 1:
@@ -1245,7 +1130,7 @@ def _resolve_source(model_id, name):
         return _resolve_source(files[0], name or model_id.lower())
     name = name or f"biomodel_{model_id}"
     log.info(f"Fetching BioModels #{model_id} as '{name}'...")
-    return _download_biomodel_to_cache(model_id), name
+    return str(download_biomodel_main(model_id)), name
 
 
 def _ordered_species(core) -> tuple[str, ...]:

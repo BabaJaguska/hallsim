@@ -629,7 +629,8 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
     import re
     from collections import Counter
 
-    from hallsim.discovery import screen_produced_species, search_for_model
+    from hallsim.screens import screen_produced_species
+    from hallsim.search.models import search_for_model
 
     src = sources.split(",") if sources else None
     seen, cands = set(), []
@@ -677,7 +678,7 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
 
     papers = [c for c in cands if c.source == "europepmc"]
     if repos and papers:
-        from hallsim.literature import repositories_cited
+        from hallsim.search.literature import repositories_cited
 
         click.echo(f"\n=== REPOSITORIES cited by {len(papers)} paper(s) ===")
         cited = repositories_cited(papers, limit=repo_limit)
@@ -768,7 +769,7 @@ def discover(
 
     simulate discover --url https://example.org/paper --no-papers
     """
-    from hallsim.web_discovery import BraveSearch, discover_models
+    from hallsim.search.web import BraveSearch, discover_models
 
     if not topic and not urls:
         raise click.UsageError("Supply a topic or --url.")
@@ -822,6 +823,35 @@ def discover(
         )
 
 
+@simulate.command("mcp")
+@click.option("--http", is_flag=True, help="serve over HTTP instead of stdio")
+@click.option("--port", type=int, default=8000, show_default=True)
+def mcp_server(http, port):
+    """Serve the search as MCP tools: find_models, find_data,
+    dataset_design, paper_datasets, sources, and screen_models (which
+    species a deposit produces). Register it in Claude Code with
+    `claude mcp add hallsim -- simulate mcp`."""
+    from dataclasses import asdict
+
+    from hallsim.screens import screen_produced_species
+    from hallsim.search.server import build_server
+
+    mcp = build_server()
+
+    @mcp.tool
+    def screen_models(model_ids: list[str], pattern: str) -> list[dict]:
+        """Which of the deposits (BioModels accessions, ``jws:`` slugs or
+        ``PMC`` ids from find_models) produce a species matching
+        ``pattern``, a regex against species ids and names. A deposit that
+        only consumes the quantity contributes nothing when composed."""
+        return [asdict(r) for r in screen_produced_species(model_ids, pattern)]
+
+    if http:
+        mcp.run(transport="http", port=port)
+    else:
+        mcp.run(transport="stdio")
+
+
 @simulate.command("find-data")
 @click.argument("query", nargs=-1, required=False)
 @click.option("--limit", type=int, default=20)
@@ -860,11 +890,10 @@ def find_data(query, limit, organism, sources, composite, paper, check):
     list is narrowed to what that composite carries, by ontology. With
     --paper the paper's own data is listed instead of a search.
     """
-    from hallsim.datasets import (
+    from hallsim.screens import coverage, loader_route
+    from hallsim.search.datasets import (
         SOURCES,
-        coverage,
         datasets_of,
-        loader_route,
         platform_head,
         search_for_dataset,
     )
@@ -872,11 +901,13 @@ def find_data(query, limit, organism, sources, composite, paper, check):
     if not query and not paper:
         raise click.UsageError("give a query, or --paper PMID")
     for s in sources:
-        if s not in SOURCES:
+        if s not in SOURCES and s != "all":
             raise click.BadParameter(
-                f"unknown source {s!r}; have {', '.join(SOURCES)}",
+                f"unknown source {s!r}; have all, {', '.join(SOURCES)}",
                 param_hint="--source",
             )
+    if "all" in sources:
+        sources = tuple(SOURCES)
     comp = None
     if composite:
         from hallsim.view import Page
@@ -923,9 +954,12 @@ def find_data(query, limit, organism, sources, composite, paper, check):
             + d.platform
         )
         click.echo(f"    {d.title[:100]}")
-        if d.samples:
+        if d.samples or d.stated is not None:
             click.echo(f"    design: {d.design.summary()}")
+        if d.samples:
             click.echo(f"    samples: {', '.join(d.samples[:6])}")
+        if d.curated:
+            click.echo(f"    curated: {d.curated}")
         if d.factors:
             click.echo(f"    factors: {', '.join(d.factors[:6])}")
         if d.files:
@@ -1231,8 +1265,23 @@ def census_data():
     "--route",
     "routes",
     multiple=True,
-    type=click.Choice(["papers", "geo", "ebi", "bioimages"]),
-    help="a route to enumerate (default: all); repeatable",
+    type=click.Choice(
+        [
+            "papers",
+            "geo",
+            "ebi",
+            "osdr",
+            "bioimages",
+            "gds",
+            "atlas",
+            "petab",
+            "models",
+        ]
+    ),
+    help="a route to enumerate (default: all, in this order); repeatable. "
+    "gds and atlas are the curated views of GEO and ArrayExpress deposits, "
+    "petab the benchmark collection of models with their data, models the "
+    "data each screened BioModels deposit ships beside itself",
 )
 @click.option(
     "--organism",
@@ -1315,9 +1364,28 @@ def census_data_run(
     help="the model census to match against (default: the run's own)",
 )
 @click.option("--all-models", is_flag=True)
-def census_data_rescreen(run_dir, models_run, all_models):
-    """Screen every stored row again under the current gates and models,
-    without asking the repositories; then run `report`."""
+@click.option(
+    "--files",
+    "with_files",
+    is_flag=True,
+    help="fetch the file list of every row that reaches the loader and "
+    "waits on one (one request per deposit)",
+)
+@click.option(
+    "--factors",
+    "with_factors",
+    is_flag=True,
+    help="fetch the declared experimental factors of every ArrayExpress "
+    "row from BioStudies (one request per deposit; tens of thousands "
+    "over a whole run)",
+)
+@click.option("--workers", type=int, default=4, show_default=True)
+def census_data_rescreen(
+    run_dir, models_run, all_models, with_files, with_factors, workers
+):
+    """Screen every stored row again under the current gates and models;
+    asks the repositories only for what --files and --factors name. Then
+    run `report`."""
     import json
     from pathlib import Path
 
@@ -1329,7 +1397,13 @@ def census_data_rescreen(run_dir, models_run, all_models):
         cfg = json.loads((run / "config.json").read_text())
         models_run = cfg["models_run"]
     models = load_models(models_run, usable_only=not all_models)
-    n = rescreen(run, models)
+    n = rescreen(
+        run,
+        models,
+        with_files=with_files,
+        with_factors=with_factors,
+        workers=workers,
+    )
     click.echo(f"{n} rows screened again against {len(models)} models")
 
 

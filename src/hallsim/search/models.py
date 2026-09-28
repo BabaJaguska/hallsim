@@ -1,8 +1,9 @@
-"""Model discovery — search public repositories for a model to import.
+"""Where the models are: search over the repositories, and over the
+papers whose supplement carries one.
 
 The first step an agent takes: turn a mechanism named in prose ("p53
-oscillator", "NF-κB signalling") into concrete, fetchable candidates, each of
-which :func:`hallsim.sbml_import.process_from_sbml` can turn into a Process.
+oscillator", "NF-κB signalling") into concrete, fetchable candidates, each
+of which an importer takes by id (``process_from_sbml(hits[0].id)``).
 
 :func:`search_for_model` fans out over the registered sources and returns a
 flat, ranked candidate list. Add a repository by writing one search function
@@ -11,7 +12,6 @@ and registering it in :data:`SOURCES` — callers do not change.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import urllib.parse
@@ -19,10 +19,20 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from hallsim.search.fetch import (
+    USER_AGENT,
+    atomic_write,
+    cache_dir,
+    cached_index,
+    cached_json,
+    fetch_many,
+    get_json,
+    is_junk_archive_entry,
+)
+
 log = logging.getLogger(__name__)
 
 BIOMODELS_SEARCH = "https://www.ebi.ac.uk/biomodels/search"
-USER_AGENT = "hallsim-discovery"
 
 
 @dataclass(frozen=True)
@@ -54,8 +64,8 @@ class ModelCandidate:
     #: deposit is not linked to it.
     publication: str = ""
     #: Every filename in the deposit, main and additional. A deposit's
-    #: supplementary files often carry the fitting data
-    #: :func:`hallsim.intake.published_fit_chi2` needs.
+    #: supplementary files often carry the fitting data a calibration
+    #: scores against.
     files: tuple = ()
 
     def fetch(self) -> Path:
@@ -64,11 +74,9 @@ class ModelCandidate:
         first model file in a paper's supplement. ``process_from_sbml`` takes
         the same ids directly."""
         if self.source == "biomodels":
-            from hallsim.sbml_import import _download_biomodel_to_cache
-
-            return Path(_download_biomodel_to_cache(self.id))
+            return download_biomodel_main(self.id)
         if self.source in ("jws", "europepmc"):
-            return Path(_sbml_paths_for(self.id, self.source, 120.0)[0])
+            return Path(model_files(self.id, self.source, 120.0)[0])
         raise NotImplementedError(
             f"no fetcher for source {self.source!r}; open {self.url} and "
             f"vendor the file under demos/models/ or data/ by hand"
@@ -94,9 +102,8 @@ class ModelCandidate:
 
         A deposit's additional files are where the provenance lives: a README
         saying what was deposited, and often the fitting data that licenses
-        every later claim about the model
-        (:func:`hallsim.intake.published_fit_chi2`). Fetching only the SBML
-        leaves that on the server.
+        every later claim about the model. Fetching only the SBML leaves that
+        on the server.
         """
         if self.source != "biomodels":
             raise NotImplementedError(f"no fetcher for source {self.source!r}")
@@ -122,7 +129,7 @@ def biomodels_record(model_id, timeout: float = 30.0) -> dict:
     annotations or unit declarations added, so semantic composition checks are
     blind on it and its clock is a guess.
     """
-    return _get_json(
+    return get_json(
         BIOMODELS_RECORD.format(model_id=_accession(model_id)),
         {"format": "json"},
         timeout,
@@ -178,39 +185,39 @@ def download_biomodel_files(
     dest: "Path | str | None" = None,
     timeout: float = 60.0,
     main_only: bool = False,
+    names=None,
 ) -> list["Path"]:
     """Download every file in a BioModels deposit; return the local paths.
 
-    ``main_only`` fetches just the deposit's main model file. A screen that
+    ``main_only`` fetches just the deposit's main model file, ``names`` only
+    the files named (a deposit's data tables, its COPASI file). A screen that
     only reads the SBML otherwise pulls the PDF, the reaction-diagram PNG and
     SVG, the MATLAB and XPP exports and the curation log with it — megabytes
     per deposit, and across a few hundred candidates that is most of the wall
     clock spent on files nothing opens.
 
-    ``_download_biomodel_to_cache`` fetches the model and stops there, but the
-    deposit's other files are where the provenance is: a README stating what
-    was deposited and under what conditions, and — for the minority of papers
-    that deposit it — the fitting data that
-    :func:`hallsim.intake.published_fit_chi2` scores against. Defaults to
-    ``~/.cache/hallsim/biomodels/<accession>/``.
+    :func:`download_biomodel_main` fetches the model and stops there, but
+    the deposit's other files are where the provenance is: a README stating
+    what was deposited and under what conditions, and — for the minority of
+    papers that deposit it — the fitting data a calibration scores against.
+    Defaults to ``biomodels/<accession>/`` under the cache.
 
     A file that comes back empty is not written: the download endpoint 302s,
     and a client that does not follow the redirect gets a silent zero-byte
     body rather than an error.
     """
-    import urllib.parse
-
     accession = _accession(model_id)
     record = biomodels_record(accession, timeout=timeout)
     if main_only:
         files = (record.get("files") or {}).get("main") or []
         names = tuple(f.get("name", "") for f in files if f.get("name"))
+    elif names is not None:
+        wanted = set(names)
+        names = tuple(n for n in _record_filenames(record) if n in wanted)
     else:
         names = _record_filenames(record)
     out_dir = (
-        Path(dest)
-        if dest is not None
-        else Path.home() / ".cache" / "hallsim" / "biomodels" / accession
+        Path(dest) if dest is not None else cache_dir("biomodels") / accession
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -240,15 +247,6 @@ def download_biomodel_files(
         "%s: %d/%d file(s) -> %s", accession, len(written), len(names), out_dir
     )
     return written
-
-
-def _get_json(url: str, params: dict, timeout: float) -> dict:
-    request = urllib.request.Request(
-        f"{url}?{urllib.parse.urlencode(params)}",
-        headers={"Accept": "application/json", "User-Agent": USER_AGENT},
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.load(response)
 
 
 #: Over-fetch factor for filters applied client-side. The search truncates
@@ -281,7 +279,7 @@ def search_biomodels(
     # The endpoint answers a quoted phrase with HTTP 400; the words are
     # matched individually, so quotes only ever break the call.
     query = query.replace('"', "")
-    payload = _get_json(
+    payload = get_json(
         BIOMODELS_SEARCH,
         {
             "query": query,
@@ -335,109 +333,13 @@ def search_biomodels(
 #: in practice are acronyms, must match a whole word.
 STEM_MIN_CHARS = 3
 
-CACHE_TTL_DAYS = 30.0
-INDEX_WORKERS = 16
-#: Tries per URL during an index build, backing off between them.
-INDEX_ATTEMPTS = 4
-#: Gap between straggler refetches, once concurrency has been given up on.
-SERIAL_RETRY_PAUSE = 0.5
 #: Reject an index build that could not hydrate this fraction of its rows.
 #: An empty row is indistinguishable from a model with no annotation, so a
 #: partial build caches as a complete one and reads as absence of evidence.
 INDEX_MIN_HYDRATED = 0.9
 
 
-def _cache_dir() -> Path:
-    path = Path.home() / ".cache" / "hallsim" / "discovery"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def cached_index(
-    name: str,
-    build: "callable",
-    ttl_days: float = CACHE_TTL_DAYS,
-    refresh: bool = False,
-) -> list[dict]:
-    """``build()``'s records, cached on disk under ``~/.cache/hallsim``.
-
-    Rebuilt when older than ``ttl_days`` or when ``refresh``. A build failure
-    with a stale cache present returns the stale cache rather than nothing —
-    a repository being down should degrade the search, not empty it.
-    """
-    import time
-
-    path = _cache_dir() / f"{name}.json"
-    fresh = (
-        path.exists()
-        and (time.time() - path.stat().st_mtime) < ttl_days * 86400.0
-    )
-    if fresh and not refresh:
-        return json.loads(path.read_text())
-    try:
-        records = build()
-    except Exception as exc:
-        if path.exists():
-            log.warning(
-                "%s index rebuild failed (%s); using stale cache", name, exc
-            )
-            return json.loads(path.read_text())
-        raise
-    path.write_text(json.dumps(records))
-    log.info("%s index built: %d records -> %s", name, len(records), path)
-    return records
-
-
-def _fetch_many(
-    urls: list[str],
-    timeout: float = 30.0,
-    workers: int = INDEX_WORKERS,
-    attempts: int = INDEX_ATTEMPTS,
-) -> list[dict | None]:
-    """Fetch JSON from many URLs concurrently, preserving order.
-
-    Index builds are thousands of small requests against a public API; serial
-    fetching makes the first search a coffee break. A failed record is None
-    rather than an exception — one bad row must not lose the index.
-
-    Overload is retried with backoff. A loaded repository answers a request it
-    would otherwise serve with 429 *or* with 500 — JWS returns 500 — so a
-    status-code allowlist would drop two thirds of that index on the floor and
-    still look like a complete build. Callers must therefore check how many
-    rows came back None; :func:`cached_index` writes whatever it is handed.
-
-    Stragglers get a final serial pass. Retrying in place keeps every worker
-    hammering a source that is shedding load, and JWS's failures were measured
-    to be transient rather than per-URL: the same 40 URLs that failed 29 times
-    inside a concurrent batch all succeeded when spaced out.
-    """
-    import random
-    import time
-    from concurrent.futures import ThreadPoolExecutor
-
-    def one(url, tries):
-        for attempt in range(tries):
-            try:
-                return _get_json(url, {}, timeout)
-            except Exception:
-                if attempt == tries - 1:
-                    return None
-                time.sleep(2.0**attempt * (0.5 + random.random()))
-        return None
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        out = list(pool.map(lambda u: one(u, attempts), urls))
-
-    missing = [i for i, rec in enumerate(out) if rec is None]
-    if missing and len(missing) < len(urls):
-        log.info("retrying %d straggler(s) serially", len(missing))
-        for i in missing:
-            time.sleep(SERIAL_RETRY_PAUSE)
-            out[i] = one(urls[i], attempts)
-    return out
-
-
-def _score(query: str, *fields: str) -> int:
+def term_score(query: str, *fields: str) -> int:
     """Match count for ``query``'s terms across ``fields``; 0 means no match.
 
     Every term must appear somewhere, so a two-word query does not return
@@ -473,23 +375,8 @@ UNIPROT_SEARCH = "https://rest.uniprot.org/uniprotkb/search"
 def uniprot_accessions(
     symbol: str, taxon: int = 9606, timeout: float = 30.0
 ) -> tuple[str, ...]:
-    """Reviewed UniProt accessions for a gene symbol.
-
-    Tries the repo's own symbol table first — it is offline and instant, but
-    covers only the reporter genes — then UniProt's REST API.
-    """
-    try:
-        from hallsim.reporter_wiring import _uniprot_symbol
-
-        local = tuple(
-            acc
-            for acc, (sym, tax) in _uniprot_symbol().items()
-            if sym.upper() == symbol.upper() and str(tax) == str(taxon)
-        )
-        if local:
-            return local
-    except Exception:
-        pass
+    """Reviewed UniProt accessions for a gene symbol, from UniProt's REST
+    API. An answer is kept on disk, so a symbol is asked once per machine."""
     params = {
         "query": (
             f"gene_exact:{symbol} AND organism_id:{taxon} AND reviewed:true"
@@ -498,17 +385,21 @@ def uniprot_accessions(
         "format": "tsv",
         "size": "10",
     }
-    request = urllib.request.Request(
-        f"{UNIPROT_SEARCH}?{urllib.parse.urlencode(params)}",
-        headers={"User-Agent": USER_AGENT},
-    )
-    try:
+
+    def fetch() -> list[str]:
+        request = urllib.request.Request(
+            f"{UNIPROT_SEARCH}?{urllib.parse.urlencode(params)}",
+            headers={"User-Agent": USER_AGENT},
+        )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             rows = response.read().decode("utf-8").splitlines()
+        return [r.strip() for r in rows[1:] if r.strip()]
+
+    try:
+        return tuple(cached_json(f"uniprot {symbol.upper()} {taxon}", fetch))
     except Exception as exc:
         log.warning("uniprot lookup failed for %r: %s", symbol, exc)
         return ()
-    return tuple(r.strip() for r in rows[1:] if r.strip())
 
 
 def search_by_gene(
@@ -537,9 +428,9 @@ MODELDB_API = "https://modeldb.science/api/v1/models"
 
 
 def _build_modeldb_index() -> list[dict]:
-    ids = _get_json(MODELDB_API, {}, 60.0)
+    ids = get_json(MODELDB_API, {}, 60.0)
     log.info("modeldb: hydrating %d records (one-time, cached)", len(ids))
-    records = _fetch_many([f"{MODELDB_API}/{i}" for i in ids], timeout=30.0)
+    records = fetch_many([f"{MODELDB_API}/{i}" for i in ids], timeout=30.0)
     out = []
     for rec in records:
         if not rec:
@@ -593,7 +484,7 @@ def search_modeldb(
     index = cached_index("modeldb", _build_modeldb_index, refresh=refresh)
     scored = []
     for rec in index:
-        score = _score(query, rec["name"], rec["text"], rec["app"])
+        score = term_score(query, rec["name"], rec["text"], rec["app"])
         if not score:
             continue
         scored.append(
@@ -619,13 +510,13 @@ BIOSIM_API = "https://api.biosimulations.org"
 
 
 def _build_biosimulations_index() -> list[dict]:
-    projects = _get_json(f"{BIOSIM_API}/projects", {}, 60.0)
+    projects = get_json(f"{BIOSIM_API}/projects", {}, 60.0)
     log.info(
         "biosimulations: hydrating %d projects (one-time, cached)",
         len(projects),
     )
     runs = [p.get("simulationRun", "") for p in projects]
-    records = _fetch_many([f"{BIOSIM_API}/metadata/{r}" for r in runs])
+    records = fetch_many([f"{BIOSIM_API}/metadata/{r}" for r in runs])
     out = []
     for project, record in zip(projects, records):
         meta = ((record or {}).get("metadata") or [{}])[0]
@@ -665,7 +556,7 @@ def search_biosimulations(
     )
     scored = []
     for rec in index:
-        score = _score(query, rec["name"], rec["text"])
+        score = term_score(query, rec["name"], rec["text"])
         if not score:
             continue
         scored.append(
@@ -690,7 +581,7 @@ PHYSIOME_EXPOSURES = "https://models.physiomeproject.org/exposure"
 
 
 def _build_physiome_index() -> list[dict]:
-    payload = _get_json(PHYSIOME_EXPOSURES, {"format": "json"}, 60.0)
+    payload = get_json(PHYSIOME_EXPOSURES, {"format": "json"}, 60.0)
     links = (payload.get("collection") or {}).get("links") or []
     return [
         {
@@ -724,7 +615,7 @@ def search_physiome(
     index = cached_index("physiome", _build_physiome_index, refresh=refresh)
     scored = []
     for rec in index:
-        score = _score(query, rec["name"])
+        score = term_score(query, rec["name"])
         if not score:
             continue
         scored.append(
@@ -760,7 +651,7 @@ def _build_jws_index() -> list[dict]:
     endpoint, so searchable text has to be assembled once and cached — the
     same shape as the ModelDB index.
     """
-    listing = _get_json(JWS_MODELS, {}, 60.0)
+    listing = get_json(JWS_MODELS, {}, 60.0)
     # The listing repeats a slug once per model version — the beuke* family
     # is 30 models in 180 rows. Fetching per row wastes the duplicates and,
     # worse, counts a broken record once per repeat, which sinks the
@@ -772,7 +663,7 @@ def _build_jws_index() -> list[dict]:
     listing = list(by_slug.values())
     slugs = list(by_slug)
     log.info("jws: hydrating %d unique records (one-time, cached)", len(slugs))
-    details = _fetch_many(
+    details = fetch_many(
         [f"{JWS_MODELS}{s}/" for s in slugs], timeout=30.0, workers=JWS_WORKERS
     )
     hydrated = sum(1 for d in details if d)
@@ -783,7 +674,7 @@ def _build_jws_index() -> list[dict]:
         )
     # A model with no linked paper 404s here, so these are allowed to be
     # sparse in a way the detail fetch is not.
-    papers = _fetch_many(
+    papers = fetch_many(
         [f"{JWS_MODELS}{s}/manuscript/" for s in slugs],
         timeout=30.0,
         workers=JWS_WORKERS,
@@ -846,7 +737,7 @@ def search_jws(
         status = rec.get("status", "")
         if curated_only and status.upper() != "CURATED":
             continue
-        score = _score(
+        score = term_score(
             query,
             *(
                 str(rec.get(k, ""))
@@ -886,7 +777,7 @@ def search_jws(
 
 def _search_europepmc(*a, **kw):
     """Late import: `literature` imports `ModelCandidate` from here."""
-    from hallsim.literature import search_europepmc
+    from hallsim.search.literature import search_europepmc
 
     return search_europepmc(*a, **kw)
 
@@ -962,51 +853,10 @@ def _accepted(search, kwargs: dict) -> dict:
     return {k: v for k, v in kwargs.items() if k in params}
 
 
-@dataclass(frozen=True)
-class OutputScreen:
-    """Whether a deposit *produces* a quantity, not merely mentions it.
-
-    Annotation search answers "is this model about IL6"; composing needs
-    "does this model emit IL6". A module imported to supply an output that it
-    only ever consumes contributes nothing — the Ihekwaba 2004 failure.
-    """
-
-    model_id: str
-    #: ``produces`` | ``no-match`` | ``qualitative`` (SBML-qual, a logical
-    #: model) | ``constraint-based`` (SBML-fbc) | ``no-reactions`` |
-    #: ``no-rate-laws`` | ``no-sbml`` | ``unreadable`` | ``fetch-failed``
-    status: str
-    produced: tuple[str, ...] = ()
-    n_species: int = 0
-    n_reactions: int = 0
-    #: Why, when the deposit could not be screened.
-    note: str = ""
-
-    @property
-    def ok(self) -> bool:
-        return self.status == "produces"
-
-
-def _is_junk_archive_entry(name: str) -> bool:
-    """Whether a zip entry is packaging debris rather than content.
-
-    A zip made on macOS carries an AppleDouble resource fork beside every file
-    (`._model.ode`, under `__MACOSX/`). They have the right extension and none
-    of the content, so an extractor that trusts the suffix hands the importer
-    a binary metadata blob — which is where ModelDB 35358's
-    `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa2` came from.
-    """
-    parts = name.replace("\\", "/").split("/")
-    return any(
-        p == "__MACOSX" or p.startswith("._") or p == ".DS_Store"
-        for p in parts
-    )
-
-
 MODELDB_DOWNLOAD = "https://modeldb.science/download/{model_id}"
 
 
-def _download_modeldb_models(model_id, timeout: float = 120.0) -> list:
+def download_modeldb_models(model_id, timeout: float = 120.0) -> list:
     """Model source files from a ModelDB entry, cached on disk.
 
     ModelDB ships a zip of whatever the authors ran. Only the formats there is
@@ -1017,7 +867,7 @@ def _download_modeldb_models(model_id, timeout: float = 120.0) -> list:
     import io
     import zipfile
 
-    dest = Path.home() / ".cache" / "hallsim" / "modeldb" / str(model_id)
+    dest = cache_dir("modeldb") / str(model_id)
     if dest.exists():
         return sorted(dest.iterdir())
     url = MODELDB_DOWNLOAD.format(model_id=model_id)
@@ -1032,7 +882,7 @@ def _download_modeldb_models(model_id, timeout: float = 120.0) -> list:
         raise LookupError(f"modeldb {model_id}: not a zip ({exc})") from exc
     for info in archive.infolist():
         name = Path(info.filename).name
-        if info.is_dir() or _is_junk_archive_entry(info.filename):
+        if info.is_dir() or is_junk_archive_entry(info.filename):
             continue
         if not name.lower().endswith((".ode", ".cps")):
             continue
@@ -1047,74 +897,70 @@ def _download_modeldb_models(model_id, timeout: float = 120.0) -> list:
     return sorted(out)
 
 
-def _screen_xpp(model_id: str, path, pattern: str) -> "OutputScreen":
-    """Screen an XPPAUT model, which declares dynamics and no reactions."""
-    from hallsim.intake import emitted_species
-    from hallsim.xpp_import import process_from_xpp
+def _biomodel_main_text(accession: str, timeout: float = 60.0) -> str:
+    """The text of a deposit's main SBML file.
+
+    Older curated deposits name it ``<accession>_url.xml``; newer ones keep
+    the author's filename (BIOMD0000001044 is ``Csikasz-Nagy2006.xml``) and
+    the conventional name answers HTTP 400. The record says which file is
+    main, so that is read when the convention fails.
+    """
+    import urllib.error
+
+    base = BIOMODELS_DOWNLOAD.format(model_id=accession)
+
+    def fetch(name: str) -> str:
+        query = urllib.parse.urlencode({"filename": name})
+        request = urllib.request.Request(
+            f"{base}?{query}", headers={"User-Agent": USER_AGENT}
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8")
 
     try:
-        proc = process_from_xpp(str(path), name="m")
-    except Exception as exc:
-        return OutputScreen(
-            model_id, "unreadable", note=f"{type(exc).__name__}: {exc}"
+        return fetch(f"{accession}_url.xml")
+    except urllib.error.HTTPError as first:
+        record = biomodels_record(accession, timeout=timeout)
+        main = [
+            f.get("name", "")
+            for f in ((record.get("files") or {}).get("main") or [])
+            if f.get("name")
+        ]
+        sbml = [n for n in main if n.lower().endswith((".xml", ".sbml"))]
+        if not sbml:
+            raise first
+        return fetch(sbml[0])
+
+
+def download_biomodel_main(model_id) -> Path:
+    """The main SBML file of a BioModels deposit, cached under
+    ``biomodels/``. An accession is immutable once deposited, so the first
+    call downloads and every later one reads the file."""
+    accession = _accession(model_id)
+    path = cache_dir("biomodels") / f"{accession}.xml"
+    if not path.exists():
+        atomic_write(path, _biomodel_main_text(accession).encode("utf-8"))
+    return path
+
+
+def download_jws_model(slug: str) -> Path:
+    """A JWS Online model's SBML, cached under ``jws/``."""
+    path = cache_dir("jws") / f"{slug}.xml"
+    if path.exists():
+        return path
+    with urllib.request.urlopen(JWS_SBML.format(slug=slug), timeout=60) as fh:
+        body = fh.read()
+    if b"<sbml" not in body[:4000]:
+        raise ValueError(
+            f"JWS model {slug!r} did not return SBML — check the slug at "
+            f"https://jjj.bio.vu.nl/models/{slug}/"
         )
-    produced = emitted_species(proc, pattern)
-    schema = proc.ports_schema()
-    return OutputScreen(
-        model_id,
-        "produces" if produced else "no-match",
-        produced,
-        n_species=len(schema),
-        note="XPPAUT; screened on the derivative, not on reactions",
-    )
+    atomic_write(path, body)
+    return path
 
 
-def _readable_model_files(paths):
-    """``paths`` with any COPASI file converted to SBML.
-
-    A deposit's supplement often ships the ``.cps`` and no SBML at all, which
-    the screen used to report as "no .xml/.sbml file" — a deposit skipped for
-    its format rather than its content.
-    """
-    from hallsim.cps_import import CopasiUnavailableError, cps_to_sbml, is_cps
-
-    out = []
-    for path in paths:
-        if not is_cps(path):
-            out.append(path)
-            continue
-        try:
-            out.append(cps_to_sbml(path))
-        except (CopasiUnavailableError, Exception) as exc:
-            log.warning("could not convert %s: %s", path, exc)
-    return out
-
-
-def _first_readable_sbml(paths):
-    """``(model, note)`` for the first path libsbml reads as SBML.
-
-    A deposit is a directory of many files — OWL, MATLAB, Octave, PNG, PDF and
-    a ``manifest.xml`` that is XML but not SBML — so "the .xml file" is not a
-    well-defined thing to open.
-    """
-    import libsbml
-
-    seen = []
-    for path in paths:
-        if not str(path).endswith((".xml", ".sbml")):
-            continue
-        doc = libsbml.SBMLReader().readSBMLFromFile(str(path))
-        model = doc.getModel()
-        if model is not None:
-            return model, ""
-        seen.append(f"{Path(path).name}({doc.getNumErrors()} errors)")
-    if not seen:
-        return None, "deposit contains no .xml/.sbml file"
-    return None, "no readable SBML among " + ", ".join(seen)
-
-
-def _sbml_paths_for(model_id: str, source: str, timeout: float) -> list[str]:
-    """Local SBML paths for one candidate, dispatched on its repository.
+def model_files(model_id: str, source: str, timeout: float) -> list:
+    """Local model files for one candidate, dispatched on its repository.
 
     A source missing here is reported unscreenable, never dropped. Adding one
     is a fetcher, not a branch in the screen.
@@ -1129,13 +975,11 @@ def _sbml_paths_for(model_id: str, source: str, timeout: float) -> list[str]:
             return main
         return download_biomodel_files(model_id, timeout=timeout)
     if source == "jws":
-        from hallsim.sbml_import import _download_jws_to_cache
-
-        return [_download_jws_to_cache(model_id)]
+        return [download_jws_model(model_id)]
     if source == "modeldb":
-        return _download_modeldb_models(model_id, timeout=timeout)
+        return download_modeldb_models(model_id, timeout=timeout)
     if source == "europepmc":
-        from hallsim.literature import supplementary_model_files
+        from hallsim.search.literature import supplementary_model_files
 
         files = supplementary_model_files(model_id, timeout=timeout)
         if not files:
@@ -1144,170 +988,3 @@ def _sbml_paths_for(model_id: str, source: str, timeout: float) -> list[str]:
             )
         return files
     raise LookupError(f"no SBML fetcher for source {source!r}")
-
-
-def _reactionless_formalism(model) -> tuple[str, str]:
-    """``(status, note)`` for a parsed SBML model with no reactions, from the
-    package it carries: SBML-qual is a logical model, SBML-fbc a
-    constraint-based one, and neither is a rate-law model to screen."""
-    if model.getPlugin("qual") is not None:
-        return (
-            "qualitative",
-            "SBML-qual: a logical model over discrete levels, with update "
-            "rules rather than rate laws; nothing to integrate or screen",
-        )
-    if model.getPlugin("fbc") is not None:
-        return (
-            "constraint-based",
-            "SBML-fbc: a constraint-based model with flux bounds and an "
-            "objective rather than rate laws; nothing to integrate or screen",
-        )
-    return (
-        "no-reactions",
-        "parsed, but declares no reactions and no qual or fbc package — "
-        "not a rate-law model",
-    )
-
-
-def screen_produced_species(
-    candidates, pattern: str, *, timeout: float = 60.0
-) -> list[OutputScreen]:
-    """Which of ``model_ids`` synthesise a species matching ``pattern``.
-
-    ``pattern`` is a case-insensitive regex matched against species ids. A
-    species counts as produced when it is a *product* of some reaction;
-    appearing only as a reactant means the deposit consumes it.
-
-    Every input yields a row, including the ones that could not be read — a
-    silent skip hides an unreadable deposit as an uninteresting one.
-    """
-    import re
-
-    rx = re.compile(pattern, re.I)
-    out: list[OutputScreen] = []
-    for cand in candidates:
-        model_id = getattr(cand, "id", cand)
-        source = getattr(cand, "source", "biomodels")
-        # A repository that re-hosts BioModels embeds the accession in its own
-        # id (BioSimulations: "BIOMD0000000582_tellurium_..."). Screening the
-        # underlying deposit beats reporting a duplicate as unreadable.
-        embedded = re.search(r"BIOMD\d{10}", str(model_id))
-        if source != "biomodels" and embedded:
-            model_id, source = embedded.group(0), "biomodels"
-        try:
-            paths = _sbml_paths_for(model_id, source, timeout)
-        except LookupError as exc:
-            # CellML and XPP deposits need their own parser. Reported, never
-            # dropped — an unscreened hit is still a hit, and silently losing
-            # it looks like the repository had none.
-            out.append(
-                OutputScreen(
-                    str(model_id),
-                    "unscreenable",
-                    note=f"{exc} (format {getattr(cand, 'format', '?')})",
-                )
-            )
-            continue
-        except Exception as exc:  # network, 404, malformed accession
-            out.append(
-                OutputScreen(
-                    str(model_id),
-                    "fetch-failed",
-                    note=f"{type(exc).__name__}: {exc}",
-                )
-            )
-            continue
-        paths = _readable_model_files(paths)
-        # An XPPAUT .ode has no reactions to scan, so it is screened on the
-        # derivative instead (intake.emitted_species). Reported with the same
-        # statuses so the two formats read alike in the outcome table.
-        ode = [q for q in paths if str(q).lower().endswith(".ode")]
-        if ode and not [
-            q for q in paths if str(q).lower().endswith((".xml", ".sbml"))
-        ]:
-            out.append(_screen_xpp(str(model_id), ode[0], pattern))
-            continue
-        try:
-            model, note = _first_readable_sbml(paths)
-        except ImportError as exc:
-            out.append(OutputScreen(str(model_id), "no-sbml", note=str(exc)))
-            continue
-        if model is None:
-            status = "no-sbml" if "no .xml" in note else "unreadable"
-            out.append(OutputScreen(str(model_id), status, note=note))
-            continue
-        n_rx = model.getNumReactions()
-        if n_rx and not any(
-            model.getReaction(i).isSetKineticLaw() for i in range(n_rx)
-        ):
-            # A CellDesigner disease map draws reactions with no rate law.
-            # Nothing is produced by an arrow, so counting one as production
-            # promotes a diagram to a model (Wu2010 has 254 such reactions).
-            out.append(
-                OutputScreen(
-                    str(model_id),
-                    "no-rate-laws",
-                    n_species=model.getNumSpecies(),
-                    n_reactions=n_rx,
-                    note=f"{n_rx} reactions, none with a kinetic law — a "
-                    f"drawn pathway map, not an integrable model",
-                )
-            )
-            continue
-        if n_rx == 0:
-            # SBML-qual and other non-reaction formalisms parse fine and
-            # present an empty core model. Reporting that as ``no-match`` is
-            # indistinguishable from a deposit whose reactions were read and
-            # produced nothing, which is the opposite conclusion. The
-            # package the file carries says which formalism it is.
-            status, note = _reactionless_formalism(model)
-            out.append(
-                OutputScreen(
-                    str(model_id),
-                    status,
-                    n_species=model.getNumSpecies(),
-                    note=note,
-                )
-            )
-            continue
-        # Match id *or* display name. A CellDesigner export — a large part of
-        # BioModels — gives every species a UUID id and puts the gene symbol in
-        # the name, so an id-only screen cannot see it (Dwivedi2014 produces
-        # IL6 in three compartments under ids like `mwf626e95e_543f_...`).
-        label = {}
-        for i in range(model.getNumSpecies()):
-            s = model.getSpecies(i)
-            label[s.getId()] = s.getName() or s.getId()
-        produced = {
-            label.get(sid, sid)
-            for i in range(model.getNumReactions())
-            for reaction in (model.getReaction(i),)
-            for j in range(reaction.getNumProducts())
-            for sid in (reaction.getProduct(j).getSpecies(),)
-            if rx.search(sid) or rx.search(label.get(sid, ""))
-        }
-        out.append(
-            OutputScreen(
-                str(model_id),
-                "produces" if produced else "no-match",
-                tuple(sorted(produced)),
-                model.getNumSpecies(),
-                model.getNumReactions(),
-            )
-        )
-    return out
-
-
-def search_producing(
-    query: str, pattern: str, *, limit: int = 40, sources=None, **kwargs
-) -> list[OutputScreen]:
-    """Search **every** repository for ``query``, keep what *produces*
-    ``pattern``.
-
-    The composable version of a text search: a hit is only useful if the
-    quantity you need is something it emits. Defaults to all sources —
-    searching one repository and concluding the model does not exist is how
-    a candidate gets missed.
-    """
-    hits = search_for_model(query, limit=limit, sources=sources, **kwargs)
-    return screen_produced_species(hits, pattern)

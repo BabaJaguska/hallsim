@@ -202,11 +202,13 @@ def measure_batch(cfg):
     span = (0.0, cfg["t_end"])
     y0 = comp.initial_state_vec()
     sched = Scheduler(max_steps=2_000_000)
-    sched.warm_up(comp, span, macro_dt=cfg["stiff_macro_dt"], y0=y0)
+    sched.warm_up(comp, span, macro_dt=cfg["stiff_macro_dt"])
 
     @eqx.filter_jit
     def solve(y):
-        return sched.run(comp, span, macro_dt=cfg["stiff_macro_dt"], y0=y).ys
+        return sched.run(
+            comp.with_initial(y), span, macro_dt=cfg["stiff_macro_dt"]
+        ).ys
 
     rng = np.random.default_rng(0)
     out = {}

@@ -1,9 +1,14 @@
 # Calibration & data validation
 
 How HallSim fits mechanism parameters to data and validates mechanistic
-states against transcriptomics — gene reporters, the calibration API,
+states against measured contrasts — gene reporters, the calibration API,
 held-out splits, priors, and what it takes to differentiate through a stiff
-multi-model composite. The runnable end-to-end example is
+multi-model composite. Every reader (GEO and GeneLab expression,
+MetaboLights and Metabolomics Workbench metabolomics, PRIDE proteomics;
+see [architecture](architecture.md)) returns the same log2 fold-change
+contrast; a species annotated with ChEBI or UniProt is compared by
+identity, a transcriptome through the reporters below or a regulon. The
+runnable end-to-end example is
 [`demos/multi_hallmark_calibrate.py`](../demos/multi_hallmark_calibrate.py).
 
 ## Gene reporters
@@ -188,7 +193,6 @@ T_END = 3600.0
 def natp(k1):
     comp = base.with_params({"p07.parameters.k1": k1})
     return Scheduler().run(comp, t_span=(0.0, T_END), macro_dt=T_END,
-                           y0=comp.initial_state_vec(),
                            save_dt=T_END / 50).get("p07/NatP")
 
 target = natp(0.012)

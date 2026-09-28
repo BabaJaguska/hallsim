@@ -7,10 +7,10 @@ from email.message import Message
 import pytest
 from click.testing import CliRunner
 
-from hallsim import web_discovery as web
 from hallsim.cli import simulate
-from hallsim.discovery import ModelCandidate
-from hallsim.literature import pointers_in
+from hallsim.search import web
+from hallsim.search.literature import pointers_in
+from hallsim.search.models import ModelCandidate
 
 
 def test_forge_names_are_not_truncated_at_punctuation():

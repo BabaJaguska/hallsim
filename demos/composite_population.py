@@ -125,7 +125,10 @@ def main():
             (ay, cd),
         )
         return sched.run(
-            c, (0.0, a.t_end), macro_dt=a.macro_dt, save_dt=a.save_dt, y0=y0i
+            c.with_initial(y0i),
+            (0.0, a.t_end),
+            macro_dt=a.macro_dt,
+            save_dt=a.save_dt,
         ).ys
 
     k = jax.random.PRNGKey(a.seed)

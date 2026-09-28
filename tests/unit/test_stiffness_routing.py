@@ -177,12 +177,14 @@ class TestToleranceIsNotStateDerived:
         comp = _composite(StiffPair(), "stiff")
         small, large = self._y0(comp, 1e-3), self._y0(comp, 1e6)
 
-        fresh = Scheduler().run(comp, (0.0, 5.0), y0=small).ys
+        fresh = Scheduler().run(comp.with_initial(small), (0.0, 5.0)).ys
 
         reused = Scheduler()
-        reused.run(comp, (0.0, 5.0), y0=large)
+        reused.run(comp.with_initial(large), (0.0, 5.0))
         assert jnp.allclose(
-            reused.run(comp, (0.0, 5.0), y0=small).ys, fresh, rtol=1e-6
+            reused.run(comp.with_initial(small), (0.0, 5.0)).ys,
+            fresh,
+            rtol=1e-6,
         )
 
     def test_population_members_are_each_solved_to_the_same_tolerance(self):
@@ -192,10 +194,10 @@ class TestToleranceIsNotStateDerived:
         comp = _composite(StiffPair(), "stiff")
         proc = comp.processes["stiff"]
         sched = Scheduler()
-        sched.run(comp, (0.0, 5.0), y0=self._y0(comp, 1e6))
+        sched.run(comp.with_initial(self._y0(comp, 1e6)), (0.0, 5.0))
 
         pop = jnp.stack([self._y0(comp, 1e-3), self._y0(comp, 1e-2)])
-        res = sched.run(comp, (0.0, 5.0), y0=pop)
+        res = sched.run(comp.with_initial(pop), (0.0, 5.0))
         for i, member in enumerate(pop):
             exact = jnp.stack(
                 [

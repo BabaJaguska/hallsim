@@ -588,6 +588,31 @@ class GraphAnalyzer:
         results: list[ValidationResult] = []
         G = self.build_graph(processes, topology)
 
+        # 0. A process that reads, through an INPUT port, a path it also
+        # writes drives that path with itself: feedback on the path by
+        # construction, and a runaway if the flux grows with the value.
+        for proc_name, proc in processes.items():
+            topo = topology.get(proc_name, {})
+            schema = proc.ports_schema()
+            read_in = {
+                p
+                for port, spec in schema.items()
+                if spec.role is PortRole.INPUT
+                for p in as_paths(topo.get(port, f"{proc_name}/{port}"))
+            }
+            _, writes = read_write_paths(schema, topo)
+            for sp in sorted(read_in & set(writes)):
+                results.append(
+                    ValidationResult(
+                        Severity.WARNING,
+                        "graph",
+                        f"{proc_name!r} reads {sp!r} through an INPUT port "
+                        "and writes it: a flux on a path driven by that "
+                        "path is feedback by construction, and runs away "
+                        "if the flux grows with the value.",
+                    )
+                )
+
         # 1. Feedback, per strongly-connected component. Enumerating simple
         # cycles is exponential in coupling density; an SCC is O(V+E).
         for scc in nx.strongly_connected_components(G):

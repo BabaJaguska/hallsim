@@ -183,7 +183,7 @@ def test_shooting_stabilizer_knobs_run_and_stay_finite():
         return jnp.stack([y[1], -y[0]])
 
     ts = jnp.linspace(0.0, 8.0, 120)
-    ys, _ = simulate_conditioned(
+    _, ys, _ = simulate_conditioned(
         lambda u: osc,
         ts,
         jnp.zeros((1, 1)),

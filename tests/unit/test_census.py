@@ -160,10 +160,10 @@ def test_list_accessions_pages_the_index_and_splits_branches(
         calls.append(params["offset"])
         return pages[params["offset"]]
 
-    import hallsim.discovery as disc
+    from hallsim.search import fetch
 
-    monkeypatch.setattr(disc, "_get_json", fake_get_json)
-    monkeypatch.setattr(disc, "_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(fetch, "get_json", fake_get_json)
+    monkeypatch.setattr(fetch, "CACHE_ROOT", tmp_path)
     everything = census.list_accessions("all", refresh=True)
     assert calls == [0, 100, 200]
     assert len(everything) == 249 and "MODEL9" not in everything

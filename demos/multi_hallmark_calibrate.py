@@ -1120,7 +1120,6 @@ def _run_arms(base, gi, dns, t_end=50.0, macro_dt=5.0):
         comp,
         t_span=(0.0, t_end),
         macro_dt=macro_dt,
-        y0=comp.initial_state_vec(),
         save_dt=macro_dt,
     )
 

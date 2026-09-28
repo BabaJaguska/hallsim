@@ -167,7 +167,7 @@ def _concrete(value):
     ) as exc:  # pragma: no cover - defensive
         raise StiffnessNotConcrete(
             "stiffness analysis needs concrete values but got JAX tracers — "
-            "call Scheduler.warm_up(y0) once eagerly before differentiating."
+            "call Scheduler.warm_up() once eagerly before differentiating."
         ) from exc
 
 
@@ -371,7 +371,6 @@ def classify_spectrum(
 def analyze_groups(
     composite: "Composite",
     *,
-    y0: jnp.ndarray | None = None,
     groups: dict[str, list[str]] | None = None,
     t0: float = 0.0,
     dt: float = 1.0,
@@ -381,20 +380,18 @@ def analyze_groups(
 
     Restricts the composite RHS Jacobian to each group's own evolving states,
     so off-group Lie-frozen variables don't pollute the spectrum, then
-    classifies the eigenvalues at ``y0`` (concrete, eager — defaults to
-    ``initial_state_vec()``). ``dt`` is the interval the explicit-step budget
+    classifies the eigenvalues at the composite's start, which must be
+    concrete. ``dt`` is the interval the explicit-step budget
     is measured against, typically the Scheduler's ``macro_dt``.
     """
-    if isinstance(y0, jax.core.Tracer):
+    if isinstance(composite.initial, jax.core.Tracer):
         raise StiffnessNotConcrete(
-            "analyze_groups needs a concrete y0 — it was given a JAX "
-            "tracer. Run stiffness analysis eagerly, outside "
+            "analyze_groups needs a concrete start and the composite's is "
+            "a JAX tracer. Run stiffness analysis eagerly, outside "
             "grad/jvp/vmap."
         )
     keys = composite.store_keys()
-    state = (
-        composite.initial_state_vec(keys) if y0 is None else jnp.asarray(y0)
-    )
+    state = composite.initial_state_vec(keys)
     groups = groups if groups is not None else composite.auto_groups()
 
     # Linearize a batched y0 about one representative member: the verdict is a

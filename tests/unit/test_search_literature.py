@@ -1,6 +1,6 @@
 """Where a paper says its model lives."""
 
-from hallsim.literature import pointers_in
+from hallsim.search.literature import pointers_in
 
 
 def test_pointers_keep_an_organisation_and_read_every_forge():
@@ -41,9 +41,9 @@ class TestRepositoryClassification:
         raise AssertionError(url)
 
     def test_kinds_by_what_the_tree_holds(self, monkeypatch):
-        from hallsim import literature
+        from hallsim.search import literature
 
-        monkeypatch.setattr(literature, "_get_json", self._fake_get_json)
+        monkeypatch.setattr(literature, "get_json", self._fake_get_json)
         matlab = literature.classify_repository("cosbi/focm")
         assert (matlab.kind, matlab.format) == ("source:matlab", "matlab")
         assert "FOCM_model.m" in matlab.description
@@ -55,10 +55,10 @@ class TestRepositoryClassification:
         assert "neuralcodinglab/HYPER" in org.description
 
     def test_cited_repositories_are_grouped_by_paper(self, monkeypatch):
-        from hallsim import literature
-        from hallsim.discovery import ModelCandidate
+        from hallsim.search import literature
+        from hallsim.search.models import ModelCandidate
 
-        monkeypatch.setattr(literature, "_get_json", self._fake_get_json)
+        monkeypatch.setattr(literature, "get_json", self._fake_get_json)
         texts = {
             "PMC1": "code at https://github.com/cosbi/focm",
             "PMC2": "see https://github.com/cosbi/focm and "

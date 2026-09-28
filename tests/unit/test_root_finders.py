@@ -67,10 +67,9 @@ def test_step_chord_batched_trajectory_and_parameter_gradient(mode):
         if mode == "forward"
         else dfx.RecursiveCheckpointAdjoint()
     )
-    plan = sched.plan(
-        comp, (0.0, 1.0), y0=population, save_dt=0.1, adjoint=adjoint
-    )
-    result = sched.run(plan, y0=population)
+    started = comp.with_initial(population)
+    plan = sched.plan(started, (0.0, 1.0), save_dt=0.1, adjoint=adjoint)
+    result = sched.run(plan)
     times = result.ts[:, None]
     expected_x = population[:, 0] / (1 + 100 * population[:, 0] * times)
     expected_y = population[:, 1] * jnp.exp(-times)
@@ -80,12 +79,10 @@ def test_step_chord_batched_trajectory_and_parameter_gradient(mode):
 
     @eqx.filter_jit
     def objective(rate):
-        varied = eqx.tree_at(lambda c: c.processes["decay"].rate, comp, rate)
-        return (
-            sched.run(plan, y0=population, params_from=varied)
-            .ys[-1, :, 0]
-            .sum()
+        varied = eqx.tree_at(
+            lambda c: c.processes["decay"].rate, started, rate
         )
+        return sched.run(plan, params_from=varied).ys[-1, :, 0].sum()
 
     rate = jnp.asarray(100.0)
     if mode == "forward":

@@ -144,12 +144,13 @@ BRANCH_PREFIX = {"curated": "BIOMD", "uncurated": "MODEL"}
 
 def biomodels_index(refresh: bool = False) -> list[dict]:
     """Every deposit the search lists — id, format, name — cached."""
-    from hallsim.discovery import BIOMODELS_SEARCH, _get_json, cached_index
+    from hallsim.search.fetch import cached_index, get_json
+    from hallsim.search.models import BIOMODELS_SEARCH
 
     def build():
         rows, offset, matches = [], 0, None
         while matches is None or offset < matches:
-            page = _get_json(
+            page = get_json(
                 BIOMODELS_SEARCH,
                 {
                     "query": "*:*",
@@ -212,9 +213,9 @@ def listing_stamp() -> dict:
     """When the BioModels listing the run enumerates was fetched (the index
     cache's modification date) and how many SBML deposits it held; ``None``
     for both when it has never been fetched."""
-    from hallsim.discovery import _cache_dir
+    from hallsim.search.fetch import index_path
 
-    path = _cache_dir() / "biomodels_all.json"
+    path = index_path("biomodels_all")
     if not path.exists():
         return {"fetched": None, "n_sbml": None}
     rows = json.loads(path.read_text())
@@ -236,7 +237,7 @@ def _records_dir() -> Path:
 
 def fetch_record(accession: str, tries: int = 3) -> dict:
     """The BioModels record, cached on disk per accession."""
-    from hallsim.discovery import biomodels_record
+    from hallsim.search.models import biomodels_record
 
     path = _records_dir() / f"{accession}.json"
     if path.exists() and path.stat().st_size:
@@ -436,7 +437,7 @@ def species_ids(path) -> list[str]:
     """The deposit's species annotations as ``namespace:id`` curies, the
     join key a dataset's measured quantities are matched on. Structural
     vocabularies (SBO) are left out."""
-    from hallsim.datasets import curie
+    from hallsim.search.datasets import curie
     from hallsim.sbml_import import _extract_species_ontology
 
     ids = {
@@ -738,7 +739,7 @@ def census_one(accession: str, t_end: float = DEFAULT_T_END) -> dict:
     try:
         import libsbml
 
-        from hallsim.sbml_import import _download_biomodel_to_cache
+        from hallsim.search.models import download_biomodel_main
 
         fmt = ""
         try:
@@ -749,7 +750,7 @@ def census_one(accession: str, t_end: float = DEFAULT_T_END) -> dict:
             row["kind"] = "not-sbml"
             row["kind_note"] = f"deposited as {fmt}, not SBML"
             return _finish(row, t0)
-        path = _download_biomodel_to_cache(accession)
+        path = download_biomodel_main(accession)
         doc = libsbml.readSBMLFromFile(str(path))
         model = doc.getModel()
         if model is None:

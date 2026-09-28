@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from hallsim.datasets import Design, parse_design
+from hallsim.search.datasets import Design, parse_design
 from hallsim.measurements import MeasuredDataset
 
 log = logging.getLogger(__name__)
@@ -165,7 +165,7 @@ def mztab_groups(
 
     A study variable is the depositor's own grouping, and its description
     is free text in the same shape as a GEO sample title, so the arms and
-    timepoints come from :func:`~hallsim.datasets.parse_design` rather than
+    timepoints come from :func:`~hallsim.search.datasets.parse_design` rather than
     from a second parser. Groups stay keyed by that description, which is
     the name the file gives them.
     """

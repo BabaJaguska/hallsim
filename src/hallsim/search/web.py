@@ -12,13 +12,14 @@ from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
 from typing import Protocol
 
-from hallsim.discovery import ModelCandidate, USER_AGENT
-from hallsim.literature import (
+from hallsim.search.fetch import USER_AGENT
+from hallsim.search.literature import (
     FORGE_URL,
     classify_repository,
     pointers_in,
     search_europepmc,
 )
+from hallsim.search.models import ModelCandidate
 
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 

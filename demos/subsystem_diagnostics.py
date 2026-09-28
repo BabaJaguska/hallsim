@@ -51,7 +51,6 @@ def run_solo(proc, t_end, n_save):
         comp,
         t_span=(0.0, t_end),
         macro_dt=t_end,
-        y0=comp.initial_state_vec(),
         save_dt=t_end / n_save,
     )
     return np.asarray(res.ts), res

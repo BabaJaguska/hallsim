@@ -35,8 +35,10 @@ def _run(proc, t_span, macro_dt, y0=None):
     """Run a standalone XPPProcess: map every state to its own store path."""
     topo = {proc._name: {s: s for s in proc._state_names}}
     comp = Composite(processes={proc._name: proc}, topology=topo)
+    if y0 is not None:
+        comp = comp.with_initial(y0)
     return Scheduler().run(
-        comp, t_span=t_span, macro_dt=macro_dt, save_dt=macro_dt, y0=y0
+        comp, t_span=t_span, macro_dt=macro_dt, save_dt=macro_dt
     )
 
 

@@ -25,8 +25,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from hallsim.datasets import _cached_json, _retrying
-from hallsim.discovery import _get_json
+from hallsim.search.fetch import cached_json, get_json, retrying
 
 log = logging.getLogger(__name__)
 
@@ -204,8 +203,8 @@ def _fetch(params: dict, timeout: float) -> dict:
     query = {k: v for k, v in params.items() if v is not None}
     query.update(format="json", best_first="true")
     key = "indra " + " ".join(f"{k}={query[k]}" for k in sorted(query))
-    return _cached_json(
-        key, lambda: _retrying(lambda: _get_json(INDRA_DB, query, timeout))
+    return cached_json(
+        key, lambda: retrying(lambda: get_json(INDRA_DB, query, timeout))
     )
 
 

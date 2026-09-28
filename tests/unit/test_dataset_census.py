@@ -7,7 +7,7 @@ tested in test_datasets.
 import json
 
 from hallsim import dataset_census as dc
-from hallsim.datasets import DatasetCandidate, Measured
+from hallsim.search.datasets import DatasetCandidate, Design, Measured
 
 TITLES = [
     "WI38_ETOPOSIDE_D00_REP1",
@@ -98,6 +98,22 @@ def test_a_proteome_reads_its_time_course_from_the_text():
     row = dc.screen_dataset(cand, _models(), route="ebi")
     assert row["timed_evidence"] == "text"
     assert (row["via"], row["n_models"]) == ("complete", 1)
+
+
+def test_timepoints_named_late_in_an_abstract_still_count():
+    """An EBI abstract names its sampling times where it gets to them,
+    often past the 400th character; the text route reads all of it."""
+    prose = "Lysates were prepared from cultured fibroblasts. " * 10
+    assert len(prose) > 400
+    cand = _cand(
+        "pride",
+        Measured("proteomics", True),
+        accession="PXD2",
+        summary=prose + "Cells were harvested 0, 6 and 24 h after rapamycin.",
+    )
+    row = dc.screen_dataset(cand, _models(), route="ebi")
+    assert row["timed_evidence"] == "text"
+    assert row["raw"]["summary"] == cand.summary
     # Whether PRIDE deposited a quantification file is not in the
     # enumeration metadata, so the loader is not asserted from the modality.
     assert row["stage"] == "loadable" and row["loader"] == "unchecked"
@@ -473,7 +489,7 @@ def test_replication_is_counted_in_subjects_not_samples():
     """Three brain regions from ten mice is ten independent units, not
     thirty: scoring it as thirty is how an effect appears that is not
     there."""
-    from hallsim.datasets import Design
+    from hallsim.search.datasets import Design
 
     thirty_samples_ten_mice = Design(
         arms=("flight", "ground"),
@@ -904,3 +920,99 @@ def test_a_row_screened_under_an_older_loader_rule_is_still_fetched(
     dc.rescreen(run, _models(), with_files=True)
     again = json.loads((run / "rows.jsonl").read_text())
     assert again["loader"] == "counts-file" and again["stage"] == "pass"
+
+
+# --- a source that states its design, and the rows of one deposit ---------
+
+
+def test_a_stated_design_reaches_the_row_and_survives_a_rescreen():
+    stated = Design(
+        arms=("condition1",),
+        per_arm=(("condition1", (0.0, 2.5, 5.0, 10.0)),),
+        n_titles=48,
+    )
+    cand = _cand(
+        "petab",
+        Measured("targeted", False, ("uniprot:P04637",)),
+        accession="Boehm_JProteomeRes2014",
+        organism="Homo sapiens",
+        stated=stated,
+    )
+    row = dc.screen_dataset(cand, _models(), route="petab")
+    assert row["timed_evidence"] == "stated"
+    assert row["contrast_kind"] == "dynamics" and row["n_timepoints"] == 4
+    assert row["measured"] and row["n_models"] >= 1
+    assert row["loader"] == "petab" and row["stage"] == "loadable"
+    again = dc.candidate_of(row)
+    assert again.stated == stated and again.design.time_course
+
+
+def test_the_report_keeps_the_row_of_a_deposit_that_saw_the_most(tmp_path):
+    import json
+
+    plain = _cand(
+        "geo",
+        Measured("expression", True),
+        accession="GSE66597",
+        kind="Expression profiling by array",
+    )
+    curated = _cand(
+        "geo",
+        Measured("expression", True),
+        accession="GSE66597",
+        kind="Expression profiling by array",
+        curated="GDS6010",
+        factors=("time", "infection"),
+        stated=Design(
+            arms=("H5N1", "control"),
+            control="control",
+            per_arm=(
+                ("H5N1", (6.0, 12.0, 24.0)),
+                ("control", (6.0, 12.0, 24.0)),
+            ),
+            time_unit="h",
+            n_titles=18,
+        ),
+    )
+    rows = [
+        dc.screen_dataset(plain, _models(), route="geo"),
+        dc.screen_dataset(curated, _models(), route="gds"),
+    ]
+    assert (
+        rows[0]["contrast_kind"] == ""
+        and rows[1]["contrast_kind"] == "dynamics"
+    )
+    (tmp_path / "rows.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows)
+    )
+    df = dc.load_rows(tmp_path)
+    assert len(df) == 1
+    assert (
+        df.iloc[0]["route"] == "gds"
+        and df.iloc[0]["contrast_kind"] == "dynamics"
+    )
+
+
+def test_a_route_writes_what_it_saw(tmp_path):
+    sink = dc._Sink(tmp_path)
+    cand = _cand("geo", Measured("expression", True), accession="GSE1")
+    sink.write({"route": "geo", "source": "geo", "accession": "GSE1"})
+    assert sink.has("geo", cand) and not sink.has("gds", cand)
+    assert dc._Sink(tmp_path).has("geo", cand)
+
+
+def test_the_cli_offers_every_route():
+    from hallsim.cli import census_data_run
+
+    (routes,) = [p for p in census_data_run.params if p.name == "routes"]
+    assert list(routes.type.choices) == list(dc.ROUTES)
+
+
+def test_a_targeted_panel_is_nameable():
+    assert dc.nameable(Measured("targeted", False, ("uniprot:P04637",)))
+    assert (
+        dc.loader_of(
+            _cand("biomodels", Measured("targeted", False), accession="BIOMD1")
+        )
+        == "table"
+    )

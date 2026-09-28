@@ -395,6 +395,27 @@ class SBMLEvent(Process):
         value = _compiled(self._trigger, self._reads)(*self._args(t, state))
         return jnp.asarray(value, dtype=bool)
 
+    def discontinuity_times(self) -> tuple[float, ...]:
+        """Composite times at which a time-only comparison in the trigger
+        changes truth value, a hair past the threshold for a strict one so
+        the sync point lands where the event is due rather than where it is
+        not yet. The scheduler makes these sync points, so a time-triggered
+        event fires at its time whatever the macro step."""
+        out = []
+        for rel in self._trigger.atoms(sympy.core.relational.Relational):
+            if rel.free_symbols != {TIME}:
+                continue
+            for root in sympy.solve(rel.lhs - rel.rhs, TIME):
+                if not getattr(root, "is_real", False):
+                    continue
+                t = float(root) / self.time_scale
+                if isinstance(
+                    rel, (sympy.StrictGreaterThan, sympy.StrictLessThan)
+                ):
+                    t += 1e-9 * max(1.0, abs(t))
+                out.append(t)
+        return tuple(sorted(set(out)))
+
     def handler(self, t, state):
         args = self._args(t, state)
         return {

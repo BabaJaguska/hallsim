@@ -113,7 +113,7 @@ def transcript_pool(
             **composite.topology,
             name: {"source": observable, "integral": f"{name}/integral"},
         },
-        initial=composite.initial,
+        initial=composite.initial_state(),
         validate=False,
         semantic_validation={"check_semantics": False},
     )

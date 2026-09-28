@@ -44,7 +44,6 @@ def run(
         t_span=(0.0, t_end),
         macro_dt=1.0,
         save_dt=save_dt,
-        y0=deterministic.initial_state_vec(keys),
     )
     key_index = {key: i for i, key in enumerate(keys)}
 

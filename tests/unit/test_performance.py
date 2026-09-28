@@ -189,7 +189,9 @@ def _flops_per_member(sched, comp, n_batch):
     y0 = comp.initial_state_vec()
     yb = jnp.broadcast_to(y0, (n_batch, y0.shape[0]))
     lowered = jax.jit(
-        lambda y: sched.run(comp, (0.0, 10.0), macro_dt=10.0, y0=y).ys
+        lambda y: sched.run(
+            comp.with_initial(y), (0.0, 10.0), macro_dt=10.0
+        ).ys
     ).lower(yb)
     return lowered.compile().cost_analysis()["flops"] / n_batch
 
@@ -220,7 +222,7 @@ def test_reused_plan_preserves_independent_population_solves():
     plan = sched.plan(comp, (0.0, 10.0), save_dt=1.0)
     y0 = comp.initial_state_vec()
     pop = jnp.linspace(0.1, 2.0, 16)[:, None] * y0
-    result = sched.run(plan, y0=pop)
+    result = sched.run(plan, params_from=comp.with_initial(pop))
     assert result.ys.shape == (11, 16, 1)
     assert result.stats["group_0"]["num_solver_steps"].shape == (16,)
     exact = pop[None] * jnp.exp(-0.1 * result.ts[:, None, None])
@@ -228,7 +230,9 @@ def test_reused_plan_preserves_independent_population_solves():
 
     def flops(n):
         return (
-            jax.jit(lambda y: sched.run(plan, y0=y).ys)
+            jax.jit(
+                lambda y: sched.run(plan, params_from=comp.with_initial(y)).ys
+            )
             .lower(pop[:n])
             .compile()
             .cost_analysis()["flops"]
@@ -236,8 +240,8 @@ def test_reused_plan_preserves_independent_population_solves():
         )
 
     assert flops(16) / flops(1) < 1.5
-    batch_plan = sched.plan(comp, (0.0, 10.0), y0=pop, save_dt=1.0)
-    solo = sched.run(batch_plan, y0=y0)
+    batch_plan = sched.plan(comp.with_initial(pop), (0.0, 10.0), save_dt=1.0)
+    solo = sched.run(batch_plan, params_from=comp)
     assert solo.ys.shape == (11, 1)
     assert jnp.allclose(
         solo.ys[:, 0], y0[0] * jnp.exp(-0.1 * solo.ts), rtol=1e-5, atol=1e-8

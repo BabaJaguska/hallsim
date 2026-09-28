@@ -507,7 +507,7 @@ def _param_digest(composite: Composite) -> str | None:
     for this structure.
     """
     h = hashlib.blake2b(digest_size=16)
-    for leaf in jax.tree_util.tree_leaves(composite):
+    for leaf in jax.tree_util.tree_leaves(composite.processes):
         if isinstance(leaf, jax.core.Tracer):
             return None
         arr = np.asarray(leaf)
@@ -815,7 +815,6 @@ class Scheduler:
         composite: Composite | RunPlan,
         t_span: tuple[float, float] | None = None,
         macro_dt: float = 1.0,
-        y0: jnp.ndarray | None = None,
         save_dt: float | None = None,
         adjoint: dfx.AbstractAdjoint | None = None,
         antialias: bool = True,
@@ -831,7 +830,8 @@ class Scheduler:
             Wired bundle of processes, or a :class:`RunPlan` from
             :meth:`plan` — which already fixes the span, ``macro_dt``,
             ``save_dt`` and ``adjoint``, so passing those alongside it is an
-            error rather than a silent override. ``y0`` still varies per run.
+            error rather than a silent override; the start varies per run
+            through ``params_from``.
         params_from:
             With a plan, take parameter *values* from this composite instead of
             the one the plan was built for. Its structure must match the plan's
@@ -845,9 +845,6 @@ class Scheduler:
             Fixed communication interval. Each macro step solves the
             continuous groups, fires any due discrete processes, then checks
             event conditions.
-        y0:
-            Initial state ``(n_vars,)``, or ``(batch, n_vars)`` for a
-            population run. ``None`` uses ``composite.initial_state_vec()``.
         save_dt:
             Output density, decoupled from ``macro_dt`` via dense output — it
             costs memory, not ODE steps. ``None`` uses
@@ -892,7 +889,7 @@ class Scheduler:
                     "discontinuity times) is what a plan *is*."
                 )
             return self._execute(
-                composite, y0, params_from=params_from, rng_key=rng_key
+                composite, params_from=params_from, rng_key=rng_key
             )
         if params_from is not None:
             raise TypeError(
@@ -902,11 +899,7 @@ class Scheduler:
             )
         if t_span is None:
             raise TypeError("run() requires t_span unless given a RunPlan")
-        if y0 is None:
-            # This composite's initial state, not the memoised plan's:
-            # ``initial`` is static, so neither the structural key nor the
-            # parameter digest notices when only it differs.
-            y0 = composite.initial_state_vec(composite.store_keys())
+        y0 = composite.initial_state_vec()
         plan = self._plan_for(
             composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
         )
@@ -917,13 +910,15 @@ class Scheduler:
         # moves the failing groups one rung up, twice at most.
         for _ in range(3):
             try:
-                result = self._execute(plan, y0, rng_key=rng_key)
+                result = self._execute(
+                    plan, params_from=composite, rng_key=rng_key
+                )
             except eqx.EquinoxRuntimeError as exc:
                 head = str(exc).splitlines()[0]
                 match = re.search(r"group '([^']+)'", str(exc))
                 failed = [match.group(1)] if match else None
                 if not self._promote_failed(
-                    plan, composite, macro_dt, y0, head, failed
+                    plan, composite, macro_dt, head, failed
                 ):
                     raise
             else:
@@ -941,16 +936,16 @@ class Scheduler:
                     )
                 ]
                 if not self._promote_failed(
-                    plan, composite, macro_dt, y0, "result.ok is False", failed
+                    plan, composite, macro_dt, "result.ok is False", failed
                 ):
                     return result
             plan = self._plan_for(
                 composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
             )
-        return self._execute(plan, y0, rng_key=rng_key)
+        return self._execute(plan, params_from=composite, rng_key=rng_key)
 
     def _promote_failed(
-        self, plan: RunPlan, composite, macro_dt, y0, why: str, failed=None
+        self, plan: RunPlan, composite, macro_dt, why: str, failed=None
     ) -> bool:
         """After a failed solve, move the failing groups (every group when
         the failure did not name one) one rung up the ladder — explicit to
@@ -986,11 +981,7 @@ class Scheduler:
                 moved.append((g, type(self.implicit_solver).__name__))
         if not moved:
             return False
-        state = (
-            composite.initial_state_vec(plan.keys)
-            if y0 is None
-            else jnp.asarray(y0)
-        )
+        state = composite.initial_state_vec(plan.keys)
         base = self._integrator_signature(
             composite, plan.groups, state, macro_dt
         )
@@ -1015,7 +1006,6 @@ class Scheduler:
         composite: Composite,
         t_span: tuple[float, float],
         macro_dt: float = 1.0,
-        y0: jnp.ndarray | None = None,
         save_dt: float | None = None,
         adjoint: dfx.AbstractAdjoint | None = None,
         antialias: bool = True,
@@ -1028,10 +1018,11 @@ class Scheduler:
         resolution across many initial conditions or parameter values, which is
         what makes a sweep cheap; ``repr`` it to see what was chosen.
 
-        ``y0`` is the state the stiffness verdict is *measured at*, defaulting
-        to the composite's initial state. Reusing the plan across other states
-        or parameters asserts the verdict holds there too.
+        The stiffness verdict is measured at the composite's start. Reusing
+        the plan across other starts or parameters asserts the verdict holds
+        there too.
         """
+        y0 = composite.initial_state_vec()
         return self._plan_for(
             composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
         )
@@ -1064,11 +1055,7 @@ class Scheduler:
             None if save_dt is None else float(save_dt),
             type(resolved).__name__,
             bool(antialias),
-            (
-                None
-                if y0 is None
-                else (tuple(jnp.shape(y0)), str(jnp.asarray(y0).dtype))
-            ),
+            (tuple(jnp.shape(y0)), str(jnp.asarray(y0).dtype)),
         )
         cached = self._last_plan
         if cached is not None and cached[0] == key:
@@ -1115,16 +1102,16 @@ class Scheduler:
             )
         if blockers:
             raise ValueError(
-                f"Batched y0 of shape {tuple(state.shape)} is not "
+                f"A batched start of shape {tuple(state.shape)} is not "
                 "supported with: " + "; ".join(blockers) + ". "
                 "Run unbatched, drop the blocking feature, or vmap "
-                "Scheduler.run from outside — over the seed as well as y0 "
-                "when a process is stochastic, or every member draws the "
-                "same noise."
+                "Scheduler.run from outside — over the seed as well as the "
+                "start when a process is stochastic, or every member draws "
+                "the same noise."
             )
 
     def verify_plan(
-        self, plan: RunPlan, composite: Composite, y0=None
+        self, plan: RunPlan, composite: Composite
     ) -> dict[str, tuple[bool, bool]]:
         """Did the plan's routing verdict survive to ``composite``'s values?
 
@@ -1136,11 +1123,7 @@ class Scheduler:
         fresh = self._resolve_integrators(
             composite,
             plan.groups,
-            (
-                composite.initial_state_vec(plan.keys)
-                if y0 is None
-                else jnp.asarray(y0)
-            ),
+            composite.initial_state_vec(plan.keys),
             plan.t_span[0],
             plan.macro_dt,
         )
@@ -1181,11 +1164,7 @@ class Scheduler:
         # Flat state layout, pinned for the whole run. Batched y0 is
         # (batch, n_vars); the batch axis rides through every group's solve.
         keys = composite.store_keys()
-        state = (
-            composite.initial_state_vec(keys)
-            if y0 is None
-            else jnp.asarray(y0)
-        )
+        state = composite.initial_state_vec(keys)
 
         groups = self.manual_groups or composite.auto_groups()
         stochastic_procs = composite.stochastic_processes()
@@ -1293,15 +1272,15 @@ class Scheduler:
     def _execute(
         self,
         plan: RunPlan,
-        y0,
         params_from: Composite | None = None,
         rng_key: jax.Array | None = None,
     ) -> SchedulerResult:
-        """Run a resolved :class:`RunPlan` from ``y0``."""
+        """Run a resolved :class:`RunPlan` from its composite's start, or
+        from ``params_from``'s when values are substituted."""
         if rng_key is None:
             rng_key = jax.random.PRNGKey(0)
         composite = plan.composite
-        if params_from is not None:
+        if params_from is not None and params_from is not plan.composite:
             want = plan.composite.structural_fingerprint()
             got = params_from.structural_fingerprint()
             if got != want:
@@ -1317,11 +1296,7 @@ class Scheduler:
         macro_dt, save_dt = plan.macro_dt, plan.save_dt
         coupling, adjoint = plan.coupling, plan.adjoint
         integrators = plan.integrators
-        state = (
-            composite.initial_state_vec(keys)
-            if y0 is None
-            else jnp.asarray(y0)
-        )
+        state = composite.initial_state_vec(keys)
         self._reject_unsupported_batch(
             composite, state, keys, compiled=plan.core is not None
         )
@@ -1524,6 +1499,13 @@ class Scheduler:
         t = t0
         while t < t1 - _TIME_EPS:
             t_next = min(t + macro_dt, t1)
+            if jump_ts is not None:
+                # A known discontinuity — a forcing edge, a time-triggered
+                # event — is a sync point too, so an event pair inside one
+                # macro step is seen and fires where it is due.
+                ahead = jump_ts[jump_ts > t + _TIME_EPS]
+                if ahead.size and ahead[0] < t_next - _TIME_EPS:
+                    t_next = float(ahead[0])
 
             if self.splitting == "strang" and len(group_rhs) > 1:
                 t_mid = t + (t_next - t) / 2.0
@@ -2122,14 +2104,24 @@ class Scheduler:
 
         discrete_info = _bound(discrete_procs)
         event_info = _bound(event_procs)
-        n_macro = max(1, int(math.ceil((t1 - t0) / macro_dt - 1e-12)))
-        t_starts = t0 + macro_dt * jnp.arange(n_macro)
+        n_regular = max(1, int(math.ceil((t1 - t0) / macro_dt - 1e-12)))
+        edges = {float(t0 + i * macro_dt) for i in range(n_regular)}
+        edges.add(float(t1))
+        # A known discontinuity — a forcing edge, a time-triggered event —
+        # is a sync point too, so an event due inside a macro step fires
+        # where it is due and a pair inside one step are both seen.
+        if jump_ts is not None:
+            edges |= {float(j) for j in jump_ts if t0 < float(j) < t1}
+        edges_np = np.asarray(sorted(edges))
+        t_starts = jnp.asarray(edges_np[:-1])
+        t_ends = jnp.asarray(edges_np[1:])
+        n_macro = len(edges_np) - 1
         due = jnp.asarray(
             [
                 [
                     self._is_due(
-                        t0 + i * macro_dt,
-                        min(t0 + (i + 1) * macro_dt, t1),
+                        float(edges_np[i]),
+                        float(edges_np[i + 1]),
                         proc.dt_step,
                     )
                     for _, proc, _, _ in discrete_info
@@ -2165,8 +2157,7 @@ class Scheduler:
                 event_fired,
                 event_deltas,
             ) = carry
-            t_start, step_index = inputs
-            t_next = jnp.minimum(t_start + macro_dt, t1)
+            t_start, t_next, step_index = inputs
             next_dt = []
             for gi, (gname, rhs) in enumerate(group_rhs):
                 st, last_dt, result, n_steps, n_rej = self._group_step(
@@ -2245,11 +2236,9 @@ class Scheduler:
             event_deltas_init,
         )
         final, snapshots = jax.lax.scan(
-            body, init, (t_starts, jnp.arange(n_macro))
+            body, init, (t_starts, t_ends, jnp.arange(n_macro))
         )
-        all_ts = jnp.concatenate(
-            (jnp.asarray([t0]), jnp.minimum(t_starts + macro_dt, t1))
-        )
+        all_ts = jnp.concatenate((jnp.asarray([t0]), t_ends))
         ys = jnp.concatenate((state[None], snapshots), axis=0)
         (
             _,
@@ -2826,8 +2815,7 @@ class Scheduler:
 
         try:
             report = analyze_groups(
-                composite,
-                y0=state,
+                composite.with_initial(state),
                 groups=groups,
                 t0=t0,
                 dt=macro_dt,
@@ -2953,8 +2941,7 @@ class Scheduler:
         )
         try:
             report = analyze_groups(
-                composite,
-                y0=probe,
+                composite.with_initial(probe),
                 groups=groups,
                 t0=t0,
                 dt=macro_dt,
@@ -3005,7 +2992,7 @@ class Scheduler:
                 "cannot measure group stiffness under tracing (grad/jvp/vmap) "
                 "with a cold cache; using the implicit solver %s for all "
                 "groups. That is correct either way, but a non-stiff group "
-                "pays for it — call warm_up(y0) once eagerly before "
+                "pays for it — call warm_up() once eagerly before "
                 "differentiating so the per-group verdict is resolved outside "
                 "the trace (CalibrationProblem.fit does this for you).",
                 type(self.implicit_solver).__name__,
@@ -3033,7 +3020,6 @@ class Scheduler:
         composite: Composite,
         t_span: tuple[float, float],
         macro_dt: float = 1.0,
-        y0: jnp.ndarray | None = None,
     ) -> dict[str, GroupIntegrator]:
         """Eagerly resolve and cache this composite's per-group solvers.
 
@@ -3044,11 +3030,7 @@ class Scheduler:
         resolved integrators for inspection.
         """
         keys = composite.store_keys()
-        state = (
-            composite.initial_state_vec(keys)
-            if y0 is None
-            else jnp.asarray(y0)
-        )
+        state = composite.initial_state_vec(keys)
         groups = self.manual_groups or composite.auto_groups()
         if not groups:
             continuous = composite.continuous_processes()

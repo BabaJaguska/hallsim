@@ -51,17 +51,17 @@ from metabolights_utils.provider.study_provider import (
     MetabolightsStudyProvider,
 )
 
-from hallsim.datasets import (
+from hallsim.search.datasets import (
     CONTROL_WORDS,
     TIME_FACTOR,
     Design,
     _UNIT_NAME,
-    _cached_json,
     _drop_identifiers,
     _strip_common,
     _times,
     curie,
 )
+from hallsim.search.fetch import cached_json
 from hallsim.measurements import MeasuredDataset
 
 log = logging.getLogger(__name__)
@@ -271,10 +271,10 @@ def factor_design(
     declared condition rather than a string parsed out of a title.
 
     A factor value is one token, and a token carried by a single sample is
-    pruned by :func:`~hallsim.datasets._drop_identifiers`, so a declared
+    pruned by :func:`~hallsim.search.datasets._drop_identifiers`, so a declared
     factor that is really a per-sample identifier does not make every
     sample its own arm; a factor constant across every sample distinguishes
-    nothing and is dropped by :func:`~hallsim.datasets._strip_common`.
+    nothing and is dropped by :func:`~hallsim.search.datasets._strip_common`.
 
     The time factor is named explicitly or found by its label. Its value is
     read with the same parser that reads times out of sample titles, so
@@ -616,9 +616,7 @@ def chebi_for(query: str, source: str = "", *, timeout: float = 30.0):
     # rather than answer "no compound": otherwise one bad request records
     # a permanent false negative.
     try:
-        payload = _cached_json(
-            f"unichem {source or 'inchikey'} {query}", fetch
-        )
+        payload = cached_json(f"unichem {source or 'inchikey'} {query}", fetch)
     except Exception as exc:  # noqa: BLE001 - the id stays unresolved
         log.info("unichem %s %s: %s", source or "inchikey", query, exc)
         return ()

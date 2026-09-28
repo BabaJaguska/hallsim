@@ -23,7 +23,7 @@ end-to-end differentiability, JIT, and native batched populations — see
 | **Port** | Named connection point with a role, default value, units, description, and ontology annotation. |
 | **Topology** | Static wiring map `{proc_name: {port_name: store_path}}`, defined at composition time — not inside processes. |
 | **Composite** | Bundles processes + topology. `build_rhs()` returns a JAX-compatible flat ODE right-hand side over `store_keys()` order. Auto-groups continuous processes by timescale. |
-| **Scheduler** | The unified runner for every composite shape — multi-rate orchestration (timescale groups, discrete dispatch, event firing), single-group fast path, shape-polymorphic state (single or batched `y0`). See [Scheduler](#scheduler). |
+| **Scheduler** | The unified runner for every composite shape — multi-rate orchestration (timescale groups, discrete dispatch, event firing), single-group fast path, shape-polymorphic state (one start or a batched one). See [Scheduler](#scheduler). |
 | **Store** | Flat `dict[str, jnp.ndarray]` with path-like keys (`"cytoplasm/ROS"`). A valid JAX PyTree. |
 
 **Flat-state order.** `store_keys()` is natural-sorted — digit runs compare
@@ -67,7 +67,7 @@ and implements both natively on JAX:
 |------------|----------|------------|---------|
 | GPU-accelerated continuous solves | No (CPython) | No (Java) | Yes (JAX/Diffrax) |
 | Differentiability through ODE solves | No | No | Yes (`jax.grad`) |
-| Population parallelism | multiprocessing | Threads | batched `y0` |
+| Population parallelism | multiprocessing | Threads | a batched start |
 | Composition-time validation | Basic | No | 4-subsystem semantic layer |
 | Heterogeneous process types | Yes (Engine) | Yes (Directors) | Yes (Scheduler) |
 
@@ -221,7 +221,7 @@ BioSimulations' COMBINE archives, and from paper supplements; XPP `.ode` comes
 from ModelDB and from supplements — both have importers
 (`process_from_sbml`, `process_from_xpp`). CellML/Physiome serves CellML and
 ModelDB also serves NEURON, neither of which has an importer, so
-`hallsim.discovery` returns those as pointers rather than imports. SED-ML,
+`hallsim.search.models` returns those as pointers rather than imports. SED-ML,
 which curated deposits ship alongside the model, is a different kind of
 artefact again — it describes a *simulation experiment over* a model, not the
 model — see [roadmap.md](roadmap.md).
@@ -270,7 +270,7 @@ The importer:
 Discover-then-import is two calls — the catalog is directly usable by an agent:
 
 ```python
-from hallsim.discovery import search_for_model
+from hallsim.search.models import search_for_model
 from hallsim.sbml_import import process_from_sbml
 
 # Every registered repository at once: BioModels, JWS Online, ModelDB,
@@ -284,7 +284,7 @@ The demos' own models ship under
 [`demos/models/sbml/<author><year>/`](../demos/models/sbml/) and are loaded
 by path.
 
-When nothing is deposited, `simulate discover <topic>` (`hallsim.web_discovery`)
+When nothing is deposited, `simulate discover <topic>` (`hallsim.search.web`)
 searches Europe PMC for model papers, reads them and their linked PDFs for
 repository links, and classifies the repositories cited: `importable:<format>`,
 `source:<language>`, `organisation`, or `linked-unverified` for a pointer not
@@ -293,6 +293,16 @@ paper or repository; `--web` adds Brave Web Search from `BRAVE_SEARCH_API_KEY`,
 and any `provider` with `search(query, *, limit, timeout)` plugs in the same
 way. PDF text needs the `search` extra. A label describes filenames, not the
 model: screen anything selected with `simulate screen`.
+
+`simulate find-data` asks OmicsDI first, EBI's one index over 29
+repositories, then the sources the index does not carry — Zenodo, GEO's
+curated DataSets, the PEtab collection; `--source all` asks every repository
+directly. The repository clients are the maintained ones where they exist:
+Biopython's E-utilities for GEO, `ppx` for PRIDE files, `petab` for PEtab
+problems, COPASI's bindings for COPASI files. `simulate mcp` serves the
+search as tools — find_models, find_data, dataset_design, paper_datasets,
+sources, and the framework's screen_models — over stdio or HTTP, so Claude
+Code, Claude Desktop or any MCP client can call it (`mcp` extra).
 
 **The supply, measured.** `simulate census run` puts every SBML deposit in
 BioModels — curated and uncurated, or one branch with `--branch` — through
@@ -313,22 +323,47 @@ row stamped — the report also copies the table and the counts to
 the deposits a change lifted or broke; a probe or a partial run leaves
 that table alone.
 
-**The data side.** `simulate census-data run` enumerates the repositories
-the same way: every GEO series for the organisms, every PRIDE,
-MetaboLights, Metabolomics Workbench and ArrayExpress entry, the BioImage
-Archive, and each screened model's own paper through Europe PMC (its
-flags, the datasets it links, its supplement). Every dataset meets four
-nested gates: timed (three or more timepoints, read from the sample
-titles, a declared time factor or the description), measured (quantities
-that can be named: a transcriptome, a proteome, listed metabolite ids),
-matched (a screened model carries one of them, by ontology: a shared
-ChEBI id, a protein in a proteome, a transcription factor a transcriptome
-reads through its regulon) and loadable (a reader exists for its tables).
-Arms, a named control and the perturbation labels are recorded, not gated:
-an unperturbed time course is data. `census-data report` writes the funnel
-per route and modality, the direct pair list and the paper census;
-`census-data rescreen` re-judges stored rows under the current gates and
-model set without asking the repositories again.
+**The data side.** `simulate census-data run` enumerates GEO, PRIDE,
+MetaboLights, Metabolomics Workbench, ArrayExpress, NASA's OSDR, the
+BioImage Archive and each screened model's own paper, then the sources
+that state a design outright: GEO's curated DataSets (a curator typed
+each subset, so a time course is declared and its sample membership
+known), Expression Atlas (factor values per assay group or contrast), the
+PEtab benchmark collection (each model with the measurement table it was
+fitted to, condition by condition and time by time) and the data a
+BioModels deposit ships beside its model (its tables, and the experiments
+its COPASI file names). A candidate from those carries its design as
+stated; the rest are read from sample titles. Every route writes what it
+saw, and among the rows of one deposit — a mirror and its original, a
+curated view and the series it curates — the report keeps the row that
+saw the most of the design. Four nested gates: contrast (two sample
+groups, so a fold change exists), measured (a modality a model
+integrates), matched (a screened model carries one of its quantities, by
+identifier, occupancy, proteome, regulon or panel, with the species
+relation recorded) and loadable (a reader exists, decided from the file
+list where a modality label cannot say). Arms, control, subjects and
+perturbation labels are recorded, not gated. `census-data report` writes
+the funnel; `census-data rescreen` re-judges stored rows and asks the
+repositories only for what `--files` (file lists a loader waits on) and
+`--factors` (the experimental factors ArrayExpress declares in
+BioStudies, which its search index omits) name.
+
+**Readers.** All return a `MeasuredDataset` (`hallsim.measurements`): a
+log2 fold change between named groups, so instrument units never meet a
+model's scale. GEO series matrices and counts tables (`gene_reporters`,
+scale decided from the values), MetaboLights MAF and Metabolomics
+Workbench mwTab keyed by ChEBI (`metabolites`), PRIDE mzTab keyed by
+UniProt (`proteins`), each through the standard's maintained package.
+Below detection is missing, an ambiguous feature is credited to nothing,
+ratios are averaged after the contrast.
+
+**Mechanisms.** `supply mechanisms` queries INDRA's database of
+machine-read statements (`hallsim.mechanisms`) around a gene, a pair or a
+model's species and splits them into mechanisms among the model and one
+step outside it, ranked by evidence, each with a sentence and PMID.
+Unnamed actors and non-protein agents are dropped; family statements fold
+onto members through the vendored FamPlex table. Kinetics are never in
+the answer.
 
 ### On-disk caches
 
@@ -420,9 +455,9 @@ reconciled onto one clock, cross-publication coupling edges, multi-group
 solves, held-out arms, and end-to-end gradients through all of it. Which
 models a demo composes, and why, is in that demo's docstring.
 
-## Population studies via batched `y0`
+## Population studies via a batched start
 
-The Scheduler's state pipeline is shape-polymorphic — a `(batch, n_vars)` y0
+The Scheduler's state pipeline is shape-polymorphic — a `(batch, n_vars)` start
 flows through every group's Diffrax solve as one batched computation, no
 `jax.vmap` over `Scheduler.run`:
 
@@ -432,11 +467,10 @@ from hallsim.scheduler import Scheduler
 from demos.models.multi_hallmark import build_multi_hallmark_composite
 
 comp = build_multi_hallmark_composite()
-y0 = comp.initial_state_vec()                        # (n_vars,)
-y0 = jnp.broadcast_to(y0, (64, y0.shape[0]))         # (64, n_vars)
-y0 = y0.at[..., comp.store_index()["dp14/DNA_damage"]].set(
-    jnp.linspace(0.0, 10.0, 64))
-result = Scheduler().run(comp, t_span=(0.0, 50.0), macro_dt=5.0, y0=y0)
+population = comp.with_initial(
+    {"dp14/DNA_damage": jnp.linspace(0.0, 10.0, 64)}  # (64,) → (64, n_vars)
+)
+result = Scheduler().run(population, t_span=(0.0, 50.0), macro_dt=5.0)
 result.get("dp14/CDKN1A").shape                      # (n_time, 64)
 ```
 
@@ -456,10 +490,10 @@ batch axis: a discrete `update` and an event `condition`/`handler` see
 member, and an event fires for exactly the members whose condition just
 turned True — `EventRecord.members` is that mask.
 
-Batched `y0` broadcasts *initial conditions*. Varying a **parameter** across a
-batch — a hallmark severity sweep, for instance — changes the process pytree
-rather than the state vector, so it is not a `y0` batch; build one composite
-per arm.
+A batched start broadcasts *initial conditions*. Varying a **parameter** across
+a batch — a hallmark severity sweep, for instance — changes the process pytree
+rather than the start, so it is not a batched start; build one composite per
+arm.
 
 ## Supporting modules
 
@@ -470,9 +504,9 @@ Small modules a model author needs early, each importable on its own:
 | `hallsim.kinetics` | `hill_gate`, `hill_inhibition` and friends — the saturating forms every coupling edge needs. Reach for these instead of hand-rolling `x**n / (K**n + x**n)`. |
 | `hallsim.io` | `outdir` and `make_run_dir` — the output convention every demo follows (timestamped run directory plus a `latest` symlink). |
 | `hallsim.bifurcation` | `equilibrium`, `spectrum`, `codim1_scan` — continuation and stability analysis around a fixed point. `codim1_scan` finds both codimension-1 crossings, Hopf (oscillation onset) and fold (bistability, an invasion threshold), each with its normal-form coefficient. Pass `laws=` for any model with a conserved moiety, or the Newton is singular at every state. Continuation is plain Newton, so a branch is followed only until it folds — tracing both arms of a hysteresis loop needs a multi-seed sweep. |
-| `hallsim.stiffness` | `analyze_groups(composite, *, y0, groups, t0, dt)` — per-group spectral abscissa, Jacobian condition number and state-scale spread, with the solver verdict. Keyword-only. |
+| `hallsim.stiffness` | `analyze_groups(composite, *, groups, t0, dt)` — per-group spectral abscissa, Jacobian condition number and state-scale spread, with the solver verdict. Keyword-only. |
 | `hallsim.structure` | What the declared symbolic forms (`reaction_channels`, `assignment_rules`, `rate_rules`) imply for a whole composite: `composite_stoichiometry` / `composite_moieties` (exact `N` and its integer moieties over store paths), `jacobian_pattern` + `compressed_jacobian` (the Jacobian in as many forward passes as its sparsity has colours; dense only on an undeclared process's own block), `check_pattern` (the pattern against the composite's derivative), `symbolic_field` (the field as sympy, over path and `<process>.<field>` parameter symbols). `steady_state` and `identifiability.structural_redundancy` are built on it. |
-| `hallsim.diagnostics` | `screen_process` / `screen_composite` (the constituents-first pre-flight), `screen_sensitivity`, and `recommend_coupling_source`. |
+| `hallsim.diagnostics` | `screen` (the constituents-first pre-flight: every member solo, from the composite's start), `screen_sensitivity`, and `recommend_coupling_source`. |
 | `hallsim.attenuation` | `trace_path(composite, control, reporter, ...)` — follows a handle or a parameter to a reporter through the wiring, runs the composite at two settings of it, and reports the relative change at every store path on the route, naming the node where it collapses and the reactions that carry that step. The diagnosis behind a flat reporter or a structural verdict; the identifiability report points here. |
 | `hallsim.view` | `page_for(composite, registry, t_end=...)` + `serve(page)` (`simulate view module:name`): a Dash page for any composite with a levers tab (one slider per handle that reaches it, a trajectory row per process, a population band for reaction-level members), a wiring tab (processes opened into their reactions and states, a `trace_path` route coloured by relative change) and, when `--run` names one, a fit tab (a saved calibration run's history, parameters and concordance). The hallmark-lever demo is one `Page` over it. Needs the `app` extra. `bake(page, dir, step=0.25)` (`--bake DIR` on `simulate view` and on the lever demo) writes the levers as a static site instead: every slider setting on a grid, solved once, read back by plain HTML and JS from any static host. |
 
@@ -491,7 +525,7 @@ boundary as INPUT ports fed from their own tools.
 Of Milner's bigraphs, which the Vivarium papers cite, HallSim keeps the link
 graph (`topology = {process: {port: store_path}}`) and drops the place graph:
 state is one flat `dict[str, jnp.ndarray]` with `/`-separated keys, not a
-nested hierarchy. Homogeneous populations are a batched `y0`; paracrine
+nested hierarchy. Homogeneous populations are a batched start; paracrine
 coupling is a process that reduces along the batch axis and writes a shared
 store path every cell reads; a composite reused under two names nests inside
 another and flattens with a prefix.
@@ -506,7 +540,7 @@ another and flattens with a prefix.
 | Gillespie / stochastic | 🟢 | `hallsim.stochastic` runs an imported reaction network at reaction level inside a composite, with a threaded batch lane; PRNG plumbing for hand-written stochastic DISCRETE processes is roadmap |
 | Boolean network | 🟡 | a DISCRETE update over logical ops; no model written yet |
 | Rule-based (BNGL / Kappa) | 🟡 | a CONTINUOUS Process emitting an expanded ODE system; not built |
-| Agent-based / multi-cellularity | 🟡 | batched `y0` gives N independent cells; inter-cell communication needs a `PopulationAggregate` — [roadmap.md](roadmap.md) |
+| Agent-based / multi-cellularity | 🟡 | a batched start gives N independent cells; inter-cell communication needs a `PopulationAggregate` — [roadmap.md](roadmap.md) |
 | Constraint-based (FBA / BiGG) | ❌ | needs an LP solver; doable via `jaxopt` and queued behind an application |
 | Molecular dynamics, Brownian dynamics, physics engines | ❌ | wrong scale or no spatial state; OpenMM / GROMACS |
 | Graphical / Bayesian networks | ❌ | a different paradigm; wrap behind a Process if needed |
@@ -556,13 +590,23 @@ src/hallsim/
   steady_state.py      — Newton to a fixed point of a composite
   bifurcation.py       — equilibrium, spectrum, codim-1 continuation
   validation.py        — unit / semantic / graph / coupling checks, analyze_composability
-  diagnostics.py       — screen_process / screen_composite, coupling-source verdicts
+  diagnostics.py       — screen, coupling-source verdicts
   intake.py            — triage_sbml, published_fit_chi2
   census.py            — the corpus census: every deposit through the gate, and the report
-  discovery.py         — search_for_model across BioModels, JWS, ModelDB, BioSimulations, Physiome, Europe PMC
-  literature.py        — Europe PMC full text, model pointers, what a cited repository holds
-  datasets.py          — search_for_dataset (GEO, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench, ArrayExpress, BioImage Archive), parse_design, a paper's own data, coverage of a composite
-  dataset_census.py    — the data census: every deposited time course through timed → measured → matched → loadable
+  search/              — the repository layer; imports nothing from the rest of the package, and tests/unit/test_search_boundary.py keeps it so
+    fetch.py           — one JSON getter, retry with backoff, concurrent fetch, the disk cache under ~/.cache/hallsim
+    models.py          — search_for_model across BioModels, JWS, ModelDB, BioSimulations, Physiome, Europe PMC; a candidate's files, downloaded and cached
+    literature.py      — Europe PMC full text, model pointers, what a cited repository holds
+    web.py             — simulate discover: papers, their PDFs, the repositories they cite
+    datasets.py        — search_for_dataset (GEO and its DataSets, Expression Atlas, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench, ArrayExpress, BioImage Archive, OSDR), parse_design and the designs a source states, a paper's own data and supplement tables, resolve_perturbation
+    attached.py        — the data a model ships beside itself: PEtab problems (petab), COPASI fitting experiments (basico), a BioModels deposit's own tables
+    server.py          — the search as MCP tools: find_models, find_data, dataset_design, paper_datasets, sources (`simulate mcp`)
+  screens.py           — where a hit meets the framework: what a model produces, what a dataset measures of a composite, how a platform loads
+  dataset_census.py    — the data census: every deposit through contrast → measured → matched → loadable
+  measurements.py      — MeasuredDataset: the one contrast interface every reader returns
+  metabolites.py       — MetaboLights MAF and Metabolomics Workbench mwTab readers, keyed by ChEBI
+  proteins.py          — PRIDE mzTab reader, keyed by UniProt
+  mechanisms.py        — literature-mined mechanisms from INDRA around a model's species; FamPlex families
   rejections.py        — the record of deposits screened out, and why
   sbml_core.py, sbml_math.py, sbml_events.py — libsbml -> sympy -> JAX
   sbml_import.py, cps_import.py, xpp_import.py — SBML / COPASI / XPPAUT importers
@@ -570,14 +614,14 @@ src/hallsim/
   imported.py          — ImportedODEProcess: time reconciliation, parameter and species inputs
   handles.py           — Handle, ParameterMapping, apply_handles, with_handles; suggest_registry
   hallmarks.py         — HALLMARK_INTENTS: the twelve hallmarks in ontology terms, naming no model
-  gene_reporters.py    — GeneReporter, MULTI_HALLMARK_REPORTERS, GeneExpressionDataset, GEO fetch
+  gene_reporters.py    — reporters and concordance (pointwise, time-course, cross-arm), GeneExpressionDataset, GEO series and counts readers
   calibration.py       — Calibrator, CalibrationProblem, Condition, FitParam
   identifiability.py   — structural redundancy, fittable-set screen
   stochastic.py        — Gillespie SSA lane
   attenuation.py       — trace_path: follow a control to a reporter through the wiring
   view/                — the Dash page: levers, wiring, fit tabs
   plotting.py          — figures for a run
-  cli.py               — the `simulate` command group
+  cli.py               — the `simulate` and `supply` command groups
   models/              — reusable primitives: hill_edge, gain_edge, clamp_edge, kick_event,
                          forcing, running_integral, bistable_latch, gated_removal,
                          saturating_removal, observer, neuralode

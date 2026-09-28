@@ -1879,25 +1879,25 @@ class CalibrationProblem:
                 return int(np.shape(value)[0])
         return 0
 
-    def _start_state(
-        self, condition: Condition, y0: jnp.ndarray, members=None
+    def _start_composite(
+        self, comp, condition: Condition, y0=None, members=None
     ):
-        """``y0`` with the condition's ``start`` written over it, gaining a
-        leading batch axis when the start is batched; ``members`` (from
-        :meth:`_member_draws`) selects which members run."""
+        """``comp`` starting from ``y0`` (the equilibrated state, when there
+        is one) with the condition's ``start`` written over it; ``members``
+        (from :meth:`_member_draws`) selects which members run."""
+        if y0 is not None:
+            comp = comp.with_initial(y0)
         if not condition.start:
-            return y0
+            return comp
         n_batch = self._condition_batch(condition)
         idx = None if not n_batch or not members else members.get(n_batch)
-        if n_batch:
-            rows = n_batch if idx is None else idx.shape[0]
-            y0 = jnp.broadcast_to(y0, (rows,) + tuple(y0.shape))
+        start = {}
         for path, value in condition.start.items():
-            value = jnp.asarray(value, dtype=y0.dtype)
+            value = jnp.asarray(value)
             if idx is not None and value.ndim > 0:
                 value = jnp.take(value, idx, axis=0)
-            y0 = y0.at[..., self._store_idx[path]].set(value)
-        return y0
+            start[path] = value
+        return comp.with_initial(start)
 
     def _member_draws(self, key) -> dict[int, jnp.ndarray] | None:
         """One draw of ``member_batch`` member indices per distinct member
@@ -2067,9 +2067,7 @@ class CalibrationProblem:
         comp = self._condition_composite(
             processes, condition, registry=registry
         )
-        if y0 is None:
-            y0 = comp.initial_state_vec()
-        y0 = self._start_state(condition, y0, members)
+        comp = self._start_composite(comp, condition, y0, members)
         t0, t1 = self._condition_window(condition)
         span = t1 - t0
         save_dt = max(1e-6, span / max(1, self.n_save - 1))
@@ -2077,7 +2075,6 @@ class CalibrationProblem:
             comp,
             t_span=(t0, t1),
             macro_dt=min(self.macro_dt, span),
-            y0=y0,
             save_dt=save_dt,
             adjoint=adjoint,
         )
@@ -2816,10 +2813,9 @@ class CalibrationProblem:
             )
             t0, t1 = self._condition_window(cond)
             results[cond_name] = self._scheduler.run(
-                comp,
+                self._start_composite(comp, cond, y0),
                 t_span=(t0, t1),
                 macro_dt=min(self.macro_dt, t1 - t0),
-                y0=self._start_state(cond, y0),
                 save_dt=max(1e-6, (t1 - t0) / max(1, n - 1)),
                 antialias=antialias,
             )

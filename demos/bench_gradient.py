@@ -61,7 +61,7 @@ topo = {"model": {p: f"pool/{p}" for p in species}}
 comp = Composite(processes={"model": proc}, topology=topo)
 sched = Scheduler()
 base_y0 = comp.flatten(comp.initial_state())
-sched.warm_up(comp, (0.0, T_END), 1.0, y0=base_y0)
+sched.warm_up(comp, (0.0, T_END), 1.0)
 SAVE_DT = T_END / (N_SAVE - 1)
 
 # ----- tellurium setup -----
@@ -103,7 +103,10 @@ def hallsim_loss_factory(pnames, yb):
             semantic_validation=False,
         )
         ys = sched.run(
-            comp_i, t_span=(0.0, T_END), macro_dt=1.0, save_dt=SAVE_DT, y0=yb
+            comp_i.with_initial(yb),
+            t_span=(0.0, T_END),
+            macro_dt=1.0,
+            save_dt=SAVE_DT,
         ).ys
         return jnp.mean(ys[-1, :, readout_i])
 

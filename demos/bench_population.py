@@ -77,17 +77,16 @@ log(
 # JIT-traced solve hits the warm cache. run() calls dfx.diffeqsolve directly,
 # so XLA fuses the whole adaptive while-loop into one GPU kernel ONLY when we
 # wrap it in jit — without this the ~thousands of steps dispatch op-by-op.
-sched.warm_up(comp, (0.0, T_END), 1.0, y0=base_y0)
+sched.warm_up(comp, (0.0, T_END), 1.0)
 
 
 @eqx.filter_jit
 def _solve(y0):
     return sched.run(
-        comp,
+        comp.with_initial(y0),
         t_span=(0.0, T_END),
         macro_dt=1.0,
         save_dt=T_END / (N_SAVE - 1),
-        y0=y0,
     ).ys
 
 

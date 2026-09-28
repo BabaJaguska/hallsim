@@ -35,6 +35,12 @@ dependencies    = [
   "networkx",
   "sympy",
   "python-libsbml",
+  # NCBI E-utilities (GEO search and enumeration) through Biopython's
+  # client, which paces requests to NCBI's limit and parses the XML.
+  "biopython",
+  # PEtab problems: the benchmark collection's measurement tables and
+  # models, read by the format's own library.
+  "petab",
   # ISA-Tab and the MetaboLights FTP layout, from the repository's own
   # team, so the assignment-file specification is not ours to track.
   "metabolights-utils",
@@ -52,6 +58,10 @@ dependencies    = [
 
 [project.optional-dependencies]
 search = ["pypdf>=5"]
+
+# `simulate mcp`: the search served as tools to Claude Code, Claude
+# Desktop or any MCP client.
+mcp = ["fastmcp>=2"]
 
 # GPU execution. Kept out of the base dependencies so a CPU-only install stays
 # small, but declared so `uv run`/`uv sync` do not strip the plugin: it must
@@ -77,7 +87,7 @@ app = ["dash>=2.17", "plotly>=5.22", "dash-cytoscape>=1.0"]
 # than an SBML file, and COPASI exports SBML natively — reimplementing that
 # translation would be reinventing a solved problem. Native wheel, so it is an
 # extra rather than a base dependency; import fails with an install hint.
-copasi = ["python-copasi>=4.42"]
+copasi = ["python-copasi>=4.42", "copasi-basico"]
 
 # xlrd reads the legacy .xls a paper's deposited fitting data arrives as
 # (DallePezze 2014's PottersWheel export); needed to verify a deposit against

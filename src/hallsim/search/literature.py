@@ -17,8 +17,8 @@ mechanical:
    is the failure mode that matters, so it needs the triage gate in front of it
    before it is worth anything.
 
-    from hallsim.literature import search_europepmc
-    from hallsim.discovery import screen_produced_species
+    from hallsim.search.literature import search_europepmc
+    from hallsim.screens import screen_produced_species
     hits = search_europepmc("senescence SASP kinetic model")
     screen_produced_species(hits, r"IL6|CXCL8|MMP1")
 """
@@ -26,7 +26,6 @@ mechanical:
 from __future__ import annotations
 
 import io
-import json
 import logging
 import re
 import urllib.parse
@@ -34,12 +33,12 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from hallsim.discovery import ModelCandidate
+from hallsim.search.fetch import cache_dir, get_json, is_junk_archive_entry
+from hallsim.search.models import ModelCandidate
 
 log = logging.getLogger(__name__)
 
 EUROPEPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest"
-CACHE = Path.home() / ".cache" / "hallsim" / "europepmc"
 
 #: Extensions worth opening. SBML is also detected by content, because a
 #: supplement names it anything at all.
@@ -48,12 +47,6 @@ MODEL_SUFFIXES = (".cps", ".xml", ".sbml", ".m", ".ode", ".cellml")
 ARCHIVE_SUFFIXES = (".zip",)
 #: Depth limit on that descent — an archive containing itself is not a model.
 MAX_DEPTH = 3
-
-
-def _get_json(url: str, params: dict, timeout: float):
-    q = urllib.parse.urlencode(params)
-    with urllib.request.urlopen(f"{url}?{q}", timeout=timeout) as fh:
-        return json.load(fh)
 
 
 def search_europepmc(
@@ -71,15 +64,13 @@ def search_europepmc(
     the difference between a citation and a model.
 
     Precision is poor by construction — a text search cannot tell a review of
-    IL-6 models from an IL-6 model. That is what
-    :func:`hallsim.discovery.screen_produced_species` and
-    :func:`hallsim.intake.triage_sbml` are for, and why the harvest is worth
-    running wide.
+    IL-6 models from an IL-6 model. That is what a produced-species screen
+    and triage are for, and why the harvest is worth running wide.
     """
     q = query
     if open_access_only:
         q = f"({query}) AND OPEN_ACCESS:y AND HAS_FT:y"
-    payload = _get_json(
+    payload = get_json(
         f"{EUROPEPMC}/search",
         {
             "query": q,
@@ -116,9 +107,6 @@ def search_europepmc(
     return out[:limit]
 
 
-from hallsim.discovery import _is_junk_archive_entry  # noqa: E402
-
-
 def _looks_like_sbml(blob: bytes) -> bool:
     return b"<sbml" in blob[:8000]
 
@@ -133,7 +121,7 @@ def _harvest(blob: bytes, dest: Path, stem: str, depth: int) -> list[Path]:
     for info in archive.infolist():
         if info.is_dir() or info.file_size > 64 * 1024 * 1024:
             continue
-        if _is_junk_archive_entry(info.filename):
+        if is_junk_archive_entry(info.filename):
             continue
         name = Path(info.filename).name
         low = name.lower()
@@ -184,7 +172,7 @@ def full_text(pmcid: str, *, timeout: float = 60.0) -> str:
     """The article's full text as XML, cached on disk. Empty when absent."""
     if not re.fullmatch(r"PMC\d+", pmcid):
         raise ValueError(f"not a PMC id: {pmcid!r}")
-    path = CACHE / pmcid / "fulltext.xml"
+    path = cache_dir("europepmc") / pmcid / "fulltext.xml"
     if path.exists():
         return path.read_text(errors="replace")
     try:
@@ -244,7 +232,7 @@ def supplementary_model_files(
     """
     if not re.fullmatch(r"PMC\d+", pmcid):
         raise ValueError(f"not a PMC id: {pmcid!r}")
-    dest = CACHE / pmcid
+    dest = cache_dir("europepmc") / pmcid
     marker = dest / ".harvested"
     if marker.exists() and not refresh:
         return sorted(p for p in dest.iterdir() if p.name != ".harvested")
@@ -309,16 +297,14 @@ def repository_files(
     owner, _, repo = pointer.partition("/")
     if forge == "github":
         if not repo:
-            rows = _get_json(
+            rows = get_json(
                 f"https://api.github.com/users/{owner}/repos",
                 {"per_page": 100},
                 timeout,
             )
             return [r["full_name"] for r in rows]
-        meta = _get_json(
-            f"https://api.github.com/repos/{pointer}", {}, timeout
-        )
-        tree = _get_json(
+        meta = get_json(f"https://api.github.com/repos/{pointer}", {}, timeout)
+        tree = get_json(
             f"https://api.github.com/repos/{pointer}/git/trees/"
             f"{meta['default_branch']}",
             {"recursive": 1},
@@ -327,7 +313,7 @@ def repository_files(
         return [t["path"] for t in tree.get("tree", []) if t["type"] == "blob"]
     if forge == "gitlab":
         if not repo:
-            rows = _get_json(
+            rows = get_json(
                 f"https://gitlab.com/api/v4/groups/{owner}/projects",
                 {"per_page": 100},
                 timeout,
@@ -336,7 +322,7 @@ def repository_files(
         project = urllib.parse.quote(pointer, safe="")
         out = []
         for page in range(1, _TREE_PAGES + 1):
-            rows = _get_json(
+            rows = get_json(
                 f"https://gitlab.com/api/v4/projects/{project}/repository/tree",
                 {"recursive": "true", "per_page": 100, "page": page},
                 timeout,
@@ -348,15 +334,13 @@ def repository_files(
     if forge == "bitbucket":
         base = "https://api.bitbucket.org/2.0/repositories"
         if not repo:
-            rows = _get_json(f"{base}/{owner}", {"pagelen": 100}, timeout)
+            rows = get_json(f"{base}/{owner}", {"pagelen": 100}, timeout)
             return [r["full_name"] for r in rows.get("values", [])]
-        meta = _get_json(f"{base}/{pointer}", {}, timeout)
+        meta = get_json(f"{base}/{pointer}", {}, timeout)
         branch = meta["mainbranch"]["name"]
         out, params = [], {"max_depth": 8, "pagelen": 100}
         for _ in range(_TREE_PAGES):
-            page = _get_json(
-                f"{base}/{pointer}/src/{branch}/", params, timeout
-            )
+            page = get_json(f"{base}/{pointer}/src/{branch}/", params, timeout)
             out += [
                 v["path"]
                 for v in page.get("values", [])

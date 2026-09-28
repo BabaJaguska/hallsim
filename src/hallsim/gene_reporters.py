@@ -40,6 +40,7 @@ import pandas as pd
 
 from hallsim.io import record_checksum, verify_checksum
 from hallsim.measurements import MeasuredDataset
+from hallsim.search.datasets import SYMBOL, geo_series_urls
 
 log = logging.getLogger(__name__)
 
@@ -819,8 +820,6 @@ def load_gene_expression(
 
 # ── Platform annotation: where a table names its genes ─────────────────
 
-#: A gene symbol: HGNC-style, at most 15 characters.
-SYMBOL = re.compile(r"^(?:[A-Z][A-Z0-9-]{0,14}|C[0-9XY]+orf[0-9]+)$")
 #: An accession: RefSeq, Ensembl, GenBank or UniProt, with optional version.
 #: UniProt is here because "Q8NH21" reads as a gene symbol otherwise.
 ACCESSION = re.compile(
@@ -991,18 +990,6 @@ def probe_gene_map(
         len(frame),
     )
     return out
-
-
-GEO_SERIES = "https://ftp.ncbi.nlm.nih.gov/geo/series"
-
-
-def geo_series_urls(accession: str) -> tuple[str, str]:
-    """The series-matrix and family-SOFT URLs GEO serves for ``accession``."""
-    base = f"{GEO_SERIES}/{accession[:3]}{accession[3:-3]}nnn/{accession}"
-    return (
-        f"{base}/matrix/{accession}_series_matrix.txt.gz",
-        f"{base}/soft/{accession}_family.soft.gz",
-    )
 
 
 #: NCBI reprocesses a subset of GEO's RNA-seq series onto one assembly and
@@ -1431,6 +1418,7 @@ def compute_concordance(
     delta_gene_expression: pd.Series,
     condition_name: str = "",
     reporters: list[Readout] | None = None,
+    scale: float = 1.0,
 ) -> ConcordanceResult:
     """Compare simulated observable changes to measured gene-expression
     changes one reporter at a time.
@@ -1439,6 +1427,11 @@ def compute_concordance(
     ----------
     delta_observables:
         ``{observable_name: Δ_sim}``.
+    scale:
+        The observables' own scale — the control level, or the largest
+        |Δ_sim| across a deposit's arms — so that "no change" is judged
+        relative to it: a readout of size 400 that moves by 1e-10 has not
+        moved.
     delta_gene_expression:
         ``pd.Series`` indexed by gene symbol, values are Δ_data
         (a log2 fold change).
@@ -1479,7 +1472,7 @@ def compute_concordance(
     if n == 0:
         return ConcordanceResult(condition_name=condition_name)
     sims, datas = np.asarray(sims), np.asarray(datas)
-    if np.all(np.abs(sims) < NO_CHANGE):
+    if np.all(np.abs(sims) < NO_CHANGE * scale):
         return ConcordanceResult(
             condition_name=condition_name,
             rows=rows,
@@ -1530,6 +1523,9 @@ class TimeCourseConcordance:
     per_gene: pd.Series
     pooled: float
     n_times: int
+    #: False when the simulation never moves on the shared timepoints, so
+    #: the contrast is outside the model's scope; see ``compute_concordance``.
+    predicted_change: bool = True
 
     @property
     def mean_per_gene(self) -> float:
@@ -1544,6 +1540,7 @@ def time_course_concordance(
     *,
     condition_name: str = "",
     lag: float = 0.0,
+    scale: float = 1.0,
 ) -> TimeCourseConcordance:
     """Compare a simulated observable's change over time against measured
     log2 fold changes gene by gene, by rank over time.
@@ -1551,8 +1548,9 @@ def time_course_concordance(
     ``delta_sim`` is indexed by time; ``delta_data`` is ``gene × time`` on
     the measured timepoints, and the simulation is interpolated onto them.
     ``lag`` reads the simulation that much earlier, for a readout that
-    trails its driver. Pointwise sign agreement cannot tell a model from
-    "up everywhere" on a ligand arm; the ranks over time can.
+    trails its driver. ``scale`` is the observable's own scale, as in
+    :func:`compute_concordance`. Pointwise sign agreement cannot tell a
+    model from "up everywhere" on a ligand arm; the ranks over time can.
     """
     times = np.asarray(delta_data.columns, float)
     st = np.asarray(delta_sim.index, float)
@@ -1569,7 +1567,14 @@ def time_course_concordance(
     pooled = _spearman(
         np.tile(sim, len(delta_data)), delta_data.values.ravel()
     )
-    return TimeCourseConcordance(condition_name, per_gene, pooled, len(times))
+    moved = (
+        bool(np.nanmax(np.abs(sim)) >= NO_CHANGE * scale)
+        if len(sim)
+        else False
+    )
+    return TimeCourseConcordance(
+        condition_name, per_gene, pooled, len(times), predicted_change=moved
+    )
 
 
 def peak_concordance(sim_peaks: pd.Series, data_peaks: pd.Series) -> float:

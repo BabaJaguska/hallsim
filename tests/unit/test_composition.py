@@ -497,11 +497,11 @@ class TestScheduler:
             topology={"prod": {"x": "x"}, "decay": {"x": "x"}},
         )
         sched = Scheduler()
-        # IC: x = 0 (override the port default via the trailing-axis tensor).
-        y0 = composite.initial_state_vec()
-        y0 = y0.at[composite.store_keys().index("x")].set(0.0)
         result = sched.run(
-            composite, t_span=(0.0, 200.0), macro_dt=1.0, save_dt=1.0, y0=y0
+            composite.with_initial({"x": 0.0}),
+            t_span=(0.0, 200.0),
+            macro_dt=1.0,
+            save_dt=1.0,
         )
         x_final = float(result.get("x")[-1])
         # Steady state: production / decay = 0.5 / 0.1 = 5.0
@@ -767,7 +767,6 @@ class TestAssignedPaths:
             comp,
             t_span=(0.0, 2.0),
             macro_dt=2.0,
-            y0=comp.initial_state_vec(),
             save_dt=0.5,
         )
         ts = jnp.asarray(res.ts)
@@ -796,7 +795,6 @@ class TestAssignedPaths:
             comp,
             t_span=(0.0, 2.0),
             macro_dt=2.0,
-            y0=comp.initial_state_vec(),
             save_dt=0.5,
         )
         ts = jnp.asarray(res.ts)
@@ -900,6 +898,175 @@ class TestParameterOverrides:
             macro_dt=1.0,
         ).get("pool/x")
         assert abs(float(base[-1]) - float(off[-1])) > 1e-6
+
+
+class TestInitialOverrides:
+    """``Composite.with_initial``: the initial-state analogue of
+    ``with_params``."""
+
+    def _comp(self):
+        return Composite(
+            processes={"prod": Production(), "decay": Decay()},
+            topology={"prod": {"x": "pool/x"}, "decay": {"x": "pool/x"}},
+            semantic_validation=False,
+        )
+
+    def test_absolute_set_leaves_the_original_alone(self):
+        comp = self._comp()
+        out = comp.with_initial({"pool/x": 10.0})
+        assert float(out.initial_state()["pool/x"]) == 10.0
+        assert float(comp.initial_state()["pool/x"]) == 1.0
+
+    def test_callable_scales_the_resolved_default(self):
+        """The dosage idiom: the caller never resolves port defaults."""
+        comp = self._comp()
+        out = comp.with_initial({"pool/x": lambda v: 1.5 * v})
+        assert float(out.initial_state()["pool/x"]) == pytest.approx(1.5)
+
+    def test_unknown_path_is_refused_with_the_real_ones(self):
+        with pytest.raises(KeyError, match="no store path named"):
+            self._comp().with_initial({"nope/x": 1.0})
+
+    def test_a_traced_start_differentiates_through_the_run(self):
+        """A declared start is a value, not structure, so an initial
+        condition is fitted or differentiated through it directly."""
+        comp = self._comp()
+
+        def end(s):
+            res = Scheduler().run(
+                comp.with_initial({"pool/x": s}),
+                t_span=(0.0, 1.0),
+                macro_dt=0.5,
+            )
+            return res.get("pool/x")[-1]
+
+        assert 0.0 < float(jax.grad(end)(2.0)) < 1.0
+
+    def test_a_batched_start_runs_a_population(self):
+        res = Scheduler().run(
+            self._comp().with_initial({"pool/x": jnp.array([1.0, 2.0, 4.0])}),
+            t_span=(0.0, 1.0),
+            macro_dt=0.5,
+        )
+        end = res.get("pool/x")[-1]
+        assert end.shape == (3,)
+        assert float(end[2]) > float(end[1]) > float(end[0])
+
+    def test_a_start_does_not_fragment_the_plan_cache(self):
+        """The plan memo keys on parameter values; a start is not one, so a
+        sweep over starting states shares one resolved plan."""
+        from hallsim.scheduler import _param_digest
+
+        comp = self._comp()
+        assert _param_digest(comp) == _param_digest(
+            comp.with_initial({"pool/x": 99.0})
+        )
+
+    def test_a_declared_start_is_not_a_parameter(self):
+        """Steady-state search perturbs fitted parameters and begins from
+        the declared start, so the start itself must not move."""
+        from hallsim.steady_state import _perturbed
+
+        comp = self._comp().with_initial({"pool/x": 7.0})
+        out = _perturbed(comp, jax.random.PRNGKey(0), 1.0)
+        assert float(out.initial_state()["pool/x"]) == 7.0
+        assert float(out.processes["prod"].rate) != pytest.approx(0.1)
+
+    def test_override_reaches_the_solver(self):
+        comp = self._comp()
+        sched = Scheduler()
+        moved = sched.run(
+            comp.with_initial({"pool/x": 10.0}),
+            t_span=(0.0, 5.0),
+            macro_dt=1.0,
+        ).get("pool/x")
+        assert float(moved[0]) == pytest.approx(10.0)
+
+    def test_turnover_washes_out_an_initial_dosage(self):
+        """Why the docstring sends a dosage to ``with_params``: where a
+        species turns over, its rates set the steady state and a scaled
+        starting amount decays back to the unscaled one, while the same
+        factor on the production rate holds."""
+        comp = self._comp()
+        sched = Scheduler()
+
+        def settled(c):
+            run = sched.run(c, t_span=(0.0, 400.0), macro_dt=10.0)
+            return float(run.get("pool/x")[-1])
+
+        base = settled(comp)
+        dosed_start = settled(comp.with_initial({"pool/x": lambda v: 1.5 * v}))
+        dosed_rate = settled(
+            comp.with_params({"prod.rate": 1.5 * Production().rate})
+        )
+        assert dosed_start == pytest.approx(base, rel=1e-3)
+        assert dosed_rate == pytest.approx(1.5 * base, rel=1e-3)
+
+
+class TestStartResolution:
+    """A composite's start is one array, resolved at construction and
+    changed only through ``with_initial``; every consumer reads it."""
+
+    def _comp(self):
+        return Composite(
+            processes={"prod": Production(), "decay": Decay()},
+            topology={"prod": {"x": "pool/x"}, "decay": {"x": "pool/x"}},
+            semantic_validation=False,
+        )
+
+    def test_the_start_is_one_leaf_however_it_was_set(self):
+        comp = self._comp()
+        n = len(jax.tree_util.tree_leaves(comp))
+        by_name = comp.with_initial({"pool/x": 9.0})
+        by_vector = comp.with_initial(jnp.array([9.0]))
+        assert len(jax.tree_util.tree_leaves(by_name)) == n
+        assert len(jax.tree_util.tree_leaves(by_vector)) == n
+
+    def test_a_dict_overrides_only_the_named_path(self):
+        class Two(Process):
+            def ports_schema(self):
+                return {
+                    "a": Port(role=PortRole.EVOLVED, default=1.0),
+                    "b": Port(role=PortRole.EVOLVED, default=2.0),
+                }
+
+            def derivative(self, t, state):
+                return {"a": 0.0, "b": 0.0}
+
+        comp = Composite(
+            processes={"t": Two()},
+            topology={"t": {"a": "s/a", "b": "s/b"}},
+            semantic_validation=False,
+        )
+        assert comp.with_initial({"s/a": 9.0}).initial.tolist() == [9.0, 2.0]
+
+    def test_a_batched_value_broadcasts_the_rest(self):
+        start = {"pool/x": jnp.array([1.0, 2.0, 3.0])}
+        assert self._comp().with_initial(start).initial.shape == (3, 1)
+
+    def test_a_full_vector_is_used_as_given(self):
+        started = self._comp().with_initial(jnp.array([42.0]))
+        assert float(started.initial[0]) == 42.0
+
+    def test_a_wrong_width_vector_is_refused(self):
+        with pytest.raises(ValueError, match="store_keys"):
+            self._comp().with_initial(jnp.array([1.0, 2.0]))
+
+    def test_a_reused_plan_starts_from_the_substituted_composite(self):
+        comp = self._comp()
+        sched = Scheduler()
+        plan = sched.plan(comp, (0.0, 1.0), macro_dt=0.5)
+        moved = sched.run(
+            plan, params_from=comp.with_initial({"pool/x": 10.0})
+        ).get("pool/x")
+        assert float(moved[0]) == pytest.approx(10.0)
+
+    def test_a_nested_composite_hands_its_start_up(self):
+        inner = self._comp().with_initial({"pool/x": 10.0})
+        outer = Composite(
+            processes={"sub": inner}, topology={}, semantic_validation=False
+        )
+        assert float(outer.initial_state()["sub/pool/x"]) == 10.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1096,7 +1263,11 @@ def test_event_and_discrete_order_survives_a_pytree_round_trip():
     round_tripped = jax.tree_util.tree_unflatten(treedef, leaves)
     assert list(round_tripped.event_processes()) == expected
     assert (
-        list(eqx.tree_at(lambda c: c.initial, comp, {}).event_processes())
+        list(
+            eqx.tree_at(
+                lambda c: c.initial, comp, comp.initial
+            ).event_processes()
+        )
         == expected
     )
 

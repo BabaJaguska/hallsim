@@ -68,7 +68,7 @@ def batched_runner(comp, sched, t_end, dt):
             (beta_x, alpha_y),
         )
         return sched.run(
-            c, (0.0, t_end), macro_dt=t_end, save_dt=dt, y0=y0
+            c.with_initial(y0), (0.0, t_end), macro_dt=t_end, save_dt=dt
         ).get("gz06/x")
 
     return jax.jit(jax.vmap(run))

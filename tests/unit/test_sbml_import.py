@@ -28,7 +28,6 @@ def _solo_ys(proc, t_end=30.0):
         comp,
         t_span=(0.0, t_end),
         macro_dt=t_end,
-        y0=comp.initial_state_vec(),
         save_dt=t_end / 30.0,
     )
     return res.ys
@@ -178,7 +177,6 @@ class TestWithSpeciesInput:
             comp,
             t_span=(0.0, 5.0),
             macro_dt=5.0,
-            y0=comp.initial_state_vec(),
             save_dt=0.5,
         )
         y = jnp.asarray(res.get("gz06/y"))
@@ -389,7 +387,8 @@ class TestProvenance:
 def test_a_pmc_id_imports_from_the_paper_supplement(tmp_path, monkeypatch):
     """A Europe PMC hit's id is a paper; its model lives in the supplement,
     so the same id an agent gets from search imports without a detour."""
-    from hallsim import literature, sbml_import
+    from hallsim import sbml_import
+    from hallsim.search import literature
 
     model = tmp_path / "model.xml"
     model.write_text(
@@ -428,44 +427,24 @@ def test_a_pmc_id_imports_from_the_paper_supplement(tmp_path, monkeypatch):
         sbml_import.process_from_sbml("PMC1234567")
 
 
-def test_biomodel_download_falls_back_to_the_records_main_file(
-    monkeypatch, tmp_path
-):
-    """Newer deposits keep the author's filename; the conventional
-    ``<accession>_url.xml`` answers 400 and the record names the file."""
-    import io
-    import urllib.error
-    import urllib.request
+def test_jws_source_scheme_resolves_without_touching_biomodels(monkeypatch):
+    """`jws:<slug>` must route to JWS, not fall through to a BioModels fetch."""
+    from pathlib import Path
+
+    import pytest
 
     from hallsim import sbml_import
 
-    served = {}
-
-    class _Resp(io.BytesIO):
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    def fake_urlopen(request, timeout=None):
-        url = request.full_url
-        served.setdefault("urls", []).append(url)
-        if "_url.xml" in url:
-            raise urllib.error.HTTPError(url, 400, "Bad Request", {}, None)
-        return _Resp(b"<sbml/>")
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    import hallsim.discovery as disc
-
     monkeypatch.setattr(
-        disc,
-        "biomodels_record",
-        lambda acc, timeout=30.0: {
-            "files": {"main": [{"name": "Csikasz-Nagy2006.xml"}]}
-        },
+        sbml_import,
+        "download_jws_model",
+        lambda slug: Path(f"/tmp/{slug}.xml"),
     )
-    text = sbml_import._fetch_biomodel_main("BIOMD0000001044")
-    assert text == "<sbml/>"
-    assert len(served["urls"]) == 2
-    assert "Csikasz-Nagy2006.xml" in served["urls"][1]
+    monkeypatch.setattr(
+        sbml_import,
+        "download_biomodel_main",
+        lambda i: pytest.fail("routed to BioModels"),
+    )
+    path, name = sbml_import._resolve_source("jws:achcar2", None)
+    assert path.endswith("achcar2.xml")
+    assert name == "jws_achcar2"

@@ -42,22 +42,24 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from hallsim.datasets import (
+from hallsim.search.attached import biomodels_data, petab_problems
+from hallsim.search.datasets import (
     EBI_DOMAINS,
     GEO_FILE_TOKEN,
     DatasetCandidate,
     Design,
     Measured,
+    biostudies_factors,
     geo_by_accession,
     iter_bioimages,
     iter_ebi,
+    iter_expression_atlas,
     iter_geo,
     iter_osdr,
     osdr_files,
     paper_data,
     study_files,
     TIME_FACTOR,
-    parse_design,
     resolve_perturbation,
     time_values,
 )
@@ -65,7 +67,21 @@ from hallsim.datasets import (
 log = logging.getLogger(__name__)
 
 GATES = ("contrast", "measured", "matched", "loadable")
-ROUTES = ("papers", "geo", "ebi", "osdr", "bioimages")
+#: In the order they run. The curated views (``gds`` over GEO series,
+#: ``atlas`` over ArrayExpress and GEO deposits) come after the
+#: repositories they curate, and the report keeps whichever row of a
+#: deposit saw the most of its design.
+ROUTES = (
+    "papers",
+    "geo",
+    "ebi",
+    "osdr",
+    "bioimages",
+    "gds",
+    "atlas",
+    "petab",
+    "models",
+)
 DEFAULT_ORGANISMS = ("Homo sapiens", "Mus musculus")
 #: Modalities whose quantities can be named against a model. A modality
 #: earns a place here by measuring something a model integrates, not by
@@ -81,6 +97,9 @@ MEASURABLE = frozenset(
         "binding",
         "ncrna",
         "imaging",
+        # A model's own measured quantities, named through the species
+        # annotations of the model they were fitted to.
+        "targeted",
     }
 )
 #: What the framework reads today, by source and modality.
@@ -89,6 +108,8 @@ LOADERS = {
     ("geo", "expression", False): "counts-file",
     ("metabolights", "metabolomics", False): "maf",
     ("metabolomics_workbench", "metabolomics", False): "mwtab",
+    ("petab", "targeted", False): "petab",
+    ("biomodels", "targeted", False): "table",
 }
 #: Routes a reader exists for. A counts file still has to be a
 #: well-formed table; NCBI's reprocessed series always are, an
@@ -191,16 +212,19 @@ def load_models(run_dir, usable_only: bool = True) -> list[ModelIds]:
 
 
 def timed_evidence(cand: DatasetCandidate, design: Design) -> str:
-    """Where a *time course* shows: ``titles`` (three or more timepoints
-    in some arm), ``factors`` (a declared time factor), ``text`` (three or
-    more distinct time tokens in the description), or empty.
+    """Where a *time course* shows: ``stated`` (the source states the
+    design — a measurement table, a curated subset listing, an assay-group
+    summary — with three or more timepoints in some arm), ``titles`` (the
+    same, read from the sample titles), ``factors`` (a declared time
+    factor), ``text`` (three or more distinct time tokens in the
+    description), or empty.
 
     Three timepoints is what constrains a rate, so this is the evidence for
     fitting dynamics — not for whether the deposit is usable at all, which
     is :func:`contrast_of`.
     """
     if design.time_course:
-        return "titles"
+        return "stated" if cand.stated is not None else "titles"
     if any(TIME_FACTOR.search(f) for f in cand.factors):
         return "factors"
     values = time_values(f"{cand.title} {cand.summary}")
@@ -240,6 +264,11 @@ def contrast_of(design: Design, evidence: str = "") -> str:
     if design.perturbed and _replicated(design):
         return "arms"
     return ""
+
+
+#: How much of a design a contrast kind saw, for choosing among rows that
+#: describe one deposit.
+CONTRAST_RANK = {"dynamics": 4, "declared": 3, "course": 2, "arms": 1, "": 0}
 
 
 def _replicated(design: Design) -> bool:
@@ -340,7 +369,7 @@ def _arrayexpress_loader(files) -> str:
 
 
 def _osdr_loader(files) -> str:
-    from hallsim.datasets import GL_COUNTS
+    from hallsim.search.datasets import GL_COUNTS
 
     if any(GL_COUNTS.search(f) for f in files):
         return "glbulkrnaseq"
@@ -564,7 +593,7 @@ def screen_dataset(
     """One row: the candidate flattened, its design, the gate booleans,
     the stage it stops at and the models it lands on."""
     t0 = time.time()
-    design = parse_design(cand.samples)
+    design = cand.design
     evidence = timed_evidence(cand, design)
     labels = perturbation_labels(cand, design)
     m = cand.measured
@@ -604,6 +633,12 @@ def screen_dataset(
             "ids": list(m.ids),
             "url": cand.url,
             "platform": cand.platform,
+            # A design the source stated is kept as stated; the titles
+            # cannot rebuild it.
+            "design": (
+                cand.stated.to_dict() if cand.stated is not None else None
+            ),
+            "curated": cand.curated,
         },
     }
     # Dynamics is recorded, not gated: a deposit that only supports an
@@ -670,6 +705,10 @@ def candidate_of(row: dict) -> DatasetCandidate:
         pubmed=row.get("pubmed", ""),
         factors=tuple(raw.get("factors", ())),
         mirrors=str(row.get("mirrors") or ""),
+        stated=(
+            Design.from_dict(raw["design"]) if raw.get("design") else None
+        ),
+        curated=str(raw.get("curated") or ""),
     )
 
 
@@ -679,6 +718,7 @@ def rescreen(
     *,
     resolve: bool = False,
     with_files: bool = False,
+    with_factors: bool = False,
     workers: int = 4,
 ) -> int:
     """Screen every stored row again from its raw part, under the current
@@ -689,6 +729,12 @@ def rescreen(
     per deposit, against its own repository — and screens those rows again
     with it, so an ``unchecked`` loader is settled. The list is kept in the
     row's raw part, so it is fetched once.
+
+    ``with_factors`` fetches the BioStudies record of every ArrayExpress
+    row that carries no declared factors and reads its ``Experimental
+    Factors``; the EBI Search listing omits them, so a time series the
+    abstract never spells out is otherwise untimed. One request per
+    deposit, tens of thousands over a whole run.
     """
     run = Path(run_dir)
     path = run / "rows.jsonl"
@@ -710,6 +756,27 @@ def rescreen(
         return new
 
     out = [screened(i) if i in cands else old for i, old in enumerate(rows)]
+    if with_factors:
+        need = [
+            i
+            for i, c in cands.items()
+            if c.source == "biostudies-arrayexpress" and not c.factors
+        ]
+        log.info("fetching declared factors for %d deposits", len(need))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(biostudies_factors, cands[i].accession): i
+                for i in need
+            }
+            for done, future in enumerate(as_completed(futures), 1):
+                i = futures[future]
+                try:
+                    cands[i] = replace(cands[i], factors=future.result())
+                    out[i] = screened(i)
+                except Exception as exc:  # noqa: BLE001 - row stays as is
+                    log.info("%s: no factors (%s)", cands[i].accession, exc)
+                if done % 200 == 0 or done == len(need):
+                    log.info("factors: %d of %d", done, len(need))
     if with_files:
         # The selection reads the fresh screen, not the stored row: a row
         # keeps the verdict of whatever rule screened it last. Only a row
@@ -779,13 +846,13 @@ def reason_of(row: dict) -> str:
 # ── Enumeration and the run ─────────────────────────────────────────
 
 
-def _done(rows_path: Path) -> set[tuple[str, str]]:
+def _done(rows_path: Path) -> set[tuple[str, str, str]]:
     seen = set()
     if rows_path.exists():
         for line in rows_path.read_text().splitlines():
             if line.strip():
                 r = json.loads(line)
-                seen.add((r["source"], r["accession"]))
+                seen.add((r.get("route", ""), r["source"], r["accession"]))
     return seen
 
 
@@ -801,15 +868,18 @@ class _Sink:
         # Routes may write from several threads; one line at a time.
         self._lock = threading.Lock()
 
-    def has(self, cand: DatasetCandidate) -> bool:
-        return (cand.source, cand.accession) in self.seen
+    def has(self, route: str, cand: DatasetCandidate) -> bool:
+        """Whether this route has written this deposit. A route writes
+        what it saw and another route may see the same deposit with more
+        of its design; the report keeps the fuller row."""
+        return (route, cand.source, cand.accession) in self.seen
 
     def write(self, row: dict) -> None:
         line = json.dumps(row) + "\n"
         with self._lock:
             with self.rows.open("a") as fh:
                 fh.write(line)
-            self.seen.add((row["source"], row["accession"]))
+            self.seen.add((row["route"], row["source"], row["accession"]))
             self.n += 1
             n = self.n
         if n % 200 == 0:
@@ -891,7 +961,7 @@ def run_papers(
                     "biomodels": list(paper.biomodels),
                 }
                 for d in paper.datasets:
-                    if sink.has(d):
+                    if sink.has("papers", d):
                         continue
                     cand = d
                     if d.source == "geo":
@@ -933,7 +1003,7 @@ def run_geo(
         start=start,
         on_page=lambda off: offset_path.write_text(str(off)),
     ):
-        if not sink.has(cand):
+        if not sink.has("geo", cand):
             sink.write(
                 screen_dataset(cand, models, route="geo", resolve=resolve)
             )
@@ -980,7 +1050,7 @@ def run_ebi(
                 "MTBLS"
             ):
                 continue
-            if not sink.has(cand):
+            if not sink.has("ebi", cand):
                 sink.write(
                     screen_dataset(cand, models, route="ebi", resolve=resolve)
                 )
@@ -996,6 +1066,83 @@ def run_ebi(
             future.result()
     if not limit:
         _route_marker(run, "ebi").touch()
+
+
+def _run_stream(
+    run: Path,
+    models: list[ModelIds],
+    sink: _Sink,
+    *,
+    route: str,
+    cands,
+    limit: int | None = None,
+    resolve: bool = False,
+    prepare=None,
+) -> None:
+    """Screen every candidate ``cands`` yields under ``route``; ``prepare``
+    may fill a candidate in first (a file list). Leaves the route's
+    completion marker unless ``limit`` cut it short."""
+    n = 0
+    for cand in cands:
+        if prepare is not None:
+            try:
+                cand = prepare(cand)
+            except Exception as exc:  # noqa: BLE001 - the listing stands
+                sink.note(f"{cand.accession}: {exc}")
+        if not sink.has(route, cand):
+            sink.write(
+                screen_dataset(cand, models, route=route, resolve=resolve)
+            )
+        n += 1
+        if limit and n >= limit:
+            return
+    _route_marker(run, route).touch()
+
+
+def iter_biomodels_data(models_run):
+    """The data each deposit of a model census ships beside its model, as
+    candidates: its table-like additional files, and the experiments its
+    COPASI file was fitted to. Deposits shipping neither yield nothing."""
+    from hallsim.census import fetch_record, load_rows
+
+    df = load_rows(models_run)
+    for r in df.itertuples():
+        try:
+            record = fetch_record(r.accession)
+        except Exception as exc:  # noqa: BLE001 - one deposit
+            log.info("%s: record not fetched (%s)", r.accession, exc)
+            continue
+        files = [
+            f.get("name", "")
+            for group in ("main", "additional")
+            for f in ((record.get("files") or {}).get(group) or [])
+        ]
+        ids = getattr(r, "species_ids", None)
+        pubmed = str(getattr(r, "pubmed", "") or "").split(".")[0]
+        try:
+            cand = biomodels_data(
+                r.accession,
+                files,
+                name=str(getattr(r, "name", "") or ""),
+                organism=str(getattr(r, "taxon", "") or ""),
+                pubmed="" if pubmed == "nan" else pubmed,
+                ids=ids if isinstance(ids, list) else (),
+            )
+        except Exception as exc:  # noqa: BLE001 - one deposit
+            log.info("%s: data not read (%s)", r.accession, exc)
+            continue
+        if cand is not None:
+            yield cand
+
+
+#: Routes that are a stream of candidates, by what they enumerate.
+STREAMS = {
+    "bioimages": lambda models_run, organisms: iter_bioimages(),
+    "gds": lambda models_run, organisms: iter_geo(organisms, entry="gds"),
+    "atlas": lambda models_run, organisms: iter_expression_atlas(),
+    "petab": lambda models_run, organisms: iter(petab_problems()),
+    "models": lambda models_run, organisms: iter_biomodels_data(models_run),
+}
 
 
 def run_census(
@@ -1068,38 +1215,32 @@ def run_census(
         elif route == "ebi":
             run_ebi(run, models, sink, limit=limit, resolve=resolve)
         elif route == "osdr":
-            n = 0
-            for cand in iter_osdr():
+
+            def with_osdr_files(cand):
                 if with_files and not cand.files:
-                    try:
-                        cand = replace(cand, files=osdr_files(cand.accession))
-                    except Exception as exc:  # noqa: BLE001
-                        sink.note(f"{cand.accession}: no file list ({exc})")
-                if not sink.has(cand):
-                    sink.write(
-                        screen_dataset(
-                            cand, models, route=route, resolve=resolve
-                        )
-                    )
-                n += 1
-                if limit and n >= limit:
-                    break
-            if not limit:
-                _route_marker(run, route).touch()
-        elif route == "bioimages":
-            n = 0
-            for cand in iter_bioimages():
-                if not sink.has(cand):
-                    sink.write(
-                        screen_dataset(
-                            cand, models, route=route, resolve=resolve
-                        )
-                    )
-                n += 1
-                if limit and n >= limit:
-                    break
-            if not limit:
-                _route_marker(run, route).touch()
+                    return replace(cand, files=osdr_files(cand.accession))
+                return cand
+
+            _run_stream(
+                run,
+                models,
+                sink,
+                route=route,
+                cands=iter_osdr(),
+                limit=limit,
+                resolve=resolve,
+                prepare=with_osdr_files,
+            )
+        elif route in STREAMS:
+            _run_stream(
+                run,
+                models,
+                sink,
+                route=route,
+                cands=STREAMS[route](models_run, organisms),
+                limit=limit,
+                resolve=resolve,
+            )
         else:
             raise ValueError(f"unknown route {route!r}; have {ROUTES}")
         sink.note(f"{route}: finished, {sink.n} rows written this pass")
@@ -1131,10 +1272,20 @@ def load_rows(run_dir):
         )
     df["_origin"] = [f"{s}/{a}" for s, a in origin]
     df["_mirror"] = [s != r for (s, _), r in zip(origin, df["source"])]
+    # Among the rows of one deposit — a mirror and its original, a curated
+    # view and the series it curates, two routes that both listed it — the
+    # row that saw the most of the design is kept, the original on a tie.
+    df["_rank"] = (
+        df["contrast_kind"].map(CONTRAST_RANK).fillna(0).astype(int)
+        if "contrast_kind" in df
+        else 0
+    )
     df = (
-        df.sort_values("_mirror", ascending=False, kind="stable")
+        df.sort_values(
+            ["_rank", "_mirror"], ascending=[True, False], kind="stable"
+        )
         .drop_duplicates("_origin", keep="last")
-        .drop(columns=["_origin", "_mirror"])
+        .drop(columns=["_origin", "_mirror", "_rank"])
         .sort_index()
     )
     df["reason"] = [reason_of(r) for r in df.to_dict("records")]

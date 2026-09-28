@@ -28,9 +28,9 @@ Each model runs on its **native clock** over a window in its own time unit — a
 few characteristic times, not the composite's full horizon. Solver steps are
 capped so a pathological model fails fast rather than hanging.
 
-Use :func:`screen_process` for a single model and :func:`screen_composite`
-before trusting a composite; ``demos/subsystem_diagnostics.py`` is the visual
-version.
+Use :func:`screen` before trusting a composite, or on
+``single_process_composite(proc)`` for one model;
+``demos/subsystem_diagnostics.py`` is the visual version.
 
 **Is it the model or is it us?** When an SBML import is flagged, the screen
 re-integrates it with an independent explicit integrator and reports via
@@ -49,6 +49,7 @@ import numpy as np
 
 from hallsim.composite import Composite, single_process_composite
 from hallsim.config import DEFAULT_ATOL, DEFAULT_MAX_STEPS
+from hallsim.process import PortRole
 from hallsim.scheduler import Scheduler
 
 log = logging.getLogger(__name__)
@@ -91,6 +92,9 @@ class ScreenReport:
     not_at_rest: bool = False
     rest_tau: float = float("inf")
     rest_state: str = ""
+    #: States that never leave zero over the screen, by store path. The
+    #: parameters reachable only through them are unidentifiable here.
+    constant_zero: tuple[str, ...] = ()
     #: The tolerances the two comparison runs used, so a reader of the report
     #: can act on tolerance_sensitive without re-deriving them.
     rtol_loose: float = 1e-3
@@ -237,7 +241,7 @@ def _on_native_clock(process):
     return process
 
 
-def rest_timescale(composite, y0=None, t=0.0) -> tuple[float, str]:
+def rest_timescale(composite, t=0.0) -> tuple[float, str]:
     """Fastest state's ``τ = |y₀| / |f(t, y₀)|`` at ``y0`` → ``(τ, path)``.
 
     How long the quickest-moving state would take to change by 100% of itself
@@ -253,7 +257,7 @@ def rest_timescale(composite, y0=None, t=0.0) -> tuple[float, str]:
     an empty pool is not reported as infinitely fast.
     """
     keys = list(composite.store_keys())
-    y0 = composite.initial_state_vec() if y0 is None else y0
+    y0 = composite.initial_state_vec()
     rhs, _ = composite.build_rhs()
     f = np.abs(np.asarray(rhs(t, y0)))
     y = np.abs(np.asarray(y0))
@@ -265,19 +269,18 @@ def rest_timescale(composite, y0=None, t=0.0) -> tuple[float, str]:
 
 
 def _solo_run(
-    process, t_end, rtol, atol, n_save, max_steps, sched_kwargs, probe=None
+    comp, t_end, rtol, atol, n_save, max_steps, sched_kwargs, probe=None
 ):
-    comp = single_process_composite(process)
-    y0 = comp.initial_state_vec()
     if probe is not None:
-        y0 = y0.at[comp.unfed_input_indices()].set(probe)
+        comp = comp.with_initial(
+            comp.initial_state_vec().at[comp.unfed_input_indices()].set(probe)
+        )
     res = Scheduler(
         rtol=rtol, atol=atol, max_steps=max_steps, **sched_kwargs
     ).run(
         comp,
         t_span=(0.0, t_end),
         macro_dt=t_end,
-        y0=y0,
         save_dt=t_end / n_save,
     )
     ys = np.asarray(res.ys)
@@ -297,9 +300,11 @@ def _solo_run(
         # on them would let the probe value itself pass for a live trajectory.
         drop += list(np.asarray(comp.unfed_input_indices(keys)))
     full = ys
+    dropped = set(int(i) for i in drop)
+    kept = tuple(k for i, k in enumerate(keys) if i not in dropped)
     if drop:
-        ys = np.delete(ys, np.asarray(sorted(set(drop)), dtype=int), axis=-1)
-    return ys, undefined, full
+        ys = np.delete(ys, np.asarray(sorted(dropped), dtype=int), axis=-1)
+    return ys, undefined, full, kept
 
 
 def operating_range(
@@ -336,7 +341,6 @@ def operating_range(
         comp,
         t_span=(0.0, t_end),
         macro_dt=t_end,
-        y0=comp.initial_state_vec(),
         save_dt=t_end / n_save,
     )
     keys = list(res.keys)
@@ -357,10 +361,6 @@ def operating_range(
             hi=float(np.max(col)),
         )
     return out
-
-
-def _has_unfed_inputs(process) -> bool:
-    return single_process_composite(process).unfed_input_indices().size > 0
 
 
 def _and(detail: str, clause: str) -> str:
@@ -457,7 +457,7 @@ def _verdict(
 
 
 def _native_finite(
-    process, t_end: float, n_steps: int, atol: float = DEFAULT_ATOL
+    process, t_end: float, n_steps: int, atol: float = DEFAULT_ATOL, y0=None
 ):
     """Integrate an SBML-imported process with a solver configuration the
     Scheduler does not use — bare diffrax ``Kvaerno5`` with its own
@@ -474,7 +474,7 @@ def _native_finite(
     try:
         import diffrax as dfx
 
-        y0 = jnp.asarray(process._species_y0)
+        y0 = jnp.asarray(process._species_y0 if y0 is None else y0)
         c0 = process._c
         w0 = process._w0
 
@@ -540,7 +540,7 @@ def _core_field(process, core, comp, cp, ts, rows):
 
 
 def _tunes(
-    process,
+    comp,
     t_end: float,
     n_probe: int = 2,
     sched_kwargs=None,
@@ -567,15 +567,14 @@ def _tunes(
     solver works (through the solve only). ``(None, False)`` when the
     process exposes no calibratable parameters.
     """
-    from hallsim.calibration import _substitute_param
-
     sched_kwargs = sched_kwargs or {}
+    name = next(iter(comp.processes))
+    process = comp.processes[name]
     probes = process.calibratable_params()[:n_probe]
     if not probes:
         return None, False
 
     if not through_solve:
-        comp = single_process_composite(process)
         y0 = comp.initial_state_vec()
         if probe is not None:
             y0 = y0.at[comp.unfed_input_indices()].set(probe)
@@ -593,8 +592,8 @@ def _tunes(
             else:
 
                 def fn(val, field=cp.field):
-                    proc = _substitute_param(process, field, val)
-                    rhs, _ = single_process_composite(proc).build_rhs()
+                    varied = comp.with_params({f"{name}.{field}": val})
+                    rhs, _ = varied.build_rhs()
                     return jnp.stack([rhs(t, y) for t, y in zip(ts, rows)])
 
             if fn is None:
@@ -614,16 +613,17 @@ def _tunes(
         for cp in probes:
 
             def loss(val, field=cp.field):
-                proc = _substitute_param(process, field, val)
-                comp = single_process_composite(proc)
-                y0 = comp.initial_state_vec()
+                varied = comp.with_params({f"{name}.{field}": val})
                 if probe is not None:
-                    y0 = y0.at[comp.unfed_input_indices()].set(probe)
+                    varied = varied.with_initial(
+                        varied.initial_state_vec()
+                        .at[varied.unfed_input_indices()]
+                        .set(probe)
+                    )
                 res = sched.run(
-                    comp,
+                    varied,
                     t_span=(0.0, t_end),
                     macro_dt=t_end,
-                    y0=y0,
                 )
                 return jnp.sum(res.ys[-1])
 
@@ -639,10 +639,9 @@ def _tunes(
     # cached before tracing (analysis can't read tracer Jacobians). Warming
     # the first probe too: cold, it falls back to Tsit5 for every group,
     # which warns on a model that passes and grinds on a stiff one.
-    comp_solo = single_process_composite(process)
     s_first = Scheduler(atol=atol, **sched_kwargs)
     try:
-        s_first.warm_up(comp_solo, t_span=(0.0, t_end), macro_dt=t_end)
+        s_first.warm_up(comp, t_span=(0.0, t_end), macro_dt=t_end)
     except Exception:
         pass
     if all_finite(s_first):
@@ -650,7 +649,7 @@ def _tunes(
 
     s_imp = Scheduler(auto_stiffness=True, atol=atol)
     try:
-        s_imp.warm_up(comp_solo, t_span=(0.0, t_end), macro_dt=t_end)
+        s_imp.warm_up(comp, t_span=(0.0, t_end), macro_dt=t_end)
     except Exception:
         return False, False
     if all_finite(s_imp):
@@ -658,9 +657,9 @@ def _tunes(
     return False, False
 
 
-def screen_process(
-    process,
-    t_end: float,
+def screen(
+    composite: Composite,
+    t_end: float | dict[str, float],
     *,
     rtol_loose: float = 1e-3,
     rtol_tight: float = 1e-7,
@@ -672,11 +671,24 @@ def screen_process(
     check_tunability: bool | str = True,
     input_probe: float = 1.0,
     **sched_kwargs,
-) -> ScreenReport:
-    """Screen one process solo over ``[0, t_end]`` **native** time units — a
-    few of the model's own characteristic times (~30000 for a second-scale
-    NF-κB oscillator, ~50 for a day-scale senescence model), on its native
-    clock regardless of composite reconciliation.
+) -> list[ScreenReport]:
+    """Screen every continuous member of ``composite`` solo, each from the
+    composite's start, over ``[0, t_end]`` **native** time units of that
+    member — a few of the model's own characteristic times (~30000 for a
+    second-scale NF-κB oscillator, ~50 for a day-scale senescence model), on
+    its native clock regardless of composite reconciliation.
+
+    One :class:`ScreenReport` per member, in order; ``assert all(r.ok for r
+    in reports)`` in a test. ``t_end`` is one window for every member, or
+    ``{member: window}`` to screen only those named, since each model needs
+    a window matched to its own timescale. A lone process is screened as
+    ``screen(single_process_composite(proc), t_end)``.
+
+    A member runs alone but starts where the composite starts it: its paths
+    take the composite's values, so an equilibrated or declared start is
+    what gets screened, and the composite's values on its INPUT paths stand
+    in for the probe drive. The report says when that start differs from the
+    member's own port defaults.
 
     Flags ``exploding`` (non-finite, or peak > ``growth_threshold`` × initial
     scale and still rising), ``vanishing`` (all states end within 1e-9 of
@@ -703,17 +715,117 @@ def screen_process(
     same solver configuration production will — required for a stiff model,
     which the default explicit solver would flag as exploding.
     """
-    proc = _on_native_clock(process)
-    name = getattr(proc, "_name", type(proc).__name__)
+    procs = composite.continuous_processes()
+    if isinstance(t_end, dict):
+        unknown = sorted(set(t_end) - set(procs))
+        if unknown:
+            raise ValueError(
+                f"screen: no continuous process named {unknown}. Known: "
+                f"{sorted(procs)}. A window whose name no longer matches (a "
+                "renamed process) would otherwise screen nothing and read "
+                "as a pass."
+            )
+        unscreened = sorted(set(procs) - set(t_end))
+        if unscreened:
+            log.warning(
+                "screen: no window given for %s — not screened.", unscreened
+            )
+        windows = {name: float(w) for name, w in t_end.items()}
+    else:
+        windows = {name: float(t_end) for name in procs}
+    settings = dict(
+        rtol_loose=rtol_loose,
+        rtol_tight=rtol_tight,
+        atol=atol,
+        tol_rel_threshold=tol_rel_threshold,
+        growth_threshold=growth_threshold,
+        n_save=n_save,
+        max_steps=max_steps,
+        check_tunability=check_tunability,
+        input_probe=input_probe,
+        **sched_kwargs,
+    )
+    state = composite.initial_state()
+    reports = []
+    for name, window in windows.items():
+        proc = _on_native_clock(procs[name])
+        try:
+            solo = single_process_composite(proc, name)
+        except Exception as exc:
+            reports.append(
+                ScreenReport(
+                    name=name,
+                    exploding=False,
+                    vanishing=False,
+                    tolerance_sensitive=False,
+                    max_abs=float("nan"),
+                    tol_rel_diff=float("nan"),
+                    did_not_construct=True,
+                    detail=(
+                        "composite did not build: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    rtol_loose=rtol_loose,
+                    rtol_tight=rtol_tight,
+                )
+            )
+            continue
+        parent_row = composite.topology.get(name, {})
+        start = {}
+        for port, own in solo.topology[name].items():
+            for own_path, parent_path in zip(own, parent_row.get(port, own)):
+                start[own_path] = state[parent_path]
+        defaults = np.asarray(solo.initial_state_vec())
+        solo = solo.with_initial(start)
+        moved = not np.allclose(defaults, np.asarray(solo.initial_state_vec()))
+        note = (
+            "screened from the composite's start, not the port defaults"
+            if moved
+            else ""
+        )
+        reports.append(
+            _screen_member(solo, name, window, start_note=note, **settings)
+        )
+    return reports
+
+
+def _screen_member(
+    comp,
+    name,
+    t_end,
+    *,
+    rtol_loose,
+    rtol_tight,
+    atol,
+    tol_rel_threshold,
+    growth_threshold,
+    n_save,
+    max_steps,
+    check_tunability,
+    input_probe,
+    start_note="",
+    **sched_kwargs,
+) -> ScreenReport:
+    proc = comp.processes[name]
+    core = getattr(proc, "_model", None)
+    species_start = None
+    if core is not None:
+        idx = comp.store_index()
+        cols = [idx.get(f"{name}/{s}") for s in core.y_indexes]
+        if all(c is not None for c in cols):
+            species_start = comp.initial_state_vec()[jnp.asarray(cols)]
 
     undefined_assigned: tuple = ()
     sampled: list = []
+    kept_keys: list = []
 
     def solo(rtol, probe=None):
         nonlocal undefined_assigned
-        ys, undefined, full = _solo_run(
-            proc, t_end, rtol, atol, n_save, max_steps, sched_kwargs, probe
+        ys, undefined, full, kept = _solo_run(
+            comp, t_end, rtol, atol, n_save, max_steps, sched_kwargs, probe
         )
+        if not kept_keys:
+            kept_keys.extend(kept)
         if undefined and not undefined_assigned:
             undefined_assigned = undefined
         if not sampled and len(full):
@@ -735,20 +847,23 @@ def screen_process(
             return y_tight, np.full_like(y_tight, np.nan), type(exc).__name__
         return y_tight, y_loose, None
 
-    try:
-        # Build before solving, so a composite that cannot be assembled is
-        # reported as that rather than as a divergent trajectory.
-        single_process_composite(proc).initial_state_vec()
-    except Exception as exc:
+    integrating = {PortRole.EVOLVED, PortRole.EXCLUSIVE, PortRole.LATCHED}
+    if not any(p.role in integrating for p in proc.ports_schema().values()):
+        # A forcing source or a level-mode edge assigns from its inputs and
+        # integrates nothing: there is no trajectory of its own to judge,
+        # and a verdict on an empty state slice is a crash, not a finding.
         return ScreenReport(
             name=name,
             exploding=False,
             vanishing=False,
             tolerance_sensitive=False,
-            max_abs=float("nan"),
-            tol_rel_diff=float("nan"),
-            did_not_construct=True,
-            detail=f"composite did not build: {type(exc).__name__}: {exc}",
+            max_abs=0.0,
+            tol_rel_diff=0.0,
+            detail=(
+                "no integrated state: the process only assigns from its "
+                "inputs; nothing to screen alone, screen the composite it "
+                "drives"
+            ),
             rtol_loose=rtol_loose,
             rtol_tight=rtol_tight,
         )
@@ -758,7 +873,7 @@ def screen_process(
     except TypeError:  # bad sched_kwargs, not an unintegrable model
         raise
     except Exception as exc:  # max_steps / non-finite blow the solve up
-        native = _native_finite(proc, t_end, n_save, atol)
+        native = _native_finite(proc, t_end, n_save, atol, y0=species_start)
         suspect = native is not None and native[1]
         detail = f"solver failed: {type(exc).__name__}"
         if suspect:
@@ -802,7 +917,7 @@ def screen_process(
     # Re-screen it under a probe drive: if it comes alive it was undriven,
     # and the flags now describe a live trajectory instead of a flat zero.
     undriven = False
-    if v.vanishing and _has_unfed_inputs(proc):
+    if v.vanishing and comp.unfed_input_indices().size > 0:
         try:
             yt, yl, _ = tight_and_loose(input_probe)
             v_driven = _verdict(
@@ -827,7 +942,7 @@ def screen_process(
     framework_suspect = False
     growing = False
     if v.exploding:
-        native = _native_finite(proc, t_end, n_save, atol)
+        native = _native_finite(proc, t_end, n_save, atol, y0=species_start)
         if native is not None and native[0] <= 1e-12 * max(v.peak, 1.0):
             # A flat-zero reference saw none of the dynamics (a dose that
             # enters through an event or a rate-ruled parameter it does not
@@ -862,7 +977,7 @@ def screen_process(
     tunes = None
     if check_tunability and not v.exploding:
         tunes, needs_implicit = _tunes(
-            proc,
+            comp,
             t_end,
             sched_kwargs=sched_kwargs,
             probe=input_probe if undriven else None,
@@ -878,10 +993,23 @@ def screen_process(
                 "tunes only under the implicit solver (auto_stiffness=True)",
             )
 
-    tau, state, at_rest_detail = _rest_verdict(proc, t_end, n_save)
+    tau, state, at_rest_detail = _rest_verdict(comp, t_end, n_save)
     if at_rest_detail:
         v.detail = _and(v.detail, at_rest_detail)
+    constant_zero = tuple(
+        k
+        for j, k in enumerate(kept_keys)
+        if j < y_tight.shape[-1]
+        and bool(np.all(np.abs(y_tight[..., j]) < atol))
+    )
+    if constant_zero and not v.vanishing:
+        v.detail = _and(
+            v.detail,
+            f"never leaves zero: {', '.join(constant_zero)}; parameters "
+            "reachable only through these are unidentifiable here",
+        )
 
+    detail = "; ".join(s for s in (start_note, v.detail) if s)
     return ScreenReport(
         name=name,
         exploding=v.exploding,
@@ -889,7 +1017,7 @@ def screen_process(
         tolerance_sensitive=v.tolerance_sensitive,
         max_abs=v.peak,
         tol_rel_diff=v.tol_rel_diff,
-        detail=v.detail,
+        detail=detail,
         framework_suspect=framework_suspect,
         tunes=tunes,
         negative=v.negative,
@@ -897,6 +1025,7 @@ def screen_process(
         not_at_rest=bool(at_rest_detail),
         rest_tau=tau,
         rest_state=state,
+        constant_zero=constant_zero,
         rtol_loose=rtol_loose,
         rtol_tight=rtol_tight,
         growing=growing,
@@ -904,7 +1033,7 @@ def screen_process(
     )
 
 
-def _rest_verdict(proc, t_end: float, n_save: int):
+def _rest_verdict(comp, t_end: float, n_save: int):
     """``(tau, state, detail)`` for the not-at-rest flag on a solo process.
 
     Flags when the fastest state's τ is below the save interval: that state has
@@ -915,16 +1044,14 @@ def _rest_verdict(proc, t_end: float, n_save: int):
     """
     from hallsim.steady_state import is_autonomous
 
-    comp = single_process_composite(proc)
-    y0 = comp.initial_state_vec()
     try:
-        tau, state = rest_timescale(comp, y0)
+        tau, state = rest_timescale(comp)
     except Exception:  # a screen must never be the thing that fails
         return float("inf"), "", ""
     save_dt = t_end / max(n_save, 1)
     if not np.isfinite(tau) or tau >= save_dt:
         return tau, state, ""
-    driven = not is_autonomous(comp, y0)
+    driven = not is_autonomous(comp, comp.initial_state_vec())
     return (
         tau,
         state,
@@ -1150,40 +1277,6 @@ def recommend_coupling_source(
     )
 
 
-def screen_composite(
-    composite: Composite,
-    t_ends: dict[str, float],
-    **kwargs,
-) -> list[ScreenReport]:
-    """Screen named continuous processes of a composite, each solo.
-
-    ``t_ends`` maps process name → native-time window. Only the named
-    processes are screened (each model needs a window matched to its own
-    timescale, so there is no single horizon that fits all). Returns one
-    :class:`ScreenReport` per entry; ``assert all(r.ok for r in reports)``
-    in a test.
-    """
-    procs = composite.continuous_processes()
-    unknown = sorted(set(t_ends) - set(procs))
-    if unknown:
-        raise ValueError(
-            f"screen_composite: no continuous process named {unknown}. "
-            f"Known: {sorted(procs)}. A window whose name no longer "
-            f"matches (a renamed process) would otherwise screen nothing "
-            f"and read as a pass."
-        )
-    unscreened = sorted(set(procs) - set(t_ends))
-    if unscreened:
-        log.warning(
-            "screen_composite: no window given for %s — not screened.",
-            unscreened,
-        )
-    return [
-        screen_process(procs[name], t_end, **kwargs)
-        for name, t_end in t_ends.items()
-    ]
-
-
 @dataclass
 class SensitivityReport:
     """Whether a reporter responds to a control in a given operating regime.
@@ -1284,7 +1377,6 @@ def screen_sensitivity(
             comp,
             t_span=(0.0, t_end),
             macro_dt=mdt,
-            y0=comp.initial_state_vec(),
         )
         return jnp.stack(
             [
@@ -1298,7 +1390,6 @@ def screen_sensitivity(
         base_comp,
         t_span=(0.0, t_end),
         macro_dt=mdt,
-        y0=base_comp.initial_state_vec(),
     )
     values = reporter_values(base_vec)
     jac = jax.jacrev(reporter_values)(base_vec)  # (n_reporter, n_handle)

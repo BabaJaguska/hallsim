@@ -286,7 +286,7 @@ def with_handles(composite, handles: dict[str, float], *, registry):
             composite.processes, handles, registry=registry
         ),
         topology=composite.topology,
-        initial=composite.initial,
+        initial=composite.initial_state(),
         validate=False,
         semantic_validation={"check_semantics": False},
     )

@@ -253,7 +253,6 @@ def trace_path(
     macro_dt: float | None = None,
     settings: tuple[float, float] | None = None,
     threshold: float = 1e-3,
-    y0=None,
 ) -> PathTrace:
     """Follow ``control`` to ``reporter`` and report how much of the
     perturbation survives at each store path on the way.
@@ -316,7 +315,6 @@ def trace_path(
             t_span=(0.0, t_end),
             macro_dt=mdt,
             save_dt=t_end / 2000.0,
-            y0=y0 if y0 is not None else comp.initial_state_vec(),
         )
         means.append(
             {
