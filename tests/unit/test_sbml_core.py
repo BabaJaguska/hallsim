@@ -306,3 +306,65 @@ def test_a_parameter_with_no_value_is_refused_like_roadrunner(tmp_path):
     text = COMPARTMENTS.replace(' value="0.7"', "")
     with pytest.raises(UnsupportedSBMLFeatureError, match="have no value"):
         compile_sbml(_write(tmp_path, "noparam", text))
+
+
+# A CellML model flattened to SBML: every component keeps its own view of the
+# shared voltage, the converter drops the connections, and only the declared
+# `name` says which variable each view is.
+FLATTENED = HEAD + """
+<listOfParameters>
+  <parameter id="V_membrane" name="V" value="-80" constant="false"/>
+  <parameter id="V_gate_a" name="V" constant="true"/>
+  <parameter id="V_gate_b" name="V" constant="true"/>
+  <parameter id="time_gate_a" name="time" constant="true"/>
+  <parameter id="k" value="0.5" constant="true"/>
+</listOfParameters>
+<listOfRules>
+  <rateRule variable="V_membrane">
+    <math xmlns="http://www.w3.org/1998/Math/MathML">
+      <apply><times/>
+        <ci>k</ci>
+        <apply><plus/><ci>V_gate_a</ci><ci>V_gate_b</ci><ci>time_gate_a</ci></apply>
+      </apply>
+    </math>
+  </rateRule>
+</listOfRules>
+""" + TAIL
+
+
+def test_a_dropped_connection_resolves_to_the_variable_naming_it(tmp_path):
+    """The dangling views carry no value, so the model was refused; each is
+    the one quantity declaring the same name, and the rate rule reads it."""
+    core = compile_sbml(_write(tmp_path, "flattened", FLATTENED))
+    assert list(core.y_indexes) == ["V_membrane"]
+    # The views are gone: nothing reads them, so they are not constants the
+    # model needs a value for.
+    for dangling in ("V_gate_a", "V_gate_b", "time_gate_a"):
+        assert dangling not in core.c_indexes
+        assert dangling not in core.y_indexes
+
+
+def test_a_resolved_view_carries_the_variable_it_names(tmp_path):
+    """dV/dt = k * (V_a + V_b + time). Both views are the membrane voltage and
+    the third is time, so at t = 2 with V = -80 it is 0.5 * (-160 + 2) = -79.
+    """
+    core = compile_sbml(_write(tmp_path, "flattened2", FLATTENED))
+    y, w, c = (
+        jnp.asarray(core.y0),
+        jnp.asarray(core.w0),
+        jnp.asarray(core.c0),
+    )
+    dy = np.asarray(core.ratefunc(y, 2.0, w, c))
+    assert dy == pytest.approx([-79.0])
+
+
+def test_an_ambiguous_name_is_still_refused(tmp_path):
+    """Two valued quantities declare the name, so which one a view meant is
+    not recoverable and the model is refused as before."""
+    text = FLATTENED.replace(
+        '<parameter id="k" value="0.5" constant="true"/>',
+        '<parameter id="k" value="0.5" constant="true"/>'
+        '<parameter id="V_other" name="V" value="-70" constant="false"/>',
+    )
+    with pytest.raises(UnsupportedSBMLFeatureError, match="have no value"):
+        compile_sbml(_write(tmp_path, "ambiguous", text))

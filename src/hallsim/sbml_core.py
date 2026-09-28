@@ -282,15 +282,90 @@ def compile_sbml(path: str) -> SBMLCore:
     return core
 
 
+def _reconnect_by_name(model) -> dict:
+    """Dangling copies of a shared variable, mapped to the variable itself.
+
+    A CellML model gives every component its own view of a shared quantity and
+    connects them. Flattening it to SBML renames each view after its component
+    — ``V_membrane``, ``V_fast_sodium_current_m_gate`` — and the automated
+    converters drop the connections, leaving every view but one with no value,
+    no initial assignment and no rule. The declared ``name`` survives: each of
+    those is still ``name="V"``.
+
+    So a valueless quantity is resolved to the one quantity that declares the
+    same name and does have a value. Where a name is declared by a valueless
+    quantity alone and reads as the model's time in that unit, it is time.
+    Anything else — two candidates, or none — stays unresolved and the caller
+    refuses the model as before.
+    """
+    ruled = set()
+    for i in range(model.getNumRules()):
+        ruled.add(model.getRule(i).getVariable())
+    for i in range(model.getNumInitialAssignments()):
+        ruled.add(model.getInitialAssignment(i).getSymbol())
+
+    valued: dict[str, list[str]] = {}
+    dangling: dict[str, list[str]] = {}
+    units_of: dict[str, str] = {}
+    time_unit = model.getTimeUnits() or ""
+    for i in range(model.getNumParameters()):
+        p = model.getParameter(i)
+        name = (p.getName() or "").strip()
+        if not name:
+            continue
+        units_of[p.getId()] = p.getUnits() or ""
+        settled = p.isSetValue() or p.getId() in ruled
+        (valued if settled else dangling).setdefault(name, []).append(
+            p.getId()
+        )
+    for i in range(model.getNumSpecies()):
+        s = model.getSpecies(i)
+        name = (s.getName() or "").strip()
+        if name and (
+            s.isSetInitialAmount()
+            or s.isSetInitialConcentration()
+            or s.getId() in ruled
+        ):
+            valued.setdefault(name, []).append(s.getId())
+
+    alias: dict = {}
+    for name, ids in dangling.items():
+        targets = valued.get(name, [])
+        if len(targets) == 1:
+            for dangler in ids:
+                alias[sympy.Symbol(dangler)] = sympy.Symbol(targets[0])
+            continue
+        if targets:
+            continue
+        units = {units_of.get(i, "") for i in ids}
+        if name.lower() == "time" and (
+            not time_unit or units == {time_unit} or len(units) == 1
+        ):
+            # The sentinel the math layer reads as time, not a symbol named
+            # "t", which a model may use for something of its own.
+            for dangler in ids:
+                alias[sympy.Symbol(dangler)] = TIME
+    return alias
+
+
 def _compile(path: str) -> SBMLCore:
     doc, model = _read_model(path)
     issues = _structural_issues(doc, model)
     if issues:
         raise UnsupportedSBMLFeatureError("; ".join(issues))
     defs = function_definitions(model)
+    alias = _reconnect_by_name(model)
+    if alias:
+        log.info(
+            "%s: %d quantities carry no value and are resolved to the one "
+            "that declares the same name",
+            os.path.basename(path),
+            len(alias),
+        )
 
     def expr_of(node):
-        return inline_functions(to_sympy(node), defs)
+        expr = inline_functions(to_sympy(node), defs)
+        return expr.xreplace(alias) if alias else expr
 
     assigned, rate_ruled = {}, {}
     for i in range(model.getNumRules()):
@@ -328,10 +403,15 @@ def _compile(path: str) -> SBMLCore:
             "is no ODE to solve"
         )
     w_names = _dependency_order(assigned)
+    # A quantity resolved to the one that declares its name is no longer read
+    # by anything, so it is not a constant the model needs a value for.
+    aliased = {s.name for s in alias}
     c_names = [
         p.getId()
         for p in params
-        if p.getId() not in assigned and p.getId() not in rate_ruled
+        if p.getId() not in assigned
+        and p.getId() not in rate_ruled
+        and p.getId() not in aliased
     ]
     c_names += [
         s.getId()

@@ -17,6 +17,7 @@ demos/_*.py
 docs/_*
 demos/models/_*
 tests/unit/_*
+scripts/_*
 
 # C extensions
 *.so

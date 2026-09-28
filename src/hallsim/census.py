@@ -410,6 +410,7 @@ def _blank_row(accession: str, t_end: float = DEFAULT_T_END) -> dict:
         "t_end": t_end,
         "kind": "unknown",
         "n_species": 0,
+        "n_states": 0,
         "n_reactions": 0,
         "n_parameters": 0,
         "n_events": 0,
@@ -619,7 +620,7 @@ def stage_of(row: dict) -> str:
     from hallsim.intake import ANNOTATION_FLAG, REST_RESIDUAL_FLAG
 
     cov = row.get("annotation_coverage")
-    if cov is None or cov != cov or cov < ANNOTATION_FLAG:
+    if cov is not None and cov == cov and cov < ANNOTATION_FLAG:
         return "annotated"
     res = row.get("rest_residual")
     if row.get("not_at_rest") or (
@@ -688,6 +689,11 @@ def salvage_verdict(row: dict) -> tuple[str, str]:
     cov = row.get("annotation_coverage")
     if cov is not None and cov == cov and cov < 0.5:
         cheap.append("annotate the species before composing")
+    elif (cov is None or cov != cov) and not row.get("n_species"):
+        review.append(
+            "no annotatable species: the state is carried by rule-driven "
+            "parameters, so semantic composition checks cannot see it"
+        )
     if review:
         return "needs-review", "; ".join(review + cheap)
     if cheap:
@@ -777,6 +783,9 @@ def census_one(accession: str, t_end: float = DEFAULT_T_END) -> dict:
         row["blockers"] = list(verdict.blockers)
         row["flags"] = list(verdict.flags)
         row["n_parameters"] = verdict.n_parameters or row["n_parameters"]
+        # A deposit that keeps its state in rate rules declares no species, so
+        # `n_species` reads as an empty model. The port count is the real width.
+        row["n_states"] = verdict.n_species
         row["time_unit_declared"] = bool(verdict.time_unit_declared)
         row["annotation_coverage"] = float(verdict.annotation_coverage)
         row["rest_residual"] = float(verdict.rest_residual)
@@ -1391,7 +1400,8 @@ def write_report(
     cols = [
         "accession", "branch", "name", "cite", "journal", "year", "pubmed",
         "paper", "about", "curator_note", "approach", "taxon", "go_terms",
-        "kind", "n_species", "n_reactions", "n_parameters", "n_events",
+        "kind", "n_species", "n_states", "n_reactions", "n_rate_rules",
+        "n_parameters", "n_events",
         "stage", "reason", "salvage", "how", "status", "time_unit_declared",
         "annotation_coverage", "rest_residual", "rest_tau", "exploding",
         "tolerance_sensitive", "negative", "undriven", "tunes",

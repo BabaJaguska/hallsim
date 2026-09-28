@@ -30,6 +30,58 @@ simulate demo multi-hallmark run | calibrate | sweep
 simulate demo stiffness
 ```
 
+## Finding models and data
+
+The README stays short on this; the detail lives here.
+
+`simulate find <query>` searches BioModels, JWS Online, ModelDB,
+BioSimulations, Physiome and Europe PMC supplements from one call, filtered by
+what a deposit *emits* rather than what it mentions — `--produces` takes a
+regex matched against species id and display name. A module imported to supply
+an output it only ever consumes contributes nothing, which is the most common
+way a candidate fails. Importers: SBML, COPASI `.cps`, XPPAUT `.ode`.
+
+Data readers cover GEO and GeneLab expression, MetaboLights and Metabolomics
+Workbench metabolomics, and PRIDE proteomics, and every one returns a single
+log2 fold-change contrast — that uniform shape is what lets a loss be written
+once. A measurement reaches a model either by identity, for a ChEBI- or
+UniProt-annotated species, or through `hallsim.gene_reporters` or a fitted
+regulon head for a transcriptome; the two readout layers score separately, as
+**Validation methodology** below sets out.
+
+`simulate find-data <query>` searches OmicsDI — one index over 29 repositories
+— plus Zenodo, GEO's curated DataSets and the PEtab benchmark collection.
+`--sources all` asks every repository directly: GEO, Expression Atlas,
+ArrayExpress, PRIDE, MetaboLights, Metabolomics Workbench, the BioImage
+Archive. Each hit's arms and timepoints come from its sample titles, or from
+the design the source states. `--composite` keeps hits measuring something a
+given composite carries; `--paper` lists a paper's own data. `simulate view
+module:name` takes `--bake DIR` to write the levers page as a static site.
+
+`simulate census` and `simulate census-data` regenerate the corpus tables;
+both are multi-hour runs against live repositories. Dated snapshots ship under
+`src/hallsim/reference/census/` so a deposit can be chosen offline — read that
+folder's `PROVENANCE.md` first, and prefer these over a live search when the
+question is "which deposits exist and what is wrong with them".
+
+**Five traps in those tables, each of which has cost someone real time:**
+
+- **`stage` names the first gate a deposit FAILED**, not a quality score. Read
+  it with `how`, which says in words what would fix it.
+- **`pass` is the best stage, not `clean`.** `pass` means nothing outstanding;
+  `clean` cleared every gate and still carries a note in `how`.
+- **A deposit reporting zero species is usually rule-based, not empty.** Its
+  state lives in `rateRule`-driven parameters, so `n_species` is 0 while
+  `n_states` is not. Never conclude a mechanism is absent from `n_species`.
+- **A species need not carry a `name`.** Grep for `name="..."` and an id-only
+  deposit reads as species-free. Parse the XML and fall back to `id`, and
+  require the SBML namespace — a foreign namespace reuses the tag `species`.
+- **`n_models` is not a per-dataset match score.** Only the `direct` route
+  selects on the dataset's own identifiers; the rest select on what a deposit
+  carries, so one value covers most rows. `n_shared_ids` is the per-dataset
+  strength. Likewise a `contrast` is not a design you can set up today —
+  `design_recovered` says whether the arms are actually known.
+
 ## Architecture invariants
 
 The README has the overview. These are the load-bearing rules — break them and composition fails silently or at validation time.
@@ -139,7 +191,15 @@ The framework exists to be worth using. Every instance of this is evidence it cu
 - **Am I writing diary, or code?** Rationale, measurements, dead ends, and "we used to do X" belong in `docs/diary.md`. Code says what the thing IS plus the one line that stops someone re-breaking it.
 - **Never cite a defect id from code.** No `P0.17` in a comment, docstring, test name or error message, anywhere under `src/`, `demos/` or `tests/`. The registry is prose and the reviews and diary cite it; a code comment states the reason in its own words. `tests/unit/test_known_problems.py` and a pre-commit hook enforce this.
 - **Never leak the local environment into public-facing text.** No venv names (`.venv/bin/python`), no absolute paths, no machine-specific dirs — not in the README, demo docstrings (they surface in `--help`), docs/, or error messages. Public invocations use `simulate <command>` or plain `python demos/x.py`. The local venv belongs in this file and nowhere else.
-- The README is user-facing. No developer-only notes there.
+- **The README is an overview, not usage documentation.** It answers two
+  questions: what is this project, and how do I get started. A title, one
+  claim, the few genuinely distinctive properties, a runnable quickstart, and
+  pointers — nothing else. Never enumerate functions, flags, readers, sources
+  or options there, and resist adding them as the project grows; that urge is
+  the failure mode. Detail an agent needs goes in this file, detail a user
+  needs goes in the owning page. A bullet that is a bold claim with nothing
+  after it, or a section restating another in denser prose, gets cut rather
+  than filled. No developer-only notes there either.
 - **We have a click CLI — use it.** A capability worth showing a user gets a `simulate` command, and that is what the README quotes. Don't document `python demos/x.py` when the CLI covers it.
 
 ## Communication style

@@ -231,6 +231,8 @@ _REPLICATE = re.compile(
     re.I,
 )
 _SEP = re.compile(r"[\s_\-/,:;|()\[\]]+")
+_ARM_TOKEN = re.compile(r"[\s/_-]+")
+
 CONTROL_WORDS = frozenset(
     {
         "control",
@@ -255,6 +257,38 @@ CONTROL_WORDS = frozenset(
         "healthy",
     }
 )
+
+
+def reference_arm(
+    arms: tuple[str, ...], values: dict[str, set] | None = None
+) -> str | None:
+    """Which arm the others are measured against, or ``None``.
+
+    Three signals, strongest first: an arm naming itself a reference, an arm
+    holding a zero level of what the others hold, and an arm whose label is
+    contained in another's. ``None`` means no arm said — not that there was no
+    reference, since an old against young contrast declares neither.
+    """
+    arms = tuple(arms)
+    if len(arms) < 2:
+        return None
+    parts = {a: [t.lower() for t in _ARM_TOKEN.split(a) if t] for a in arms}
+    named = next(
+        (a for a in arms if any(t in CONTROL_WORDS for t in parts[a])), None
+    )
+    if named is not None:
+        return named
+    if values:
+        zeroed = [a for a in arms if values.get(a) == {0.0}]
+        if len(zeroed) == 1:
+            return zeroed[0]
+    tokens = {a: frozenset(parts[a]) for a in arms}
+    contained = [
+        a
+        for a in arms
+        if tokens[a] and any(tokens[a] < tokens[b] for b in arms if b != a)
+    ]
+    return contained[0] if len(contained) == 1 else None
 
 
 def _times(title: str) -> tuple[list[tuple[float, str]], str]:
@@ -386,14 +420,7 @@ def parse_design(samples) -> Design:
             per_arm.setdefault(arm, set()).add(round(v * conv.get(u, 1.0), 6))
         per_arm.setdefault(arm, set())
     arms = tuple(sorted(per_arm))
-    control = next(
-        (
-            a
-            for a in arms
-            if any(tok.lower() in CONTROL_WORDS for tok in a.split())
-        ),
-        None,
-    )
+    control = reference_arm(arms, per_arm)
     return Design(
         arms=arms,
         control=control,
@@ -479,14 +506,7 @@ def design_of_table(frame) -> Design | None:
         if pd.notna(t_val):
             per_arm[arm].add(round(float(t_val), 6))
     arms = tuple(sorted(per_arm))
-    control = next(
-        (
-            a
-            for a in arms
-            if any(tok.lower() in CONTROL_WORDS for tok in a.split())
-        ),
-        None,
-    )
+    control = reference_arm(arms, per_arm)
     return Design(
         arms=arms,
         control=control,
@@ -847,14 +867,7 @@ def gds_design(subsets) -> Design:
             v, u = times[s]
             per_arm[arm].add(round(v * conv.get(u, 1.0), 6))
     arms = tuple(sorted(per_arm))
-    control = next(
-        (
-            a
-            for a in arms
-            if any(tok.lower() in CONTROL_WORDS for tok in a.split())
-        ),
-        None,
-    )
+    control = reference_arm(arms, per_arm)
     return Design(
         arms=arms,
         control=control,
@@ -869,8 +882,13 @@ def _gds_candidates(
 ) -> list[DatasetCandidate]:
     """DataSet summaries as candidates for the series they curate. The
     candidate *is* the series — that is where the data lives — with the
-    DataSet's subset types as factors and, for one with a time subset, the
-    design its subsets state."""
+    DataSet's subset types as factors and the design its subsets state.
+
+    Subsets are read for every typed DataSet, not only one typed ``time``. A
+    curator's grouping is the best statement of a design in the corpus, and on
+    an agent or genotype subset it is what names the control arm; skipping
+    those left the control to be guessed from sample titles.
+    """
     out = []
     for r in records:
         gds = str(r.get("Accession") or "")
@@ -885,7 +903,7 @@ def _gds_candidates(
             )
         )
         stated = None
-        if designs and any(TIME_FACTOR.search(k) for k in types):
+        if designs and types:
             try:
                 _geo_throttle()
                 stated = gds_design(gds_subsets(gds, timeout=timeout))
@@ -1413,6 +1431,16 @@ _FILE_LISTERS = {
     "geo": geo_files,
 }
 
+#: Sources stating each sample's factors as fields rather than in its title.
+#: Both spellings of the Workbench appear, by whether the row came through
+#: OmicsDI or the source directly. Reading one is
+#: :func:`hallsim.metabolites.declared_design`, which lives there because it
+#: needs the ISA-Tab and mwTab readers and this package imports nothing from
+#: the rest of hallsim.
+DESIGN_SOURCES = frozenset(
+    {"metabolights", "metabolomics-workbench", "metabolomics_workbench"}
+)
+
 
 def study_files(cand: "DatasetCandidate", *, timeout: float = 15.0) -> tuple:
     """A deposit's file list from its own repository, for the sources
@@ -1551,14 +1579,7 @@ def atlas_design(record: dict) -> Design | None:
             per_arm[arm].add(round(v * conv.get(u, 1.0), 6))
         n_titles += n
     arms = tuple(sorted(per_arm))
-    control = next(
-        (
-            a
-            for a in arms
-            if any(tok.lower() in CONTROL_WORDS for tok in a.split())
-        ),
-        None,
-    )
+    control = reference_arm(arms, per_arm)
     return Design(
         arms=arms,
         control=control,

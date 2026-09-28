@@ -56,9 +56,10 @@ class TriageVerdict:
 
     def __str__(self) -> str:
         parts = [f"[{self.status.upper()}] {self.name}"]
+        cov = self.annotation_coverage
         parts.append(
             f"{self.n_species} species, {self.n_parameters} params, "
-            f"annot {self.annotation_coverage:.0%}, "
+            f"annot {'n/a' if cov != cov else format(cov, '.0%')}, "
             f"‖f(y0)‖/‖y0‖ {self.rest_residual:.3g}"
         )
         if self.blockers:
@@ -584,7 +585,7 @@ def triage_process(
 
         blockers.extend(trigger_pathologies(events))
 
-    time_declared, coverage = False, 0.0
+    time_declared, coverage = False, float("nan")
     if xml_path is not None:
         from hallsim.sbml_core import unsupported_features
         from hallsim.sbml_import import (
@@ -628,10 +629,18 @@ def triage_process(
         ontology = _extract_species_ontology(xml_path)
         if ontology:
             coverage = sum(bool(v) for v in ontology.values()) / len(ontology)
-        if coverage < ANNOTATION_FLAG:
+            if coverage < ANNOTATION_FLAG:
+                flags.append(
+                    f"only {coverage:.0%} of species carry an ontology ID — "
+                    "semantic composition checks are blind here"
+                )
+        else:
+            # Coverage over no species is undefined, not zero. Reporting it as
+            # zero fails the annotation gate and emits "annotate the species",
+            # an instruction with no referent.
             flags.append(
-                f"only {coverage:.0%} of species carry an ontology ID — "
-                "semantic composition checks are blind here"
+                "no species to annotate: the state is carried by rule-driven "
+                "parameters, so semantic composition checks cannot see it"
             )
 
     residual = float("nan")

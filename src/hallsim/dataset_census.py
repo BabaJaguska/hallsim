@@ -44,6 +44,7 @@ from pathlib import Path
 
 from hallsim.search.attached import biomodels_data, petab_problems
 from hallsim.search.datasets import (
+    DESIGN_SOURCES,
     EBI_DOMAINS,
     GEO_FILE_TOKEN,
     DatasetCandidate,
@@ -123,6 +124,7 @@ READABLE = frozenset(
         "mwtab",
         "mztab",
         "glbulkrnaseq",
+        "petab",
     }
 )
 _COUNTS_FILE = re.compile(
@@ -243,8 +245,11 @@ def contrast_of(design: Design, evidence: str = "") -> str:
         enough to constrain a rate.
     ``declared``
         the repository asserts a time course through a study factor or its
-        description, but the sample titles do not show the groups. The
-        groups exist; reading them takes the deposit's own metadata files.
+        description, but the sample titles do not show the groups. The groups
+        exist; reading them takes the deposit's own metadata files, so
+        ``n_arms``, ``control`` and ``n_timepoints`` can all be empty on a row
+        that carries a real course. ``design_recovered`` is the column that
+        separates these from the rows whose arms are known.
     ``course``
         two timepoints in some arm: a change over time, but only an
         endpoint's worth of constraint.
@@ -567,7 +572,15 @@ def match_models(
         ),
         "n_same_species": 0 if chebi_only else relations.count("same"),
         "via": via,
+        # How many deposits the route reaches, which is per-dataset only on
+        # the `direct` route. The others select on what a deposit carries, so
+        # the count is a property of the corpus and the route: every
+        # transcriptome reaches the same models-with-TFs. `n_shared_ids` is
+        # the per-dataset strength, and it is zero off the direct route.
         "n_models": len(scored),
+        "n_shared_ids": (
+            max((n for n, _, _ in scored), default=0) if via == "direct" else 0
+        ),
         "top_models": [
             {"model": acc, "n_shared": n, "shared": list(sh)}
             for n, acc, sh in scored[:5]
@@ -647,6 +660,11 @@ def screen_dataset(
     row["dynamics"] = bool(evidence)
     row["timed"] = bool(evidence)
     row["contrast"] = bool(row["contrast_kind"])
+    # Whether the groups to divide are known, or only asserted by the source.
+    # A `declared` row can carry a real course with no arms recovered from its
+    # titles, so a consumer that needs a comparison it can set up today has to
+    # filter on this rather than on `contrast`.
+    row["design_recovered"] = len(design.arms) >= 2 or design.n_timepoints >= 2
     row["measured"] = row["contrast"] and nameable(m)
     match = (
         match_models(m, models, cand.organism)
@@ -656,6 +674,7 @@ def screen_dataset(
             "n_same_species": 0,
             "via": "none",
             "n_models": 0,
+            "n_shared_ids": 0,
             "top_models": [],
             "direct_pairs": [],
         }
@@ -719,6 +738,7 @@ def rescreen(
     resolve: bool = False,
     with_files: bool = False,
     with_factors: bool = False,
+    with_design: bool = False,
     workers: int = 4,
 ) -> int:
     """Screen every stored row again from its raw part, under the current
@@ -735,6 +755,12 @@ def rescreen(
     Factors``; the EBI Search listing omits them, so a time series the
     abstract never spells out is otherwise untimed. One request per
     deposit, tens of thousands over a whole run.
+
+    ``with_design`` fetches the per-sample factors of every metabolomics row
+    whose design came back empty — MetaboLights' ISA-Tab sample file, mwTab's
+    ``SUBJECT_SAMPLE_FACTORS`` — so its arms, timepoints and control arm are
+    read from what the deposit declares rather than from sample titles it
+    never shipped. One request per deposit.
     """
     run = Path(run_dir)
     path = run / "rows.jsonl"
@@ -777,6 +803,26 @@ def rescreen(
                     log.info("%s: no factors (%s)", cands[i].accession, exc)
                 if done % 200 == 0 or done == len(need):
                     log.info("factors: %d of %d", done, len(need))
+    if with_design:
+        from hallsim.metabolites import declared_design
+
+        need = [
+            i
+            for i, c in cands.items()
+            if c.source in DESIGN_SOURCES and not c.design.arms
+        ]
+        log.info("fetching declared designs for %d deposits", len(need))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(declared_design, cands[i]): i for i in need}
+            for done, future in enumerate(as_completed(futures), 1):
+                i = futures[future]
+                try:
+                    cands[i] = replace(cands[i], stated=future.result())
+                    out[i] = screened(i)
+                except Exception as exc:  # noqa: BLE001 - row stays as is
+                    log.info("%s: no design (%s)", cands[i].accession, exc)
+                if done % 100 == 0 or done == len(need):
+                    log.info("designs: %d of %d", done, len(need))
     if with_files:
         # The selection reads the fresh screen, not the stored row: a row
         # keeps the verdict of whatever rule screened it last. Only a row

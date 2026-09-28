@@ -114,6 +114,7 @@ hallsim = [
   "py.typed",
   "reference/**/*.tsv",
   "reference/**/*.csv.gz",
+  "reference/**/*.json.gz",
   "reference/**/*.md",
   "view/*.css",
   "view/*.html",

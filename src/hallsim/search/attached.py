@@ -16,6 +16,7 @@ by the table rather than read from sample titles.
 
 from __future__ import annotations
 
+import collections
 import logging
 import re
 from dataclasses import dataclass
@@ -25,12 +26,12 @@ from urllib.parse import unquote
 import pandas as pd
 
 from hallsim.search.datasets import (
-    CONTROL_WORDS,
     TABLE_SUFFIXES,
     DatasetCandidate,
     Design,
     Measured,
     curie,
+    reference_arm,
     table_design,
 )
 from hallsim.search.fetch import cached_index, get_json
@@ -73,19 +74,30 @@ PETAB_URL = (
 )
 
 
+def condition_names(conditions) -> dict[str, str]:
+    """``{conditionId: arm label}`` from a PEtab condition table.
+
+    A condition's name labels it only where that name belongs to one
+    condition. PEtab lets several share a name — Isensee 2018 gives seven
+    doses of one compound the same one — and pooling those averages a dose
+    response into a single arm, so a shared name falls back to the id.
+    """
+    if conditions is None or "conditionId" not in conditions:
+        return {}
+    ids = [str(c) for c in conditions["conditionId"]]
+    if "conditionName" not in conditions:
+        return {i: i for i in ids}
+    names = [str(n) for n in conditions["conditionName"].fillna("")]
+    counts = collections.Counter(n for n in names if n)
+    return {i: (n if n and counts[n] == 1 else i) for i, n in zip(ids, names)}
+
+
 def petab_design(measurements, conditions=None) -> Design:
     """The design a PEtab measurement table states: one arm per simulation
-    condition (named through the condition table where it names them),
-    the ``time`` column's distinct values per arm. PEtab declares no time
-    unit; the model's clock is the unit."""
-    names = {}
-    if conditions is not None and "conditionId" in conditions:
-        label = (
-            conditions["conditionName"]
-            if "conditionName" in conditions
-            else conditions["conditionId"]
-        )
-        names = dict(zip(conditions["conditionId"], label.fillna("")))
+    condition (labelled by :func:`condition_names`), the ``time`` column's
+    distinct values per arm. PEtab declares no time unit; the model's clock
+    is the unit."""
+    names = condition_names(conditions)
     per_arm: dict[str, set] = {}
     cond = measurements.get("simulationConditionId")
     times = pd.to_numeric(measurements.get("time"), errors="coerce")
@@ -95,14 +107,7 @@ def petab_design(measurements, conditions=None) -> Design:
         if pd.notna(t):
             per_arm[arm].add(round(float(t), 6))
     arms = tuple(sorted(per_arm))
-    control = next(
-        (
-            a
-            for a in arms
-            if any(tok.lower() in CONTROL_WORDS for tok in a.split())
-        ),
-        None,
-    )
+    control = reference_arm(arms, per_arm)
     return Design(
         arms=arms,
         control=control,

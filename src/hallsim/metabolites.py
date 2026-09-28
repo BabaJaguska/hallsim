@@ -33,8 +33,13 @@ assay file's sample names decide that.
 
 from __future__ import annotations
 
+import functools
+import gzip
+import json
 import logging
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,7 +57,7 @@ from metabolights_utils.provider.study_provider import (
 )
 
 from hallsim.search.datasets import (
-    CONTROL_WORDS,
+    DESIGN_SOURCES,
     TIME_FACTOR,
     Design,
     _UNIT_NAME,
@@ -60,6 +65,7 @@ from hallsim.search.datasets import (
     _strip_common,
     _times,
     curie,
+    reference_arm,
 )
 from hallsim.search.fetch import cached_json
 from hallsim.measurements import MeasuredDataset
@@ -254,6 +260,37 @@ def _unit_after(frame: pd.DataFrame, column: str) -> str:
     return ""
 
 
+def _time_factor_by_values(
+    names: list[str], factors: list[dict[str, str]]
+) -> str | None:
+    """A factor whose *values* are times, whatever it is called — MTBLS15393
+    declares 6h to 72h under a factor named ``Treatment``, and testing the
+    name alone reads that time course as five treatment groups.
+
+    Two values must parse and differ. At most one distinct value may not
+    parse, which is what a missing-value marker looks like — MTBLS15393's
+    seventh level is ``not applicable`` — while a genuinely mixed factor
+    offering several non-time levels is left alone. Where two qualify, the one
+    resolving the most distinct times wins.
+    """
+    best: tuple[str, int] | None = None
+    for name in names:
+        given = [f.get(name, "").strip() for f in factors]
+        given = [v for v in given if v]
+        times, unparsed = [], set()
+        for value in given:
+            found, _ = _times(_APPROXIMATE.sub("", value).strip())
+            if found:
+                times.append(found[0][0])
+            else:
+                unparsed.add(value.lower())
+        distinct = len(set(times))
+        if distinct >= 2 and len(unparsed) <= 1:
+            if best is None or distinct > best[1]:
+                best = (name, distinct)
+    return best[0] if best else None
+
+
 def factor_design(
     samples: list[str],
     factors: list[dict[str, str]],
@@ -283,7 +320,9 @@ def factor_design(
     """
     names = sorted({k for f in factors for k in f})
     if time_factor is None:
-        time_factor = next((n for n in names if TIME_FACTOR.search(n)), None)
+        time_factor = next(
+            (n for n in names if TIME_FACTOR.search(n)), None
+        ) or _time_factor_by_values(names, factors)
     elif time_factor not in names:
         raise ValueError(
             f"no factor named {time_factor!r}; these declare {names}"
@@ -330,17 +369,7 @@ def factor_design(
         groups.setdefault(key, []).append(str(sample))
 
     arms = tuple(sorted(per_arm))
-    control = next(
-        (
-            a
-            for a in arms
-            if any(
-                tok.lower() in CONTROL_WORDS
-                for tok in re.split(r"[\s/_-]+", a)
-            )
-        ),
-        None,
-    )
+    control = reference_arm(arms, per_arm)
     design = Design(
         arms=arms,
         control=control,
@@ -751,3 +780,59 @@ def mwtab_design(source, *, time_factor: str | None = None):
     samples = [str(r.get("Sample ID", "")).strip() for r in rows]
     factors = [dict(r.get("Factors") or {}) for r in rows]
     return factor_design(samples, factors, time_factor=time_factor)
+
+
+@functools.lru_cache(maxsize=1)
+def shipped_designs() -> dict[str, dict]:
+    """Declared designs already read from the repositories, by accession.
+
+    A dated snapshot under ``hallsim/reference/census``. Reading one costs a
+    request per deposit against a slow endpoint, so the shipped answer is
+    preferred and a fetch is the fallback. Empty where none ships.
+    """
+    folder = Path(__file__).resolve().parent / "reference/census"
+    out: dict[str, dict] = {}
+    for path in sorted(folder.glob("*_designs_*.json.gz")):
+        try:
+            with gzip.open(path, "rt") as fh:
+                out.update(json.load(fh))
+        except Exception as exc:  # noqa: BLE001 - a snapshot is optional
+            log.info("designs %s: not read (%s)", path.name, exc)
+    return out
+
+
+def declared_design(cand) -> Design:
+    """The design a deposit declares per sample: the shipped snapshot where it
+    carries this accession, else its own repository — MetaboLights' ISA-Tab
+    sample file, or mwTab's ``SUBJECT_SAMPLE_FACTORS``.
+
+    A fetch is one request per deposit against an endpoint that takes seconds,
+    so :func:`shipped_designs` answers first. The EBI Search listing carries
+    no sample list, so a title parse has nothing to read without either.
+    """
+    if cand.source not in DESIGN_SOURCES:
+        raise ValueError(f"{cand.source} states no per-sample factors")
+    stored = shipped_designs().get(cand.accession)
+    if stored is not None:
+        return Design.from_dict(stored)
+    if cand.source == "metabolights":
+        # Into a directory of its own, removed on the way out. Left to its
+        # default the repository keeps every study it has ever seen, and a
+        # study is its data files as well as its metadata: a pass over the
+        # 3,415 MetaboLights deposits wrote 30 GB and filled the disk, which
+        # cost that pass its results at the final write.
+        root = tempfile.mkdtemp(prefix="hallsim-mtbls-")
+        try:
+            model, messages = MetabolightsFtpRepository(
+                local_storage_root_path=root
+            ).load_study_model(cand.accession, load_folder_metadata=False)
+            if model is None or not model.samples:
+                raise LookupError(
+                    f"{cand.accession}: no sample file "
+                    f"({'; '.join(str(m) for m in (messages or [])[:2])})"
+                )
+            frame = isa_frame(next(iter(model.samples.values())).table)
+            return isa_design(frame)[0]
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+    return mwtab_design(cand.accession)[0]

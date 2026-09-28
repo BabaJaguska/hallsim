@@ -1379,13 +1379,27 @@ def census_data_run(
     "row from BioStudies (one request per deposit; tens of thousands "
     "over a whole run)",
 )
+@click.option(
+    "--design",
+    "with_design",
+    is_flag=True,
+    help="read the per-sample factors every metabolomics row declares, so "
+    "its arms, timepoints and control come from the deposit rather than "
+    "from sample titles it never shipped (one request per deposit)",
+)
 @click.option("--workers", type=int, default=4, show_default=True)
 def census_data_rescreen(
-    run_dir, models_run, all_models, with_files, with_factors, workers
+    run_dir,
+    models_run,
+    all_models,
+    with_files,
+    with_factors,
+    with_design,
+    workers,
 ):
     """Screen every stored row again under the current gates and models;
-    asks the repositories only for what --files and --factors name. Then
-    run `report`."""
+    asks the repositories only for what --files, --factors and --design
+    name. Then run `report`."""
     import json
     from pathlib import Path
 
@@ -1402,6 +1416,7 @@ def census_data_rescreen(
         models,
         with_files=with_files,
         with_factors=with_factors,
+        with_design=with_design,
         workers=workers,
     )
     click.echo(f"{n} rows screened again against {len(models)} models")

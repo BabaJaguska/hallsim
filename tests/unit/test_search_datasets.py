@@ -799,3 +799,15 @@ def test_every_data_source_is_registered():
         "arrayexpress",
         "bioimages",
     }
+
+
+def test_the_reference_arm_is_found_without_a_control_word():
+    """A dose of none and a label the others extend both name the baseline;
+    an old-against-young contrast names neither, and says so."""
+    from hallsim.search.datasets import reference_arm
+
+    assert reference_arm(("control", "treated")) == "control"
+    assert reference_arm(("a", "b"), {"a": {0.0}, "b": {10.0}}) == "a"
+    assert reference_arm(("WT", "WT plus drug")) == "WT"
+    assert reference_arm(("Young", "Old")) is None
+    assert reference_arm(("only one",)) is None

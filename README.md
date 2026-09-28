@@ -1,16 +1,16 @@
-# hallsim: a differentiable, composable multi-scale modelling framework for aging biology
+# hallsim
 [![Basic CI/CD Workflow](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml/badge.svg)](https://github.com/BabaJaguska/HallSim/actions/workflows/basic_CI_linux.yaml)
 
-**hallsim composes independently-published systems-biology models into one multi-scale dynamical system and calibrates the whole thing by gradient descent through the ODE solve.** Built on JAX / Equinox / Diffrax, with a focus on aging biology, where no single model captures the crosstalk between hallmarks.
+**hallsim composes independently-published systems-biology models into one
+multi-scale dynamical system and calibrates the whole thing by gradient descent
+through the ODE solve.** Built on JAX, Equinox and Diffrax, for aging biology,
+where no single model captures the crosstalk between hallmarks.
 
-- **End-to-end differentiable.** The entire composite of multiple stiff models, operator-split across timescales, is a single differentiable function. 
-- **Agent-friendly by construction.** 
-- **Scale is central, not an edge case.** 
-
-## Goals
-- Serve as an in-silico testbed for perturbations (rapamycin, caloric restriction, …).
-- Make large multi-model composition, tractable for AI agents building at a scale no one assembles by hand.
-- Educational material letting students see what happens across a range of processes when a perturbation is applied 
+The composite stays one differentiable function — many stiff models,
+operator-split across timescales — and runs batched over a population with no
+`vmap` to write. A perturbation is a named, differentiable severity, so
+rapamycin, caloric restriction or a gene dosage moves the right parameters
+across every model at once.
 
 ![hallsim architecture](docs/assets/hallsim_architecture.png)
 
@@ -45,40 +45,33 @@ composite = Composite(
     topology={"decay": {"x": "pool/x"}, "growth": {"x": "pool/x"}},
     semantic_validation=True,   # optional unit/semantic checks
 )
-result = Scheduler().run(composite, t_span=(0.0, 100.0), macro_dt=1.0, save_dt=1.0)
+result = Scheduler().run(
+    composite, t_span=(0.0, 100.0), macro_dt=1.0, save_dt=1.0
+)
 print(result.get("pool/x").shape)
 ```
 
-### Workflow
+## Workflow
 
-1. **Find** — `simulate find <query>`: search the repositories for a deposit that *emits* what you need; `simulate find-data <query>` does the same for a time course to calibrate against: through OmicsDI, one index over 29 repositories, plus Zenodo, GEO's curated DataSets and the PEtab benchmark collection, or with `--source all` every repository directly (GEO, Expression Atlas, ArrayExpress, PRIDE, MetaboLights, Metabolomics Workbench, the BioImage Archive), reading each hit's arms and timepoints from its sample titles or from the design the source states; `--composite` keeps the hits that measure something your composite carries, and `--paper` lists a paper's own data. When nothing is deposited, `simulate discover <topic>` finds the papers and the code they link. `simulate census` measures how much of BioModels, curated and uncurated, clears the gate at all and keeps the stamped verdict table under `results/census/`; `simulate census-data` does the same for the data repositories, OSDR and the data a BioModels deposit ships beside its model included: every deposit that supports a contrast, which screened models it could score, and whether a reader exists. `supply mechanisms` lists what the literature says acts on a model's species, with evidence counts and PMIDs. `simulate mcp` serves the search as tools to Claude Code, Claude Desktop or any MCP client (`claude mcp add hallsim -- simulate mcp`).
-2. **Screen** — `simulate screen <id-or-path>`: triage and the numerical screen of that one model on its own. Nothing joins a composite unscreened.
-3. **Import** — `process_from_sbml` / `process_from_xpp`, then `reconciled_to` to put it on the composite's clock.
-4. **Compose** — `Composite` with a topology; `analyze_composability` where two models overlap.
-5. **Calibrate** — `CalibrationProblem` with held-out arms
+1. **Find** — `simulate find <query>` searches the model repositories for a
+   deposit that *emits* what you need; `simulate find-data <query>` finds a
+   time course to calibrate against.
+2. **Screen** — `simulate screen <id-or-path>` triages one model on its own.
+   Nothing joins a composite unscreened.
+3. **Import** — `process_from_sbml` / `process_from_xpp`, then `reconciled_to`
+   to put the model on the composite's clock.
+4. **Compose** — `Composite` with a topology; `analyze_composability` where
+   two models overlap.
+5. **Calibrate** — `CalibrationProblem`, scored on held-out arms.
 
-### Demos & tests
-
-`simulate demo --help` lists examples: framework mechanics on
-toy processes, and one case study that composes three published SBML
-models and calibrates them against GSE248823 (`simulate demo
-multi-hallmark run`; the first run fetches the dataset). 
-`simulate view module:name` serves any composite as a page: levers over
-its handles and its wiring with a signal trace; `--bake DIR` writes the
-levers as a static site instead.
-`make test` runs the unit suite.
-
-## What you can do with it
-
-- **Compose published models.** Search BioModels, JWS Online, ModelDB, BioSimulations, Physiome and Europe PMC supplements from one call, filtered by what a deposit *emits*; import SBML, COPASI `.cps` or XPPAUT `.ode`. 
-- **Pull a perturbation handle.** A named, differentiable severity that moves the right parameters across models. The demos ship the hallmarks of aging as one registry on their models; a drug or a gene dosage is another entry, applied the same way.
-- **Calibrate against data.** Readers for GEO and GeneLab expression, MetaboLights and Metabolomics Workbench metabolomics and PRIDE proteomics, all returning one log2 fold-change contrast; identity for a ChEBI- or UniProt-annotated species, gene reporters or a regulon for a transcriptome. Log2-fold-change loss, MAP priors, differentiation through the stiff solve. 
-- **Run batched population studies.** A `(batch, n_vars)` `y0` flows through the solve as one computation — no `vmap` to write. 
+`simulate demo --help` lists the worked examples, including one that composes
+three published SBML models and calibrates them against GEO data. `simulate
+mcp` serves the search to any MCP client. `make test` runs the unit suite.
 
 ## License
 
 MIT.
 
-## References
+## Citation
 
-If you use hallsim, please cite our paper: https://doi.org/10.64898/2026.09.22.753641 
+https://doi.org/10.64898/2026.09.22.753641

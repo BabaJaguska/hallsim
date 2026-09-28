@@ -942,7 +942,10 @@ def test_a_stated_design_reaches_the_row_and_survives_a_rescreen():
     assert row["timed_evidence"] == "stated"
     assert row["contrast_kind"] == "dynamics" and row["n_timepoints"] == 4
     assert row["measured"] and row["n_models"] >= 1
-    assert row["loader"] == "petab" and row["stage"] == "loadable"
+    # `PetabDataset` reads a measurement table, so the deposit clears the
+    # reader gate too; before it existed the row stopped at `loadable`.
+    assert row["loader"] == "petab" and row["stage"] == "pass"
+    assert row["loadable"]
     again = dc.candidate_of(row)
     assert again.stated == stated and again.design.time_course
 

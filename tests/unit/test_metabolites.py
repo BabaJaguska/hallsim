@@ -373,6 +373,37 @@ def test_a_time_factor_value_is_read_with_the_title_parser():
     assert sorted(groups) == ["all @ 0h", "all @ 24h", "all @ 48h"]
 
 
+def test_a_mislabelled_time_factor_is_found_by_its_values():
+    """MTBLS15393 declares 6h to 72h under a factor named ``Treatment``, and
+    its seventh level is the marker ``not applicable``. Read by name alone
+    that is a seven-arm study; read by value it is one arm over six times."""
+    design, _ = metabolites.factor_design(
+        [f"S{i}" for i in range(7)],
+        [
+            {"Treatment": v}
+            for v in ("0h", "6h", "12h", "24h", "48h", "72h", "not applicable")
+        ],
+    )
+    assert design.arms == ("all",)
+    assert design.timepoints == (0.0, 6.0, 12.0, 24.0, 48.0, 72.0)
+    assert design.time_course
+
+
+def test_a_mixed_factor_is_not_taken_for_a_time_axis():
+    """One unparseable value reads as a missing marker; several are levels,
+    so a treatment factor naming a duration keeps its arms."""
+    design, _ = metabolites.factor_design(
+        [f"S{i}" for i in range(4)],
+        [
+            {"Treatment": v}
+            for v in ("2 days antibiotic", "control", "vehicle", "untreated")
+        ],
+    )
+    assert design.n_timepoints == 0
+    assert len(design.arms) == 4
+    assert design.control == "control"
+
+
 def test_the_census_reads_a_workbench_study():
     from hallsim.dataset_census import LOADERS, READABLE
 
