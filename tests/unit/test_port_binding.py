@@ -30,25 +30,24 @@ class Block(Process):
 
 
 def test_a_plain_port_bound_to_several_paths_is_refused():
-    comp = Composite(
-        processes={"d": Decay()},
-        topology={"d": {"x": ("a", "b", "c")}},
-        validate=False,
-        semantic_validation=False,
-    )
-    with pytest.raises(ValueError, match=r"d\.x is a plain port bound to 3"):
-        comp.build_rhs()
+    # Refused when the start is laid out, before anything runs.
+    with pytest.raises(ValueError, match=r"d\.x binds 3 paths"):
+        Composite(
+            processes={"d": Decay()},
+            topology={"d": {"x": ("a", "b", "c")}},
+            validate=False,
+            semantic_validation=False,
+        )
 
 
 def test_a_block_port_bound_to_the_wrong_count_is_refused():
-    comp = Composite(
-        processes={"k": Block()},
-        topology={"k": {"b": ("p", "q", "r")}},
-        validate=False,
-        semantic_validation=False,
-    )
-    with pytest.raises(ValueError, match=r"2-wide block port bound to 3"):
-        comp.build_rhs()
+    with pytest.raises(ValueError, match=r"k\.b declares 2 elements"):
+        Composite(
+            processes={"k": Block()},
+            topology={"k": {"b": ("p", "q", "r")}},
+            validate=False,
+            semantic_validation=False,
+        )
 
 
 def test_a_block_port_bound_to_its_width_runs():

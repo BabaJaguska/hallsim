@@ -678,6 +678,13 @@ class Composite(eqx.Module):
                 }
                 for proc_name, topo in flat_topology.items()
             }
+            # A nested start follows its path. Where a redirected start lands
+            # on a path that declares its own, the path's own stands.
+            kept = {q: v for q, v in sub_initial.items() if q not in rewire}
+            for q, v in sub_initial.items():
+                if q in rewire:
+                    kept.setdefault(rewire[q], v)
+            sub_initial = kept
         # Name-sorted at construction, not at each consumer. JAX sorts dict
         # keys whenever it flattens a pytree, so an unsorted `processes` makes
         # a composite iterate differently before and after any jit / vmap /
@@ -942,7 +949,16 @@ class Composite(eqx.Module):
             )
             if write_pairs.ports:
                 pre.append((proc, read_pairs, write_pairs))
-        assign_pre = self._assignment_pre(proc_names, keys, key_to_idx, canon)
+        # Every assigning process is a candidate, not just this group's: an
+        # algebraic value is a function of the shared state, so a group that
+        # reads one assigned elsewhere must recompute it here. Restricted to
+        # the group, the read falls through to the path's persisted slot,
+        # which no integration ever writes, and the reader silently gets the
+        # port default. `_assignments_read_by` then keeps only what this
+        # group's derivatives actually reach, so the pruned cost is unchanged.
+        assign_pre = self._assignment_pre(
+            list(self.continuous_processes().keys()), keys, key_to_idx, canon
+        )
         if assign_pre:
             _check_assignments(assign_pre, len(keys))
             assign_pre = _assignments_read_by(assign_pre, pre, len(keys))

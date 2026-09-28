@@ -113,6 +113,7 @@ include = ["hallsim*", "demos*"]
 hallsim = [
   "py.typed",
   "reference/**/*.tsv",
+  "reference/**/*.csv.gz",
   "reference/**/*.md",
   "view/*.css",
   "view/*.html",

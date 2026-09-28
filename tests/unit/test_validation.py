@@ -721,6 +721,8 @@ class TestSubCompositeFlattening:
         assert merged.topology["a.prod"]["ros"] == ("a/pool/ros",)
         assert merged.topology["b.prod"]["ros"] == ("a/pool/ros",)
         assert merged.store_paths() == {"a/pool/ros"}
+        # and the inner starts followed their paths there
+        assert set(merged.initial_state()) == {"a/pool/ros"}
 
     def test_subcomposite_with_incompatible_units_raises_on_merge(self):
         """Inner composites validate fine individually; merging onto one

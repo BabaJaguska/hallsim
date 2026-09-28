@@ -101,9 +101,8 @@ def test_gradient_through_steady_state():
     def loss(p):
         return jnp.sum(steady_state(eqx.combine(p, static), laws=laws))
 
-    assert jnp.isfinite(
-        jnp.sum(jnp.asarray(jax.tree_util.tree_leaves(jax.grad(loss)(params))))
-    )
+    grads = jax.tree_util.tree_leaves(jax.grad(loss)(params))
+    assert jnp.isfinite(sum(jnp.sum(g) for g in grads))
 
 
 def test_scheduler_run_under_jit_and_grad():

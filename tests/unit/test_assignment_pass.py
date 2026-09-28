@@ -97,3 +97,41 @@ def test_a_partial_rhs_keeps_only_what_its_group_reads():
     )
     rhs_a, _ = comp.build_rhs(["a"])
     assert rhs_a.assign_procs == ()
+
+
+def test_a_group_recomputes_an_assignment_made_in_another_group():
+    """An ASSIGNED path is algebraic, so a reader split into its own group
+    must recompute it rather than fall through to the persisted slot, which
+    no integration writes and which holds the port default."""
+    comp = _comp(
+        {"a": Algebraic(), "r": Reader()},
+        {"a": {"x": "x", "s": "s"}, "r": {"z": "z", "s": "s"}},
+    )
+    rhs_r, keys = comp.build_rhs(["r"])
+    assert len(rhs_r.assign_procs) == 1, "the writer is in the other group"
+    y0 = comp.initial_state_vec(keys)
+    # s = 2x = 2 at the default x, so dz/dt = s - z = 2 - 0.5.
+    dz = float(rhs_r(0.0, y0)[keys.index("z")])
+    assert dz == pytest.approx(1.5)
+
+
+def test_a_timescale_split_does_not_zero_a_cross_group_assignment():
+    """`auto_groups` splits on timescale, so the defect was reachable from
+    the default path: the reader saw the port default and integrated zero."""
+
+    class SlowReader(Reader):
+        timescale: float = eqx.field(static=True, default=1e4)
+
+    comp = _comp(
+        {"a": Algebraic(), "r": SlowReader()},
+        {"a": {"x": "x", "s": "s"}, "r": {"z": "z", "s": "s"}},
+    )
+    groups = comp.auto_groups()
+    assert len(groups) > 1, "the timescales must actually split"
+    for members in groups.values():
+        if "r" not in members:
+            continue
+        rhs, keys = comp.build_rhs(list(members))
+        y0 = comp.initial_state_vec(keys)
+        dz = float(rhs(0.0, y0)[keys.index("z")])
+        assert dz == pytest.approx(1.5)

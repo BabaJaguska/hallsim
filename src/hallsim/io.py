@@ -11,6 +11,8 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+import jax
+
 _ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -149,3 +151,80 @@ def verify_checksum(path) -> str | None:
             f"({digest} != {expected}); delete it and fetch again."
         )
     return digest
+
+
+def identity(composite) -> dict:
+    """What a composite *is*, derived from the object rather than from the
+    caller's description of it: the members it holds, the width of its
+    store, and three digests — ``structure`` over its wiring and process
+    classes, ``params`` over its parameter values, ``start`` over the state
+    it begins from.
+
+    Stamp this beside a number and a caption cannot disagree with the run.
+    Two rows of a results table that claim to differ in how they were built
+    but share a ``structure`` digest were built the same way; two that claim
+    to be one sweep but differ in it were not.
+    """
+    import numpy as np
+
+    digest = hashlib.blake2b(digest_size=8)
+    digest.update(repr(composite.structural_fingerprint()).encode())
+    params = hashlib.blake2b(digest_size=8)
+    traced = False
+    for leaf in jax.tree_util.tree_leaves(composite.processes):
+        if isinstance(leaf, jax.core.Tracer):
+            traced = True
+            break
+        arr = np.asarray(leaf)
+        params.update(f"{arr.dtype}{arr.shape}".encode())
+        params.update(arr.tobytes())
+    start = np.asarray(composite.initial)
+    start_digest = hashlib.blake2b(start.tobytes(), digest_size=8).hexdigest()
+    return {
+        "members": sorted(composite.processes),
+        "n_store_paths": len(composite.store_keys()),
+        "structure": digest.hexdigest(),
+        "params": None if traced else params.hexdigest(),
+        "start": start_digest,
+        "start_shape": list(start.shape),
+    }
+
+
+def write_results(path, rows, *, note: str = "") -> Path:
+    """Write ``rows`` as JSON with the versions that produced them, replacing
+    any ``Composite`` value with its :func:`identity` stamp.
+
+    ``rows`` is a list of dicts. A row may carry the composite it came from
+    under any key; that key is rewritten to the stamp, so the table records
+    what was actually run rather than what the caller believed::
+
+        write_results(run / "dcrit.json", [
+            {"arm": "both edges", "composite": comp, "d_crit": 4.0063},
+            {"arm": "blocked",     "composite": blocked, "d_crit": 4.0441},
+        ])
+
+    Two arms that were meant to differ structurally and share a ``structure``
+    digest are then visible on inspection, which is the failure this exists
+    to make loud.
+    """
+    import json
+
+    from hallsim.composite import Composite
+
+    stamped = []
+    for row in rows:
+        out = {}
+        for key, value in row.items():
+            out[key] = (
+                identity(value) if isinstance(value, Composite) else value
+            )
+        stamped.append(out)
+    payload = {
+        "note": note,
+        "written": datetime.now().isoformat(timespec="seconds"),
+        "versions": versions(),
+        "rows": stamped,
+    }
+    path = Path(path)
+    path.write_text(json.dumps(payload, indent=1, default=str))
+    return path
