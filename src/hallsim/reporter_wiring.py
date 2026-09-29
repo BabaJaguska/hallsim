@@ -197,6 +197,30 @@ def resolve_ontology(
     return {}, path
 
 
+def paths_measuring(ontmap, namespace: str, measured) -> dict[str, str]:
+    """``store path → the measured identifier as given``, for the paths
+    annotated in ``namespace`` that ``measured`` carries.
+
+    Both sides are spelled as one curie before comparing, because a deposit
+    writes ``CHEBI:15422``, a reader indexes ``chebi:15422`` and another
+    indexes a bare ``P04637``. The value is the caller's own spelling, which
+    is what indexes their table.
+    """
+    from hallsim.search.datasets import curie
+
+    want = {}
+    for ident in measured:
+        want.setdefault(curie(namespace, ident).lower(), str(ident))
+    out = {}
+    for path, ont in ontmap.items():
+        ident = ont.get(namespace)
+        if ident:
+            hit = want.get(curie(namespace, ident).lower())
+            if hit is not None:
+                out[path] = hit
+    return out
+
+
 def classify_ontology(ont: dict) -> ObservableKind:
     """Molecular kind from a MIRIAM annotation dict (lower-cased keys)."""
     if not ont:

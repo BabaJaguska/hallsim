@@ -18,7 +18,7 @@ from hallsim.diagnostics import (
     screen,
     screen_sensitivity,
 )
-from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
+from demos.models.multi_hallmark import MULTI_HALLMARK_REPORTERS
 from hallsim.models.hill_edge import HillEdge
 from demos.models.hallmarks import HALLMARK_REGISTRY
 from demos.models.multi_hallmark import (
@@ -660,3 +660,114 @@ def test_one_window_screens_every_member_and_a_dict_only_the_named():
     assert [r.name for r in named] == ["d"]
     with pytest.raises(ValueError, match="no continuous process named"):
         screen(comp, {"nope": 1.0}, check_tunability=False)
+
+
+def test_a_state_nothing_reads_is_not_divergence():
+    """A pure accumulator only grows, by construction — it is named in the
+    report, not counted as divergence."""
+
+    class _WithSink(Process):
+        def ports_schema(self):
+            return {
+                "x": Port(role=PortRole.EVOLVED, default=1.0),
+                "sink": Port(
+                    role=PortRole.EVOLVED, default=0.0, reads_value=False
+                ),
+            }
+
+        def derivative(self, t, state):
+            return {
+                "x": -0.1 * (state["x"] - 1.0),
+                "sink": 1e2 * (t + 1.0) ** 2,
+            }
+
+    (r,) = screen(
+        single_process_composite(_WithSink()),
+        t_end=100.0,
+        check_tunability=False,
+    )
+    assert r.ok, r
+    assert not r.exploding and not r.growing
+    assert r.terminal == ("_WithSink/sink",)
+    # The exclusion is a structured field and an advisory, not only prose:
+    # every consumer of a report drops `detail`.
+    assert any("read" in a for a in r.advisories)
+    # max_abs still says what the trajectory reached, so a census column keeps
+    # comparing like with like.
+    assert r.max_abs > 1e6
+
+
+def test_terminality_is_read_from_the_composite_not_the_wrapper():
+    """A member is screened alone, where its exported path looks unread. The
+    composite is what gets certified, so its wiring decides — otherwise every
+    coupling edge, which declares its output ``reads_value=False``, is exempt
+    from the growth gate."""
+    from hallsim.composite import Composite
+
+    class Source(Process):
+        def ports_schema(self):
+            return {
+                "core": Port(role=PortRole.EVOLVED, default=1.0),
+                "out": Port(
+                    role=PortRole.EVOLVED, default=1.0, reads_value=False
+                ),
+            }
+
+        def derivative(self, t, state):
+            return {"core": 0.0, "out": 1e3 * state["core"]}
+
+    class Sink(Process):
+        def ports_schema(self):
+            return {
+                "signal": Port(role=PortRole.INPUT, default=0.0),
+                "y": Port(role=PortRole.EVOLVED, default=1.0),
+            }
+
+        def derivative(self, t, state):
+            return {"y": state["signal"]}
+
+    comp = Composite(
+        {"src": Source(), "dn": Sink()},
+        topology={
+            "src": {"core": "src/core", "out": "src/out"},
+            "dn": {"signal": "src/out", "y": "dn/y"},
+        },
+        semantic_validation=False,
+    )
+    alone = screen(
+        single_process_composite(Source(), "src"),
+        t_end=100.0,
+        check_tunability=False,
+    )[0]
+    assert alone.terminal == ("src/out",)  # nothing reads it here
+
+    src = next(
+        r
+        for r in screen(comp, 100.0, check_tunability=False)
+        if r.name == "src"
+    )
+    assert src.terminal == ()  # the neighbour reads it, so it is judged
+    assert src.exploding, src
+
+
+def test_a_dependency_declaration_that_omits_a_read_cannot_grant_exemption():
+    """The exemption is checked against the field, not only the declaration:
+    an under-declared process would otherwise excite itself unseen."""
+
+    class Liar(Process):
+        def ports_schema(self):
+            return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+        def port_dependencies(self):
+            return {"x": frozenset()}  # claims dx/dt reads nothing
+
+        def derivative(self, t, state):
+            return {"x": 0.5 * state["x"]}  # but it reads x
+
+    (r,) = screen(
+        single_process_composite(Liar()),
+        t_end=60.0,
+        check_tunability=False,
+    )
+    assert r.terminal == ()
+    assert r.exploding and r.max_abs > 1e10

@@ -1,12 +1,6 @@
-"""Tests for gene_reporters — single-gene reporter validation.
-
-Covers:
-- Reporter table integrity (all expected fields, valid signs, distinct
-  observables and genes)
-- derive_observables produces the expected keys and types
-- compute_concordance correctness on synthetic deltas
-- log2_fold_change helper
-"""
+"""Tests for gene_reporters — scoring one observable against one measured
+quantity: the Readout contract, the derived identity join, trajectory
+summaries, compute_concordance on synthetic deltas, log2_fold_change."""
 
 from __future__ import annotations
 
@@ -19,14 +13,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
-from hallsim.gene_reporters import (
-    CANONICAL_REPORTERS,
+from demos.models.multi_hallmark import (
     MULTI_HALLMARK_REPORTERS,
     PROTEOSTASIS_REPORTERS,
+)
+from hallsim.gene_reporters import (
     GeneExpressionDataset,
     Readout,
     compute_concordance,
-    cycle_average,
     last_value,
     log2_fold_change,
     summarize_reporters,
@@ -72,31 +66,153 @@ class TestZerophaseMean:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestReporterTable:
+_LOCAL = [
+    Readout(path="p53_activity", key="CDKN1A", sign=+1),
+    Readout(path="mito_damage", key="DDB2", sign=+1),
+    Readout(path="ROS_algebraic", key="HMOX1", sign=+1),
+    Readout(path="NFKB_algebraic", key="NFKBIA", sign=+1),
+    Readout(path="mito_function", key="CYCS", sign=+1),
+    Readout(path="mTOR_activity_algebraic", key="EIF4EBP1", sign=+1),
+]
 
-    def test_all_signs_are_plus_or_minus_one(self):
-        for r in CANONICAL_REPORTERS:
-            assert r.sign in (
-                +1,
-                -1,
-            ), f"{r.path}: sign {r.sign} must be ±1"
 
-    def test_all_reporters_have_references(self):
-        for r in CANONICAL_REPORTERS:
-            assert r.reference, f"{r.path} missing literature ref"
-            assert r.description, f"{r.path} missing description"
+class TestReadoutContract:
+    """No set ships, so a shipped list's invariants move onto every readout."""
 
-    def test_observables_unique(self):
-        obs = [r.path for r in CANONICAL_REPORTERS]
-        assert len(obs) == len(
-            set(obs)
-        ), "duplicate observable in reporter table"
+    def test_a_sign_is_plus_or_minus_one(self):
+        with pytest.raises(ValueError, match="no third case"):
+            Readout(path="cell/x", key="GENE", sign=0)
 
-    def test_genes_unique(self):
-        genes = [r.key for r in CANONICAL_REPORTERS]
-        assert len(genes) == len(
-            set(genes)
-        ), "duplicate gene symbol in reporter table"
+    def test_scoring_without_reporters_says_so(self):
+        import pandas as pd
+
+        with pytest.raises(ValueError, match="no reporters given"):
+            compute_concordance(
+                delta_observables={"cell/x": 1.0},
+                delta_gene_expression=pd.Series({"GENE": 1.0}),
+                condition_name="arm",
+                reporters=None,
+            )
+
+    def test_a_provenance_outside_the_three_is_refused(self):
+        with pytest.raises(ValueError, match="not a valid Provenance"):
+            Readout(path="cell/x", key="GENE", provenance="canonical")
+
+    def test_a_readout_written_by_hand_is_supplied(self):
+        assert Readout(path="cell/x", key="GENE").provenance == "supplied"
+
+
+class TestDerivedReadouts:
+    """The identity join: what the species says it is, against what the
+    dataset measured."""
+
+    def _dataset(self, *ids):
+        """Indexed the way the reader leaves it: ``curie`` lower-cases the
+        namespace, so the spelling differs from the deposit's own."""
+        from hallsim.metabolites import MetaboliteDataset
+        from hallsim.search.datasets import curie
+
+        keys = [curie("chebi", i) for i in ids]
+        frame = pd.DataFrame(
+            {"s1": [1.0] * len(keys), "s2": [2.0] * len(keys)},
+            index=keys,
+        )
+        return MetaboliteDataset(
+            quantities=frame, sample_groups={"a": ["s1"], "b": ["s2"]}
+        )
+
+    def _protein_dataset(self, *accessions):
+        """An mzTab index is a bare accession, not a curie — the other
+        spelling the join has to survive."""
+        from hallsim.proteins import ProteinDataset
+
+        frame = pd.DataFrame(
+            {"s1": [1.0] * len(accessions)}, index=list(accessions)
+        )
+        return ProteinDataset(quantities=frame, sample_groups={"a": ["s1"]})
+
+    def _composite(self):
+        from hallsim.composite import Composite
+        from hallsim.process import Port, PortRole, Process
+
+        class Cell(Process):
+            def ports_schema(self):
+                return {
+                    "atp": Port(
+                        role=PortRole.EVOLVED,
+                        default=1.0,
+                        ontology={"chebi": "CHEBI:15422"},
+                    ),
+                    "nad": Port(
+                        role=PortRole.EVOLVED,
+                        default=1.0,
+                        ontology={"chebi": "CHEBI:15846"},
+                    ),
+                    "ros": Port(role=PortRole.EVOLVED, default=1.0),
+                    "p53": Port(
+                        role=PortRole.EVOLVED,
+                        default=1.0,
+                        ontology={"uniprot": "P04637"},
+                    ),
+                }
+
+            def derivative(self, t, state):
+                return {k: 0.0 for k in ("atp", "nad", "ros", "p53")}
+
+        paths = ("atp", "nad", "ros", "p53")
+        return Composite(
+            {"cell": Cell()},
+            topology={"cell": {k: f"cell/{k}" for k in paths}},
+            semantic_validation=False,
+        )
+
+    def test_only_the_measured_identifiers_come_back(self):
+        from hallsim.gene_reporters import derive_readouts
+
+        got = derive_readouts(
+            self._composite(), self._dataset("CHEBI:15422", "CHEBI:99999")
+        )
+        assert [(r.path, r.sign) for r in got] == [("cell/atp", 1)]
+        assert got[0].provenance == "derived"
+
+    def test_the_key_is_the_spelling_that_indexes_the_data(self):
+        """The deposit writes ``CHEBI:15422`` and the reader indexes
+        ``chebi:15422``; scoring looks the key up in the table, so the key is
+        the table's spelling."""
+        from hallsim.gene_reporters import derive_readouts
+
+        data = self._dataset("CHEBI:15422")
+        (got,) = derive_readouts(self._composite(), data)
+        assert got.key in data.measured
+
+    def test_a_bare_accession_joins_as_well_as_a_curie(self):
+        from hallsim.gene_reporters import derive_readouts
+
+        (got,) = derive_readouts(
+            self._composite(), self._protein_dataset("P04637", "Q00000")
+        )
+        assert (got.path, got.key) == ("cell/p53", "P04637")
+
+    def test_a_species_with_no_identifier_yields_nothing(self):
+        from hallsim.gene_reporters import derive_readouts
+
+        got = derive_readouts(self._composite(), self._dataset("CHEBI:15422"))
+        assert "cell/ros" not in {r.path for r in got}
+
+    def test_a_dataset_without_identifiers_cannot_be_joined(self):
+        from hallsim.gene_reporters import derive_readouts
+
+        class Anon(self._dataset("CHEBI:15422").__class__):
+            measures = ""
+
+        with pytest.raises(ValueError, match="not indexed by identifier"):
+            derive_readouts(
+                self._composite(),
+                Anon(
+                    quantities=pd.DataFrame({"s1": [1.0]}, index=["x"]),
+                    sample_groups={"a": ["s1"]},
+                ),
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -118,14 +234,6 @@ def _stub_eriq_state():
 
 
 class TestDeriveObservables:
-
-    def test_keys_cover_all_reporter_observables(self):
-        obs = derive_observables(_stub_eriq_state())
-        for r in CANONICAL_REPORTERS:
-            assert r.path in obs, (
-                f"derive_observables missing key '{r.path}' "
-                f"required by reporter {r.key}"
-            )
 
     def test_values_are_finite(self):
         obs = derive_observables(_stub_eriq_state())
@@ -164,6 +272,7 @@ class TestComputeConcordance:
             delta_observables=delta_obs,
             delta_gene_expression=delta_data,
             condition_name="all_aligned",
+            reporters=_LOCAL,
         )
         assert result.sign_agreement == 1.0
         assert result.n_compared == 6
@@ -199,6 +308,7 @@ class TestComputeConcordance:
             delta_observables=delta_obs,
             delta_gene_expression=delta_data,
             condition_name="all_mismatched",
+            reporters=_LOCAL,
         )
         assert result.sign_agreement == 0.0
         # Perfectly anticorrelated (largest sim → most-negative data).
@@ -212,6 +322,7 @@ class TestComputeConcordance:
             delta_observables={"p53_activity": +1.0},
             delta_gene_expression=pd.Series({"SOMETHING_ELSE": +0.5}),
             condition_name="empty",
+            reporters=_LOCAL,
         )
         assert result_data.n_compared == 0
         assert result_data.sign_agreement == 0.0  # no rows → defaults
@@ -221,6 +332,7 @@ class TestComputeConcordance:
             delta_observables={},
             delta_gene_expression=pd.Series({"CDKN1A": +0.5}),
             condition_name="empty_sim",
+            reporters=_LOCAL,
         )
         assert result_sim.n_compared == 0
 
@@ -247,8 +359,7 @@ class TestComputeConcordance:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Trajectory summaries (last_value / cycle_average) and the
-# derive_observable_summaries pipeline
+# Trajectory summaries and the derive_observable_summaries pipeline
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -258,19 +369,6 @@ class TestTrajectorySummaries:
         ts = jnp.arange(5, dtype=jnp.float32)
         y = jnp.asarray([1.0, 2.0, 3.0, 4.0, 5.0])
         assert float(last_value(ts, y)) == pytest.approx(5.0)
-
-    def test_cycle_average_quarter(self):
-        # Linear ramp 0..99 (100 points). Last 25% are 75..99, mean = 87.
-        y = jnp.arange(100, dtype=jnp.float32)
-        ts = jnp.arange(100, dtype=jnp.float32)
-        s = cycle_average(0.25)
-        assert float(s(ts, y)) == pytest.approx(87.0)
-
-    def test_cycle_average_rejects_invalid_fraction(self):
-        with pytest.raises(ValueError):
-            cycle_average(0.0)
-        with pytest.raises(ValueError):
-            cycle_average(1.5)
 
     def test_window_mean_is_exact_flat_mean(self):
         # source = 5 + sin(t); its exact integral A = 5t - cos(t) + 1
@@ -317,9 +415,9 @@ class TestTrajectorySummaries:
             for k, v in _stub_eriq_state().items()
         }
         out = summarize_reporters(
-            ts, state_traj, CANONICAL_REPORTERS, derive=derive_observables
+            ts, state_traj, _LOCAL, derive=derive_observables
         )
-        for r in CANONICAL_REPORTERS:
+        for r in _LOCAL:
             assert r.path in out
             assert jnp.isfinite(out[r.path])
 

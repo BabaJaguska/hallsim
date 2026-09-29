@@ -497,9 +497,14 @@ class Process(eqx.Module):
             if port in out:
                 out[port] = out[port] | reads(expr)
         rules = dict(self.assignment_rules())
-        for p, s in schema.items():
-            if s.role is PortRole.ASSIGNED:
-                out[p] = reads(rules[p]) if p in rules else readable
+        assigned = frozenset(
+            p for p, s in schema.items() if s.role is PortRole.ASSIGNED
+        )
+        for p in assigned:
+            # Not on this process's own assigned ports: one `assign` call
+            # produces them all from the same inputs, so none is an input to
+            # another, and claiming otherwise reads as an algebraic cycle.
+            out[p] = reads(rules[p]) if p in rules else readable - assigned
         return out
 
     # --- Interface: ASSIGNED (algebraic) -------------------------------------

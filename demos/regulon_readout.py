@@ -1,7 +1,7 @@
 """Score the regulon readout head genome-wide against GSE248823.
 
-The canonical reporters read six curated transcripts off the multi-hallmark
-composite. This asks the same composite a much larger question: expand its
+This composite's own readouts read a handful of transcripts off it. This asks
+the same composite a much larger question: expand its
 three modelled TF activities through the CollecTRI prior and see how far the
 predicted transcriptome-wide log2 fold change agrees with the measured one.
 
@@ -52,8 +52,8 @@ log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Summaries match the canonical reporters reading the same store paths, so the
-# activity delta is collapsed the same way the validated readout collapses it.
+# Summaries match this composite's own readouts on the same store paths, so
+# the activity delta is collapsed the same way.
 TF_BINDINGS = [
     ActivityBinding(
         path="gz06/x",

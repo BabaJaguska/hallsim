@@ -1,10 +1,10 @@
 """Regulon readout head — modelled TF activity to transcriptome-wide log2FC.
 
-:mod:`hallsim.gene_reporters` maps one mechanistic observable to one textbook
-transcript by hand, which caps a composite's transcriptomic readout at the
-handful of genes someone curated. This is the scaled readout: a signed
-TF→target prior expands the regulator activities a composite already carries
-across every gene those regulators are known to touch.
+:mod:`hallsim.gene_reporters` scores one mechanistic observable against one
+measured quantity, which caps a transcriptomic readout at the genes some
+observable corresponds to. This is the scaled readout: a signed TF→target
+prior expands the regulator activities a composite already carries across
+every gene those regulators are known to touch.
 
     Δlog2 x̂ = (S ⊙ W) · Δa
 
@@ -14,9 +14,9 @@ they stay positive: the *sign* of every prediction is then fixed by the prior
 alone, making sign concordance a zero-parameter prediction and leaving only
 magnitude to fit.
 
-Unlike the canonical reporters this layer *is* fitted, so it is a model rather
-than a validation instrument — score it on held-out perturbations and report it
-separately from reporter concordance.
+This layer *is* fitted, so it is a model rather than a validation instrument —
+score it on held-out perturbations and report it separately from an identity
+readout's concordance.
 """
 
 from __future__ import annotations
@@ -74,6 +74,13 @@ class ActivityBinding:
     #: Empty by declaration — no transcript is claimed, so the reporter
     #: validator skips it and its data column is absent rather than wrong.
     key: str = ""
+
+    @property
+    def provenance(self):
+        """This head is fitted, so it scores in its own column."""
+        from hallsim.gene_reporters import Provenance
+
+        return Provenance.FITTED
 
 
 @dataclass(frozen=True)

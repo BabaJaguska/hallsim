@@ -1524,12 +1524,48 @@ def atlas_experiment(accession: str, *, timeout: float = 60.0) -> dict:
     )
 
 
+def _factored_arms(factored: list) -> list:
+    """Assay groups labelled by the factors that group them.
+
+    A factor is dropped only when all three hold: it takes a distinct value in
+    every group, another factor does group them, and no group is replicated —
+    E-PROT-71's `individual` over 41 single-assay groups beside a `fraction`
+    taking two. Token frequency would instead discard a real condition that
+    appears once, and cardinality alone a three-arm design of three cell types.
+    """
+    width = max(len(values) for values, _, _ in factored)
+    spread = []
+    for i in range(width):
+        seen = [v[i] for v, _, _ in factored if i < len(v) and v[i]]
+        spread.append(len(set(seen)) if seen else 0)
+    grouping = any(0 < n < len(factored) for n in spread)
+    replicated = any(n > 1 for _, _, n in factored)
+    keep = [
+        n > 0 and (n < len(factored) or not grouping or replicated)
+        for n in spread
+    ]
+    return [
+        (
+            " ".join(
+                v
+                for i, v in enumerate(values)
+                if i < len(keep) and keep[i] and v
+            ).strip()
+            or "all",
+            found,
+            n,
+        )
+        for values, found, n in factored
+    ]
+
+
 def atlas_design(record: dict) -> Design | None:
     """The design an Atlas experiment states. A baseline experiment lists
     assay groups with their factor values; a differential one lists
     contrasts as ``'test' vs 'reference' in 'context' at 'time'``. Either
     way the time-like factor gives the timepoints and the rest the arms."""
     groups: list[tuple[str, list[tuple[float, str]], int]] = []
+    factored: list[tuple[list[str], list[tuple[float, str]], int]] = []
     for header in record.get("columnHeaders") or []:
         summary = header.get("assayGroupSummary")
         if summary is not None:
@@ -1544,9 +1580,7 @@ def atlas_design(record: dict) -> Design | None:
                     found += times
                 else:
                     arm.append(value)
-            groups.append(
-                (" ".join(arm), found, int(summary.get("replicates") or 1))
-            )
+            factored.append((arm, found, int(summary.get("replicates") or 1)))
             continue
         m = _ATLAS_CONTRAST.match(str(header.get("displayName") or ""))
         if not m:
@@ -1559,6 +1593,8 @@ def atlas_design(record: dict) -> Design | None:
         ):
             n = int((header.get(key) or {}).get("replicates") or 1)
             groups.append((f"{m.group(side)} {context}".strip(), found, n))
+    if factored:
+        groups += _factored_arms(factored)
     if not groups:
         return None
     units = {u for _, found, _ in groups for _, u in found if u}
@@ -1611,7 +1647,11 @@ def _atlas_candidate(
         source, accession = "expression-atlas", acc
     factors = tuple(str(f) for f in (rec.get("experimentalFactors") or []))
     stated = None
-    if designs and any(TIME_FACTOR.search(f) for f in factors):
+    # Read for every experiment that declares a factor, not only one whose
+    # factor is named like time. Atlas states its contrasts, and a factor
+    # called `stimulus` or `disease` names the arms of one; requiring a
+    # time-like name left those experiments with no design at all.
+    if designs and factors:
         try:
             stated = atlas_design(atlas_experiment(acc, timeout=timeout))
         except Exception as exc:  # noqa: BLE001 - the listing stands

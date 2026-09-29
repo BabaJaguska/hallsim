@@ -454,6 +454,8 @@ class MetaboliteDataset(MeasuredDataset):
     names: dict[str, str] = field(default_factory=dict)
     design: Design | None = None
 
+    measures = "chebi"
+
     @property
     def log_values(self) -> pd.DataFrame:
         return np.log2(self.quantities)

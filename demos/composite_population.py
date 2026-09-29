@@ -49,7 +49,7 @@ def _reporters():
     """Read the reporter table rather than transcribing it — a hard-coded
     panel outlives the model it names (this one still read `nfkb/IkBat` after
     Ihekwaba was removed, so the demo could not run)."""
-    from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
+    from demos.models.multi_hallmark import MULTI_HALLMARK_REPORTERS
 
     return {r.key: r.path for r in MULTI_HALLMARK_REPORTERS}
 

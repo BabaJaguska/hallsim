@@ -221,6 +221,8 @@ class ProteinDataset(MeasuredDataset):
     design: Design | None = None
     descriptions: dict[str, str] = field(default_factory=dict)
 
+    measures = "uniprot"
+
     @property
     def log_values(self) -> pd.DataFrame:
         return np.log2(self.quantities)

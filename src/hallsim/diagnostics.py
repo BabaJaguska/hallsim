@@ -113,6 +113,11 @@ class ScreenReport:
     #: quantities (a fraction that is 0/0 at t = 0), reported by name and
     #: kept out of the divergence verdict.
     undefined_assigned: tuple = ()
+    #: Paths nothing in the composite reads that outgrew the states it does
+    #: read — the accumulators whose exclusion changed the growth verdict.
+    #: Their peak is still in :attr:`max_abs` and their tolerance sensitivity
+    #: still counts.
+    terminal: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -190,6 +195,14 @@ class ScreenReport:
             )
         if self.tunes is False:
             out.append("non-finite gradient — not calibratable as configured")
+        if self.terminal:
+            out.append(
+                "nothing in this composite reads "
+                + ", ".join(self.terminal)
+                + ", and they outgrow every state it does read, so their "
+                "growth is by construction and is not counted as divergence "
+                "— wire a reader before treating one as an output"
+            )
         return tuple(out)
 
     @property
@@ -241,7 +254,7 @@ def _on_native_clock(process):
     return process
 
 
-def rest_timescale(composite, t=0.0) -> tuple[float, str]:
+def rest_timescale(composite, t=0.0, exclude=None) -> tuple[float, str]:
     """Fastest state's ``τ = |y₀| / |f(t, y₀)|`` at ``y0`` → ``(τ, path)``.
 
     How long the quickest-moving state would take to change by 100% of itself
@@ -254,7 +267,9 @@ def rest_timescale(composite, t=0.0) -> tuple[float, str]:
     is not comparable between models, while a time compares directly against the
     horizon and the save interval. Returns ``inf`` for a genuine rest state.
     States at zero are scaled by the median magnitude of the non-zero ones, so
-    an empty pool is not reported as infinitely fast.
+    an empty pool is not reported as infinitely fast. A state nothing reads is
+    skipped: it has no rest state to be away from. ``exclude`` names those
+    paths where the caller knows them from a wider composite than this one.
     """
     keys = list(composite.store_keys())
     y0 = composite.initial_state_vec()
@@ -264,6 +279,14 @@ def rest_timescale(composite, t=0.0) -> tuple[float, str]:
     nonzero = y[y > 0]
     scale = np.maximum(y, np.median(nonzero) if nonzero.size else 1.0)
     tau = np.where(f > 0, scale / np.maximum(f, 1e-300), np.inf)
+    skip = (
+        _terminal_paths(composite) if exclude is None else frozenset(exclude)
+    )
+    terminal = np.asarray(
+        [j for j, k in enumerate(keys) if k in skip], dtype=int
+    )
+    if 0 < terminal.size < tau.size:
+        tau[terminal] = np.inf
     i = int(np.argmin(tau))
     return float(tau[i]), keys[i]
 
@@ -375,9 +398,71 @@ class _Verdict:
     vanishing: bool
     tolerance_sensitive: bool
     negative: bool
+    #: Peak over the states something reads — what the growth gate compares.
     peak: float
+    #: Peak over every state, including the unread ones: what the trajectory
+    #: actually reached, and what an independent integrator is compared to.
+    full_peak: float
     tol_rel_diff: float
     detail: str
+
+
+def _terminal_paths(comp) -> frozenset:
+    """Store paths nothing in ``comp`` reads; empty if the structure cannot be
+    read — a screen must never be the thing that fails."""
+    from hallsim.structure import terminal_states
+
+    try:
+        keys = list(comp.store_keys())
+        return frozenset(keys[i] for i in terminal_states(comp, keys))
+    except Exception as exc:
+        log.warning(
+            "could not read which paths are read (%s: %s); every state is "
+            "judged, so an accumulator may read as growth.",
+            type(exc).__name__,
+            exc,
+        )
+        return frozenset()
+
+
+def _unread_in_field(comp, candidates, states) -> frozenset:
+    """Of ``candidates``, those whose column is exactly zero in the RHS at
+    every probed state.
+
+    A declared dependency that omits a read leaves a state's column empty in
+    the sparsity pattern while the field excites it, so terminality is checked
+    against the field as well as the declaration — otherwise an
+    under-declaration turns into hidden divergence.
+    """
+    if not candidates:
+        return frozenset()
+    try:
+        keys = list(comp.store_keys())
+        rhs, _ = comp.build_rhs()
+        index = {k: i for i, k in enumerate(keys)}
+        probes = [comp.initial_state_vec()] + [
+            jnp.asarray(s) for s in (states or ())
+        ]
+
+        def moves(j):
+            tangent = jnp.zeros(len(keys)).at[j].set(1.0)
+            return any(
+                float(
+                    jnp.max(
+                        jnp.abs(
+                            jax.jvp(lambda y: rhs(0.0, y), (p,), (tangent,))[1]
+                        )
+                    )
+                )
+                != 0.0
+                for p in probes
+            )
+
+        return frozenset(
+            p for p in candidates if p in index and not moves(index[p])
+        )
+    except Exception:
+        return frozenset()
 
 
 def _verdict(
@@ -388,17 +473,31 @@ def _verdict(
     rtol_loose,
     rtol_tight,
     atol: float = DEFAULT_ATOL,
+    terminal: np.ndarray | None = None,
 ) -> _Verdict:
     finite = bool(np.all(np.isfinite(y_tight)))
-    peak = float(np.nanmax(np.abs(y_tight))) if y_tight.size else 0.0
-    init_scale = max(float(np.max(np.abs(y_tight[0]))) if finite else 0.0, 1.0)
+    # Growth and collapse are judged on the states something reads, because an
+    # unread one accumulates by construction. Every column still reports its
+    # own peak and its own tolerance sensitivity.
+    # Every column terminal leaves nothing to judge growth on, and judging
+    # them instead would make the verdict turn on whether one bounded state
+    # happens to sit beside them.
+    core_t = y_tight
+    if terminal is not None and terminal.any():
+        core_t = y_tight[..., ~terminal]
+    all_terminal = core_t.shape[-1] == 0 if core_t.ndim else True
+    if all_terminal:
+        core_t = np.zeros_like(y_tight[..., :1])
+    peak = float(np.nanmax(np.abs(core_t))) if core_t.size else 0.0
+    full_peak = float(np.nanmax(np.abs(y_tight))) if y_tight.size else 0.0
+    init_scale = max(float(np.max(np.abs(core_t[0]))) if finite else 0.0, 1.0)
     final_peak = (
-        float(np.max(np.abs(y_tight[int(0.9 * len(y_tight)) :])))
+        float(np.max(np.abs(core_t[int(0.9 * len(core_t)) :])))
         if finite
         else float("inf")
     )
     mid_peak = (
-        float(np.max(np.abs(y_tight[: int(0.5 * len(y_tight))])))
+        float(np.max(np.abs(core_t[: int(0.5 * len(core_t))])))
         if finite
         else 0.0
     )
@@ -408,8 +507,10 @@ def _verdict(
     # Collapsed to nothing on its own scale, or below what the solver can
     # resolve: an absolute floor alone would call every molar-scale model
     # dead.
-    vanishing = finite and bool(
-        np.all(np.abs(y_tight[-1]) < max(atol, 1e-6 * peak))
+    vanishing = (
+        finite
+        and not all_terminal
+        and bool(np.all(np.abs(core_t[-1]) < max(atol, 1e-6 * peak)))
     )
 
     # Domain violation: a state that starts non-negative but dips materially
@@ -424,12 +525,21 @@ def _verdict(
         neg_thresh = -0.02 * np.maximum(np.max(np.abs(y_tight), axis=0), 1e-12)
         negative = bool(np.any(started_nonneg & (most_neg < neg_thresh)))
 
-    scale = max(peak, 1e-12)
-    tol_rel_diff = (
-        float(np.nanmax(np.abs(y_loose - y_tight)) / scale)
-        if y_loose.shape == y_tight.shape and finite
-        else float("inf")
-    )
+    # Every column counts, each against its own scale: an unread column shares
+    # its scale with nothing, so normalising it by the peak of the states that
+    # are read would hide a solver-dependent accumulator behind them.
+    tol_rel_diff = float("inf")
+    if finite and y_loose.shape == y_tight.shape:
+        per_column = np.nanmax(np.abs(y_loose - y_tight), axis=0)
+        column_scale = np.maximum(
+            np.nanmax(np.abs(y_tight), axis=0), max(atol, 1e-12)
+        )
+        core_scale = max(peak, 1e-12)
+        if terminal is not None and terminal.size == per_column.size:
+            column_scale = np.where(terminal, column_scale, core_scale)
+        else:
+            column_scale = np.full_like(per_column, core_scale)
+        tol_rel_diff = float(np.nanmax(per_column / column_scale))
     tolerance_sensitive = tol_rel_diff > tol_rel_threshold
 
     detail = ""
@@ -451,6 +561,7 @@ def _verdict(
         tolerance_sensitive=tolerance_sensitive,
         negative=negative,
         peak=peak,
+        full_peak=full_peak,
         tol_rel_diff=tol_rel_diff,
         detail=detail,
     )
@@ -746,6 +857,7 @@ def screen(
         **sched_kwargs,
     )
     state = composite.initial_state()
+    parent_terminal = _terminal_paths(composite)
     reports = []
     for name, window in windows.items():
         proc = _on_native_clock(procs[name])
@@ -772,9 +884,12 @@ def screen(
             continue
         parent_row = composite.topology.get(name, {})
         start = {}
+        member_terminal = set()
         for port, own in solo.topology[name].items():
             for own_path, parent_path in zip(own, parent_row.get(port, own)):
                 start[own_path] = state[parent_path]
+                if parent_path in parent_terminal:
+                    member_terminal.add(own_path)
         defaults = np.asarray(solo.initial_state_vec())
         solo = solo.with_initial(start)
         moved = not np.allclose(defaults, np.asarray(solo.initial_state_vec()))
@@ -784,7 +899,14 @@ def screen(
             else ""
         )
         reports.append(
-            _screen_member(solo, name, window, start_note=note, **settings)
+            _screen_member(
+                solo,
+                name,
+                window,
+                start_note=note,
+                terminal_paths=frozenset(member_terminal),
+                **settings,
+            )
         )
     return reports
 
@@ -804,6 +926,7 @@ def _screen_member(
     check_tunability,
     input_probe,
     start_note="",
+    terminal_paths=None,
     **sched_kwargs,
 ) -> ScreenReport:
     proc = comp.processes[name]
@@ -894,6 +1017,20 @@ def _screen_member(
             rtol_tight=rtol_tight,
         )
 
+    # Terminality is a property of the composite under certification, not of
+    # the one-process wrapper this member runs in: inside the wrapper a path a
+    # neighbour reads looks unread. `screen` passes what the parent says;
+    # only a lone process falls back to the wrapper.
+    if terminal_paths is None:
+        terminal_paths = _terminal_paths(comp)
+    terminal_paths = _unread_in_field(comp, terminal_paths, sampled)
+    mask_full = np.asarray(
+        [k in terminal_paths for k in kept_keys], dtype=bool
+    )
+
+    def terminal_of(y):
+        return mask_full if mask_full.size == y.shape[-1] else None
+
     v = _verdict(
         y_tight,
         y_loose,
@@ -902,6 +1039,7 @@ def _screen_member(
         rtol_loose,
         rtol_tight,
         atol=atol,
+        terminal=terminal_of(y_tight),
     )
     if loose_failed:
         v.tolerance_sensitive = True
@@ -928,6 +1066,7 @@ def _screen_member(
                 rtol_loose,
                 rtol_tight,
                 atol=atol,
+                terminal=terminal_of(yt),
             )
         except Exception:
             v_driven = None
@@ -943,16 +1082,18 @@ def _screen_member(
     growing = False
     if v.exploding:
         native = _native_finite(proc, t_end, n_save, atol, y0=species_start)
-        if native is not None and native[0] <= 1e-12 * max(v.peak, 1.0):
+        if native is not None and native[0] <= 1e-12 * max(v.full_peak, 1.0):
             # A flat-zero reference saw none of the dynamics (a dose that
             # enters through an event or a rate-ruled parameter it does not
             # carry) and says nothing about this run.
             native = None
         if native is not None and native[1]:
+            # The reference integrates every species, so it compares against
+            # the whole-state peak rather than the gated one.
             agree = (
-                np.isfinite(v.peak)
-                and native[0] <= 1.5 * v.peak
-                and v.peak <= 1.5 * native[0]
+                np.isfinite(v.full_peak)
+                and native[0] <= 1.5 * v.full_peak
+                and v.full_peak <= 1.5 * native[0]
             )
             if agree:
                 # Both integrators reach the same peak: the model grows
@@ -993,7 +1134,9 @@ def _screen_member(
                 "tunes only under the implicit solver (auto_stiffness=True)",
             )
 
-    tau, state, at_rest_detail = _rest_verdict(comp, t_end, n_save)
+    tau, state, at_rest_detail = _rest_verdict(
+        comp, t_end, n_save, exclude=terminal_paths
+    )
     if at_rest_detail:
         v.detail = _and(v.detail, at_rest_detail)
     constant_zero = tuple(
@@ -1008,6 +1151,13 @@ def _screen_member(
             f"never leaves zero: {', '.join(constant_zero)}; parameters "
             "reachable only through these are unidentifiable here",
         )
+    outsized = tuple(
+        k
+        for j, k in enumerate(kept_keys)
+        if k in terminal_paths
+        and j < y_tight.shape[-1]
+        and float(np.nanmax(np.abs(y_tight[..., j]))) > v.peak
+    )
 
     detail = "; ".join(s for s in (start_note, v.detail) if s)
     return ScreenReport(
@@ -1015,7 +1165,8 @@ def _screen_member(
         exploding=v.exploding,
         vanishing=v.vanishing,
         tolerance_sensitive=v.tolerance_sensitive,
-        max_abs=v.peak,
+        max_abs=v.full_peak,
+        terminal=outsized,
         tol_rel_diff=v.tol_rel_diff,
         detail=detail,
         framework_suspect=framework_suspect,
@@ -1033,7 +1184,7 @@ def _screen_member(
     )
 
 
-def _rest_verdict(comp, t_end: float, n_save: int):
+def _rest_verdict(comp, t_end: float, n_save: int, exclude=None):
     """``(tau, state, detail)`` for the not-at-rest flag on a solo process.
 
     Flags when the fastest state's τ is below the save interval: that state has
@@ -1045,7 +1196,7 @@ def _rest_verdict(comp, t_end: float, n_save: int):
     from hallsim.steady_state import is_autonomous
 
     try:
-        tau, state = rest_timescale(comp)
+        tau, state = rest_timescale(comp, exclude=exclude)
     except Exception:  # a screen must never be the thing that fails
         return float("inf"), "", ""
     save_dt = t_end / max(n_save, 1)

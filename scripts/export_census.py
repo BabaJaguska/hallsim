@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from datetime import date
 from pathlib import Path
 
@@ -75,6 +76,48 @@ def export_models(run: Path, out: Path, stamp: str, replace: bool) -> Path:
     return dest
 
 
+def _pmids(column: pd.Series) -> pd.Series:
+    """The column as PubMed ids, empty where there is none — a DOI is not one.
+
+    Nullable ``Int64`` because a mixed-type column makes ``read_csv`` warn and
+    infer differently per chunk.
+    """
+    return pd.to_numeric(column, errors="coerce").astype("Int64")
+
+
+def _count(value) -> float:
+    """A count from a raw row, zero where absent or not a number. A JSON
+    ``NaN`` is truthy, so ``or 0`` leaves it in and poisons a comparison."""
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return n if math.isfinite(n) else 0.0
+
+
+def _best_row_per_accession(rows: list[dict]) -> list[dict]:
+    """One row per accession: a named control first, then arms, then
+    timepoints, then whether the design was recovered.
+
+    Two routes enumerate the same GEO series — its curated DataSet and the
+    series itself — and the mirror logic does not collapse them, so an
+    accession arrives twice with two designs that disagree.
+    """
+    best: dict[str, tuple] = {}
+    for row in rows:
+        control = str(row.get("control") or "").strip()
+        rank = (
+            bool(control),
+            _count(row.get("n_arms")),
+            _count(row.get("n_timepoints")),
+            bool(row.get("design_recovered")),
+        )
+        key = str(row.get("accession"))
+        if key not in best or rank > best[key][0]:
+            best[key] = (rank, row)
+    return [row for _, row in best.values()]
+
+
 def export(run: Path, out: Path, stamp: str, replace: bool) -> Path:
     kept = []
     total = 0
@@ -82,7 +125,12 @@ def export(run: Path, out: Path, stamp: str, replace: bool) -> Path:
         total += 1
         if row.get("loadable"):
             kept.append({c: row.get(c) for c in COLUMNS})
+    before = len(kept)
+    kept = _best_row_per_accession(kept)
+    if before != len(kept):
+        print(f"deduplicated {before - len(kept)} repeat enumerations")
     frame = pd.DataFrame(kept, columns=COLUMNS)
+    frame["pubmed"] = _pmids(frame["pubmed"])
     dest = out / f"datasets_loadable_{stamp}.csv.gz"
     frame.to_csv(dest, index=False, compression="gzip")
     if replace:

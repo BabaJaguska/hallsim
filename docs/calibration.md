@@ -6,21 +6,26 @@ held-out splits, priors, and what it takes to differentiate through a stiff
 multi-model composite. Every reader (GEO and GeneLab expression,
 MetaboLights and Metabolomics Workbench metabolomics, PRIDE proteomics;
 see [architecture](architecture.md)) returns the same log2 fold-change
-contrast; a species annotated with ChEBI or UniProt is compared by
-identity, a transcriptome through the reporters below or a regulon. The
+contrast; a species annotated with ChEBI or UniProt is joined to it by
+identity (`derive_readouts`), a transcriptome through a stated
+correspondence or a regulon head. The
 runnable end-to-end example is
 [`demos/multi_hallmark_calibrate.py`](../demos/multi_hallmark_calibrate.py).
 
 ## Gene reporters
 
-Mechanistic states are validated against transcriptomic data via
-**single-gene reporters** ([`hallsim.gene_reporters`](../src/hallsim/gene_reporters.py)):
-one canonical reporter gene per mechanistic store path, with a
-literature-anchored sign and a per-reporter trajectory summary. The
-multi-hallmark composite's reporters:
+Mechanistic states are validated against measured data one quantity at a time
+([`hallsim.gene_reporters`](../src/hallsim/gene_reporters.py)): one measured
+quantity per store path, with a sign and a per-readout trajectory summary. No
+set ships — `derive_readouts` builds them from the species' annotations where
+an identifier exists, and the caller states the rest. The multi-hallmark
+composite states its own, and they are a test workload rather than a
+recommendation:
 
-<!-- reporters:start — checked against MULTI_HALLMARK_REPORTERS + PROTEOSTASIS_REPORTERS by
-     tests/unit/test_gene_reporters.py; edit the code, then this table. -->
+<!-- reporters:start — checked against demos.models.multi_hallmark's
+     MULTI_HALLMARK_REPORTERS + PROTEOSTASIS_REPORTERS by
+     tests/unit/test_gene_reporters.py; edit the code, then this table.
+     They are the demo composite's own, not a set the framework ships. -->
 
 | Gene | Store path | Summary | Note |
 |---|---|---|---|
@@ -107,9 +112,12 @@ for wiring any composite to any held-out gene-expression dataset:
 
 ```python
 from hallsim.calibration import Arm, CalibrationProblem, Condition, FitParam
-from hallsim.gene_reporters import GeneExpressionDataset, MULTI_HALLMARK_REPORTERS
+from hallsim.gene_reporters import GeneExpressionDataset
 from demos.models.hallmarks import HALLMARK_REGISTRY
-from demos.models.multi_hallmark import build_multi_hallmark_composite
+from demos.models.multi_hallmark import (
+    MULTI_HALLMARK_REPORTERS,
+    build_multi_hallmark_composite,
+)
 from demos.multi_hallmark_calibrate import (
     PLATFORM, SAMPLE_POSITION_GROUPS, SERIES_MATRIX, fetch_dataset)
 

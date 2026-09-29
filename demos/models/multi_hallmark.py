@@ -78,6 +78,11 @@ from hallsim.models.hill_edge import (
     place_hill_gate_for_crossing,
 )
 from demos.models.sbml import sbml_source
+from hallsim.gene_reporters import (
+    Readout,
+    zerophase_mean,
+    zerophase_rms_raw,
+)
 from hallsim.sbml_import import process_from_sbml
 
 DP14_SBML_PATH = sbml_source(
@@ -450,3 +455,141 @@ def _add_proteostasis(processes: dict, topology: dict, dp14) -> None:
         "parts": tuple(f"p07/{name}" for name in PROCTOR07_AGGREGATE_POOLS),
         "total": "p07/aggregates",
     }
+
+
+# ── Readouts for this composite ────────────────────────────────────
+#
+# Each names a store path of this composite, so they live with it rather
+# than in the framework: `hallsim.gene_reporters` ships no reporter set,
+# because a shipped set becomes the one everybody scores against.
+
+MULTI_HALLMARK_REPORTERS: list[Readout] = [
+    Readout(
+        path="dp14/CDKN1A",
+        key="CDKN1A",
+        sign=+1,
+        summary=zerophase_mean(tau=2.0),
+        description=(
+            "p21/CIP1/WAF1 — senescence and cell-cycle arrest marker. "
+            "DallePezze 2014 models CDKN1A as transcribed by FoxO3a in "
+            "the presence of DNA damage and degraded by phospho-Akt; "
+            "DP14 has no explicit p53 species, so CDKN1A here is a "
+            "senescence-state readout rather than a direct p53 readout."
+        ),
+        reference="el-Deiry et al. 1993, Cell 75:817–825",
+    ),
+    Readout(
+        path="dp14/SA_beta_gal",
+        key="GLB1",
+        sign=+1,
+        summary=zerophase_mean(tau=2.0),
+        description=(
+            "β-galactosidase (GLB1) — the canonical senescence-associated "
+            "SA-β-gal marker; DallePezze 2014 models SA-β-gal directly, so "
+            "GLB1 reads the senescence-state axis at the transcript level."
+        ),
+        reference="Dimri et al. 1995, PNAS 92:9363–9367",
+    ),
+    Readout(
+        path="dp14/FoxO3a",
+        key="BNIP3",
+        sign=+1,
+        summary=zerophase_mean(tau=2.0),
+        description=(
+            "BNIP3 — BCL2-interacting mitophagy receptor and a FoxO3 "
+            "transcriptional target; reads DP14's active FoxO3a, the same "
+            "TF-activity→target mapping DDB2 uses for p53. Reports the "
+            "FoxO-driven autophagy/mitophagy arm — the mTOR→autophagy program "
+            "DP14 is built around — downstream of nutrient sensing."
+        ),
+        reference="Mammucari et al. 2007, Cell Metab 6:458–471",
+    ),
+    Readout(
+        path="gz06/x",
+        key="DDB2",
+        sign=+1,
+        summary=zerophase_rms_raw(tau=0.75),
+        description=(
+            "Damage-specific DNA Binding Protein 2 — direct p53 "
+            "transcription target, mapped to GZ06's p53 (x). Read as the "
+            "lag-free RMS amplitude √⟨x²⟩ of the raw p53 pulse (zero-phase over "
+            "x²): under GZ06's ψ-cancellation the mean ⟨x⟩ is damage-blind "
+            "while the oscillation amplitude grows with damage. Post-hoc on the "
+            "raw trajectory — no integral state to accumulate or lag."
+        ),
+        reference="Hwang, Ford, Hanawalt & Chu 1999, PNAS 96:424–428",
+    ),
+    Readout(
+        path="gz06/y0",
+        key="MDM2",
+        sign=+1,
+        summary=zerophase_rms_raw(tau=0.75),
+        description=(
+            "MDM2 — the canonical p53 transcriptional target, mapped to GZ06's "
+            "y0, which Table I defines as the 'Mdm2 precursor... representing, "
+            "for example, Mdm2 mRNA'. A transcript reporter reads the "
+            "transcript: y is the protein (UniProt Q00987). Read as the "
+            "lag-free RMS amplitude √⟨y0²⟩ of the raw trajectory, as DDB2 "
+            "reads p53: under GZ06's ψ-cancellation the mean of y0 is as "
+            "damage-blind as the mean of x, so a mean reporter can only move "
+            "by shifting the fixed point, which the fit did by damping the "
+            "oscillator; the amplitude is the channel damage actually drives."
+        ),
+        reference="Barak et al. 1993, EMBO J 12:461–468",
+    ),
+]
+
+PROTEOSTASIS_REPORTERS: list[Readout] = [
+    Readout(
+        path="p07/MisP",
+        key="HSPA1A",
+        sign=+1,
+        summary=zerophase_mean(tau=2.0),
+        description=(
+            "HSP70 (HSPA1A) — the canonical HSF1 target induced by misfolded "
+            "protein load; reads Proctor 2007's free misfolded pool MisP. "
+            "The model has no chaperone arm, so this is the load the heat-"
+            "shock response would answer, not the response itself."
+        ),
+        reference="Morimoto 1998, Genes Dev 12:3788–3796",
+    ),
+]
+
+#: p62 on the aggregate total. Not in the default set: Proctor 2007 starts
+#: with no aggregates and accumulates them without clearance, so against a
+#: day-0 reference the transcript would read the model's own filling of an
+#: empty pool (+1.7 log2 in every arm), not a response. Usable with a
+#: time-matched control (an arm referencing it) or an aged starting state.
+SQSTM1_REPORTER = Readout(
+    path="p07/aggregates",
+    key="SQSTM1",
+    sign=+1,
+    summary=zerophase_mean(tau=2.0),
+    description=(
+        "p62 (SQSTM1) — induced by aggregate load through NRF2 and TFEB, "
+        "and itself the receptor that ships aggregates to autophagy. "
+        "Reads the sum of Proctor 2007's aggregate pools (free, "
+        "proteasome-bound, sequestered) as one path."
+    ),
+    reference=(
+        "Jain et al. 2010, J Biol Chem 285:22576–22591; "
+        "Bjørkøy et al. 2005, J Cell Biol 171:603–614"
+    ),
+)
+
+#: Free ubiquitin as a transcript reporter. Not in the default set: Proctor
+#: 2007 keeps ubiquitin as a closed pool (E1 charging drains it, only
+#: degradation returns it, nothing makes it), so a treatment that lowers
+#: misfolding drains the free pool by bookkeeping, and a UBB transcript
+#: cannot track that.
+UBB_REPORTER = Readout(
+    path="p07/Ub",
+    key="UBB",
+    sign=-1,
+    summary=zerophase_mean(tau=2.0),
+    description=(
+        "UBB — polyubiquitin B; reads Proctor 2007's free Ub with a negative "
+        "sign, the transcript answering depletion of the pool."
+    ),
+    reference="Ryu et al. 2007, J Biol Chem 282:36592–36602",
+)

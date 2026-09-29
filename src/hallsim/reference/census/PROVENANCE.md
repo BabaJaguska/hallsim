@@ -41,15 +41,29 @@ the count, so read those beside `n_species` before writing a deposit off.
 
 The 1,636 at `clean` through `clock` all run. The last three stages do not.
 
-## `datasets_loadable_2026-09-28.csv.gz` — 60,931 deposits, 20 columns
+## `datasets_loadable_2026-09-28.csv.gz` — 58,898 deposits, 20 columns
+
+One row per accession. The run holds 2,033 more: more than one route
+enumerates the same GEO series — its curated DataSet and the series itself —
+and the mirror logic does not collapse those, so the same accession arrived
+twice with two designs that disagreed about the control in 1,401 cases and the
+arm count in 725. The export keeps the row a reader would want, preferring a
+named control, then arms, then timepoints. The duplication itself is still in
+the census and wants fixing there.
+
+`pubmed` is a PubMed id or empty. Two deposits cite a DOI or "in preparation"
+instead; a DOI is not a PubMed id, so those are empty here and both are still
+in the run's raw rows. Pass `dtype={"pubmed": "Int64"}` to read them as
+integers — with empties present a plain read infers a float and shows
+`21772264.0`.
 
 The loadable subset of the data census: deposits with a contrast, a measured
 quantity, a model match, and a reader that can open them. Produced by
 `hallsim.dataset_census`. The full table is 367,373 rows and 847 MB and is not
 shipped; regenerate it if you need the rows that did not make this cut.
 
-Readers: series-matrix 31,520, counts-file 25,566, maf 2,183, mwtab 1,629,
-petab 31, mztab 2. Of these, 29,382 are human and 8,241 carry three or more
+Readers: series-matrix 29,487, counts-file 25,566, maf 2,183, mwtab 1,629,
+petab 31, mztab 2. Of these, 28,439 are human and 7,770 carry three or more
 timepoints.
 
 **31 rows are PEtab problems, and they are the only ones needing no bridge.** A
@@ -63,19 +77,19 @@ stopped at, so `stage == "loadable"` selects rows that reached that gate and
 **failed** it. The rows here were selected on the `loadable` flag, and all of
 them carry `stage == "pass"`.
 
-**A contrast is not always a design you can set up today.** 290 rows carry a
+**A contrast is not always a design you can set up today.** 286 rows carry a
 contrast their source asserts — in a study factor, or an abstract naming its
 timepoints — without the groups ever being recovered from the sample titles, so
 `n_arms` and `control` are empty on a row that does hold a real course. Reading
 those means opening the deposit's own metadata. `design_recovered` is the column
-that separates them. Of the 60,931 rows, 33,119 name a control and 11,562 carry
-more than one timepoint, but only **5,582 have both**, 2,628 of them human.
+that separates them. Of the 58,898 rows, 32,088 name a control and 10,931 carry
+more than one timepoint, but only **5,297 have both**, 2,494 of them human.
 
 **`n_models` is not a per-dataset match score.** It counts the deposits the
 matching route reached, and only the `direct` route selects on the dataset's
 own identifiers. The other routes select on what a deposit carries, so every
 transcriptome reaches the same 119 models-with-transcription-factors — which is
-why one value covers 57,092 rows. `n_same_species` is coarse for the same
+why one value covers 55,059 rows. `n_same_species` is coarse for the same
 reason. `n_shared_ids` carries the per-dataset strength and is above zero on
 894 rows, being zero off the direct route.
 

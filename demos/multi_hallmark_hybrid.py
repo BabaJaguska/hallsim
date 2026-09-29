@@ -57,7 +57,7 @@ from hallsim.handles import apply_handles  # noqa: E402
 from demos.models.hallmarks import HALLMARK_REGISTRY  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.sbml_import import process_from_sbml  # noqa: E402
-from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS  # noqa: E402
+from demos.models.multi_hallmark import MULTI_HALLMARK_REPORTERS  # noqa: E402
 from demos.models.multi_hallmark import (  # noqa: E402
     GZ06_SBML_PATH,
     CANONICAL_TIME_SECONDS,

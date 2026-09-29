@@ -24,6 +24,15 @@ class MeasuredDataset:
 
     sample_groups: dict[str, list]
 
+    #: Namespace :attr:`log_values` is indexed in, so a species carrying the
+    #: same identifier joins to it. Empty when the index is not identifiers.
+    measures: str = ""
+
+    @property
+    def measured(self) -> pd.Index:
+        """The distinct quantities measured, keyed as :attr:`measures`."""
+        return self.log_values.index.unique()
+
     @property
     def log_values(self) -> pd.DataFrame:
         """``quantity × sample`` on a log2 scale, so a fold change is a

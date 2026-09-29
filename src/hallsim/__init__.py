@@ -14,10 +14,10 @@ Hallmark handles, validation, plotting, and SBML import are imported on
 demand from their respective submodules — they aren't surfaced here to
 keep the top-level namespace small.
 
-Validation against transcriptomic data is via
-:mod:`hallsim.gene_reporters` — a one-to-one mapping from mechanistic
-state variables to canonical reporter genes, evaluated by sign agreement
-and Spearman concordance.
+Validation against measured data is via :mod:`hallsim.gene_reporters` — one
+mechanistic observable to one measured quantity, derived from the species'
+annotations or stated by the caller, evaluated by sign agreement and Spearman
+concordance.
 """
 
 # SBML-derived ODEs are integrated in float64. In float32 the RHS noise

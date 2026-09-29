@@ -811,3 +811,33 @@ def test_the_reference_arm_is_found_without_a_control_word():
     assert reference_arm(("WT", "WT plus drug")) == "WT"
     assert reference_arm(("Young", "Old")) is None
     assert reference_arm(("only one",)) is None
+
+
+def test_a_factor_that_only_labels_its_groups_is_not_the_design():
+    """Atlas states its arms as factor values, and a factor may take a
+    distinct value in every group — an individual, a specimen id — which
+    labels the groups rather than grading them."""
+    from hallsim.search.datasets import _factored_arms
+
+    # 41 individuals against two subcellular fractions: the design is the
+    # fraction, so the per-individual factor goes.
+    nuisance = [
+        ([f"S{i}", "microsomes" if i % 2 else "S9"], [], 1) for i in range(41)
+    ]
+    assert {a for a, _, _ in _factored_arms(nuisance)} == {"S9", "microsomes"}
+
+    # Two groups, one factor, two values: a genuine contrast, kept.
+    contrast = [(["social play"], [], 3), (["non-behavior"], [], 3)]
+    assert {a for a, _, _ in _factored_arms(contrast)} == {
+        "social play",
+        "non-behavior",
+    }
+
+    # Distinct conditions that each appear once are conditions, not ids:
+    # token frequency would prune them, factor cardinality keeps them.
+    conditions = [
+        (["Kupffer cell", "normal"], [], 2),
+        (["cholangiocyte", "normal"], [], 2),
+        (["hepatocyte", "carcinoma"], [], 2),
+    ]
+    assert len({a for a, _, _ in _factored_arms(conditions)}) == 3

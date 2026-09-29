@@ -15,7 +15,7 @@ calibration); ``"reverse"`` is one VJP and wins for many parameters
 
     problem = CalibrationProblem(
         composite=my_composite,
-        readouts=MULTI_HALLMARK_REPORTERS,
+        readouts=my_readouts,
         conditions={"ctrl": Condition(...), "DDIS": Condition(...)},
         data={"DDIS_vs_ctrl": ds.delta(...)},
         params={"rate": FitParam("dp14", "parameters.k")},

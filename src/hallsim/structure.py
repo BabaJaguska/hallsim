@@ -407,6 +407,43 @@ def jacobian_pattern(composite, keys=None) -> JacobianPattern:
     return JacobianPattern.from_entries(len(keys), rows, cols)
 
 
+def terminal_states(composite, keys=None) -> tuple[int, ...]:
+    """Indices of states nothing in ``composite`` reads — a degradation
+    collector, a flat running integral, an SBML sink.
+
+    Such a state has no fixed point, and within this composite its size
+    reaches nothing else. **That holds only for the composite passed in**: a
+    member's exported path is unread in a one-process wrapper and read by its
+    neighbour in the composite, so ask the composite being reasoned about.
+
+    An ASSIGNED path is recomputed from its rule and is never terminal. A
+    dependency is counted where it is declared, without following an ASSIGNED
+    path through to what its rule reads: over-counting a reader only keeps a
+    state out of the set, which is the safe direction. A process with no
+    declared dependencies — DISCRETE, EVENT, stochastic — has every path it
+    touches counted as read. Structure only, trace-safe.
+    """
+    keys = composite.store_keys() if keys is None else list(keys)
+    idx = {k: i for i, k in enumerate(keys)}
+    read = set(np.asarray(composite.assigned_indices(keys)).tolist())
+    declared = set(composite.continuous_processes())
+
+    def mark(name, ports):
+        topo = composite.topology.get(name, {})
+        for port in ports:
+            for path in as_paths(topo.get(port, f"{name}/{port}")):
+                if path in idx:
+                    read.add(idx[path])
+
+    for name, proc in composite.processes.items():
+        if name in declared:
+            for deps in proc.port_dependencies().values():
+                mark(name, deps)
+        else:
+            mark(name, proc.ports_schema())
+    return tuple(j for j in range(len(keys)) if j not in read)
+
+
 def compressed_jacobian(fn, y, pattern: JacobianPattern):
     """``∂fn/∂y`` at ``y`` as a dense ``(n, n)`` array, formed in
     ``pattern.n_colours`` forward passes rather than ``n``. Entries outside

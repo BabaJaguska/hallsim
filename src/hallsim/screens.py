@@ -23,11 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from hallsim.search.datasets import (
-    DatasetCandidate,
-    curie,
-    search_for_dataset,
-)
+from hallsim.search.datasets import DatasetCandidate, search_for_dataset
 from hallsim.search.models import model_files, search_for_model
 
 log = logging.getLogger(__name__)
@@ -306,21 +302,20 @@ class Coverage:
 
 def coverage(candidate: DatasetCandidate, composite, ontmap=None) -> Coverage:
     """What ``candidate`` measures of ``composite``, by ontology."""
-    from hallsim.reporter_wiring import store_ontology_map, tf_observables
+    from hallsim.reporter_wiring import (
+        paths_measuring,
+        store_ontology_map,
+        tf_observables,
+    )
 
     ontmap = store_ontology_map(composite) if ontmap is None else ontmap
     m = candidate.measured
-    measured_ids = {i.lower() for i in m.ids}
 
     def with_ns(ns: str) -> list[str]:
         return sorted(p for p, o in ontmap.items() if ns in o)
 
     def listed(ns: str) -> list[str]:
-        return sorted(
-            p
-            for p, o in ontmap.items()
-            if ns in o and curie(ns, o[ns]).lower() in measured_ids
-        )
+        return sorted(paths_measuring(ontmap, ns, m.ids))
 
     if m.modality == "proteomics":
         hit = listed("uniprot")

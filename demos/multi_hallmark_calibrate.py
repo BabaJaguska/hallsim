@@ -59,12 +59,12 @@ from hallsim.handles import with_handles  # noqa: E402
 from demos.models.hallmarks import HALLMARK_REGISTRY  # noqa: E402
 from hallsim.scheduler import Scheduler  # noqa: E402
 from hallsim.gene_reporters import (  # noqa: E402
-    MULTI_HALLMARK_REPORTERS,
-    PROTEOSTASIS_REPORTERS,
     GeneExpressionDataset,
     fetch_geo_series,
 )
 from demos.models.multi_hallmark import (  # noqa: E402
+    MULTI_HALLMARK_REPORTERS,
+    PROTEOSTASIS_REPORTERS,
     MULTI_HALLMARK_GRID as GRID,
     build_multi_hallmark_composite,
     GZ06_ALPHA_X_CONTROL,

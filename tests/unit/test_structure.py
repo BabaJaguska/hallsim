@@ -21,6 +21,7 @@ from hallsim.structure import (
     jacobian_pattern,
     rational_null_space,
     symbolic_field,
+    terminal_states,
 )
 
 
@@ -249,3 +250,57 @@ def test_symbolic_field_names_paths_and_parameters():
     )
     assert float(field.parameters["p0.tau"]) == 2.5
     assert field.opaque == ()
+
+
+def test_terminal_states_are_the_ones_no_derivative_reads():
+    """A flat integral's output and an assigned slot both carry an empty
+    column; only the first is an accumulator."""
+    comp = Composite(
+        processes={
+            "acc": RunningIntegral(power=1.0, tau=None, initial=0.0),
+            "leak": RunningIntegral(power=1.0, tau=2.0, initial=1.0),
+            "lvl": GainEdge(offset=0.0, gain=2.0, mode="level"),
+        },
+        topology={
+            "acc": {"integral": "p/total", "source": "p/x"},
+            "leak": {"integral": "p/x", "source": "lvl/level"},
+            "lvl": {"source": "p/x", "signal": "lvl/level"},
+        },
+        semantic_validation=False,
+    )
+    keys = comp.store_keys()
+    named = {keys[i] for i in terminal_states(comp, keys)}
+    assert named == {"p/total"}
+
+
+def test_an_opaque_process_assigns_without_an_algebraic_cycle():
+    """Two ASSIGNED ports of one process come out of a single `assign` call
+    from the same inputs, so neither is an input to the other. Counting them
+    as such reported a cycle and left the pattern unbuildable."""
+
+    class Surrogate(Process):
+        def ports_schema(self):
+            return {
+                "drive": Port(role=PortRole.INPUT, default=1.0),
+                "a": Port(role=PortRole.ASSIGNED, default=0.0),
+                "b": Port(role=PortRole.ASSIGNED, default=0.0),
+                "x": Port(role=PortRole.EVOLVED, default=1.0),
+            }
+
+        def assign(self, t, state):
+            return {"a": 2.0 * state["drive"], "b": 3.0 * state["drive"]}
+
+        def derivative(self, t, state):
+            return {"x": state["a"] - state["b"]}
+
+    comp = Composite(
+        {"s": Surrogate()},
+        topology={
+            "s": {k: f"s/{k}" for k in ("drive", "a", "b", "x")},
+        },
+        semantic_validation=False,
+    )
+    keys = comp.store_keys()
+    pattern = jacobian_pattern(comp, keys)
+    fn, _ = _rhs(comp)
+    check_pattern(fn, comp.initial_state_vec(), pattern, keys)

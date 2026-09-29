@@ -86,7 +86,7 @@ def test_observer_hop_resolves_to_annotated_source():
 @pytest.mark.demo
 @pytest.mark.slow
 def test_multi_hallmark_reporter_verdicts(composite):
-    from hallsim.gene_reporters import MULTI_HALLMARK_REPORTERS
+    from demos.models.multi_hallmark import MULTI_HALLMARK_REPORTERS
 
     valid = {
         "ok",
@@ -108,7 +108,6 @@ def test_multi_hallmark_reporter_verdicts(composite):
     # Anchored cases with an unambiguous wiring interpretation:
     assert status["DDB2"] == "ok"  # gz06/x=TP53 → DDB2 CollecTRI target
     assert status["CDKN1A"] == "proxy"  # protein read as own transcript
-    assert status["NFKBIA"] == "unannotated"  # no MIRIAM on IkBat
 
 
 @pytest.mark.demo

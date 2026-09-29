@@ -1,14 +1,11 @@
-"""Gene-reporter validation: one-to-one mapping from a mechanistic
-observable to a canonical reporter transcript.
+"""Gene-reporter validation: which measured quantity stands for which
+mechanistic observable, with an expected sign and no tunable parameters —
+calibration belongs to the mechanism, not the readout layer.
 
-Each entry in :data:`CANONICAL_REPORTERS` pairs one mechanistic quantity with
-the single gene whose expression is its textbook readout, plus an expected sign
-and a literature anchor. The mapping has **no tunable parameters** — calibration
-belongs to the mechanism, not the readout layer.
-
-This is the hand-built, one-gene-per-observable readout. It scores a composite
-against a handful of textbook transcripts; it does not scale to a transcriptome,
-which needs a fitted regulon head instead.
+**No reporter set ships here**: a shipped set becomes the one everyone scores
+against, whatever their biology. A correspondence is *derived* by identity
+join (:func:`derive_readouts`), *supplied* where no identifier exists, or
+*fitted* through a regulon head — an instrument, an assumption, and a model.
 
 Pipeline: run control and perturbed conditions, collapse each reporter's
 trajectory with :func:`summarize_reporters`, take Δ_gene via
@@ -29,6 +26,7 @@ import re
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from enum import StrEnum
 from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
@@ -301,39 +299,17 @@ def zerophase_rms_raw(tau: float):
     return summarize
 
 
-def cycle_average(fraction: float = 0.25):
-    """Mean over the last ``fraction`` of the *saved* trajectory points.
-
-    Endpoint-only (grid-based): phase-insensitive when the saves resolve
-    the oscillation, but with a coarse grid the points alias and it
-    degrades to ~the endpoint, and it cannot be evaluated at an arbitrary
-    query time. Prefer :func:`window_mean` over a
-    :class:`~hallsim.models.running_integral.RunningIntegral`, which is
-    exact and query-time-aware.
-
-    Parameters
-    ----------
-    fraction:
-        Fraction of the saved points to average over (default 0.25).
-    """
-    if not 0 < fraction <= 1:
-        raise ValueError(f"fraction must be in (0, 1]; got {fraction!r}")
-
-    def summarize(ts, y, query_times=None):
-        if query_times is not None:
-            raise NotImplementedError(
-                "cycle_average is grid-based and endpoint-only; use "
-                "window_mean (over a RunningIntegral) for trajectory "
-                "queries at arbitrary times."
-            )
-        n = int(y.shape[0])
-        k = max(1, int(round(n * fraction)))
-        return y[-k:].mean(axis=0)
-
-    return summarize
-
-
 # ── Reporter table ─────────────────────────────────────────────────
+
+
+class Provenance(StrEnum):
+    """Where a correspondence came from. An identity join is an instrument,
+    a stated one an assumption, a regulon head a model — scores report them
+    apart, so the three never merge into one number."""
+
+    DERIVED = "derived"
+    SUPPLIED = "supplied"
+    FITTED = "fitted"
 
 
 @dataclass(frozen=True)
@@ -349,6 +325,9 @@ class Readout:
     to :func:`last_value`; use :func:`window_mean` / :func:`window_rms` over a
     :class:`~hallsim.models.running_integral.RunningIntegral` for an
     oscillating state.
+
+    ``provenance`` is ``derived`` for an identity join, ``supplied`` for one
+    written by hand, ``fitted`` for a regulon head. Scores report them apart.
     """
 
     path: str
@@ -360,6 +339,16 @@ class Readout:
     #: Model units to data units, used only by an arm with no reference; a
     #: fold change cancels it. A fixed conversion, never fitted here.
     scale: float = 1.0
+    provenance: Provenance = Provenance.SUPPLIED
+
+    def __post_init__(self):
+        if self.sign not in (1, -1):
+            raise ValueError(
+                f"{self.path!r} -> {self.key!r}: sign is {self.sign}; a "
+                "readout moves with its reporter (+1) or against it (-1), "
+                "there is no third case."
+            )
+        object.__setattr__(self, "provenance", Provenance(self.provenance))
 
 
 def trajectory_readouts(*paths: str, scale: float = 1.0) -> list[Readout]:
@@ -369,6 +358,41 @@ def trajectory_readouts(*paths: str, scale: float = 1.0) -> list[Readout]:
     columns are the paths."""
     return [
         Readout(path=p, key=p, summary=last_value, scale=scale) for p in paths
+    ]
+
+
+def derive_readouts(
+    composite, dataset, *, summary=last_value, scale: float = 1.0
+) -> list[Readout]:
+    """Readouts where a species and the data name the same thing.
+
+    One per annotated store path whose identifier in ``dataset.measures`` the
+    dataset actually measures; ``sign`` is +1 because the two sides are one
+    quantity. No list to pick from, and it works on a deposit nobody has read.
+    A species with no identifier yields nothing here — state that one
+    yourself as a :class:`Readout`.
+    """
+    from hallsim.reporter_wiring import paths_measuring, store_ontology_map
+
+    space = dataset.measures
+    if not space:
+        raise ValueError(
+            f"{type(dataset).__name__} is not indexed by identifier, so "
+            "nothing joins to it by identity; supply the correspondences "
+            "instead."
+        )
+    matched = paths_measuring(
+        store_ontology_map(composite), space, dataset.measured
+    )
+    return [
+        Readout(
+            path=path,
+            key=matched[path],
+            summary=summary,
+            scale=scale,
+            provenance=Provenance.DERIVED,
+        )
+        for path in sorted(matched)
     ]
 
 
@@ -437,219 +461,6 @@ def oscillating_readout(
         reference=reference,
         summary=summary,
     )
-
-
-CANONICAL_REPORTERS: list[Readout] = [
-    Readout(
-        path="p53_activity",
-        key="CDKN1A",
-        sign=+1,
-        description=(
-            "p21/CIP1/WAF1 — direct p53 transcriptional target via a "
-            "well-characterized response element. Standard readout of "
-            "p53 transcriptional activity in DDR and senescence."
-        ),
-        reference="el-Deiry et al. 1993, Cell 75:817–825",
-    ),
-    Readout(
-        path="mito_damage",
-        key="DDB2",
-        sign=+1,
-        description=(
-            "Damage-specific DNA Binding Protein 2 — direct p53 target "
-            "induced by DDR signaling. Transcriptional readout of "
-            "accumulated DNA damage. Routed through a p53 oscillator "
-            "(e.g. Geva-Zatorsky 2006) in the multi-hallmark composite, "
-            "so the summary is a cycle-average rather than the endpoint: "
-            "the final-time phase of the oscillator is arbitrary, but "
-            "the cycle-mean is phase-insensitive and matches bulk "
-            "transcriptomics' implicit population averaging."
-        ),
-        reference="Hwang, Ford, Hanawalt & Chu 1999, PNAS 96:424–428",
-        summary=cycle_average(0.25),
-    ),
-    Readout(
-        path="ROS_algebraic",
-        key="HMOX1",
-        sign=+1,
-        description=(
-            "Heme oxygenase 1 — canonical Nrf2/ARE-driven antioxidant "
-            "response gene; standard transcriptional reporter of "
-            "oxidative stress."
-        ),
-        reference="Alam & Cook 2007, Antioxid Redox Signal 9:2499–2511",
-    ),
-    Readout(
-        path="NFKB_algebraic",
-        key="NFKBIA",
-        sign=+1,
-        description=(
-            "IκBα — direct NF-κB target via the autoregulatory negative "
-            "feedback loop. Among the cleanest transcriptional reporters "
-            "of NF-κB activity."
-        ),
-        reference="Sun et al. 1993, Science 259:1912–1915",
-    ),
-    Readout(
-        path="mito_function",
-        key="CYCS",
-        sign=+1,
-        description=(
-            "Cytochrome c — nuclear-encoded OXPHOS component whose "
-            "transcript level tracks PGC-1α-driven mitochondrial "
-            "biogenesis and OXPHOS capacity."
-        ),
-        reference="Scarpulla 2008, Physiol Rev 88:611–638",
-    ),
-    Readout(
-        path="mTOR_activity_algebraic",
-        key="EIF4EBP1",
-        sign=+1,
-        description=(
-            "4E-BP1 — mTORC1 substrate and mTOR-target gene. Gene-level "
-            "readout is intentionally noisier than kinase-level activity "
-            "in chronic stress; included so the mTOR axis is represented."
-        ),
-        reference="Brunn et al. 1997, Science 277:99–101",
-    ),
-]
-
-
-# ── Multi-hallmark composite reporters ─────────────────────────────
-#
-# These map directly to store paths in the DP14 + GZ06 composite,
-# unlike CANONICAL_REPORTERS which routes through ERiQ algebraic helpers.
-
-MULTI_HALLMARK_REPORTERS: list[Readout] = [
-    Readout(
-        path="dp14/CDKN1A",
-        key="CDKN1A",
-        sign=+1,
-        summary=zerophase_mean(tau=2.0),
-        description=(
-            "p21/CIP1/WAF1 — senescence and cell-cycle arrest marker. "
-            "DallePezze 2014 models CDKN1A as transcribed by FoxO3a in "
-            "the presence of DNA damage and degraded by phospho-Akt; "
-            "DP14 has no explicit p53 species, so CDKN1A here is a "
-            "senescence-state readout rather than a direct p53 readout."
-        ),
-        reference="el-Deiry et al. 1993, Cell 75:817–825",
-    ),
-    Readout(
-        path="dp14/SA_beta_gal",
-        key="GLB1",
-        sign=+1,
-        summary=zerophase_mean(tau=2.0),
-        description=(
-            "β-galactosidase (GLB1) — the canonical senescence-associated "
-            "SA-β-gal marker; DallePezze 2014 models SA-β-gal directly, so "
-            "GLB1 reads the senescence-state axis at the transcript level."
-        ),
-        reference="Dimri et al. 1995, PNAS 92:9363–9367",
-    ),
-    Readout(
-        path="dp14/FoxO3a",
-        key="BNIP3",
-        sign=+1,
-        summary=zerophase_mean(tau=2.0),
-        description=(
-            "BNIP3 — BCL2-interacting mitophagy receptor and a FoxO3 "
-            "transcriptional target; reads DP14's active FoxO3a, the same "
-            "TF-activity→target mapping DDB2 uses for p53. Reports the "
-            "FoxO-driven autophagy/mitophagy arm — the mTOR→autophagy program "
-            "DP14 is built around — downstream of nutrient sensing."
-        ),
-        reference="Mammucari et al. 2007, Cell Metab 6:458–471",
-    ),
-    Readout(
-        path="gz06/x",
-        key="DDB2",
-        sign=+1,
-        summary=zerophase_rms_raw(tau=0.75),
-        description=(
-            "Damage-specific DNA Binding Protein 2 — direct p53 "
-            "transcription target, mapped to GZ06's p53 (x). Read as the "
-            "lag-free RMS amplitude √⟨x²⟩ of the raw p53 pulse (zero-phase over "
-            "x²): under GZ06's ψ-cancellation the mean ⟨x⟩ is damage-blind "
-            "while the oscillation amplitude grows with damage. Post-hoc on the "
-            "raw trajectory — no integral state to accumulate or lag."
-        ),
-        reference="Hwang, Ford, Hanawalt & Chu 1999, PNAS 96:424–428",
-    ),
-    Readout(
-        path="gz06/y0",
-        key="MDM2",
-        sign=+1,
-        summary=zerophase_rms_raw(tau=0.75),
-        description=(
-            "MDM2 — the canonical p53 transcriptional target, mapped to GZ06's "
-            "y0, which Table I defines as the 'Mdm2 precursor... representing, "
-            "for example, Mdm2 mRNA'. A transcript reporter reads the "
-            "transcript: y is the protein (UniProt Q00987). Read as the "
-            "lag-free RMS amplitude √⟨y0²⟩ of the raw trajectory, as DDB2 "
-            "reads p53: under GZ06's ψ-cancellation the mean of y0 is as "
-            "damage-blind as the mean of x, so a mean reporter can only move "
-            "by shifting the fixed point, which the fit did by damping the "
-            "oscillator; the amplitude is the channel damage actually drives."
-        ),
-        reference="Barak et al. 1993, EMBO J 12:461–468",
-    ),
-]
-
-PROTEOSTASIS_REPORTERS: list[Readout] = [
-    Readout(
-        path="p07/MisP",
-        key="HSPA1A",
-        sign=+1,
-        summary=zerophase_mean(tau=2.0),
-        description=(
-            "HSP70 (HSPA1A) — the canonical HSF1 target induced by misfolded "
-            "protein load; reads Proctor 2007's free misfolded pool MisP. "
-            "The model has no chaperone arm, so this is the load the heat-"
-            "shock response would answer, not the response itself."
-        ),
-        reference="Morimoto 1998, Genes Dev 12:3788–3796",
-    ),
-]
-
-#: p62 on the aggregate total. Not in the default set: Proctor 2007 starts
-#: with no aggregates and accumulates them without clearance, so against a
-#: day-0 reference the transcript would read the model's own filling of an
-#: empty pool (+1.7 log2 in every arm), not a response. Usable with a
-#: time-matched control (an arm referencing it) or an aged starting state.
-SQSTM1_REPORTER = Readout(
-    path="p07/aggregates",
-    key="SQSTM1",
-    sign=+1,
-    summary=zerophase_mean(tau=2.0),
-    description=(
-        "p62 (SQSTM1) — induced by aggregate load through NRF2 and TFEB, "
-        "and itself the receptor that ships aggregates to autophagy. "
-        "Reads the sum of Proctor 2007's aggregate pools (free, "
-        "proteasome-bound, sequestered) as one path."
-    ),
-    reference=(
-        "Jain et al. 2010, J Biol Chem 285:22576–22591; "
-        "Bjørkøy et al. 2005, J Cell Biol 171:603–614"
-    ),
-)
-
-#: Free ubiquitin as a transcript reporter. Not in the default set: Proctor
-#: 2007 keeps ubiquitin as a closed pool (E1 charging drains it, only
-#: degradation returns it, nothing makes it), so a treatment that lowers
-#: misfolding drains the free pool by bookkeeping, and a UBB transcript
-#: cannot track that.
-UBB_REPORTER = Readout(
-    path="p07/Ub",
-    key="UBB",
-    sign=-1,
-    summary=zerophase_mean(tau=2.0),
-    description=(
-        "UBB — polyubiquitin B; reads Proctor 2007's free Ub with a negative "
-        "sign, the transcript answering depletion of the pool."
-    ),
-    reference="Ryu et al. 2007, J Biol Chem 282:36592–36602",
-)
 
 
 def summarize_reporters(
@@ -1247,6 +1058,8 @@ class GeneExpressionDataset(MeasuredDataset):
     gene_expr: pd.DataFrame
     sample_groups: dict[str, list]
 
+    measures = "hgnc.symbol"
+
     @classmethod
     def from_series_matrix(
         cls,
@@ -1393,20 +1206,41 @@ class ConcordanceResult:
     #: scores are NaN rather than a row of mismatches.
     predicted_change: bool = True
 
+    @property
+    def by_provenance(self) -> dict[str, tuple[int, int]]:
+        """``{provenance: (matches, compared)}`` — a derived row is an
+        identity join and a supplied one an assumption, so one score over
+        both hides which carried it."""
+        out: dict[str, list[int]] = {}
+        for r in self.rows:
+            acc = out.setdefault(r.reporter.provenance, [0, 0])
+            acc[0] += bool(r.sign_match)
+            acc[1] += 1
+        return {k: (v[0], v[1]) for k, v in sorted(out.items())}
+
     def __str__(self) -> str:
         lines = [
             f"{self.condition_name}: "
             f"sign agreement = {self.sign_agreement*100:.1f}% "
             f"({sum(r.sign_match for r in self.rows)}/{self.n_compared}), "
             f"Spearman r = {self.spearman_r:+.3f}",
-            f"  {'observable':<28}  {'gene':<10}  "
-            f"{'Δ_sim·sign':>12}  {'Δ_data':>10}  match",
         ]
+        split = self.by_provenance
+        if len(split) > 1:
+            lines.append(
+                "  by provenance: "
+                + ", ".join(f"{k} {m}/{n}" for k, (m, n) in split.items())
+            )
+        lines.append(
+            f"  {'observable':<28}  {'gene':<10}  {'from':<9}  "
+            f"{'Δ_sim·sign':>12}  {'Δ_data':>10}  match"
+        )
         for r in self.rows:
             mk = "OK" if r.sign_match else "X"
             lines.append(
                 f"  {r.reporter.path:<28}  "
                 f"{r.reporter.key:<10}  "
+                f"{r.reporter.provenance:<9}  "
                 f"{r.delta_sim:>+12.4f}  {r.delta_data:>+10.4f}  {mk}"
             )
         return "\n".join(lines)
@@ -1438,10 +1272,14 @@ def compute_concordance(
     condition_name:
         Label for the report (e.g. ``"DDIS_D14_vs_D00"``).
     reporters:
-        Defaults to :data:`CANONICAL_REPORTERS`.
+        The correspondences to score. Required — there is no default set,
+        because a default is what everyone ends up scoring against.
     """
-    if reporters is None:
-        reporters = CANONICAL_REPORTERS
+    if not reporters:
+        raise ValueError(
+            "no reporters given. Use derive_readouts for the ones the "
+            "annotations settle, and state the rest yourself."
+        )
 
     rows: list[ReporterRow] = []
     sims: list[float] = []
