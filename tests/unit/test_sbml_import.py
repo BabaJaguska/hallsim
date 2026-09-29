@@ -466,3 +466,106 @@ def test_jws_source_scheme_resolves_without_touching_biomodels(monkeypatch):
     path, name = sbml_import._resolve_source("jws:achcar2", None)
     assert path.endswith("achcar2.xml")
     assert name == "jws_achcar2"
+
+
+def test_an_assignment_rule_species_keeps_its_annotation():
+    """A curated deposit states its observables as assignment-rule species and
+    annotates those, so dropping their ontology loses exactly the ones a
+    readout is built from."""
+    from hallsim.process import PortRole
+    from hallsim.sbml_import import process_from_sbml
+    from demos.models.sbml import sbml_source
+
+    path = sbml_source(
+        "rateras2015", "stat1_BIOMD0000000585.xml", "BIOMD0000000585"
+    )
+    schema = process_from_sbml(str(path), name="stat1").ports_schema()
+    annotated = {
+        n: s.ontology
+        for n, s in schema.items()
+        if s.role is PortRole.ASSIGNED and s.ontology
+    }
+    assert annotated, "assignment-rule ports lost their MIRIAM annotations"
+    assert annotated["Stat1ex"]["hgnc.symbol"] == "STAT1"
+
+
+class TestLiveParameterDrivers:
+    """An assignment rule reading a driven constant must see the driven
+    value, and a promoted constant must not start at zero."""
+
+    def _proc(self):
+        from hallsim.sbml_import import process_from_sbml
+        from demos.models.sbml import sbml_source
+
+        path = sbml_source(
+            "rateras2015", "stat1_BIOMD0000000585.xml", "BIOMD0000000585"
+        )
+        return process_from_sbml(str(path), name="s").with_param_input(
+            "scale_Stat1Pcex", "scale_in"
+        )
+
+    def test_assign_sees_the_driven_value(self):
+        import jax.numpy as jnp
+
+        proc = self._proc()
+        published = float(proc.parameters["scale_Stat1Pcex"])
+        state = {
+            n: jnp.asarray(float(p.default))
+            for n, p in proc.ports_schema().items()
+        }
+        state["Stat1Pd"] = jnp.asarray(1.0)
+        at_published = proc.assign(
+            0.0, {**state, "scale_in": jnp.asarray(published)}
+        )["Stat1Pcex"]
+        at_triple = proc.assign(
+            0.0, {**state, "scale_in": jnp.asarray(published * 3.0)}
+        )["Stat1Pcex"]
+        assert float(at_published) != 0.0
+        assert float(at_triple) == pytest.approx(3.0 * float(at_published))
+
+    def test_a_promoted_constant_defaults_to_its_published_value(self):
+        proc = self._proc()
+        port = proc.ports_schema()["scale_in"]
+        assert port.default == pytest.approx(
+            float(proc.parameters["scale_Stat1Pcex"])
+        )
+        assert port.default != 0.0
+
+
+def test_timescale_is_not_inferred_from_the_time_unit():
+    """`timescale` is a rate; the unit a model is written in is not evidence
+    of one, and auto_groups clusters on it."""
+    from hallsim.sbml_import import process_from_sbml
+    from demos.models.sbml import sbml_source
+
+    path = str(
+        sbml_source(
+            "rateras2015", "stat1_BIOMD0000000585.xml", "BIOMD0000000585"
+        )
+    )
+    assert process_from_sbml(path, name="s").timescale is None
+    supplied = process_from_sbml(path, name="s", timescale=120.0)
+    assert supplied.timescale == pytest.approx(120.0)
+
+
+def test_an_unwired_promoted_constant_is_reported(caplog):
+    """Neither default is safe — zero loses the published value and the
+    published value is the paper's own experiment, not a resting state — so
+    composing says which driver ports nothing writes."""
+    import logging
+
+    from hallsim.composite import single_process_composite
+    from hallsim.sbml_import import process_from_sbml
+    from demos.models.sbml import sbml_source
+
+    path = str(
+        sbml_source(
+            "rateras2015", "stat1_BIOMD0000000585.xml", "BIOMD0000000585"
+        )
+    )
+    proc = process_from_sbml(path, name="s").with_param_input(
+        "scale_Stat1Pcex", "scale_in"
+    )
+    with caplog.at_level(logging.WARNING, logger="hallsim.composite"):
+        single_process_composite(proc, "s")
+    assert any("scale_in" in r.message for r in caplog.records)

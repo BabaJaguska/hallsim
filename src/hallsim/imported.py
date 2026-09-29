@@ -160,11 +160,20 @@ class ImportedODEProcess(Process):
     def _driver_input_ports(self) -> dict:
         """INPUT ports feeding the live parameter drivers, to be merged into
         the subclass ``ports_schema``. Wire each to its driving store path via
-        topology."""
+        topology. Each defaults to the constant's published value, so an
+        unwired promotion reproduces the deposit rather than zeroing it."""
+        from hallsim.tracing import is_traced
+
+        published = dict(self._published_parameters)
+
+        def deposited(name):
+            value = published.get(name, self.parameters.get(name, 0.0))
+            return 0.0 if is_traced(value) else float(value)
+
         return {
             d.input_port: Port(
                 role=PortRole.INPUT,
-                default=0.0,
+                default=deposited(d.param_name),
                 units="dimensionless",
                 description=f"drives {self._param_label} {d.param_name!r}",
             )

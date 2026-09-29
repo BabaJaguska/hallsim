@@ -62,6 +62,12 @@ class SBMLProcess(ImportedODEProcess):
     _species_ontology: tuple[dict[str, str], ...] = eqx.field(
         static=True, default=()
     )
+    # An assignment-rule species carries annotations like any other, and a
+    # curated deposit's stated observables are exactly these, so they are the
+    # ones a readout most needs.
+    _assigned_ontology: tuple[dict[str, str], ...] = eqx.field(
+        static=True, default=()
+    )
     # Param constancy + SBO, dynamic variables, and the assignment-rule graph,
     # so a driver aimed at a rate constant the model modulates via a rule can
     # be flagged (see hallsim.coupling_wiring).
@@ -558,8 +564,14 @@ class SBMLProcess(ImportedODEProcess):
                     default=y0,
                     units="dimensionless",
                     description=f"SBML assignment rule: {name}",
+                    ontology=dict(ont) if ont else {},
                 )
-                for name, y0 in zip(self._assigned_names, self._assigned_y0)
+                for name, y0, ont in zip(
+                    self._assigned_names,
+                    self._assigned_y0,
+                    self._assigned_ontology
+                    or ({},) * len(self._assigned_names),
+                )
             }
         )
         schema.update(self._driver_input_ports())
@@ -584,9 +596,10 @@ class SBMLProcess(ImportedODEProcess):
         assignmentfunc = self._model.assignmentfunc
         y = jnp.stack([state[name] for name in self._species_names], axis=-1)
         t_native = t * self.time_scale
-        c = self._constants(t)
+        c, c_batched = self._driven_constants(t, state)
         if y.ndim > 1:
-            w = jax.vmap(assignmentfunc, in_axes=(0, None, None, None))(
+            c_in = 0 if c_batched else None
+            w = jax.vmap(assignmentfunc, in_axes=(0, None, c_in, None))(
                 y, self._w0, c, t_native
             )
         else:
@@ -623,6 +636,29 @@ class SBMLProcess(ImportedODEProcess):
         )
         return self._c.at[jnp.asarray(self._param_indexes)].set(values)
 
+    def _driven_constants(self, t, state):
+        """``(c, batched)`` — constants with live parameter drivers scattered
+        in. Every reader goes through here, or an assignment rule reports a
+        value the derivative is not running on."""
+        c = self._constants(t)
+        if not self._param_drivers:
+            return c, False
+        dv = self._driven_param_values(state)  # {param_name: value}
+        names = list(dv)
+        driven = jnp.stack([dv[n] for n in names], axis=-1)
+        d_idx = jnp.asarray(
+            [self._param_indexes[self._param_names.index(n)] for n in names]
+        )
+        if driven.ndim > 1:
+            batch = driven.shape[0]
+            return (
+                jnp.broadcast_to(c, (batch,) + c.shape)
+                .at[:, d_idx]
+                .set(driven),
+                True,
+            )
+        return c.at[d_idx].set(driven), False
+
     def derivative(self, t, state):
         # Trailing-axis stack, matching Composite.flatten/unflatten, so this
         # Process is shape-polymorphic and batched runs need no extra vmap.
@@ -631,31 +667,7 @@ class SBMLProcess(ImportedODEProcess):
         boundaryfunc = self._model.boundaryfunc
         is_batched = y.ndim > 1
 
-        c = self._constants(t)
-
-        # Live drivers override a constant with an INPUT-port value. A batched
-        # driving signal makes c per-batch, so the ratefunc vmaps over c too.
-        c_batched = False
-        if self._param_drivers:
-            dv = self._driven_param_values(state)  # {param_name: value}
-            names = list(dv)
-            driven = jnp.stack([dv[n] for n in names], axis=-1)
-            d_idx = jnp.asarray(
-                [
-                    self._param_indexes[self._param_names.index(n)]
-                    for n in names
-                ]
-            )
-            if driven.ndim > 1:  # batched signal → per-batch c
-                batch = driven.shape[0]
-                c = (
-                    jnp.broadcast_to(c, (batch,) + c.shape)
-                    .at[:, d_idx]
-                    .set(driven)
-                )
-                c_batched = True
-            else:
-                c = c.at[d_idx].set(driven)
+        c, c_batched = self._driven_constants(t, state)
 
         # τ = t·time_scale, dy/dt = (dy/dτ)·time_scale — so time-referencing
         # assignment rules stay on the model's own clock.
@@ -1398,15 +1410,15 @@ def process_from_sbml(
         _assigned_names=assigned_names,
         _assigned_indexes=assigned_indexes,
         _assigned_y0=tuple(float(w0[i]) for i in assigned_indexes),
+        _assigned_ontology=tuple(
+            ontology_map.get(n, {}) for n in assigned_names
+        ),
         _frozen_indices=frozen_indices,
         _compartment_names=compartment_names,
-        # Default the scheduler timescale to the model's native time unit (a
-        # day-scale model has day-scale dynamics) so auto_groups clusters
-        # mixed-rate composites correctly. Never None for SBML processes, so
-        # reconciled_to / tree_at can replace it without None-leaf ambiguity.
-        timescale=float(
-            timescale if timescale is not None else native_time_seconds
-        ),
+        # Left unset unless the caller supplies one: `timescale` is a rate and
+        # the time unit is not evidence of one, so inferring it from the unit
+        # grouped composites by how their authors chose to write them.
+        timescale=None if timescale is None else float(timescale),
         _events=tuple(events),
     )
     if events:

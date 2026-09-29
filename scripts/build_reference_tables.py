@@ -13,6 +13,7 @@ Build-time network sources:
   - UniProt REST stream — reviewed human+mouse accession→gene symbol
   - GO OBO (go-basic) — every GO term's aspect
   - MGI homology report — mouse→human ortholog symbols
+  - ChEBI structures dump — id→InChIKey skeleton (88 MB, build time only)
   - OmniPath via `decoupler` — the CollecTRI regulon (whole)
 """
 
@@ -111,6 +112,40 @@ def build_orthologs() -> None:
     )
 
 
+def build_chebi_skeletons(local: Path | None = None) -> None:
+    """ChEBI id → the first block of its InChIKey, which is connectivity
+    alone, so one skeleton covers a compound's stereoisomers and protonation
+    states. A ChEBI class carries no structure and gets no row."""
+    import csv
+    import gzip
+    import io
+
+    csv.field_size_limit(10_000_000)
+    url = (
+        "https://ftp.ebi.ac.uk/pub/databases/chebi/flat_files/"
+        "structures.tsv.gz"
+    )
+    blob = local.read_bytes() if local else _get(url, timeout=900)
+    rows: dict[str, str] = {}
+    with gzip.open(io.BytesIO(blob), "rt", newline="") as fh:
+        for rec in csv.DictReader(fh, delimiter="\t", quotechar='"'):
+            if (rec.get("default_structure") or "").lower() != "true":
+                continue
+            cid = (rec.get("compound_id") or "").strip()
+            key = (rec.get("standard_inchi_key") or "").strip()
+            block = key.split("-")[0] if key else ""
+            if cid and len(block) == 14:
+                rows[cid] = block
+    dest = _ONT / "chebi_skeleton.tsv.gz"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(dest, "wt", newline="", compresslevel=9) as out:
+        w = csv.writer(out, delimiter="\t", lineterminator="\n")
+        w.writerow(["chebi_id", "skeleton"])
+        for cid in sorted(rows, key=int):
+            w.writerow([cid, rows[cid]])
+    print(f"  wrote {dest.relative_to(REPO)} ({len(rows)} rows)")
+
+
 def build_collectri() -> None:
     try:
         import decoupler as dc
@@ -142,6 +177,7 @@ def main() -> None:
     build_uniprot_symbols()
     build_go_aspects()
     build_orthologs()
+    build_chebi_skeletons()
     build_collectri()
     print("Done.")
 

@@ -728,7 +728,45 @@ class Composite(eqx.Module):
                 raise ValueError(f"Semantic validation failed:\n{report}")
             if report.warnings:
                 log.warning("Semantic validation warnings:\n%s", report)
+        self._warn_undriven_param_inputs(flat_processes, flat_topology)
         self.initial = self._resolve_start(declared)
+
+    @staticmethod
+    def _warn_undriven_param_inputs(processes, topology) -> None:
+        """A promoted constant whose port nothing writes holds its port
+        default all run, substituting one value for the deposit's. Neither
+        choice of default is safe, so say which ones are unwired."""
+        written = {
+            path
+            for name, proc in processes.items()
+            for port, spec in proc.ports_schema().items()
+            if spec.role is not PortRole.INPUT
+            for path in as_paths(
+                topology.get(name, {}).get(port, f"{name}/{port}")
+            )
+        }
+        loose = [
+            f"{name}.{d.param_name} (port {d.input_port!r})"
+            for name, proc in processes.items()
+            for d in getattr(proc, "_param_drivers", ())
+            if not (
+                set(
+                    as_paths(
+                        topology.get(name, {}).get(
+                            d.input_port, f"{name}/{d.input_port}"
+                        )
+                    )
+                )
+                & written
+            )
+        ]
+        if loose:
+            log.warning(
+                "no process writes the driver port for %s — each holds its "
+                "port default for the whole run, which is the deposit's "
+                "published value and not a resting condition.",
+                ", ".join(sorted(loose)),
+            )
 
     # -----------------------------------------------------------------
     # State flattening: dict ↔ array

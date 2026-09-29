@@ -166,19 +166,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   would look at the normalizer, which is why the default has to change rather
   than be documented.
 
-- [ ] **P0.13 — `timescale` is a declared unit, not a rate.** Split from P0.6,
-  whose execution-order half is fixed. An SBML import sets `timescale =
-  native_time_seconds` — the model's declared time unit, not how fast it
-  moves — and `auto_groups` clusters on it, so two models with the same
-  dynamics but different declared units land in different groups and one with
-  the same unit but different speeds lands in the same one.
-  *Fix:* cluster on a measured rate. `analyze_groups` already computes a
-  spectral abscissa.
-
-
-
----
-
 - [ ] **P0.9 — The supported parameter route exists only on
   `CalibrationProblem`, and is undiscoverable from anywhere else.**
   `with_overrides` (`calibration.py:1067`) is the correct answer and P0.5's fix
@@ -294,8 +281,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   to prevent. Related: `drive_step` raises `KeyError` on `CD95L` because it is
   an SBML *parameter* rather than a `w` input, so the working path
   (`with_param_input`) is not the one the helper leads you to.
-
-
 
 - [ ] **P0.46 — An undriven imported constant keeps the deposit's own
   experimental dose, so an unwired control arm is silently a dosed one.**
@@ -483,7 +468,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   *Fix:* make the rest window relative to something the model asserts — its own
   slowest time constant, or the caller's horizon — and refuse to report a rest
   verdict at all when `native_time_source == "assumed"`, since the window is
-  then uninterpretable. Same class as P0.40.
+  then uninterpretable. Same class as P0.40. **Measured corpus-wide 2026-09-28**: `t_end` is 10.0 on all 2,531 census rows, the 929 that declare a unit as well as the 1,602 that do not, so every screen column — `rest_residual`, `rest_tau`, exploding, vanishing, tolerance, tunes — is taken over a window that can be orders of magnitude shorter than the process the deposit describes. The muscle deposit MODEL1704110003 (seconds) records `rest_residual` 0.00214, which reads as settled against a threshold of 1.0, and is about 1292 over the seven-day horizon its biology occupies. Closing this wants the corpus re-screened with a clock-scaled horizon, which is a multi-hour rerun.
 
 - [ ] **P0.54 — The calibratable surface is scalar-only, so a per-source
   parameter cannot be fitted.** Filed 2026-09-05.
@@ -627,8 +612,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   So the p53 -> CD95 edge is weak in absolute receptor terms and simultaneously
   one of the better-behaved things in this composite. Both readings are true;
   quote the one that matches the quantity being discussed.
-
-
 
 - [ ] **P0.34 — A zero-delay SBML event fires at `t = macro_dt`, so a
   scheduler knob silently sets the delivered dose.** Found 2026-09-04 on
@@ -1082,7 +1065,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   store layout it presents, so a replacement can be checked against the one it
   replaces at swap time rather than discovered downstream.
 
-
 - [ ] **P0.88 — A block port forfeits the Jacobian sparsity the equivalent
   process spelling declares.** Filed 2026-09-12. The same maths written as one
   block-ported process declares a **100% dense** Jacobian (400 colours) where
@@ -1111,6 +1093,14 @@ The framework returns a plausible number and nothing indicates it is wrong.
   file later). The failure *count* has been 0, 3, 5 and 7 across identical
   code, tracking cache state rather than anything in the tree — so there is no
   evidence of a failing test, only of a run that cannot finish.
+  **Did not reproduce 2026-09-28**: six full `tests/unit` runs in one 
+  interpreter under the CI markers each reached 100% with no collection 
+  abort (1,248 / 1,251 / 1,256 / 1,261 / 1,270 passed across successive 
+  states of the tree). Both named victim files are collected under those 
+  markers — `test_steady_state.py` entirely, 
+  `test_stiffness_large_group.py` bar one slow case — so the condition was 
+  exercised. One machine's evidence should not close it, but it is no 
+  longer reproducing.
 
   Mitigated, not fixed: `make test` now runs the files in chunks of
   `TEST_CHUNK` (12) so each gets a fresh interpreter — 861 passed, 0 failed —
@@ -1129,9 +1119,12 @@ The framework returns a plausible number and nothing indicates it is wrong.
   from this repository, which is the standard P0.81 was filed to insist on.
   *Fix:* commit them, or re-derive the numbers with something that is
   committed.
+  **Two thirds resolved 2026-09-28**: `scripts/bench_scheduler.py` (388 
+  lines) and `scripts/bench_field.py` (295) are now present and tracked; 
+  `scripts/verify_gpu_batch.py` is still absent, so the GPU numbers remain 
+  the unreproducible ones.
 - [ ] **P0.116 — Calibrating a parameter that only touches a downstream linear block recompiles a forward-mode gradient through the whole solve.** Found 2026-09-26 by the second agent trial (`outputs/agent-trial/erbb-compose/report.md`). Fitting the transcript pool's one time constant on eight arms of GSE6462 took 349 s, two compiles of a forward-mode gradient through a nine-arm vmapped solve of Birtwistle 2007, and converged in ten steps. The pool is linear and downstream of every fitted state, so its trajectory is a convolution of the saved ERK* trajectory and the same fit takes about a second by any one-dimensional minimiser on that array, same maths. The stop rule fired: the calibration path lost to hand-rolling by two orders of magnitude on the one piece that improved the held-out score. Fix: `CalibrationProblem` detects from the topology that a fitted parameter reaches no EVOLVED port upstream of its readout, solves the upstream block once and fits on the saved trajectory; more generally, cache the base solve when every fitted leaf is downstream only.
 - [ ] **P0.117 — A handle can measurably do the opposite of its own description, and nothing checks.** Found 2026-09-27 when `test_severity_moves_the_readouts` in the mitochondrial-aging demo was given the registry it had been missing. The "Mitochondrial Dysfunction" handle's text says "increased ROS generation"; at full severity `mito/ROS` at day 20 is 7.96 against 8.70 at none. Reproduced on DallePezze 2014 alone with only its own `mito_dysfunction` tripled (old mass 0.936, new mass 0.777, ROS 0.876), so it is the deposit, not the composition: ROS there is produced from old mitochondria's membrane potential, less new mass lifts AMPK, AMPK drives mitophagy, and old mass is cleared faster than the extra conversion makes it. No remap fixes it — at day 20 `mitophagy_old` ÷3 gives 1.052, `ROS_prod_by_Mito_membr_pot_old` ×3 gives 0.969, and the two combined with the dysfunction rate give 0.994 and 0.916. The model is homeostatic for ROS at that endpoint against every push in the dysfunction direction, which is the numeric form of the intake warning that these deposits are transient-response models. The framework gap: a `Handle` declares a direction in prose and `trace_path` reports the size of the effect but never its sign against that claim, so a registry mapping chosen by parameter name applies silently and the readout goes the wrong way. Fix: a declared expected sign per (handle, readout) that `suggest_registry`'s review step must supply and `trace_path` checks, refusing or warning on a mismatch; until then the demo test expects to fail, strictly, with the reason in words.
-
 
 ## P1 — cannot tell whether a result is trustworthy
 
@@ -1513,7 +1506,6 @@ The check that would catch a mistake does not exist, does not run, or fails open
   `--fit PARAM` option added to `simulate multi-hallmark calibrate` today
   is the same instinct one level down: the identifiability probe was a
   scratch script until it was a flag.
-
 
 ## P3 — capability gaps
 
@@ -1972,6 +1964,12 @@ The check that would catch a mistake does not exist, does not run, or fails open
 - [ ] **P3.47 — Gene dosage cannot be expressed as a handle, and "the thing I dose" has three addresses.** Recorded 2026-09-26 from the third trial, whose whole subject was a 1.5× receptor. `ParameterMapping` writes parameters; the receptor in Qi 2013 is an evolved species with no synthesis, so its abundance is its initial amount and 1.5× had to be written into `y0` through `store_index()` in every script. **Settled 2026-09-27, and not the way this asked.** `Composite.with_initial({path: value_or_callable})` landed as the initial-state analogue of `with_params`; the callable form takes the path's resolved initial value, so a relative change no longer makes the caller resolve port defaults by hand. Later the same day `Composite.initial` became an ordinary value leaf, one `(n_vars,)` or `(batch, n_vars)` array, so a start set through `with_initial` is traced and batched like a parameter and the run-time start argument was removed from every entry point. The *handle* form asked for here is still not built, on one measurement: a dosage written as an initial amount washes out wherever the species turns over — on Kok 2020 a 1.5× receptor is worth 1.016× by 600 h against 1.500× held indefinitely by the same factor on `Receptor_production` — so a dosage belongs on a synthesis rate, which `ParameterMapping` already reaches. The receptor-turnover primitive this trial line also wanted is unnecessary for the same reason: the corpus ships it, as three ordinary SBML reactions. What remains open below is the address question and the mechanism neighbourhood. The address forms now in use for a dose are an SBML boundary constant (`qi.parameters.species_79`), an initial amount through `store_index()`, and a handle's `"parameters.<key>"`; one route should cover all three. Related: `supply mechanisms --model` queries only the model's own species, so a ligand's receptor that the model lacks (IFNAR for a type I interferon deposit) is two hops away and never offered; the neighbourhood should reach a named ligand's receptor even when the model does not contain it.
 
 - [ ] **P3.50 — The dataset census emits the same accession twice with two disagreeing designs, and the export papers over it.** Recorded 2026-09-28. Two routes enumerate a GEO series — its curated DataSet and the series itself — and the mirror logic collapses neither, so 2,033 rows of the 60,931 arrive as duplicate accessions whose recovered designs disagree with each other. The shipped table is deduplicated in `scripts/export_census.py`, which keeps the row a reader would want (a named control first, then arms, then timepoints, then whether the design was recovered). That is an export-level workaround and it says so: the cause is in the census, where a single accession should be enumerated once and its two design sources reconciled — or, if both are worth keeping, the row should carry which route found it so a reader can choose, since `curated` distinguishes them and is not shipped. Until then any consumer reading the run's raw rows rather than the exported table sees both. Found by the architecture review of the export, which noted the same file already declares the workaround in prose.
+
+- [ ] **P3.54 — `SchedulerResult` is not a registered pytree, so a batched run cannot be mapped.** Found 2026-09-28 in the build round. `jax.tree_util.tree_flatten` on a result returns a single opaque leaf (`PyTreeDef(*)`), so `jax.vmap(Scheduler.run)` fails with "not a valid JAX type". The framework is batch-native by design and the batch path is the headline feature, so a result object that cannot cross a `vmap` boundary forces a caller to unpack it by hand or to drop to a lower-level call — which is the shape of the stop rule. Registering it with `jax.tree_util.register_pytree_node` (arrays as children, keys and metadata as static aux) is the fix.
+
+- [ ] **P3.56 — Nothing checks whether a rate law leaves the range its functional form is valid over.** Found 2026-09-28 by the build round's methionine entry. `ScreenReport.negative` catches a *state* that leaves its domain, but a *rate law* that reverses sign outside its fitted window is invisible. BIOMD0000000698 has two: `V_BHMT` carries the prefactor `0.7 - 0.025*(AdoMet + AdoHcy - 150)`, which passes through zero and turns the re-methylation flux negative above `AdoMet + AdoHcy = 178` µM, and `V_CBS` reverses below `beta_2/beta_1 = 17.6` µM. Both reproduce exactly from the file. The deposit is therefore valid only inside a window, its own control state sits at 150.8 µM — within 15% of the upper bound — and several counterfactuals a user would naturally try cross it and fail to solve. An affine factor on a flux with no `max(0, ·)` guard is a recognisable shape, and the screen already builds the symbolic field (`structure.symbolic_field`), so a check that reports which rate laws change sign inside the operating range the run actually visits is reachable without running anything extra. The finding to surface is not "this model is wrong" — it is "this model answers only inside this window, and your question sits near its edge", which is exactly the regime a methionine-dependent cell occupies.
+
+- [ ] **P3.57 — A cross-namespace readout yields nothing from `derive_readouts` and says nothing about why.** Found 2026-09-28 by the build round's DNA-damage entry. Its deposit's species carry UniProt ids, its dataset indexes `hgnc.symbol`, and the identity join does not cross the two, so a correspondence it then had to supply and defend by hand returned zero derived rows. The entry's objection is that the UniProt→symbol crosswalk ships in the same package and `reporter_wiring.classify_reporter` already uses it. **The refusal is correct and should stand**: a UniProt id names a protein, an HGNC symbol on a transcriptome names a transcript, and reading one as the other is an assumption — the framework's own checker labels exactly this case `proxy`, which is what the entry reported. Deriving it would make the framework assert a biological equivalence on the user's behalf, which is the thing that was deleted. What is wrong is the silence: the join returns `[]`, `compute_concordance` then says "no reporters given", and nothing tells the caller that both sides carry identifiers in namespaces that cannot be joined by identity, nor that the crosswalk exists if a proxy is what they mean. The fix is one message, not a lookup: when nothing joins but both sides carry ids, report both namespaces and both id sets and name why the join was refused. Three distinct refusals now share this surface — namespaces that cannot be joined by identity (this entry), a ChEBI class that carries no structure and so no skeleton (`CHEBI:17234`, glucose), and a species annotated only with a foreign accession (`kegg.compound:C00021`), which ChEBI's own `database_accession.tsv` could resolve in the same build pass that now produces the skeleton table.
 
 ## Review notes — 2026-08-31 external systems review
 

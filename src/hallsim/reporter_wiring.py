@@ -99,11 +99,29 @@ def _uniprot_symbol() -> dict[str, tuple[str, str]]:
 
 @lru_cache(maxsize=1)
 def _orthologs() -> dict[str, str]:
-    """Mouse gene symbol → human ortholog symbol (MGI)."""
+    """Mouse gene symbol → human ortholog symbol (MGI), one-to-one only.
+
+    MGI lists a mouse gene once per human ortholog, so a family like the MHC
+    class I locus has several rows. Keeping the last silently resolved every
+    one of them to whichever sorted last — a pseudogene, in that case — so an
+    ambiguous symbol is dropped instead and reported as unresolved.
+    """
     df = _read_table(
         "ontology", "ortholog_mouse_human.tsv", sep="\t", dtype=str
     )
-    return {} if df is None else dict(zip(df.mouse_symbol, df.human_symbol))
+    if df is None:
+        return {}
+    counts = df.mouse_symbol.value_counts()
+    one_to_one = df[df.mouse_symbol.map(counts).eq(1)]
+    dropped = int(len(counts) - len(one_to_one))
+    if dropped:
+        log.info(
+            "%d of %d mouse symbols map to more than one human ortholog and "
+            "are left unresolved rather than collapsed.",
+            dropped,
+            len(counts),
+        )
+    return dict(zip(one_to_one.mouse_symbol, one_to_one.human_symbol))
 
 
 @lru_cache(maxsize=1)
@@ -197,6 +215,26 @@ def resolve_ontology(
     return {}, path
 
 
+@lru_cache(maxsize=1)
+def _chebi_skeletons() -> dict[str, str]:
+    """ChEBI id → the first block of its InChIKey, which is connectivity
+    alone: one skeleton covers a compound's stereoisomers and protonation
+    states, and a ChEBI class has no structure and so no skeleton."""
+    df = _read_table("ontology", "chebi_skeleton.tsv.gz", sep="\t", dtype=str)
+    if df is None:
+        return {}
+    return dict(zip(df.chebi_id, df.skeleton))
+
+
+def _skeleton(namespace: str, identifier: str) -> str | None:
+    if namespace != "chebi":
+        return None
+    bare = str(identifier).strip().lower()
+    if bare.startswith("chebi:"):
+        bare = bare[len("chebi:") :]
+    return _chebi_skeletons().get(bare)
+
+
 def paths_measuring(ontmap, namespace: str, measured) -> dict[str, str]:
     """``store path → the measured identifier as given``, for the paths
     annotated in ``namespace`` that ``measured`` carries.
@@ -205,19 +243,30 @@ def paths_measuring(ontmap, namespace: str, measured) -> dict[str, str]:
     writes ``CHEBI:15422``, a reader indexes ``chebi:15422`` and another
     indexes a bare ``P04637``. The value is the caller's own spelling, which
     is what indexes their table.
+
+    A ChEBI id that matches nothing exactly is then matched on its structural
+    skeleton, so a deposit's ``CHEBI:16811`` (methionine) meets a panel's
+    ``chebi:16643`` (L-methionine) and ``chebi:57844`` (its zwitterion).
     """
     from hallsim.search.datasets import curie
 
-    want = {}
+    want, by_skeleton = {}, {}
     for ident in measured:
         want.setdefault(curie(namespace, ident).lower(), str(ident))
+        skel = _skeleton(namespace, ident)
+        if skel:
+            by_skeleton.setdefault(skel, str(ident))
     out = {}
     for path, ont in ontmap.items():
         ident = ont.get(namespace)
-        if ident:
-            hit = want.get(curie(namespace, ident).lower())
-            if hit is not None:
-                out[path] = hit
+        if not ident:
+            continue
+        hit = want.get(curie(namespace, ident).lower())
+        if hit is None:
+            skel = _skeleton(namespace, ident)
+            hit = by_skeleton.get(skel) if skel else None
+        if hit is not None:
+            out[path] = hit
     return out
 
 
