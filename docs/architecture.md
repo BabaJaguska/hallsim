@@ -284,7 +284,7 @@ The demos' own models ship under
 [`demos/models/sbml/<author><year>/`](../demos/models/sbml/) and are loaded
 by path.
 
-When nothing is deposited, `simulate discover <topic>` (`hallsim.search.web`)
+When nothing is deposited, `supply discover <topic>` (`hallsim.search.web`)
 searches Europe PMC for model papers, reads them and their linked PDFs for
 repository links, and classifies the repositories cited: `importable:<format>`,
 `source:<language>`, `organisation`, or `linked-unverified` for a pointer not
@@ -294,20 +294,20 @@ and any `provider` with `search(query, *, limit, timeout)` plugs in the same
 way. PDF text needs the `search` extra. A label describes filenames, not the
 model: screen anything selected with `simulate screen`.
 
-`simulate find-data` asks OmicsDI first, EBI's one index over 29
+`supply find-data` asks OmicsDI first, EBI's one index over 29
 repositories, then the sources the index does not carry — Zenodo, GEO's
 curated DataSets, the PEtab collection; `--source all` asks every repository
 directly. The repository clients are the maintained ones where they exist:
 Biopython's E-utilities for GEO, `ppx` for PRIDE files, `petab` for PEtab
-problems, COPASI's bindings for COPASI files. `simulate mcp` serves the
+problems, COPASI's bindings for COPASI files. `supply mcp` serves the
 search as tools — find_models, find_data, dataset_design, paper_datasets,
 sources, and the framework's screen_models — over stdio or HTTP, so Claude
 Code, Claude Desktop or any MCP client can call it (`mcp` extra).
 
-**The supply, measured.** `simulate census run` puts every SBML deposit in
+**The supply, measured.** `supply census run` puts every SBML deposit in
 BioModels — curated and uncurated, or one branch with `--branch` — through
 the same gate as `simulate screen`, in parallel with a per-deposit timeout,
-streaming one row per deposit; `simulate census report` writes the funnel
+streaming one row per deposit; `supply census report` writes the funnel
 (listed → kinetic → imports → solves → clock → annotated → at rest → clean)
 per branch, a salvage class per deposit
 (`hallsim.census.SALVAGE`: as-is, cheap-fix, needs-review, importer-work,
@@ -323,7 +323,7 @@ row stamped — the report also copies the table and the counts to
 the deposits a change lifted or broke; a probe or a partial run leaves
 that table alone.
 
-**The data side.** `simulate census-data run` enumerates GEO, PRIDE,
+**The data side.** `supply census-data run` enumerates GEO, PRIDE,
 MetaboLights, Metabolomics Workbench, ArrayExpress, NASA's OSDR, the
 BioImage Archive and each screened model's own paper, then the sources
 that state a design outright: GEO's curated DataSets (a curator typed
@@ -597,10 +597,10 @@ src/hallsim/
     fetch.py           — one JSON getter, retry with backoff, concurrent fetch, the disk cache under ~/.cache/hallsim
     models.py          — search_for_model across BioModels, JWS, ModelDB, BioSimulations, Physiome, Europe PMC; a candidate's files, downloaded and cached
     literature.py      — Europe PMC full text, model pointers, what a cited repository holds
-    web.py             — simulate discover: papers, their PDFs, the repositories they cite
+    web.py             — supply discover: papers, their PDFs, the repositories they cite
     datasets.py        — search_for_dataset (GEO and its DataSets, Expression Atlas, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench, ArrayExpress, BioImage Archive, OSDR), parse_design and the designs a source states, a paper's own data and supplement tables, resolve_perturbation
     attached.py        — the data a model ships beside itself: PEtab problems (petab), COPASI fitting experiments (basico), a BioModels deposit's own tables
-    server.py          — the search as MCP tools: find_models, find_data, dataset_design, paper_datasets, sources (`simulate mcp`)
+    server.py          — the search as MCP tools: find_models, find_data, dataset_design, paper_datasets, sources (`supply mcp`)
   screens.py           — where a hit meets the framework: what a model produces, what a dataset measures of a composite, how a platform loads
   dataset_census.py    — the data census: every deposit through contrast → measured → matched → loadable
   measurements.py      — MeasuredDataset: the one contrast interface every reader returns

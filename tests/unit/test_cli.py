@@ -11,22 +11,42 @@ import sys
 from pathlib import Path
 
 import pytest
+import click
 from click.testing import CliRunner
 
-from hallsim.cli import simulate
+from hallsim.cli import simulate, supply
 
 DEMOS = Path(__file__).resolve().parents[2] / "demos"
 
+ENTRY_POINTS = {"simulate": simulate, "supply": supply}
 
-COMMANDS = [[n] for n in sorted(simulate.commands) if n != "demo"] + [
-    ["demo", n] for n in sorted(simulate.commands["demo"].commands)
+
+def _paths(group):
+    """Every leaf command under ``group``, nested groups included."""
+    for name in sorted(group.commands):
+        command = group.commands[name]
+        if isinstance(command, click.Group):
+            for tail in _paths(command):
+                yield [name, *tail]
+        else:
+            yield [name]
+
+
+COMMANDS = [
+    (entry, path)
+    for entry, group in ENTRY_POINTS.items()
+    for path in _paths(group)
 ]
 
 
-@pytest.mark.parametrize("path", COMMANDS, ids=" ".join)
-def test_command_help_works(path):
+@pytest.mark.parametrize(
+    "entry,path",
+    COMMANDS,
+    ids=lambda value: value if isinstance(value, str) else " ".join(value),
+)
+def test_command_help_works(entry, path):
     """Every registered command exposes help without blowing up."""
-    result = CliRunner().invoke(simulate, [*path, "--help"])
+    result = CliRunner().invoke(ENTRY_POINTS[entry], [*path, "--help"])
     assert result.exit_code == 0, result.output
 
 

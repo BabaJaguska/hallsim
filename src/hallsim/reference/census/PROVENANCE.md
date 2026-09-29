@@ -8,7 +8,7 @@ in each filename; the repositories move and these do not.
 
 Every BioModels deposit, curated and uncurated, run through the intake gate:
 import, solve, clock, annotation, rest state, gradient. Produced by
-`hallsim.census` (`simulate census`).
+`hallsim.census` (`supply census`).
 
 One thing this snapshot predates: the importer used to hold a species that
 nothing reads at its initial value, and now integrates it. That changes a
@@ -114,7 +114,7 @@ study model downloads its data files too, which over these 3,415 deposits is
 ## Regenerating
 
 ```
-simulate census                 # models
+supply census                   # models
 simulate dataset-census         # datasets
 ```
 

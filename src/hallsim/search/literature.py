@@ -31,6 +31,8 @@ import re
 import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from hallsim.search.fetch import cache_dir, get_json, is_junk_archive_entry
@@ -47,6 +49,107 @@ MODEL_SUFFIXES = (".cps", ".xml", ".sbml", ".m", ".ode", ".cellml")
 ARCHIVE_SUFFIXES = (".zip",)
 #: Depth limit on that descent — an archive containing itself is not a model.
 MAX_DEPTH = 3
+
+
+@dataclass(frozen=True)
+class Paper:
+    """One Europe PMC record, identified well enough to cite."""
+
+    pmid: str | None
+    pmcid: str | None
+    year: int | None
+    journal: str
+    title: str
+    authors: str
+    cited_by: int
+    doi: str | None
+    open_access: bool
+
+    @property
+    def url(self) -> str:
+        if self.pmcid:
+            return f"https://europepmc.org/article/PMC/{self.pmcid}"
+        if self.pmid:
+            return f"https://europepmc.org/article/MED/{self.pmid}"
+        return f"https://doi.org/{self.doi}" if self.doi else ""
+
+
+@dataclass(frozen=True)
+class PaperSearch:
+    """A query's total and the most-cited papers under it.
+
+    ``hit_count`` is what a premise turns on and the reason this returns it
+    rather than only a list: four papers behind a claim and four hundred are
+    different claims, and zero is the most informative answer of the three.
+    """
+
+    query: str
+    hit_count: int
+    papers: tuple[Paper, ...]
+
+
+def _year(raw) -> int | None:
+    text = str(raw or "")
+    return int(text) if text.isdigit() else None
+
+
+def search_papers(
+    query: str | Sequence[str],
+    limit: int = 10,
+    *,
+    field: str = "TITLE_ABS",
+    sort: str = "CITED desc",
+    timeout: float = 45.0,
+) -> PaperSearch:
+    """Europe PMC ranked by citation count — the check on a premise.
+
+    Pass a sequence of terms and every one is required in the title or
+    abstract, which is what separates a paper *about* a claim from one that
+    mentions it in passing; pass a string and it reaches Europe PMC verbatim,
+    so its own query syntax works.
+
+        search_papers(["EZH2", "senescence"]).hit_count
+
+    Records with no retrievable full text are kept, unlike
+    :func:`search_europepmc`, which drops them because it is looking for a
+    supplement to open. Here the paper that settles a claim is often the
+    paywalled one, and its abstract and citation count settle it anyway.
+    """
+    if isinstance(query, str):
+        text = query
+    else:
+        text = " AND ".join(
+            f'{field}:"{term}"' if field else f'"{term}"' for term in query
+        )
+    payload = get_json(
+        f"{EUROPEPMC}/search",
+        {
+            "query": text,
+            "format": "json",
+            "pageSize": min(max(limit, 1), 100),
+            "sort": sort,
+            "resultType": "lite",
+        },
+        timeout,
+    )
+    records = payload.get("resultList", {}).get("result", []) or []
+    papers = tuple(
+        Paper(
+            pmid=rec.get("pmid"),
+            pmcid=rec.get("pmcid"),
+            year=_year(rec.get("pubYear")),
+            journal=(rec.get("journalTitle") or "").strip(),
+            title=(rec.get("title") or "").strip().rstrip("."),
+            authors=(rec.get("authorString") or "")[:120],
+            cited_by=int(rec.get("citedByCount") or 0),
+            doi=rec.get("doi"),
+            open_access=rec.get("isOpenAccess") == "Y",
+        )
+        for rec in records
+    )
+    hits = int(payload.get("hitCount") or 0)
+    log.info("europepmc '%s': %d hits", text, hits)
+    return PaperSearch(query=text, hit_count=hits, papers=papers[:limit])
 
 
 def search_europepmc(
@@ -356,7 +459,7 @@ def repository_files(
 def classify_repository(
     pointer: str, forge: str = "github", *, timeout: float = 30.0
 ) -> ModelCandidate:
-    """What a cited repository holds, as a candidate ``simulate find`` can
+    """What a cited repository holds, as a candidate ``supply find`` can
     list beside the deposits: ``importable:<format>`` when a file an
     importer reads is there (judged by suffix), ``source:<language>`` when
     the model exists only as code to translate, ``organisation`` for an

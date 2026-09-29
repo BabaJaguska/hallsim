@@ -34,7 +34,7 @@ simulate demo stiffness
 
 The README stays short on this; the detail lives here.
 
-`simulate find <query>` searches BioModels, JWS Online, ModelDB,
+`supply find <query>` searches BioModels, JWS Online, ModelDB,
 BioSimulations, Physiome and Europe PMC supplements from one call, filtered by
 what a deposit *emits* rather than what it mentions — `--produces` takes a
 regex matched against species id and display name. A module imported to supply
@@ -49,7 +49,7 @@ UniProt-annotated species, or through `hallsim.gene_reporters` or a fitted
 regulon head for a transcriptome; the two readout layers score separately, as
 **Validation methodology** below sets out.
 
-`simulate find-data <query>` searches OmicsDI — one index over 29 repositories
+`supply find-data <query>` searches OmicsDI — one index over 29 repositories
 — plus Zenodo, GEO's curated DataSets and the PEtab benchmark collection.
 `--sources all` asks every repository directly: GEO, Expression Atlas,
 ArrayExpress, PRIDE, MetaboLights, Metabolomics Workbench, the BioImage
@@ -58,7 +58,7 @@ the design the source states. `--composite` keeps hits measuring something a
 given composite carries; `--paper` lists a paper's own data. `simulate view
 module:name` takes `--bake DIR` to write the levers page as a static site.
 
-`simulate census` and `simulate census-data` regenerate the corpus tables;
+`supply census` and `supply census-data` regenerate the corpus tables;
 both are multi-hour runs against live repositories. Dated snapshots ship under
 `src/hallsim/reference/census/` so a deposit can be chosen offline — read that
 folder's `PROVENANCE.md` first, and prefer these over a live search when the

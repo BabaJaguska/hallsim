@@ -164,7 +164,7 @@ if __name__ == "__main__":
         "--models-run",
         type=Path,
         default=None,
-        help="a `simulate census` run whose `report` has been built",
+        help="a `supply census` run whose `report` has been built",
     )
     p.add_argument("--out", type=Path, default=REFERENCE)
     p.add_argument("--stamp", default=date.today().isoformat())

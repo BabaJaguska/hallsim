@@ -1,6 +1,6 @@
 """A census of a model repository: what survives each intake gate, and why.
 
-Stage 0 of the composition benchmark. ``simulate find`` answers "is there a
+Stage 0 of the composition benchmark. ``supply find`` answers "is there a
 deposit for X"; this answers the prior question — of everything the
 repository holds, how much can HallSim use at all, and what stops the rest.
 It runs the same mechanical gate as ``simulate screen``
@@ -11,9 +11,9 @@ classifies each failure by the work that would lift it. The curated branch
 has had a curator reproduce a figure; the uncurated one has not been run by
 anyone, which is where a mechanical screen is worth most.
 
-    simulate census run                    # both branches, in parallel
-    simulate census run --branch uncurated
-    simulate census report                 # tables, figures, write-up
+    supply census run                    # both branches, in parallel
+    supply census run --branch uncurated
+    supply census report                 # tables, figures, write-up
 
 Every row carries the HallSim version and commit it was screened under and
 when, so a resumed run says which rows the current code produced. When

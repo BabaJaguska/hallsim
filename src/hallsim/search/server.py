@@ -4,7 +4,7 @@
 :func:`build_server` returns a FastMCP server with ``find_models``,
 ``find_data``, ``dataset_design``, ``paper_datasets`` and ``sources``,
 each a thin call into the search package that returns plain
-dictionaries. ``simulate mcp`` serves it over stdio for Claude Code or
+dictionaries. ``supply mcp`` serves it over stdio for Claude Code or
 Claude Desktop, adding the framework's screens, and anything that speaks
 MCP can register it. Needs the ``mcp`` extra.
 """

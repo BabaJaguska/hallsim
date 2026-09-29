@@ -8,7 +8,7 @@ review documents written in prose.
     from hallsim.rejections import load, distribution
     distribution()          # {'wrong-formalism': 9, 'consumes-not-emits': 4, ...}
 
-Reached from the CLI as ``simulate rejections``.
+Reached from the CLI as ``supply rejections``.
 """
 
 from __future__ import annotations

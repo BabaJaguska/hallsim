@@ -572,7 +572,7 @@ def clamp(level, t1, rel_error, k_clamps):
     run_demo(**overrides)
 
 
-@simulate.command("find")
+@supply.command("find")
 @click.argument("query", nargs=-1, required=True)
 @click.option(
     "--produces",
@@ -619,7 +619,7 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
     contributes nothing, which is the single most common way a candidate
     fails. Each query term is searched separately and the hits are pooled.
 
-        simulate find NFkB inflammation --produces '\bIL6\b|\bCXCL8\b'
+        supply find NFkB inflammation --produces '\bIL6\b|\bCXCL8\b'
 
     Every candidate yields a row, including the ones that could not be
     screened: `qualitative` is an SBML-qual logical model,
@@ -700,7 +700,7 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
             click.echo(str(triage_sbml(r.model_id)))
 
 
-@simulate.command("discover")
+@supply.command("discover")
 @click.argument("topic", required=False, default="")
 @click.option(
     "--alias",
@@ -765,9 +765,9 @@ def discover(
     For a topic with no deposit: the papers, then the repositories they
     cite, classified by what they hold. No output filter, unlike `find`.
 
-    simulate discover "Down syndrome" --alias "trisomy 21" --web
+    supply discover "Down syndrome" --alias "trisomy 21" --web
 
-    simulate discover --url https://example.org/paper --no-papers
+    supply discover --url https://example.org/paper --no-papers
     """
     from hallsim.search.web import BraveSearch, discover_models
 
@@ -823,14 +823,14 @@ def discover(
         )
 
 
-@simulate.command("mcp")
+@supply.command("mcp")
 @click.option("--http", is_flag=True, help="serve over HTTP instead of stdio")
 @click.option("--port", type=int, default=8000, show_default=True)
 def mcp_server(http, port):
     """Serve the search as MCP tools: find_models, find_data,
     dataset_design, paper_datasets, sources, and screen_models (which
     species a deposit produces). Register it in Claude Code with
-    `claude mcp add hallsim -- simulate mcp`."""
+    `claude mcp add hallsim -- supply mcp`."""
     from dataclasses import asdict
 
     from hallsim.screens import screen_produced_species
@@ -852,7 +852,7 @@ def mcp_server(http, port):
         mcp.run(transport="stdio")
 
 
-@simulate.command("find-data")
+@supply.command("find-data")
 @click.argument("query", nargs=-1, required=False)
 @click.option("--limit", type=int, default=20)
 @click.option("--organism", default=None, help='e.g. "Homo sapiens"')
@@ -975,6 +975,52 @@ def find_data(query, limit, organism, sources, composite, paper, check):
             )
 
 
+@supply.command("find-papers")
+@click.argument("terms", nargs=-1, required=True)
+@click.option("--limit", default=10, show_default=True, help="Papers to list.")
+@click.option(
+    "--anywhere",
+    is_flag=True,
+    default=False,
+    help="Require each term anywhere in the text, not just the title and "
+    "abstract. Raises the count and lowers the precision.",
+)
+@click.option(
+    "--raw",
+    is_flag=True,
+    default=False,
+    help="Send TERMS to Europe PMC verbatim, for its own query syntax.",
+)
+def find_papers(terms, limit, anywhere, raw):
+    """Check a claim against the literature, ranked by citation count.
+
+    Every TERM must appear in the title or abstract, so a hit is a paper
+    about the claim rather than one mentioning it. The count is the answer as
+    much as the list is: search the direction you believe AND its opposite,
+    and a claim that returns nothing either way is unexamined rather than
+    established.
+
+        supply find-papers EZH2 senescence
+        supply find-papers EZH2 HLA-E
+    """
+    from hallsim.search.literature import search_papers
+
+    query = " ".join(terms) if raw else list(terms)
+    found = search_papers(
+        query, limit=limit, field="" if anywhere else "TITLE_ABS"
+    )
+    click.echo(f"{found.hit_count} hits · {found.query}")
+    if not found.hit_count:
+        click.echo("  nothing states this in a title or abstract")
+        return
+    for paper in found.papers:
+        pmid = paper.pmid or "-"
+        click.echo(
+            f"  {paper.year or '????'}  {paper.cited_by:>6} cites  "
+            f"{paper.journal[:26]:26s}  PMID:{pmid:<9} {paper.title[:88]}"
+        )
+
+
 @simulate.command("screen")
 @click.argument("model")
 @click.option(
@@ -1062,7 +1108,7 @@ def handles(models, demo):
             click.echo(f"        {m.description}")
 
 
-@simulate.command("rejections")
+@supply.command("rejections")
 @click.option(
     "--class", "cls", default=None, help="Show only this failure class."
 )
@@ -1093,7 +1139,7 @@ def rejections(cls, slot):
         click.echo(f"    evidence: {r.evidence}")
 
 
-@simulate.group("census")
+@supply.group("census")
 def census():
     """Measure a repository: what survives each intake gate, and why.
 
@@ -1236,12 +1282,12 @@ def census_report(run_dir):
         click.echo(f"  ... {len(d['changed']) - 25} more")
 
 
-@simulate.group("census-data")
+@supply.group("census-data")
 def census_data():
     """Measure the data repositories: every deposited time course, and
     what a screened model could be scored on.
 
-    The data side of `simulate census`. `run` enumerates the routes (the
+    The data side of `supply census`. `run` enumerates the routes (the
     model papers through Europe PMC, every GEO series for the organisms,
     every PRIDE, MetaboLights, Metabolomics Workbench and ArrayExpress
     entry, the BioImage Archive) and streams one row per dataset through
@@ -1257,7 +1303,7 @@ def census_data():
     "--models-run",
     default=None,
     type=click.Path(exists=True, file_okay=False),
-    help="a `simulate census` run directory whose deposits carry species "
+    help="a `supply census` run directory whose deposits carry species "
     "ids (default: outputs/census/latest)",
 )
 @click.option("--run-dir", default=None, type=click.Path(file_okay=False))

@@ -7,8 +7,8 @@ from email.message import Message
 import pytest
 from click.testing import CliRunner
 
-from hallsim.cli import simulate
-from hallsim.search import web
+from hallsim.cli import supply
+from hallsim.search import literature, web
 from hallsim.search.literature import pointers_in
 from hallsim.search.models import ModelCandidate
 
@@ -280,11 +280,11 @@ def test_brave_api_contract(monkeypatch):
 def test_cli_no_key_and_url_only_report(monkeypatch, tmp_path):
     monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
     runner = CliRunner()
-    result = runner.invoke(simulate, ["discover", "aging", "--web"])
+    result = runner.invoke(supply, ["discover", "aging", "--web"])
     assert result.exit_code != 0 and "BRAVE_SEARCH_API_KEY" in result.output
     target = tmp_path / "report.json"
     result = runner.invoke(
-        simulate,
+        supply,
         [
             "discover",
             "--url",
@@ -308,7 +308,7 @@ def test_search_failure_is_reported_not_an_empty_success(monkeypatch):
         raise OSError("search unavailable")
 
     monkeypatch.setattr(web, "search_europepmc", fail)
-    result = CliRunner().invoke(simulate, ["discover", "aging"])
+    result = CliRunner().invoke(supply, ["discover", "aging"])
     assert result.exit_code != 0
     assert "search unavailable" in result.output
 
@@ -372,3 +372,101 @@ def test_pmc_fulltext_does_not_follow_relative_publisher_pdf(monkeypatch):
     assert len(visited) == 1 and visited[0].endswith("/fullTextXML")
     assert any(lead.candidate.id == "lab/model" for lead in report.leads)
     assert report.deferred_documents == 0
+
+
+def _epmc_payload(hits, records):
+    return {"hitCount": hits, "resultList": {"result": records}}
+
+
+def test_claim_terms_are_required_in_the_title_or_abstract(monkeypatch):
+    seen = {}
+
+    def capture(url, params, timeout):
+        seen.update(params)
+        return _epmc_payload(0, [])
+
+    monkeypatch.setattr(literature, "get_json", capture)
+    found = literature.search_papers(["EZH2", "HLA-E"])
+    assert seen["query"] == 'TITLE_ABS:"EZH2" AND TITLE_ABS:"HLA-E"'
+    assert seen["sort"] == "CITED desc"
+    assert found.hit_count == 0
+    assert found.papers == ()
+
+
+def test_a_raw_query_string_reaches_europepmc_verbatim(monkeypatch):
+    seen = {}
+
+    def capture(url, params, timeout):
+        seen.update(params)
+        return _epmc_payload(0, [])
+
+    monkeypatch.setattr(literature, "get_json", capture)
+    literature.search_papers('TITLE:"senescence" AND SRC:MED')
+    assert seen["query"] == 'TITLE:"senescence" AND SRC:MED'
+
+
+def test_terms_search_every_field_when_asked(monkeypatch):
+    seen = {}
+
+    def capture(url, params, timeout):
+        seen.update(params)
+        return _epmc_payload(0, [])
+
+    monkeypatch.setattr(literature, "get_json", capture)
+    literature.search_papers(["EZH2", "senescence"], field="")
+    assert seen["query"] == '"EZH2" AND "senescence"'
+
+
+def test_a_paywalled_paper_survives_the_claim_search(monkeypatch):
+    """The landmark paper often has no PMC id; dropping it loses the claim."""
+    records = [
+        {
+            "pmid": "17344414",
+            "pubYear": "2007",
+            "journalTitle": "Genes Dev",
+            "title": "The Polycomb group proteins bind throughout the "
+            "INK4A-ARF locus.",
+            "authorString": "Bracken AP, et al.",
+            "citedByCount": 721,
+            "doi": "10.1101/gad.415507",
+            "isOpenAccess": "N",
+        }
+    ]
+    monkeypatch.setattr(
+        literature,
+        "get_json",
+        lambda url, params, timeout: _epmc_payload(202, records),
+    )
+    found = literature.search_papers(["EZH2", "senescence"])
+    assert found.hit_count == 202
+    assert len(found.papers) == 1
+    paper = found.papers[0]
+    assert paper.pmcid is None and paper.pmid == "17344414"
+    assert paper.year == 2007 and paper.cited_by == 721
+    assert paper.open_access is False
+    assert paper.title.endswith("INK4A-ARF locus")
+    assert paper.url == "https://europepmc.org/article/MED/17344414"
+
+
+def test_a_missing_year_does_not_break_the_record(monkeypatch):
+    monkeypatch.setattr(
+        literature,
+        "get_json",
+        lambda url, params, timeout: _epmc_payload(
+            1, [{"pmid": "1", "pubYear": "in press", "citedByCount": None}]
+        ),
+    )
+    paper = literature.search_papers(["x"]).papers[0]
+    assert paper.year is None and paper.cited_by == 0
+
+
+def test_find_papers_reports_an_empty_claim_as_such(monkeypatch):
+    monkeypatch.setattr(
+        literature,
+        "get_json",
+        lambda url, params, timeout: _epmc_payload(0, []),
+    )
+    result = CliRunner().invoke(supply, ["find-papers", "EZH2", "HLA-E"])
+    assert result.exit_code == 0, result.output
+    assert "0 hits" in result.output
+    assert "nothing states this" in result.output

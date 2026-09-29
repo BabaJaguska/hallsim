@@ -53,8 +53,8 @@ print(result.get("pool/x").shape)
 
 ## Workflow
 
-1. **Find** — `simulate find <query>` searches the model repositories for a
-   deposit that *emits* what you need; `simulate find-data <query>` finds a
+1. **Find** — `supply find <query>` searches the model repositories for a
+   deposit that *emits* what you need; `supply find-data <query>` finds a
    time course to calibrate against.
 2. **Screen** — `simulate screen <id-or-path>` triages one model on its own.
    Nothing joins a composite unscreened.
@@ -65,7 +65,7 @@ print(result.get("pool/x").shape)
 5. **Calibrate** — `CalibrationProblem`, scored on held-out arms.
 
 `simulate demo --help` lists the worked examples, including one that composes
-three published SBML models and calibrates them against GEO data. `simulate
+three published SBML models and calibrates them against GEO data. `supply
 mcp` serves the search to any MCP client. `make test` runs the unit suite.
 
 ## License
