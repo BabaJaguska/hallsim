@@ -784,12 +784,9 @@ def mwtab_design(source, *, time_factor: str | None = None):
 
 @functools.lru_cache(maxsize=1)
 def shipped_designs() -> dict[str, dict]:
-    """Declared designs already read from the repositories, by accession.
-
-    A dated snapshot under ``hallsim/reference/census``. Reading one costs a
-    request per deposit against a slow endpoint, so the shipped answer is
-    preferred and a fetch is the fallback. Empty where none ships.
-    """
+    """Declared designs already read from the repositories, by accession: the
+    dated snapshots under ``hallsim/reference/census``, empty where none
+    ships."""
     folder = Path(__file__).resolve().parent / "reference/census"
     out: dict[str, dict] = {}
     for path in sorted(folder.glob("*_designs_*.json.gz")):
@@ -803,24 +800,19 @@ def shipped_designs() -> dict[str, dict]:
 
 def declared_design(cand) -> Design:
     """The design a deposit declares per sample: the shipped snapshot where it
-    carries this accession, else its own repository — MetaboLights' ISA-Tab
-    sample file, or mwTab's ``SUBJECT_SAMPLE_FACTORS``.
-
-    A fetch is one request per deposit against an endpoint that takes seconds,
-    so :func:`shipped_designs` answers first. The EBI Search listing carries
-    no sample list, so a title parse has nothing to read without either.
-    """
+    carries this accession, else a fetch of MetaboLights' ISA-Tab sample file
+    or mwTab's ``SUBJECT_SAMPLE_FACTORS``, one request each and seconds apiece.
+    The EBI Search listing carries no sample list, so a title parse has
+    nothing to read without either."""
     if cand.source not in DESIGN_SOURCES:
         raise ValueError(f"{cand.source} states no per-sample factors")
     stored = shipped_designs().get(cand.accession)
     if stored is not None:
         return Design.from_dict(stored)
     if cand.source == "metabolights":
-        # Into a directory of its own, removed on the way out. Left to its
-        # default the repository keeps every study it has ever seen, and a
-        # study is its data files as well as its metadata: a pass over the
-        # 3,415 MetaboLights deposits wrote 30 GB and filled the disk, which
-        # cost that pass its results at the final write.
+        # Its own directory, removed on the way out: left to its default the
+        # repository keeps every study whole, data files included, and 3,415
+        # of those filled a disk.
         root = tempfile.mkdtemp(prefix="hallsim-mtbls-")
         try:
             model, messages = MetabolightsFtpRepository(

@@ -52,6 +52,29 @@ def rows_of(run: Path):
                 yield json.loads(line)
 
 
+def export_models(run: Path, out: Path, stamp: str, replace: bool) -> Path:
+    """Ship the models table `census report` built, which carries the deposit
+    metadata the screened rows alone do not."""
+    frame = pd.read_csv(run / "census.csv")
+    dest = out / f"models_{stamp}.csv.gz"
+    frame.to_csv(dest, index=False, compression="gzip")
+    if replace:
+        for old in sorted(out.glob("models_*.csv.gz")):
+            if old != dest:
+                old.unlink()
+                print(f"removed {old.name}")
+    runs = ("clean", "pass", "at_rest", "annotated", "clock")
+    print(f"{len(frame)} deposits -> {dest}")
+    print(f"  {dest.stat().st_size / 1e6:.2f} MB")
+    print(f"  runnable:            {int(frame.stage.isin(runs).sum())}")
+    print(f"  composes as-is:      {int((frame.stage == 'pass').sum())}")
+    print(
+        "  rule-based (no species, has rate rules): "
+        f"{int(((frame.n_species.fillna(0) == 0) & (frame.n_rate_rules.fillna(0) > 0)).sum())}"
+    )
+    return dest
+
+
 def export(run: Path, out: Path, stamp: str, replace: bool) -> Path:
     kept = []
     total = 0
@@ -89,8 +112,17 @@ if __name__ == "__main__":
     p.add_argument(
         "--run", type=Path, default=Path("outputs/census-data/latest")
     )
+    p.add_argument(
+        "--models-run",
+        type=Path,
+        default=None,
+        help="a `simulate census` run whose `report` has been built",
+    )
     p.add_argument("--out", type=Path, default=REFERENCE)
     p.add_argument("--stamp", default=date.today().isoformat())
     p.add_argument("--replace", action="store_true")
     a = p.parse_args()
-    export(a.run, a.out, a.stamp, a.replace)
+    if a.models_run is not None:
+        export_models(a.models_run, a.out, a.stamp, a.replace)
+    else:
+        export(a.run, a.out, a.stamp, a.replace)

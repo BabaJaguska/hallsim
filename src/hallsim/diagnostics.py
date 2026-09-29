@@ -1087,9 +1087,9 @@ class CouplingSource:
 
     - ``suitable`` — produced and consumed; reaches a bounded quasi-steady
       level under sustained input. Safe to couple from.
-    - ``dead_sink`` — produced, consumed by nothing, and read by no rate law
-      (an inert accumulator the importer freezes at its initial value).
-      Reads as a constant; unfreezing it makes it diverge. **Never couple.**
+    - ``dead_sink`` — produced, consumed by nothing, read by no rate law, and
+      held at its initial value by a caller's `with_frozen`. Reads as a
+      constant, so an edge from it carries nothing. **Never couple.**
     - ``unbounded_accumulator`` — produced, never consumed, but read by the
       dynamics. Grows without bound under sustained input, so an additive
       edge from it diverges. **Never couple.**

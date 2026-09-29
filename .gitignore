@@ -7,6 +7,9 @@ data/
 /models/
 docs/diary.md
 /outputs/
+# The census tables `simulate census report` writes. The shipped snapshot
+# under src/hallsim/reference/census is the copy that travels.
+/results/
 /one_off_scripts/
 /scratchpad/
 # Throwaway investigations: probe scripts, progress logs and figures, one

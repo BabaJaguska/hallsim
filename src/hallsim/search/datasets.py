@@ -1431,12 +1431,10 @@ _FILE_LISTERS = {
     "geo": geo_files,
 }
 
-#: Sources stating each sample's factors as fields rather than in its title.
-#: Both spellings of the Workbench appear, by whether the row came through
-#: OmicsDI or the source directly. Reading one is
-#: :func:`hallsim.metabolites.declared_design`, which lives there because it
-#: needs the ISA-Tab and mwTab readers and this package imports nothing from
-#: the rest of hallsim.
+#: Sources stating each sample's factors as fields rather than in its title;
+#: both spellings of the Workbench appear. Reading one is
+#: :func:`hallsim.metabolites.declared_design`, which needs the ISA-Tab reader
+#: and so cannot live in this package.
 DESIGN_SOURCES = frozenset(
     {"metabolights", "metabolomics-workbench", "metabolomics_workbench"}
 )

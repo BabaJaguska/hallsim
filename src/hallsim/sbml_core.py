@@ -285,18 +285,11 @@ def compile_sbml(path: str) -> SBMLCore:
 def _reconnect_by_name(model) -> dict:
     """Dangling copies of a shared variable, mapped to the variable itself.
 
-    A CellML model gives every component its own view of a shared quantity and
-    connects them. Flattening it to SBML renames each view after its component
-    — ``V_membrane``, ``V_fast_sodium_current_m_gate`` — and the automated
-    converters drop the connections, leaving every view but one with no value,
-    no initial assignment and no rule. The declared ``name`` survives: each of
-    those is still ``name="V"``.
-
-    So a valueless quantity is resolved to the one quantity that declares the
-    same name and does have a value. Where a name is declared by a valueless
-    quantity alone and reads as the model's time in that unit, it is time.
-    Anything else — two candidates, or none — stays unresolved and the caller
-    refuses the model as before.
+    A valueless quantity resolves to the one quantity declaring the same SBML
+    ``name`` that does have a value; a valueless ``name="time"`` in the time
+    unit is time. Two candidates or none stays unresolved, so the caller
+    refuses the model as before. Flattening CellML to SBML drops the
+    connections that would have carried these values.
     """
     ruled = set()
     for i in range(model.getNumRules()):

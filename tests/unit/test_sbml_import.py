@@ -363,14 +363,32 @@ class TestProvenance:
             GZ06_PSI_NAME: 0.2
         }
 
-    def test_a_frozen_sink_is_named_and_warns_when_read(
-        self, tmp_path, caplog
-    ):
+    def test_a_species_nothing_reads_is_integrated_not_held(self, tmp_path):
+        """It is a terminal product as often as a degradation counter, and a
+        terminal product is what an assay measures, so its value stands."""
         from hallsim.composite import single_process_composite
 
         path = tmp_path / "sink.xml"
         path.write_text(SBML_WITH_INERT_SINK)
         proc = process_from_sbml(str(path), name="sink")
+        assert proc.frozen_species() == []
+        comp = single_process_composite(proc)
+        assert comp.frozen_paths() == set()
+        res = Scheduler().run(
+            comp, t_span=(0.0, 1.0), macro_dt=1.0, save_dt=0.5
+        )
+        # B takes up what A loses, so it rises rather than sitting at zero.
+        assert float(res.get("sink/B")[-1]) > 0.0
+        assert float(res.get("sink/A")[-1]) < 5.0
+
+    def test_a_named_sink_can_still_be_held(self, tmp_path, caplog):
+        """Holding is opt-in now, for the case it was built for: a collector
+        whose unbounded growth is costing the solve."""
+        from hallsim.composite import single_process_composite
+
+        path = tmp_path / "sink.xml"
+        path.write_text(SBML_WITH_INERT_SINK)
+        proc = process_from_sbml(str(path), name="sink").with_frozen("B")
         assert proc.frozen_species() == ["B"]
         comp = single_process_composite(proc)
         assert comp.frozen_paths() == {"sink/B"}
@@ -381,7 +399,7 @@ class TestProvenance:
             held = res.get("sink/B")
         assert "with_unfrozen" in caplog.text
         assert float(held[-1]) == 0.0
-        assert float(res.get("sink/A")[-1]) < 5.0
+        assert proc.with_unfrozen("B").frozen_species() == []
 
 
 def test_a_pmc_id_imports_from_the_paper_supplement(tmp_path, monkeypatch):

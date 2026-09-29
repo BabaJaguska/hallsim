@@ -10,6 +10,7 @@ from hallsim.composite import single_process_composite
 from hallsim.diagnostics import (
     DEAD_SINK,
     SUITABLE,
+    UNBOUNDED_ACCUMULATOR,
     ScreenReport,
     coupling_source_verdict,
     recommend_coupling_source,
@@ -103,15 +104,24 @@ def test_bad_scheduler_kwarg_raises_instead_of_flagging_the_model():
         )
 
 
-def test_dead_sink_rejected_as_coupling_source():
-    """A produced-but-never-consumed, read-by-nothing species (the importer
-    freezes it) must be rejected: coupling from it feeds a frozen constant /
-    diverges if unfrozen."""
+def test_a_species_nothing_consumes_is_rejected_as_coupling_source():
+    """Produced, never consumed: it grows without bound, so an additive edge
+    from it diverges. The import integrates it now, so the verdict names the
+    growth rather than a freeze."""
     p = process_from_sbml(str(WNT_SBML_PATH), name="wnt")
     v = coupling_source_verdict(p, "s195")
-    assert v.verdict == DEAD_SINK
-    assert v.frozen and v.produced and not v.consumed
+    assert v.verdict == UNBOUNDED_ACCUMULATOR
+    assert v.produced and not v.consumed and not v.frozen
     assert not v.ok
+
+
+def test_a_held_sink_is_a_dead_sink_as_coupling_source():
+    """Held at its initial value on request, it reads as a constant, which is
+    a different failure from growing without bound."""
+    p = process_from_sbml(str(WNT_SBML_PATH), name="wnt").with_frozen("s195")
+    v = coupling_source_verdict(p, "s195")
+    assert v.verdict == DEAD_SINK
+    assert v.frozen and not v.ok
 
 
 def test_produced_and_consumed_is_the_suitable_source():

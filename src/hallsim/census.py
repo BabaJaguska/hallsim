@@ -18,9 +18,10 @@ anyone, which is where a mechanical screen is worth most.
 Every row carries the HallSim version and commit it was screened under and
 when, so a resumed run says which rows the current code produced. When
 the run is the whole census — every listed deposit screened, every row
-stamped — ``report`` also copies the table and the counts to the tracked
-``results/census/``, so a diff between two commits names the deposits a
-change lifted or broke; a probe or a partial run leaves that table alone.
+stamped — ``report`` also copies the table and the counts to
+``results/census/``; a probe or a partial run leaves that copy alone. The one
+that travels is the dated snapshot under ``hallsim/reference/census``, which
+``scripts/export_census.py`` writes.
 
 The gates, in the order a model has to clear them:
 
@@ -1381,7 +1382,7 @@ def write_report(
     ``writeup.md`` (a preprint paragraph and a blog section) in ``run_dir``.
     With both branches present the figures and tables compare them. When
     the run is the whole census, the table and the counts are also copied
-    to ``dest`` (default ``<repo>/results/census/``, which is tracked)."""
+    to ``dest`` (default ``<repo>/results/census/``)."""
     run = Path(run_dir)
     refresh_deposits(run)
     df = load_rows(run)
@@ -1780,9 +1781,9 @@ def _publish(
     """Copy :data:`PUBLISHED` to ``dest`` when the run is the whole census:
     every row stamped with what screened it, and every deposit the listing
     holds screened. A run with unstamped rows, or a probe (``--only``,
-    ``--limit``, one branch), leaves the tracked table alone and says why;
-    a tracked table has to say what produced it, and a partial run is not
-    the census. Returns the folder (or ``None``), the reason it was
+    ``--limit``, one branch), leaves that copy alone and says why; a table
+    has to say what produced it, and a partial run is not the census.
+    Returns the folder (or ``None``), the reason it was
     skipped, and the :func:`verdict_delta` against the table found there."""
     import pandas as pd
 

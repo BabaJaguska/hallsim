@@ -288,13 +288,15 @@ def test_ssa_event_limit_is_not_silent(tmp_path, provider):
         )
 
 
-def test_a_stochastic_copy_integrates_the_sink_the_ode_import_froze(tmp_path):
-    """The ODE import holds an inert sink for scaling's sake; a count has no
-    such problem, so the reaction-level copy moves it, and its declared
-    stoichiometry says so too."""
+def test_a_stochastic_copy_integrates_a_sink_the_caller_held(tmp_path):
+    """A count cannot have the scaling problem holding is for, so the
+    reaction-level copy moves a held sink, and its declared stoichiometry
+    says so too."""
     path = tmp_path / "decay.xml"
     path.write_text(textwrap.dedent(MODEL))
     process = process_from_sbml(str(path), name="decay")
+    # Nothing is held at import; hold one to make the case.
+    process = process.with_frozen("B")
     assert process._frozen_indices
     sink = process._species_names[process._frozen_indices[0]]
     frozen_row = dict(

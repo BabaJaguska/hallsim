@@ -320,34 +320,49 @@ class SBMLProcess(ImportedODEProcess):
         )
         return new
 
-    def with_unfrozen(self, *species: str):
-        """Copy that integrates ``species`` normally instead of holding them
-        at their initial value.
+    def _with_frozen_indices(self, indices: tuple[int, ...]):
+        import copy
 
-        Import freezes species nothing reads back, which catches unbounded
-        degradation counters and a model's terminal products alike::
+        new = copy.copy(self)
+        object.__setattr__(new, "_frozen_indices", indices)
+        return new
 
-            k14 = process_from_sbml(524).with_unfrozen("tBid")
-
-        A Composite lifts the freeze on its own for any frozen species another
-        process reads; this is for the rest — plotting, reporters, scoring.
-        """
+    def _species_indices(self, species: tuple[str, ...]) -> set[int]:
         unknown = [s for s in species if s not in self._species_names]
         if unknown:
             raise KeyError(
                 f"{unknown} are not species on {self._name!r}; "
                 f"available: {sorted(self._species_names)}"
             )
-        drop = {self._species_names.index(s) for s in species}
-        import copy
+        return {self._species_names.index(s) for s in species}
 
-        new = copy.copy(self)
-        object.__setattr__(
-            new,
-            "_frozen_indices",
-            tuple(i for i in self._frozen_indices if i not in drop),
+    def with_frozen(self, *species: str):
+        """Copy that holds ``species`` at their initial value instead of
+        integrating them.
+
+        Import holds nothing: a species nothing reads back is integrated and
+        reported, because a terminal product is what an assay measures. This is
+        for the case that made holding tempting — a degradation collector whose
+        unbounded growth is costing the solve::
+
+            dp14 = process_from_sbml(...).with_frozen("Nil")
+        """
+        return self._with_frozen_indices(
+            tuple(
+                sorted(
+                    set(self._frozen_indices) | self._species_indices(species)
+                )
+            )
         )
-        return new
+
+    def with_unfrozen(self, *species: str):
+        """Copy that integrates ``species`` normally instead of holding them
+        at their initial value. Nothing is held at import, so this undoes a
+        :meth:`with_frozen`."""
+        drop = self._species_indices(species)
+        return self._with_frozen_indices(
+            tuple(i for i in self._frozen_indices if i not in drop)
+        )
 
     def with_species_input(self, *species: str) -> "SBMLProcess":
         """Copy that reads ``species`` from the store instead of integrating
@@ -1177,25 +1192,29 @@ def _settable_surface(xml_path, c, w0, c_indexes, w_indexes):
     )
 
 
-def _frozen_sink_indices(xml_path, species_names, name) -> tuple[int, ...]:
-    """Indices of inert sinks — written by degradation, read by nothing.
-    Frozen so they don't accumulate and ruin the state scaling."""
+def _accumulator_indices(xml_path, species_names, name) -> tuple[int, ...]:
+    """Indices of species written by reactions and read by nothing: a pure
+    accumulator, so it only grows.
+
+    Integrated like any other state, and reported rather than held. Because no
+    rate law or rule reads one, its value cannot reach another state, so
+    integrating it cannot change the rest of the solution — while holding it
+    turns a terminal product into a flat line, and a terminal product is what
+    an assay measures. The step control scales per state, so an accumulator
+    heading for 1e6 no longer dominates the error norm.
+    """
     inert = _detect_inert_sinks(xml_path)
-    frozen = tuple(i for i, n in enumerate(species_names) if n in inert)
-    if frozen:
-        log.warning(
-            "%s: inert sink species %s are written but read by nothing; "
-            "freezing them (treated as boundary) so they cannot accumulate "
-            "unboundedly. They now hold their initial value and are UNUSABLE "
-            "as coupling sources or reporter observables. A terminal product "
-            "this model exports is indistinguishable from a degradation "
-            "counter by this test — lift the freeze with "
-            "proc.with_unfrozen(...), or mark boundaryCondition=true in the "
-            "source SBML.",
+    found = tuple(i for i, n in enumerate(species_names) if n in inert)
+    if found:
+        log.info(
+            "%s: %s are written but read by nothing, so each only "
+            "accumulates. They are integrated and their values stand; a "
+            "degradation collector among them grows without bound and the "
+            "screen reports that as growth.",
             name,
-            [species_names[i] for i in frozen],
+            [species_names[i] for i in found],
         )
-    return frozen
+    return found
 
 
 def _apply_parameter_overrides(
@@ -1321,7 +1340,10 @@ def process_from_sbml(
         assigned_names,
         assigned_indexes,
     ) = _settable_surface(xml_path, c, w0, c_indexes, w_indexes_map)
-    frozen_indices = _frozen_sink_indices(xml_path, species_names, name)
+    # Detected and reported, not held: see `_accumulator_indices`. A caller
+    # that wants one held passes it to `with_frozen`.
+    _accumulator_indices(xml_path, species_names, name)
+    frozen_indices: tuple[int, ...] = ()
     published = tuple(sorted(params_dict.items()))
     _apply_parameter_overrides(
         params_dict, parameters, c_indexes, boundary_inputs
