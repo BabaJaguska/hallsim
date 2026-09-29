@@ -477,7 +477,9 @@ def test_an_assignment_rule_species_keeps_its_annotation():
     from demos.models.sbml import sbml_source
 
     path = sbml_source(
-        "rateras2015", "stat1_BIOMD0000000585.xml", "BIOMD0000000585"
+        "rateitschak2012",
+        "rateitschak2012_BIOMD0000000585.xml",
+        "BIOMD0000000585",
     )
     schema = process_from_sbml(str(path), name="stat1").ports_schema()
     annotated = {
@@ -498,7 +500,9 @@ class TestLiveParameterDrivers:
         from demos.models.sbml import sbml_source
 
         path = sbml_source(
-            "rateras2015", "stat1_BIOMD0000000585.xml", "BIOMD0000000585"
+            "rateitschak2012",
+            "rateitschak2012_BIOMD0000000585.xml",
+            "BIOMD0000000585",
         )
         return process_from_sbml(str(path), name="s").with_param_input(
             "scale_Stat1Pcex", "scale_in"
@@ -540,7 +544,9 @@ def test_timescale_is_not_inferred_from_the_time_unit():
 
     path = str(
         sbml_source(
-            "rateras2015", "stat1_BIOMD0000000585.xml", "BIOMD0000000585"
+            "rateitschak2012",
+            "rateitschak2012_BIOMD0000000585.xml",
+            "BIOMD0000000585",
         )
     )
     assert process_from_sbml(path, name="s").timescale is None
@@ -560,7 +566,9 @@ def test_an_unwired_promoted_constant_is_reported(caplog):
 
     path = str(
         sbml_source(
-            "rateras2015", "stat1_BIOMD0000000585.xml", "BIOMD0000000585"
+            "rateitschak2012",
+            "rateitschak2012_BIOMD0000000585.xml",
+            "BIOMD0000000585",
         )
     )
     proc = process_from_sbml(path, name="s").with_param_input(
