@@ -7,8 +7,8 @@ through the ODE solve.** Built on JAX, Equinox and Diffrax, for aging biology,
 where no single model captures the crosstalk between hallmarks.
 
 The composite stays one differentiable function — many stiff models,
-operator-split across timescales — and runs batched over a population with no
-`vmap` to write. A perturbation is a named, differentiable severity, so
+operator-split across timescales — and runs over a population with no `vmap`
+to write. A perturbation is a named, differentiable severity, so
 rapamycin, caloric restriction or a gene dosage moves the right parameters
 across every model at once.
 

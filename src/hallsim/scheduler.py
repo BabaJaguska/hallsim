@@ -46,6 +46,7 @@ from hallsim.store import as_paths, read_write_paths
 from hallsim.tracing import is_traced
 from hallsim.config import (
     DEFAULT_ATOL,
+    DEFAULT_BATCH_CHUNK,
     DEFAULT_NEWTON_ATOL,
     DEFAULT_DT0,
     DEFAULT_MAX_EXPLICIT_SUBSTEPS,
@@ -633,6 +634,15 @@ class Scheduler:
         Cap on host threads a threaded batch uses. ``None`` (default) uses
         the cores this process is scheduled on, which on a shared machine is
         what ``taskset`` was set to.
+    batch_chunk:
+        Members per vectorized pass. One vmapped ``while_loop`` has a single
+        trip count, so every member steps as many times as the slowest one in
+        its pass, and a wide batch pays the worst member across all of it.
+        Splitting the leading axis bounds that waste to a chunk. ``None``
+        (default) chunks a CPU batch at 64 and never chunks on an
+        accelerator, where the batch is already near-flat and more passes
+        would only add launch overhead. ``0`` disables chunking. Per member
+        the result is identical either way — the members are independent.
     """
 
     def __init__(
@@ -660,6 +670,7 @@ class Scheduler:
         progress: bool = False,
         batch_mode: str = "auto",
         max_batch_workers: int | None = None,
+        batch_chunk: int | None = None,
     ) -> None:
         if batch_mode not in ("auto", "vectorized", "threaded"):
             raise ValueError(
@@ -671,8 +682,14 @@ class Scheduler:
                 f"max_batch_workers must be at least 1, got "
                 f"{max_batch_workers!r}"
             )
+        if batch_chunk is not None and int(batch_chunk) < 0:
+            raise ValueError(
+                f"batch_chunk must be 0 (no chunking) or positive, got "
+                f"{batch_chunk!r}"
+            )
         self.batch_mode = batch_mode
         self.max_batch_workers = max_batch_workers
+        self.batch_chunk = batch_chunk
         if coupling_mode not in ("auto", "frozen", "interpolated"):
             raise ValueError(
                 f"coupling_mode must be 'auto', 'frozen', or "
@@ -1908,6 +1925,19 @@ class Scheduler:
             return max(1, len(affinity(0)))
         return max(1, os.cpu_count() or 1)
 
+    def _chunk_width(self, y0) -> int | None:
+        """Members per vectorized pass, or None to run the batch whole.
+
+        Chunking trades vectorisation for a tighter trip count, which pays on
+        a CPU and costs on an accelerator, where one device runs the batch and
+        extra passes are extra launches.
+        """
+        if self.batch_chunk is not None:
+            return int(self.batch_chunk) or None
+        if is_traced(*jax.tree_util.tree_leaves(y0)):
+            return None
+        return DEFAULT_BATCH_CHUNK if self._platform(y0) == "cpu" else None
+
     @staticmethod
     def _platform(y0) -> str | None:
         """Backend the batch lives on, or None if it will not say."""
@@ -1969,8 +1999,26 @@ class Scheduler:
 
         def vectorized(comp, y0, rng_key):
             keys = jax.random.split(rng_key, y0.shape[0])
-            ts, ys, stats = mapped(comp, y0, keys)
-            return ts[0], ys, stats
+            width = self._chunk_width(y0)
+            if width is None or y0.shape[0] <= width:
+                ts, ys, stats = mapped(comp, y0, keys)
+                return ts[0], ys, stats
+            # Keys are split over the whole population first, so a member
+            # draws the same noise whatever the chunking.
+            passes = [
+                mapped(comp, y0[i : i + width], keys[i : i + width])
+                for i in range(0, y0.shape[0], width)
+            ]
+            ys = jnp.concatenate([p[1] for p in passes], axis=1)
+            stats = jax.tree_util.tree_map(
+                lambda *xs: (
+                    jnp.concatenate(xs, axis=0)
+                    if eqx.is_array(xs[0]) and jnp.ndim(xs[0]) > 0
+                    else xs[0]
+                ),
+                *[p[2] for p in passes],
+            )
+            return passes[0][0][0], ys, stats
 
         compiled = threading.Event()
 

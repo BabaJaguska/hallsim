@@ -2676,3 +2676,87 @@ def test_a_time_triggered_event_fires_at_its_time_not_the_next_macro_step():
         next(v for k, v in vars(ev).items() if k in ("time", "t", "t_fired"))
     )
     assert fired_at == pytest.approx(3.0, abs=1e-6), vars(ev)
+
+
+class TestBatchChunking:
+    """One vmapped `while_loop` has a single trip count, so a wide batch makes
+    every member step as often as its slowest. Chunking bounds that."""
+
+    def _population(self, n):
+        from hallsim.composite import single_process_composite
+
+        class Relax(Process):
+            def ports_schema(self):
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=1.0),
+                    "k": Port(role=PortRole.EVOLVED, default=1.0),
+                }
+
+            def derivative(self, t, state):
+                return {"x": -state["k"] * state["x"] ** 3, "k": 0.0}
+
+        comp = single_process_composite(Relax(), "p")
+        keys = comp.store_keys()
+        rates = jnp.exp(
+            jnp.linspace(-3.0, 3.0, n)
+        )  # spread, so trip counts differ
+        y0 = (
+            jnp.broadcast_to(comp.initial_state_vec(keys), (n, len(keys)))
+            .at[:, keys.index("p/k")]
+            .set(rates)
+        )
+        return comp.with_initial(y0)
+
+    def _run(self, pop, chunk):
+        return Scheduler(batch_chunk=chunk).run(
+            pop, t_span=(0.0, 50.0), macro_dt=50.0, save_dt=10.0
+        )
+
+    def test_chunking_changes_no_member(self):
+        """Members are independent, so the split must be exact — not close."""
+        pop = self._population(80)
+        whole = self._run(pop, 0)
+        chunked = self._run(pop, 16)
+        assert jnp.array_equal(whole.ys, chunked.ys)
+        assert jnp.array_equal(whole.ts, chunked.ts)
+
+    def test_every_chunk_width_agrees(self):
+        pop = self._population(72)
+        ref = self._run(pop, 0).ys
+        for width in (8, 16, 32, 64, 128):
+            assert jnp.array_equal(self._run(pop, width).ys, ref), width
+
+    def test_stats_come_back_per_member_in_order(self):
+        pop = self._population(48)
+        whole = self._run(pop, 0).stats["default"]["num_solver_steps"]
+        chunked = self._run(pop, 16).stats["default"]["num_solver_steps"]
+        assert whole.shape == (48,)
+        assert jnp.array_equal(whole, chunked)
+
+    def test_zero_disables_and_none_chunks_a_cpu_batch(self):
+        from hallsim.config import DEFAULT_BATCH_CHUNK
+
+        y0 = jnp.ones((8, 3))
+        assert Scheduler(batch_chunk=0)._chunk_width(y0) is None
+        assert Scheduler(batch_chunk=8)._chunk_width(y0) == 8
+        assert (
+            Scheduler()._chunk_width(y0) == DEFAULT_BATCH_CHUNK
+            if Scheduler._platform(y0) == "cpu"
+            else Scheduler()._chunk_width(y0) is None
+        )
+
+    def test_a_traced_batch_is_never_chunked(self):
+        """Chunking is a Python-side split; under a trace there is one program
+        and the width is not known here."""
+        seen = []
+
+        def f(y):
+            seen.append(Scheduler()._chunk_width(y))
+            return y.sum()
+
+        jax.jit(f)(jnp.ones((8, 3)))
+        assert seen == [None]
+
+    def test_a_negative_width_is_refused(self):
+        with pytest.raises(ValueError, match="batch_chunk"):
+            Scheduler(batch_chunk=-1)

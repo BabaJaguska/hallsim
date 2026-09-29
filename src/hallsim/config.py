@@ -44,6 +44,12 @@ DEFAULT_COMPILATION_CACHE_MIN_SECS = 0.0
 # force, exceeds this; canonical cases sit orders of magnitude either side.
 DEFAULT_MAX_EXPLICIT_SUBSTEPS = 100.0
 
+# Members per vectorized pass on a CPU. The optimum is interior: one pass
+# makes every member step as often as the slowest, one member per pass throws
+# the vectorisation away. Depends on step-count spread, state width and
+# platform, so it is a default rather than a constant.
+DEFAULT_BATCH_CHUNK = 64
+
 
 def enable_compilation_cache(directory: str | None = None) -> str | None:
     """Point XLA's persistent compilation cache at ``directory``.

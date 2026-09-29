@@ -940,55 +940,6 @@ The framework returns a plausible number and nothing indicates it is wrong.
   single-model diagnostic goes through, so those models cannot be screened at
   all.
 
-- [ ] **P0.70 — The stop rule fired on the batch path: 1024 composites in one
-  batched run are slower than 1024 sequential runs, and a Python loop of
-  64-member chunks beats both.** Filed 2026-09-10. Proteostasis composite, 79
-  states, control arm, 14 days, initial conditions jittered log-normally
-  (σ = 0.1), CPU, 11 cores, second call timed: B = 64 → 329 ms per member
-  (1.6× over singles), 256 → 442 ms (1.2×), **1024 → 707 ms, 724 s against
-  540 s for 1024 singles and 418 s for 16 chunks of 64**. Every member
-  solved. The mechanism is measured, not inferred: per-member solver step
-  counts inside one chunk of 64 spread from ~165 to 258–590, the chunk's wall
-  time tracks its maximum (20.8 s at max 258, 30.9 s at max 590), and one
-  vmapped `while_loop` has one trip count, so every member steps as many
-  times as the slowest and the one-shot 1024 stepped ≥ 590 times for a
-  median member that needs ~170. The three members that left the basin did
-  not sit in the slowest chunks; the waste is the ordinary spread of an
-  adaptive solver over a population. The batch used 3.7 of 11 cores. The
-  README's "sub-linear on CPU" holds to about 64 and is false past 256.
-  Scripts in `scratch/2026-09-10-batch/`.
-  *Sharding from outside does not work on the installed stack (measured
-  2026-09-10).* `jax.shard_map` over 8 host devices fails inside the implicit
-  solver's linear solve — lineax's LU `ravel_vector` raises "pytree does not
-  match out_structure" from `Scheduler._reduced_solve` — at 16 and 256
-  members, at 1- and 14-day horizons, and with an unsharded warm-up at the
-  per-shard width beforehand (the compiled core is keyed on the batch shape,
-  so a sharded call builds its core inside the shard trace). With JAX's
-  varying-axes check left on, the failure is an earlier `select_n` check
-  that JAX's own message says to disable. JAX 0.10.2, lineax as installed;
-  the 2.4× in `docs/benchmarks.md` was measured on an earlier JAX and is not
-  reproducible today.
-  `pmap` over the same 8 host devices fails on the same lineax line.
-  **Worker processes work, and are the number to beat: the 1024 as 16 chunks
-  of 64 over 3 spawned processes, each with its own Scheduler, take 266 s
-  including each process's compile — 260 ms per member, 2.7× faster than
-  the one batched call and 1.6× faster than the chunks run one after
-  another** (`scratch/2026-09-10-batch/procs_1024.py`). Nothing is traced
-  across members, so nothing can fail; the cost is one compile per process.
-  *Fix, in order of what is known to work:* (1) `Scheduler(fixed_dt=...)`
-  now uses lockstep integration for non-stiff groups while retaining adaptive
-  control for stiffness-routed implicit groups, so selecting population mode
-  does not make the published Proctor launch transient fail. (2) a population
-  entry point on
-  the Scheduler that chunks a batched `y0` and runs the chunks in spawned
-  worker processes — chunk size from this measurement (about 64), worker
-  count from the cores a single solve uses (3.7 of 11 here) — so the
-  measured route is the framework's route and not a script. (3)
-  Re-batching by observed step counts between macro steps, which the stats
-  already carry per member. The lockstep route is the structural answer for
-  a GPU, but it still needs a population entry point and a validated
-  per-member step policy.
-
 - [ ] **P0.80 — The guarded chord costs 37% at one cell on a GPU, where it
   saves 32% on a CPU. The single-member solve is kernel-launch bound and the
   chord runs more, smaller sequential ops than Newton's two heavy ones.**
@@ -1125,6 +1076,8 @@ The framework returns a plausible number and nothing indicates it is wrong.
   the unreproducible ones.
 - [ ] **P0.116 — Calibrating a parameter that only touches a downstream linear block recompiles a forward-mode gradient through the whole solve.** Found 2026-09-26 by the second agent trial (`outputs/agent-trial/erbb-compose/report.md`). Fitting the transcript pool's one time constant on eight arms of GSE6462 took 349 s, two compiles of a forward-mode gradient through a nine-arm vmapped solve of Birtwistle 2007, and converged in ten steps. The pool is linear and downstream of every fitted state, so its trajectory is a convolution of the saved ERK* trajectory and the same fit takes about a second by any one-dimensional minimiser on that array, same maths. The stop rule fired: the calibration path lost to hand-rolling by two orders of magnitude on the one piece that improved the held-out score. Fix: `CalibrationProblem` detects from the topology that a fitted parameter reaches no EVOLVED port upstream of its readout, solves the upstream block once and fits on the saved trajectory; more generally, cache the base solve when every fitted leaf is downstream only.
 - [ ] **P0.117 — A handle can measurably do the opposite of its own description, and nothing checks.** Found 2026-09-27 when `test_severity_moves_the_readouts` in the mitochondrial-aging demo was given the registry it had been missing. The "Mitochondrial Dysfunction" handle's text says "increased ROS generation"; at full severity `mito/ROS` at day 20 is 7.96 against 8.70 at none. Reproduced on DallePezze 2014 alone with only its own `mito_dysfunction` tripled (old mass 0.936, new mass 0.777, ROS 0.876), so it is the deposit, not the composition: ROS there is produced from old mitochondria's membrane potential, less new mass lifts AMPK, AMPK drives mitophagy, and old mass is cleared faster than the extra conversion makes it. No remap fixes it — at day 20 `mitophagy_old` ÷3 gives 1.052, `ROS_prod_by_Mito_membr_pot_old` ×3 gives 0.969, and the two combined with the dysfunction rate give 0.994 and 0.916. The model is homeostatic for ROS at that endpoint against every push in the dysfunction direction, which is the numeric form of the intake warning that these deposits are transient-response models. The framework gap: a `Handle` declares a direction in prose and `trace_path` reports the size of the effect but never its sign against that claim, so a registry mapping chosen by parameter name applies silently and the readout goes the wrong way. Fix: a declared expected sign per (handle, readout) that `suggest_registry`'s review step must supply and `trace_path` checks, refusing or warning on a mismatch; until then the demo test expects to fail, strictly, with the reason in words.
+
+- [ ] **P1.37 — A population still runs on one core: chunks execute in sequence, not in parallel.** Filed 2026-09-29, split from P0.70 when its stop-rule half was fixed. `Scheduler(batch_chunk=...)` now bounds the trip-count waste a wide batch pays, and that is where the measured 724 s → 418 s of the original report came from — on one core, with no extra workers. The rest of that report is parallelism and is untouched: the same 16 chunks of 64 over 3 spawned processes took **266 s**, another 1.6x, because a batched solve occupied 3.7 of 11 cores and chunks run one after another occupy no more. Nothing is traced across members, so nothing can fail across them; the cost is one compile per worker. The two are independent knobs, and conflating them is what made the original entry look larger than it was. *Fix:* a worker count on the Scheduler beside `batch_chunk`, defaulting to the cores a single solve does **not** already use, spawning per chunk and concatenating as the sequential path already does. Sharding is not the route — `jax.shard_map` and `pmap` both fail inside lineax's LU solve on JAX 0.10.2, recorded under the now-closed P0.70.
 
 ## P1 — cannot tell whether a result is trustworthy
 
