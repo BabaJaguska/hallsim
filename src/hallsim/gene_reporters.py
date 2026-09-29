@@ -601,6 +601,9 @@ def load_gene_expression(
         header=0,
         index_col=0,
         quotechar='"',
+        # Probe ids as the file wrote them, matching the platform's dtype=str
+        # below: inferred, an all-digit column is int64 and the join is empty.
+        converters={0: str},
     ).dropna(how="all")
     processing = next(
         (

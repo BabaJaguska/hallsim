@@ -469,4 +469,58 @@ def test_find_papers_reports_an_empty_claim_as_such(monkeypatch):
     result = CliRunner().invoke(supply, ["find-papers", "EZH2", "HLA-E"])
     assert result.exit_code == 0, result.output
     assert "0 hits" in result.output
-    assert "nothing states this" in result.output
+    # Both terms are themselves zero here, so the breakdown says so rather
+    # than letting one number stand for two different answers.
+    assert "0 together" in result.output
+    assert "EZH2" in result.output and "HLA-E" in result.output
+
+
+def test_each_term_is_counted_alone_to_explain_an_empty_conjunction():
+    """One zero carries two answers — nobody connected these terms, or one of
+    them occurs nowhere — and a premise check turns on which."""
+    counts = {
+        'TITLE_ABS:"methionine restriction hypomethylation"': 0,
+        'TITLE_ABS:"methionine"': 9000,
+        'TITLE_ABS:"restriction"': 8000,
+        'TITLE_ABS:"hypomethylation"': 7000,
+    }
+
+    def fake(url, params, timeout):
+        return _epmc_payload(counts[params["query"]], [])
+
+    import unittest.mock as mock
+
+    with mock.patch.object(literature, "get_json", fake):
+        assert (
+            literature.search_papers(
+                ["methionine restriction hypomethylation"]
+            ).hit_count
+            == 0
+        )
+        alone = literature.term_counts(
+            ["methionine", "restriction", "hypomethylation"]
+        )
+    assert alone == {
+        "methionine": 9000,
+        "restriction": 8000,
+        "hypomethylation": 7000,
+    }
+
+
+def test_a_phrase_term_that_finds_nothing_says_it_was_a_phrase(monkeypatch):
+    """A quoted multi-word argument is one exact phrase, and reporting that
+    zero as an unexamined claim is the failure this output prevents."""
+
+    def fake(url, params, timeout):
+        hits = 0 if " " in params["query"] else 4242
+        return _epmc_payload(hits, [])
+
+    monkeypatch.setattr(literature, "get_json", fake)
+    result = CliRunner().invoke(
+        supply, ["find-papers", "methionine restriction", "hypomethylation"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "0 together" in result.output
+    assert "searched as an exact phrase" in result.output
+    assert "4242" in result.output
+    assert "nobody has connected them" in result.output

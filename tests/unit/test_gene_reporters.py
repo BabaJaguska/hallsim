@@ -999,3 +999,25 @@ class TestConcordanceScope:
             scale=400.0,
         )
         assert flat.predicted_change is False and math.isnan(flat.pooled)
+
+
+def test_a_numeric_probe_id_still_joins_to_its_gene(tmp_path):
+    """A platform whose probe ids are digits joined to nothing: the expression
+    index was inferred int64 while the platform is read as text, so the whole
+    numeric-id array era of GEO raised "none of N probes maps to a gene"."""
+    from hallsim.gene_reporters import load_gene_expression
+
+    matrix = tmp_path / "m.txt"
+    matrix.write_text(
+        '!Series_platform_id\t"GPL1"\n!series_matrix_table_begin\n'
+        '"ID_REF"\t"GSM1"\t"GSM2"\n1007\t3.0\t4.0\n1053\t5.0\t6.0\n'
+        "!series_matrix_table_end\n"
+    )
+    platform = tmp_path / "p.txt"
+    platform.write_text(
+        "ID\tGene Symbol\n1007\tDDR1\n1053\tRFC2\n",
+    )
+    expr = load_gene_expression(matrix, platform)
+    assert list(expr.index) == ["DDR1", "RFC2"]
+    assert expr.loc["DDR1", "GSM1"] == 3.0
+    assert expr.loc["RFC2", "GSM2"] == 6.0

@@ -975,6 +975,73 @@ def find_data(query, limit, organism, sources, composite, paper, check):
             )
 
 
+@supply.command("reactions")
+@click.argument("model")
+@click.option(
+    "--species/--no-species", default=True, help="List the species too."
+)
+@click.option(
+    "--delta/--no-delta",
+    default=True,
+    help="Also import the deposit and report what the import did not keep.",
+)
+def reactions(model, species, delta):
+    """What a deposit holds: its species, reactions and rate laws.
+
+    Choosing a deposit means arguing from its mechanism rather than its title,
+    and this reads the file to show it — compartments, boundary and constant
+    markers, every reaction's stoichiometry and rate law as written, and the
+    bodies of any functionDefinitions the laws call. Species referenced by no
+    reaction and no rule are marked UNUSED: they are inert whatever they are
+    named, so an intervention wired to one drives nothing.
+
+        supply reactions BIOMD0000000140
+        supply reactions path/to/model.xml --no-delta
+    """
+    from hallsim.sbml_inspect import import_delta, inspect_sbml
+
+    deposit = inspect_sbml(model, name="deposit")
+    click.echo(
+        f"{deposit.name}: {len(deposit.species)} species, "
+        f"{len(deposit.reactions)} reactions, {len(deposit.rules)} rules, "
+        f"{len(deposit.functions)} functionDefinitions"
+        + (
+            f"; compartments {', '.join(deposit.compartments)}"
+            if deposit.compartments
+            else ""
+        )
+    )
+    if not deposit.reactions and deposit.rules:
+        click.echo(
+            "  no reactions: this deposit's mechanism is in its rules, and a "
+            "reaction count of 0 is not an empty model"
+        )
+    if species:
+        click.echo("\nSpecies")
+        for spec in deposit.species:
+            click.echo(f"  {spec}")
+    if deposit.reactions:
+        click.echo("\nReactions")
+        for rxn in deposit.reactions:
+            click.echo(f"  {rxn}")
+    if deposit.functions:
+        click.echo("\nfunctionDefinitions (where the laws above lead)")
+        for fid, body in deposit.functions.items():
+            click.echo(f"  {fid} = {body}")
+    if deposit.rules:
+        click.echo("\nRules")
+        for kind, target, formula in deposit.rules:
+            click.echo(f"  {kind} {target} = {formula}")
+    if delta:
+        click.echo("\nWhat the import kept")
+        try:
+            click.echo(str(import_delta(model, name="deposit")))
+        except Exception as exc:
+            # A deposit the importer refuses still has a readable mechanism
+            # above, and why it was refused is the most useful line here.
+            click.echo(f"  the import refuses this deposit: {exc}")
+
+
 @supply.command("find-papers")
 @click.argument("terms", nargs=-1, required=True)
 @click.option("--limit", default=10, show_default=True, help="Papers to list.")
@@ -1000,18 +1067,33 @@ def find_papers(terms, limit, anywhere, raw):
     and a claim that returns nothing either way is unexamined rather than
     established.
 
+    Pass the terms separately. A quoted multi-word argument is one term and is
+    searched as an exact phrase, which almost always returns nothing — on an
+    empty result this prints each term's own count so the two kinds of zero
+    cannot be confused.
+
         supply find-papers EZH2 senescence
         supply find-papers EZH2 HLA-E
+        supply find-papers EZH2 "MHC class I"    # a phrase, on purpose
     """
-    from hallsim.search.literature import search_papers
+    from hallsim.search.literature import search_papers, term_counts
 
+    field = "" if anywhere else "TITLE_ABS"
     query = " ".join(terms) if raw else list(terms)
-    found = search_papers(
-        query, limit=limit, field="" if anywhere else "TITLE_ABS"
-    )
+    found = search_papers(query, limit=limit, field=field)
     click.echo(f"{found.hit_count} hits · {found.query}")
     if not found.hit_count:
-        click.echo("  nothing states this in a title or abstract")
+        if raw:
+            click.echo("  no paper matches this query")
+            return
+        click.echo("  0 together. Each term on its own:")
+        for term, count in term_counts(list(terms), field=field).items():
+            phrase = " — searched as an exact phrase" if " " in term else ""
+            click.echo(f"    {count:>8}  {term}{phrase}")
+        click.echo(
+            "  A term at 0 is the reason. Every term high with 0 together is "
+            "the real finding: nobody has connected them."
+        )
         return
     for paper in found.papers:
         pmid = paper.pmid or "-"
@@ -1026,8 +1108,9 @@ def find_papers(terms, limit, anywhere, raw):
 @click.option(
     "--t-end",
     type=float,
-    default=10.0,
-    help="solo solve window, in the model's native time unit",
+    default=None,
+    help="solo solve window, in the model's native time unit; the default is "
+    "the deposit's own authored SED-ML horizon, or 10 if it states none",
 )
 def screen(model, t_end):
     """Screen one model on its own before it joins a composite.
@@ -1159,9 +1242,9 @@ def census():
 @click.option(
     "--t-end",
     type=float,
-    default=10.0,
-    show_default=True,
-    help="screen horizon, in each model's native time unit",
+    default=None,
+    help="screen horizon, in each model's native time unit; the default is "
+    "each deposit's own authored SED-ML horizon, or 10 where it states none",
 )
 @click.option(
     "--timeout",

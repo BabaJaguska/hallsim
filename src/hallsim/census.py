@@ -739,9 +739,20 @@ def reason_of(row: dict) -> str:
     return "; ".join(row.get("flags") or [])
 
 
-def census_one(accession: str, t_end: float = DEFAULT_T_END) -> dict:
-    """Run one deposit through every gate. Never raises."""
+def census_one(accession: str, t_end: float | None = None) -> dict:
+    """Run one deposit through every gate. Never raises.
+
+    ``t_end`` unset takes each deposit's own authored SED-ML horizon, falling
+    back to :data:`DEFAULT_T_END`. It is resolved here rather than inside the
+    triage so the row records the window its verdicts were actually measured
+    over — a constant 10.0 in every row is what made a horizon shorter than the
+    model's own dynamics invisible.
+    """
+    from hallsim.intake import triage_horizon
+
     t0 = time.time()
+    if t_end is None:
+        t_end = triage_horizon(accession)
     row = _blank_row(accession, t_end)
     try:
         import libsbml
@@ -837,9 +848,13 @@ def _finish(row: dict, t0: float) -> dict:
 
 
 def timeout_row(
-    accession: str, timeout: float, t_end: float = DEFAULT_T_END
+    accession: str, timeout: float, t_end: float | None = None
 ) -> dict:
-    row = _blank_row(accession, t_end)
+    from hallsim.intake import triage_horizon
+
+    row = _blank_row(
+        accession, triage_horizon(accession) if t_end is None else t_end
+    )
     row["error"] = f"timeout: not screened within {timeout:.0f} s"
     row["seconds"] = timeout
     return _finish(row, time.time() - timeout)

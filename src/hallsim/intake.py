@@ -751,9 +751,43 @@ def triage_process(
     )
 
 
+#: Horizon used when a deposit states none of its own. Arbitrary, and that is
+#: the point: it is a caller's number, not the model's, so anything it decides
+#: is provisional (docs/known-problems.md, the rest-verdict entry).
+DEFAULT_TRIAGE_T_END = 10.0
+
+
+def triage_horizon(model_id, xml_path=None) -> float:
+    """The horizon to screen ``model_id`` over: its own, or the default.
+
+    Prefers the deposit's authored SED-ML horizon, which is stated in the same
+    time as its rate laws and so needs no declared time unit. Returns
+    :data:`DEFAULT_TRIAGE_T_END` when the deposit states nothing, which the
+    caller should treat as unverified rather than as the model's own window.
+    """
+    from hallsim.sedml import authored_horizon
+
+    for source in (model_id, xml_path):
+        if source is None:
+            continue
+        try:
+            horizon = authored_horizon(source)
+        except OSError:
+            horizon = None
+        if horizon is not None and horizon > 0:
+            log.info(
+                "%s: screening to its own SED-ML horizon %g, not %g",
+                model_id,
+                horizon,
+                DEFAULT_TRIAGE_T_END,
+            )
+            return float(horizon)
+    return DEFAULT_TRIAGE_T_END
+
+
 def triage_sbml(
     model_id,
-    t_end: float = 10.0,
+    t_end: float | None = None,
     name: str = "m",
     *,
     produces: str | None = None,
@@ -764,6 +798,14 @@ def triage_sbml(
 
     An import that raises is itself a reject — that is the cheapest possible
     verdict and the most common one on an uncurated candidate.
+
+    ``t_end`` left unset takes the horizon the deposit's own SED-ML states
+    (:func:`hallsim.sedml.authored_horizon`) and falls back to
+    :data:`DEFAULT_TRIAGE_T_END` when it states none. Screening a model over a
+    window it never claimed is how a deposit whose dynamics need 144,000 units
+    reads clean over 10; measured on 20 deposits, running each to its authored
+    horizon cost **0.8x** the 10-unit screen rather than more, because an
+    adaptive solver steps to the dynamics and not to the horizon.
     """
     from hallsim.sbml_import import (
         _extract_native_time_seconds,
@@ -788,7 +830,7 @@ def triage_sbml(
         )
     return triage_process(
         process,
-        t_end,
+        triage_horizon(model_id, xml_path) if t_end is None else t_end,
         xml_path=str(xml_path),
         name=str(model_id),
         produces=produces,

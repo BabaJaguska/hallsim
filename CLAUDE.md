@@ -51,7 +51,7 @@ regulon head for a transcriptome; the two readout layers score separately, as
 
 `supply find-data <query>` searches OmicsDI — one index over 29 repositories
 — plus Zenodo, GEO's curated DataSets and the PEtab benchmark collection.
-`--sources all` asks every repository directly: GEO, Expression Atlas,
+`--source all` asks every repository directly: GEO, Expression Atlas,
 ArrayExpress, PRIDE, MetaboLights, Metabolomics Workbench, the BioImage
 Archive. Each hit's arms and timepoints come from its sample titles, or from
 the design the source states. `--composite` keeps hits measuring something a

@@ -152,6 +152,28 @@ def search_papers(
     return PaperSearch(query=text, hit_count=hits, papers=papers[:limit])
 
 
+def term_counts(
+    terms: Sequence[str],
+    *,
+    field: str = "TITLE_ABS",
+    timeout: float = 45.0,
+) -> dict[str, int]:
+    """Each term's own hit count — why a conjunction of them came back empty.
+
+    One zero carries two different answers: nobody has connected these terms,
+    or one of them occurs nowhere. A premise check turns on which, so a bare
+    zero cannot be reported as an unexamined claim. A term that is itself zero
+    is the reason, and a multi-word term is the usual cause, since it is
+    searched as an exact phrase.
+    """
+    return {
+        term: search_papers(
+            [term], limit=1, field=field, timeout=timeout
+        ).hit_count
+        for term in terms
+    }
+
+
 def search_europepmc(
     query: str,
     limit: int = 25,

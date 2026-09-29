@@ -28,6 +28,21 @@ while `clean` cleared the ordered gates and still carries a note in `how`.
 nine rate rules. `n_states` is the imported model's own width and `n_rate_rules`
 the count, so read those beside `n_species` before writing a deposit off.
 
+**`go_terms` misleads in exactly the way `n_species` does, and this file used to
+warn about only one of them.** A deposit annotated for a process need not carry
+a species of it: two annotated "regulation of autophagy" hold AMPK and mTORC1
+and no autophagy species at all. Treat a GO term as a claim about the paper's
+subject, not about what the model emits, and check the species either way.
+
+**`n_shared_ids` is populated by one matching route only.** It is above zero on
+894 of 58,898 rows because only the `direct` route selects on a dataset's own
+identifiers; the others select on what a deposit carries. So a zero means *that
+route found nothing*, not that no overlap exists — three independent readers hit
+zero across every row in their areas (metabolomics, IL-6, butyrate) and each
+concluded the corpus offered no route where one did exist. Until the route is
+widened, search the models census yourself rather than reading this column as an
+absence of overlap.
+
 | stage | n | what it means |
 |---|---|---|
 | `pass` | 308 | runs and composes as-is; `how` is empty |
