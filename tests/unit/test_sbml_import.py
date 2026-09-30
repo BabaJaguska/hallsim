@@ -577,3 +577,125 @@ def test_an_unwired_promoted_constant_is_reported(caplog):
     with caplog.at_level(logging.WARNING, logger="hallsim.composite"):
         single_process_composite(proc, "s")
     assert any("scale_in" in r.message for r in caplog.records)
+
+
+class TestIdentitySurvivesRoleChange:
+    """A quantity keeps its identity and its value when its role changes.
+
+    The importer addresses a model two ways — ports, which carry a role, a
+    default and an ontology, and `parameters`, which carries none of those. A
+    quantity promoted from the second to the first used to arrive bare, which
+    is one cause behind several separately-reported silences: a readout that
+    joins to nothing, and a driver that runs the model at zero until wired.
+    """
+
+    PATH = (
+        "demos/models/sbml/dallepezze2014/"
+        "dallepezze2014_BIOMD0000000582.xml"
+    )
+
+    def _proc(self):
+        from hallsim.sbml_import import process_from_sbml
+
+        return process_from_sbml(self.PATH, name="dp14")
+
+    def test_a_promoted_parameter_keeps_its_annotation(self):
+        """`Insulin` carries a ChEBI id, so a dataset measuring insulin has to
+        reach it by identity however it is addressed."""
+        port = (
+            self._proc()
+            .with_param_input("Insulin", "insulin_in")
+            .ports_schema()["insulin_in"]
+        )
+        assert port.ontology.get("chebi") == "CHEBI:5931"
+
+    def test_a_driven_boundary_input_keeps_its_annotation(self):
+        port = (
+            self._proc()
+            .with_input_driver("Irradiation", "dose_in")
+            .ports_schema()["dose_in"]
+        )
+        assert port.ontology.get("sbo") == "SBO:0000405"
+
+    def test_a_driven_boundary_input_keeps_its_published_value(self):
+        """Defaulting a driver port to 0 runs the model at zero insulin until
+        something wires it, which is a wrong answer rather than a missing one.
+        """
+        proc = self._proc()
+        port = proc.with_param_input("Insulin", "insulin_in").ports_schema()[
+            "insulin_in"
+        ]
+        assert port.default == pytest.approx(float(proc.parameters["Insulin"]))
+        assert port.default != 0.0
+
+    def test_identity_is_kept_for_undriven_inputs_too(self):
+        """Identity belongs to the quantity, not to whichever port is
+        addressing it, so it must not depend on having called a driver."""
+        proc = self._proc()
+        assert proc.identity_of("Insulin").get("chebi") == "CHEBI:5931"
+        assert proc.identity_of("Amino_Acids").get("chebi") == "CHEBI:33709"
+        assert proc.identity_of("Irradiation").get("sbo") == "SBO:0000405"
+
+    def test_identity_does_not_depend_on_which_vector_holds_it(self):
+        """Insulin is a constants-vector parameter and Irradiation a boundary
+        input; both are annotated species and both must resolve."""
+        proc = self._proc()
+        assert "Insulin" in proc._param_names
+        assert "Irradiation" in proc._w_names
+        for name in ("Insulin", "Irradiation"):
+            assert proc.identity_of(name)
+
+
+class TestAConstantBoundaryInputIsSettable:
+    """A boundary species whose rule is a constant is a level the experiment
+    held fixed, so setting it has to reach the field. One whose rule reads time
+    is a protocol and must keep it."""
+
+    PATH = (
+        "demos/models/sbml/dallepezze2014/"
+        "dallepezze2014_BIOMD0000000582.xml"
+    )
+
+    def _proc(self):
+        from hallsim.sbml_import import process_from_sbml
+
+        return process_from_sbml(self.PATH, name="dp14")
+
+    def test_it_becomes_a_real_parameter(self):
+        proc = self._proc()
+        assert "Insulin" in proc._param_names
+        assert "Amino_Acids" in proc._param_names
+
+    def test_setting_it_moves_the_vector_field(self):
+        """It used to accept the write and move nothing, so a handle aimed at
+        it swept a flat line that looked like biology."""
+        import equinox as eqx
+        import jax.numpy as jnp
+
+        from hallsim.composite import single_process_composite
+
+        proc = self._proc()
+        comp = single_process_composite(proc, "dp14")
+        keys = comp.store_keys()
+        y0 = comp.initial_state_vec(keys)
+        base, _ = comp.build_rhs()
+        half = eqx.tree_at(
+            lambda m: m.parameters["Insulin"], proc, jnp.asarray(0.5)
+        )
+        treated, _ = single_process_composite(half, "dp14").build_rhs()
+        moved = [
+            keys[i]
+            for i, d in enumerate(
+                abs(treated(0.0, y0, None) - base(0.0, y0, None))
+            )
+            if float(d) > 0
+        ]
+        assert moved, "setting Insulin changed no derivative"
+        assert any("Akt" in path for path in moved)
+
+    def test_a_time_varying_input_keeps_its_rule(self):
+        """The dose gate stays a protocol: it is not a parameter, and its
+        pulse stays in the symbolic field where the analysis reads it."""
+        proc = self._proc()
+        assert "Irradiation" in proc._w_names
+        assert "Irradiation" not in proc._param_names

@@ -262,7 +262,7 @@ class SBMLCore(eqx.Module):
 _CORES: dict = {}
 
 
-def compile_sbml(path: str) -> SBMLCore:
+def compile_sbml(path: str, document=None) -> SBMLCore:
     """The :class:`SBMLCore` for the SBML file at ``path``.
 
     Cached per file (path, size, mtime): a core holds compiled functions,
@@ -276,7 +276,7 @@ def compile_sbml(path: str) -> SBMLCore:
         key = None
     if key is not None and key in _CORES:
         return _CORES[key]
-    core = _compile(path)
+    core = _compile(path, document)
     if key is not None:
         _CORES[key] = core
     return core
@@ -341,8 +341,11 @@ def _reconnect_by_name(model) -> dict:
     return alias
 
 
-def _compile(path: str) -> SBMLCore:
-    doc, model = _read_model(path)
+def _compile(path: str, document=None) -> SBMLCore:
+    if document is None:
+        doc, model = _read_model(path)
+    else:
+        doc, model = document, document.getModel()
     issues = _structural_issues(doc, model)
     if issues:
         raise UnsupportedSBMLFeatureError("; ".join(issues))
@@ -375,6 +378,39 @@ def _compile(path: str) -> SBMLCore:
     species = [model.getSpecies(i) for i in range(model.getNumSpecies())]
     params = [model.getParameter(i) for i in range(model.getNumParameters())]
     reactions = [model.getReaction(i) for i in range(model.getNumReactions())]
+    # A boundary species whose assignment rule is a constant states a level the
+    # experiment held fixed, not a protocol. Dropping that rule makes it an
+    # ordinary boundary constant: it lands in ``c``, so setting it through
+    # ``parameters`` reaches the field and a handle on it works. Only where the
+    # constant equals the declared initial value, which makes this incapable of
+    # changing what the model computes. A rule reading time or a species is a
+    # protocol and is left alone — flattening a dose pulse to its mean would be
+    # a wrong answer that does not announce itself.
+    for s in species:
+        if not s.getBoundaryCondition() or s.getId() not in assigned:
+            continue
+        rule = assigned[s.getId()]
+        if getattr(rule, "free_symbols", {"x"}):
+            continue
+        declared = (
+            s.getInitialConcentration()
+            if s.isSetInitialConcentration()
+            else (s.getInitialAmount() if s.isSetInitialAmount() else None)
+        )
+        value = float(rule)
+        if declared is None or abs(value - declared) > 1e-12 * max(
+            1.0, abs(declared)
+        ):
+            log.info(
+                "%s: constant rule %g disagrees with the declared initial "
+                "value %s, so the rule is kept and the input is not settable",
+                s.getId(),
+                value,
+                declared,
+            )
+            continue
+        del assigned[s.getId()]
+
     # ── layout ────────────────────────────────────────────────────
     y_names = [
         s.getId()

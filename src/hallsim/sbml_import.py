@@ -68,6 +68,22 @@ class SBMLProcess(ImportedODEProcess):
     _assigned_ontology: tuple[dict[str, str], ...] = eqx.field(
         static=True, default=()
     )
+    # A boundary input is a species too, so it carries annotations the same way
+    # — and it is exactly the quantity an experiment sets and a dataset
+    # measures, so identity has to survive the move onto a driver's port.
+    # Kept for every `_w_names` entry, driven or not: identity belongs to the
+    # quantity, not to whichever port happens to be addressing it today.
+    #: Every annotated quantity the file declares, as ``(name, ids)`` pairs —
+    #: one map, so identity survives a quantity moving between vectors or
+    #: gaining a port. The positional tuples above index their own vectors;
+    #: this is what a promotion consults.
+    _ontology: tuple[tuple[str, dict[str, str]], ...] = eqx.field(
+        static=True, default=()
+    )
+    # Boundary-input initial values as plain floats, like ``_assigned_y0``:
+    # ``_w0`` is traced, and taking ``float()`` of it while building a schema
+    # raises under JIT.
+    _w_y0: tuple[float, ...] = eqx.field(static=True, default=())
     # Param constancy + SBO, dynamic variables, and the assignment-rule graph,
     # so a driver aimed at a rate constant the model modulates via a rule can
     # be flagged (see hallsim.coupling_wiring).
@@ -529,6 +545,12 @@ class SBMLProcess(ImportedODEProcess):
         )(ts)
         return float(jnp.trapezoid(native, ts))
 
+    def identity_of(self, name: str) -> dict:
+        """Ontology ids the SBML attaches to ``name``, whatever vector it is
+        in now — so promoting a species to a parameter, or a parameter to a
+        port, does not drop its identifier."""
+        return dict(dict(self._ontology).get(name) or {})
+
     def ports_schema(self):
         schema = {
             name: Port(
@@ -575,13 +597,16 @@ class SBMLProcess(ImportedODEProcess):
             }
         )
         schema.update(self._driver_input_ports())
+        # A driven input keeps the driven quantity's identity and value.
+        w_start = dict(zip(self._w_names, self._w_y0))
         schema.update(
             {
                 port: Port(
                     role=PortRole.INPUT,
-                    default=0.0,
+                    default=w_start.get(name, 0.0),
                     units="dimensionless",
                     description=f"drives boundary input {name!r}",
+                    ontology=self.identity_of(name),
                 )
                 for name, port in self._input_drivers
             }
@@ -590,7 +615,13 @@ class SBMLProcess(ImportedODEProcess):
 
     def assign(self, t, state):
         """Values of the ASSIGNED ports — the SBML assignment rules, evaluated
-        at the current state on the model's own clock."""
+        at the current state on the model's own clock.
+
+        Covers the boundary inputs too, so an undriven one is a port holding
+        its rule's value rather than a quantity the composite cannot see. A
+        *driven* input is excluded: its wired port supplies the value and the
+        native rule is replaced, which is what ``with_input_driver`` means.
+        """
         if not self._assigned_names:
             return {}
         assignmentfunc = self._model.assignmentfunc
@@ -739,40 +770,31 @@ class SBMLProcess(ImportedODEProcess):
         return base
 
 
-def _extract_compartment_names(xml_path: str) -> frozenset[str]:
-    """Compartment ids. They reach ``parameters`` as sizes, but a compartment
-    volume is geometry: it scales every rate at once, so it is the most
-    sensitive and the most degenerate thing in a fit."""
+def _sbml_model(xml_path: str):
+    """The parsed libsbml model, or ``None`` if the file will not parse.
+
+    One parse, handed to every reader below. They each used to open the file
+    again, so a single import paid for ten parses of the same bytes — 24 s each
+    on the largest deposit in BioModels.
+    """
     import libsbml
 
-    model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
-    if model is None:
-        return frozenset()
-    return frozenset(
-        model.getCompartment(i).getId()
-        for i in range(model.getNumCompartments())
-    )
+    return libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
 
 
-def _extract_species_labels(xml_path: str) -> dict[str, str]:
-    """``{species_id: display name}`` from the SBML.
+def _species_labels(deposit) -> dict[str, str]:
+    """``{species_id: display name}`` from the deposit record.
 
     A CellDesigner export gives every species a UUID id and puts the gene
     symbol in the ``name`` attribute, so anything matching on id alone is
     blind to it (Dwivedi 2014 produces IL6 under ``mwf626e95e_543f_...``).
     """
-    import libsbml
-
-    model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
-    if model is None:
-        return {}
-    return {
-        model.getSpecies(i).getId(): (model.getSpecies(i).getName() or "")
-        for i in range(model.getNumSpecies())
-    }
+    return {s.id: s.name for s in deposit.species}
 
 
-def _extract_species_ontology(xml_path: str) -> dict[str, dict[str, str]]:
+def _extract_species_ontology(
+    xml_path: str, sbml_model=None
+) -> dict[str, dict[str, str]]:
     """Pull MIRIAM identifier URIs from each species' annotation block.
 
     SBML curators annotate species with controlled-vocabulary URIs that
@@ -790,13 +812,9 @@ def _extract_species_ontology(xml_path: str) -> dict[str, dict[str, str]]:
     """
     import re
 
-    import libsbml
-
     pattern = re.compile(r"https?://identifiers\.org/([^/]+)/(.+)$")
 
-    reader = libsbml.SBMLReader()
-    doc = reader.readSBMLFromFile(str(xml_path))
-    model = doc.getModel()
+    model = sbml_model if sbml_model is not None else _sbml_model(xml_path)
     if model is None:
         return {}
 
@@ -818,12 +836,10 @@ def _extract_species_ontology(xml_path: str) -> dict[str, dict[str, str]]:
 
 
 def _extract_reaction_channels(
-    xml_path: str, core: SBMLCore
+    xml_path: str, core: SBMLCore, sbml_model=None
 ) -> tuple[SBMLReactionChannel, ...]:
     """Each reaction's id, rate law and signed net stoichiometry."""
-    import libsbml
-
-    model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
+    model = sbml_model if sbml_model is not None else _sbml_model(xml_path)
     if model is None:
         return ()
     # A local parameter is read by its local id and stored under
@@ -860,7 +876,7 @@ def _extract_reaction_channels(
     return tuple(channels)
 
 
-def _extract_coupling_metadata(xml_path: str) -> dict:
+def _extract_coupling_metadata(xml_path: str, sbml_model=None) -> dict:
     """Structure a coupling-wiring checker needs to judge what may drive what.
 
     Returns ``{param_constant, param_sbo, variables, rules,
@@ -886,8 +902,7 @@ def _extract_coupling_metadata(xml_path: str) -> dict:
     """
     import libsbml
 
-    reader = libsbml.SBMLReader()
-    model = reader.readSBMLFromFile(str(xml_path)).getModel()
+    model = sbml_model if sbml_model is not None else _sbml_model(xml_path)
     if model is None:
         return {
             "param_constant": {},
@@ -940,7 +955,9 @@ def _extract_coupling_metadata(xml_path: str) -> dict:
     }
 
 
-def _extract_native_time_seconds(xml_path: str) -> tuple[float, bool]:
+def _extract_native_time_seconds(
+    xml_path: str, sbml_model=None
+) -> tuple[float, bool]:
     """``(seconds_per_time_unit, declared)`` for the model's rate constants.
 
     SBML rate laws use a model-specific time unit, so composing models that
@@ -957,10 +974,7 @@ def _extract_native_time_seconds(xml_path: str) -> tuple[float, bool]:
     (L3); a ``<unitDefinition id="time">`` (the L2 convention); a base-unit
     ``timeUnits``; otherwise ``(1.0, False)``.
     """
-    import libsbml
-
-    doc = libsbml.SBMLReader().readSBMLFromFile(str(xml_path))
-    model = doc.getModel()
+    model = sbml_model if sbml_model is not None else _sbml_model(xml_path)
     if model is None:
         return 1.0, False
 
@@ -983,14 +997,14 @@ def _extract_native_time_seconds(xml_path: str) -> tuple[float, bool]:
     return float(seconds), True
 
 
-def _load_local_sbml(sbml_path: str):
+def _load_local_sbml(sbml_path: str, document=None):
     """``(core, y0, w0, c)`` for an SBML file, from :func:`compile_sbml`."""
-    core = compile_sbml(sbml_path)
+    core = compile_sbml(sbml_path, document)
     as_vec = lambda values: jnp.asarray(values, dtype=float)  # noqa: E731
     return core, as_vec(core.y0), as_vec(core.w0), as_vec(core.c0)
 
 
-def _collect_boundary_inputs(xml_path: str) -> set[str]:
+def _collect_boundary_inputs(xml_path: str, sbml_model=None) -> set[str]:
     """Boundary species that are exogenous inputs, not observable outputs.
 
     A boundary species in SBML is imposed on the model rather than computed
@@ -1008,8 +1022,7 @@ def _collect_boundary_inputs(xml_path: str) -> set[str]:
 
     import libsbml
 
-    doc = libsbml.SBMLReader().readSBMLFromFile(str(xml_path))
-    model = doc.getModel()
+    model = sbml_model if sbml_model is not None else _sbml_model(xml_path)
     if model is None:
         return set()
 
@@ -1043,7 +1056,7 @@ def _collect_boundary_inputs(xml_path: str) -> set[str]:
     return inputs
 
 
-def _detect_inert_sinks(xml_path: str) -> set[str]:
+def _detect_inert_sinks(xml_path: str, sbml_model=None) -> set[str]:
     """Species that are written by reactions but read by nothing.
 
     A degradation "sink" (conventionally named ``Nil``/``Sink``/``∅``):
@@ -1060,8 +1073,7 @@ def _detect_inert_sinks(xml_path: str) -> set[str]:
 
     import libsbml
 
-    doc = libsbml.SBMLReader().readSBMLFromFile(str(xml_path))
-    model = doc.getModel()
+    model = sbml_model if sbml_model is not None else _sbml_model(xml_path)
     if model is None:
         return set()
 
@@ -1170,7 +1182,7 @@ def _index_maps(core):
     return core.c_indexes, core.w_indexes
 
 
-def _settable_surface(xml_path, c, w0, c_indexes, w_indexes):
+def _settable_surface(xml_path, c, w0, c_indexes, w_indexes, sbml_model=None):
     """Every SBML constant at its published default, plus boundary-input
     species (Irradiation, Insulin, …) at theirs — the whole surface addressable
     by calibration targets and hallmark substitution, uncurated.
@@ -1186,7 +1198,9 @@ def _settable_surface(xml_path, c, w0, c_indexes, w_indexes):
         param_names = tuple(c_indexes.keys())
         param_indexes = tuple(c_indexes[n] for n in param_names)
 
-    boundary_inputs = _collect_boundary_inputs(xml_path) & set(w_indexes)
+    boundary_inputs = _collect_boundary_inputs(xml_path, sbml_model) & set(
+        w_indexes
+    )
     params_dict.update({n: float(w0[w_indexes[n]]) for n in boundary_inputs})
     w_names = tuple(sorted(boundary_inputs))
     # Everything else in `w` is determined by an <assignmentRule> each step.
@@ -1204,7 +1218,9 @@ def _settable_surface(xml_path, c, w0, c_indexes, w_indexes):
     )
 
 
-def _accumulator_indices(xml_path, species_names, name) -> tuple[int, ...]:
+def _accumulator_indices(
+    xml_path, species_names, name, sbml_model=None
+) -> tuple[int, ...]:
     """Indices of species written by reactions and read by nothing: a pure
     accumulator, so it only grows.
 
@@ -1215,7 +1231,7 @@ def _accumulator_indices(xml_path, species_names, name) -> tuple[int, ...]:
     an assay measures. The step control scales per state, so an accumulator
     heading for 1e6 no longer dominates the error norm.
     """
-    inert = _detect_inert_sinks(xml_path)
+    inert = _detect_inert_sinks(xml_path, sbml_model)
     found = tuple(i for i, n in enumerate(species_names) if n in inert)
     if found:
         log.info(
@@ -1249,11 +1265,11 @@ def _apply_parameter_overrides(
         params_dict[n] = float(v)
 
 
-def _native_clock(xml_path, name, supplied=None):
+def _native_clock(xml_path, name, supplied=None, sbml_model=None):
     """``(seconds_per_native_unit, source)`` where source is ``"declared"``,
     ``"supplied"`` or ``"assumed"``. Warns loudly when assumed — an assumed
     clock is silently 60x/3600x/86400x wrong once reconciled."""
-    seconds, declared = _extract_native_time_seconds(xml_path)
+    seconds, declared = _extract_native_time_seconds(xml_path, sbml_model)
     if supplied is not None:
         supplied = float(supplied)
         if supplied <= 0:
@@ -1321,24 +1337,42 @@ def process_from_sbml(
     """
     xml_path, name = _resolve_source(model_id, name)
 
+    # One parse of the file, read once into the full record, and handed to
+    # everything below — the compiler included. Each reader used to open the
+    # file again: a single import paid for ten parses of the same bytes, and
+    # the largest deposit in BioModels takes 24 s to parse.
+    import libsbml
+
+    from hallsim.sbml_read import read_deposit
+
+    document = libsbml.SBMLReader().readSBMLFromFile(str(xml_path))
+    sbml = document.getModel()
+    deposit = read_deposit(sbml, document, name) if sbml is not None else None
+
     # Single import path: local files and downloads alike go through
     # _load_local_sbml, which caches one compiled core per file.
-    model, y0, w0, c = _load_local_sbml(xml_path)
+    model, y0, w0, c = _load_local_sbml(xml_path, document)
     species_names = _ordered_species(model)
     log.info(f"Loaded {len(species_names)} species: {species_names}")
 
     # MIRIAM annotations on each species → Port.ontology, so the
     # composability analyzer can detect shared biology across imported
     # SBML models by their identifiers.org references.
-    ontology_map = _extract_species_ontology(xml_path)
-    coupling_meta = _extract_coupling_metadata(xml_path)
-    compartment_names = _extract_compartment_names(xml_path)
-    reaction_channels = _extract_reaction_channels(xml_path, model)
+    ontology_map = _extract_species_ontology(xml_path, sbml)
+    coupling_meta = _extract_coupling_metadata(xml_path, sbml)
+    compartment_names = (
+        frozenset(c.id for c in deposit.compartments)
+        if deposit is not None
+        else frozenset()
+    )
+    reaction_channels = _extract_reaction_channels(xml_path, model, sbml)
     species_ontology = tuple(ontology_map.get(s, {}) for s in species_names)
-    _species_label_map = _extract_species_labels(xml_path)
+    _species_label_map = (
+        _species_labels(deposit) if deposit is not None else {}
+    )
 
     native_time_seconds, native_time_source = _native_clock(
-        xml_path, name, native_time_seconds
+        xml_path, name, native_time_seconds, sbml
     )
 
     c_indexes, w_indexes_map = _index_maps(model)
@@ -1351,10 +1385,10 @@ def process_from_sbml(
         boundary_inputs,
         assigned_names,
         assigned_indexes,
-    ) = _settable_surface(xml_path, c, w0, c_indexes, w_indexes_map)
+    ) = _settable_surface(xml_path, c, w0, c_indexes, w_indexes_map, sbml)
     # Detected and reported, not held: see `_accumulator_indices`. A caller
     # that wants one held passes it to `with_frozen`.
-    _accumulator_indices(xml_path, species_names, name)
+    _accumulator_indices(xml_path, species_names, name, sbml)
     frozen_indices: tuple[int, ...] = ()
     published = tuple(sorted(params_dict.items()))
     _apply_parameter_overrides(
@@ -1377,7 +1411,7 @@ def process_from_sbml(
     # hallsim.sbml_events.expand_events(proc).
     from hallsim.sbml_events import translate_events
 
-    events = translate_events(xml_path, species_names, params_dict, name)
+    events = translate_events(xml_path, species_names, params_dict, name, sbml)
     # Through __init__, never object.__new__ + setattr: JAX rebuilds this pytree
     # at every jit/partition boundary, and a field-by-field instance does not
     # match what tree_unflatten produces — its structure shifts on the
@@ -1413,6 +1447,10 @@ def process_from_sbml(
         _assigned_ontology=tuple(
             ontology_map.get(n, {}) for n in assigned_names
         ),
+        _ontology=tuple(
+            (n, dict(ids)) for n, ids in ontology_map.items() if ids
+        ),
+        _w_y0=tuple(float(w0[i]) for i in w_index_tuple),
         _frozen_indices=frozen_indices,
         _compartment_names=compartment_names,
         # Left unset unless the caller supplies one: `timescale` is a rate and

@@ -981,11 +981,14 @@ def find_data(query, limit, organism, sources, composite, paper, check):
     "--species/--no-species", default=True, help="List the species too."
 )
 @click.option(
-    "--delta/--no-delta",
-    default=True,
-    help="Also import the deposit and report what the import did not keep.",
+    "--notes",
+    is_flag=True,
+    default=False,
+    help="Print every note in the file in full, and where each one hangs. "
+    "The model's own note is abridged without this; notes on single "
+    "parameters, species and reactions are always shown in full.",
 )
-def reactions(model, species, delta):
+def reactions(model, species, notes):
     """What a deposit holds: its species, reactions and rate laws.
 
     Choosing a deposit means arguing from its mechanism rather than its title,
@@ -996,21 +999,49 @@ def reactions(model, species, delta):
     named, so an intervention wired to one drives nothing.
 
         supply reactions BIOMD0000000140
-        supply reactions path/to/model.xml --no-delta
+        supply reactions path/to/model.xml --notes
     """
-    from hallsim.sbml_inspect import import_delta, inspect_sbml
+    from hallsim.sbml_read import read_sbml
 
-    deposit = inspect_sbml(model, name="deposit")
+    deposit = read_sbml(model, name="deposit")
     click.echo(
-        f"{deposit.name}: {len(deposit.species)} species, "
+        f"{deposit.name}: SBML L{deposit.sbml_level}V{deposit.sbml_version}, "
+        f"{len(deposit.species)} species, "
         f"{len(deposit.reactions)} reactions, {len(deposit.rules)} rules, "
+        f"{len(deposit.parameters)} parameters, "
         f"{len(deposit.functions)} functionDefinitions"
         + (
-            f"; compartments {', '.join(deposit.compartments)}"
-            if deposit.compartments
+            f"; packages {', '.join(deposit.packages)}"
+            if deposit.packages
             else ""
         )
     )
+    if deposit.notes:
+        # Usually the whole abstract, so it is abridged unless asked for; the
+        # notes that carry a condition hang on single elements, not here.
+        blurb = deposit.notes
+        if not notes and len(blurb) > 400:
+            blurb = blurb[:400].rstrip() + " … (--notes for all of it)"
+        click.echo(f"\nWhat the file says about itself\n  {blurb}")
+    if deposit.history:
+        click.echo("  " + "; ".join(f"{k}: {v}" for k, v in deposit.history))
+    if deposit.model_units:
+        click.echo(
+            "\nModel-level units\n  "
+            + ", ".join(f"{k} = {v}" for k, v in deposit.model_units)
+        )
+    if deposit.units:
+        click.echo("\nUnit definitions")
+        for unit in deposit.units:
+            click.echo(f"  {unit}")
+    if deposit.compartments:
+        click.echo("\nCompartments — size divides every concentration in it")
+        for comp in deposit.compartments:
+            click.echo(f"  {comp}")
+    if deposit.constraints:
+        click.echo("\nConstraints — the author's own validity range")
+        for constraint in deposit.constraints:
+            click.echo(f"  {constraint}")
     if not deposit.reactions and deposit.rules:
         click.echo(
             "  no reactions: this deposit's mechanism is in its rules, and a "
@@ -1020,6 +1051,18 @@ def reactions(model, species, delta):
         click.echo("\nSpecies")
         for spec in deposit.species:
             click.echo(f"  {spec}")
+        inexact = deposit.inexact_species
+        if inexact:
+            click.echo(
+                f"  {len(inexact)} annotations above are weaker than identity, "
+                "and the import keeps the term while dropping that "
+                "distinction. A readout joined on one of these measures "
+                "something other than what it reports:"
+            )
+            for sid, qualifier, term in inexact[:8]:
+                click.echo(f"    {sid} {qualifier} {term}")
+            if len(inexact) > 8:
+                click.echo(f"    … and {len(inexact) - 8} more")
     if deposit.reactions:
         click.echo("\nReactions")
         for rxn in deposit.reactions:
@@ -1030,16 +1073,44 @@ def reactions(model, species, delta):
             click.echo(f"  {fid} = {body}")
     if deposit.rules:
         click.echo("\nRules")
-        for kind, target, formula in deposit.rules:
-            click.echo(f"  {kind} {target} = {formula}")
-    if delta:
-        click.echo("\nWhat the import kept")
-        try:
-            click.echo(str(import_delta(model, name="deposit")))
-        except Exception as exc:
-            # A deposit the importer refuses still has a readable mechanism
-            # above, and why it was refused is the most useful line here.
-            click.echo(f"  the import refuses this deposit: {exc}")
+        for rule in deposit.rules:
+            click.echo(f"  {rule}")
+    if deposit.initial_assignments:
+        click.echo(
+            "\ninitialAssignments — these override the initial values above"
+        )
+        for assignment in deposit.initial_assignments:
+            click.echo(f"  {assignment}")
+    if deposit.parameters:
+        click.echo("\nParameters")
+        for parameter in deposit.parameters:
+            click.echo(f"  {parameter}")
+        zeros = deposit.zero_parameters
+        if zeros:
+            click.echo(
+                f"  {len(zeros)} of these "
+                + ("is" if len(zeros) == 1 else "are")
+                + " exactly zero "
+                f"({', '.join(p.id for p in zeros[:12])}"
+                + (", …" if len(zeros) > 12 else "")
+                + "). A term at zero was set there by someone; what that "
+                "means is yours to decide, and any note above is the only "
+                "place the file says why."
+            )
+    if deposit.events:
+        click.echo("\nEvents — usually the deposit's protocol")
+        for event in deposit.events:
+            click.echo(f"  {event}")
+        click.echo(
+            "  An event assigns outright, so a handle aimed at "
+            f"{', '.join(deposit.event_written)} is overwritten when it fires."
+        )
+    if notes:
+        click.echo(
+            f"\nEvery note in the file ({len(deposit.annotated_notes)})"
+        )
+        for where, text in deposit.annotated_notes:
+            click.echo(f"  [{where}] {text}")
 
 
 @supply.command("find-papers")

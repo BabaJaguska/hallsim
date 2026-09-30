@@ -26,14 +26,18 @@ any other perturbation is another :class:`Handle` in a registry of its own.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 import equinox as eqx
 import numpy as np
 
+from hallsim.imported import ImportedODEProcess
 from hallsim.process import Process
 from hallsim.tracing import is_traced
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -498,3 +502,384 @@ def suggest_registry(intents, composite) -> dict[str, Handle]:
     the gap is visible rather than dropped."""
     items = intents.values() if isinstance(intents, dict) else intents
     return {i.name: suggest_handle(i, composite) for i in items}
+
+
+# ── Does the handle do anything? ────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class HandleEffect:
+    """What a handle actually moved, measured rather than assumed.
+
+    A mapping can resolve to a real parameter name, accept a severity, stay
+    differentiable, and move nothing: the value it writes is read by no rate
+    law, because an assignment rule supplies what the field reads or the
+    parameter is simply unused. Nothing raises, so an inert handle looks like
+    a working one and every severity swept over it returns the same answer.
+
+    ``wrote`` is what changed in the parameters, ``moved`` what changed in the
+    vector field. A handle with writes and no movement is the silent case.
+    """
+
+    handle: str
+    severity: float
+    wrote: tuple[tuple[str, float, float], ...] = ()
+    moved: tuple[tuple[str, float], ...] = ()
+    diverged: tuple[tuple[str, float], ...] = ()
+    unmapped: tuple[str, ...] = ()
+    times: tuple[float, ...] = (0.0,)
+    processes: tuple[str, ...] = ()
+    imported: tuple[str, ...] = ()
+
+    @property
+    def reach(self) -> tuple[str, ...]:
+        """Every state the handle changes, by either measure."""
+        return tuple(
+            dict.fromkeys(
+                [p for p, _ in self.diverged] + [p for p, _ in self.moved]
+            )
+        )
+
+    @property
+    def deposits(self) -> tuple[str, ...]:
+        """The **imported models** this handle reaches — the number the "two
+        deposits" gate is stated in.
+
+        Narrower than :attr:`processes` on purpose. A composite is mostly not
+        deposits: coupling edges, observers and forcing sources are processes
+        too, and counting them inflates the gate. Resolved from the topology
+        rather than by splitting a path, because a path's prefix is a store
+        namespace and coincides with a process name only for an imported
+        composite's default wiring.
+        """
+        return self.imported
+
+    @property
+    def inert(self) -> bool:
+        """Changes neither a trajectory nor a derivative anywhere sampled."""
+        return not self.diverged and not self.moved
+
+    @property
+    def silent(self) -> bool:
+        """Wrote a parameter and still changed nothing — the dangerous case."""
+        return bool(self.wrote) and self.inert
+
+    def __str__(self) -> str:
+        head = f"{self.handle} at severity {self.severity:g}"
+        if self.unmapped:
+            head += f"\n  MAPPING MISSED: {', '.join(self.unmapped)}"
+        lines = [head]
+        for name, before, after in self.wrote:
+            lines.append(f"  wrote {name}: {before:g} -> {after:g}")
+        if self.silent:
+            lines.append(
+                "  INERT: every write landed and nothing changed — the value "
+                "is read by nothing, so this handle cannot change an answer"
+            )
+        elif self.inert:
+            lines.append("  INERT: nothing was written and nothing changed")
+        else:
+            lines.append(
+                f"  reaches {len(self.reach)} states in "
+                f"{len(self.deposits)} deposit(s)"
+                + (f" ({', '.join(self.deposits)})" if self.deposits else "")
+                + f", {len(self.processes)} processes in all"
+            )
+            if self.diverged:
+                lines.append(
+                    f"  trajectory moved, {len(self.diverged)} states, "
+                    "signed and relative to each state's own scale:"
+                )
+                for path, rel in self.diverged[:8]:
+                    lines.append(f"    {path}: {rel:+.3%}")
+            lines.append(
+                f"  derivative moved at a sampled state: {len(self.moved)}"
+            )
+        return "\n".join(lines)
+
+
+def _read_param(proc, param_name: str):
+    target = proc
+    for part in param_name.split("."):
+        if isinstance(target, dict):
+            if part not in target:
+                return None
+            target = target[part]
+        else:
+            if not hasattr(target, part):
+                return None
+            target = getattr(target, part)
+    return target
+
+
+def handle_effect(
+    composite,
+    handle: str,
+    registry: dict,
+    *,
+    severity: float = 1.0,
+    t_end: float,
+    samples: int = 8,
+    atol: float = 0.0,
+    baseline=None,
+) -> HandleEffect:
+    """Apply one handle and report what it moved, over a window.
+
+    The check every registry entry is owed before a severity is swept over it:
+    a mapping that writes a parameter nothing reads is silently inert, and a
+    sweep over it produces a flat line that looks like biology.
+
+        effect = handle_effect(comp, "Chronic Inflammation", REG, t_end=14.0)
+        assert not effect.inert, str(effect)
+
+    ``t_end`` is required, and the reason is the whole design of this function.
+    "Does this handle matter" is a dynamical question and has no answer at a
+    point: a rate multiplying a species that starts at zero moves no derivative
+    at the initial state *at any time*, and a driver that steps later moves none
+    at ``t=0``. Both read as inert if you evaluate the field where the model
+    starts, and both are live. Two of the demo registry's handles were wrongly
+    called dead this way — once for each reason — before this sampled the states
+    the model actually reaches.
+
+    Two measures, because one is not enough. ``diverged`` integrates both arms
+    and compares the **trajectories**, signed and relative to each state's own
+    scale: that is what answers "how far does this handle reach", because reach
+    arrives by integration and comparing vector fields cannot see it — a handle
+    on an upstream rate constant registers only where that constant literally
+    appears, understating a loop-wide effect to one state. ``moved`` keeps the
+    field comparison, which still catches an effect that later washes out.
+    ``deposits`` is the count the "two deposits" gate is actually stated in.
+
+    Limit worth knowing: the field comparison sees only states the saved
+    trajectory visits, so a window far longer than the dynamics samples past
+    them. The trajectory comparison has no such blind spot, since a divergence
+    that starts early is carried in the state afterwards — which is why
+    ``inert`` rests on both, and why a long ``t_end`` can lower ``moved`` while
+    leaving ``diverged`` intact.
+
+    Pass ``baseline`` to reuse one untreated run across several handles rather
+    than re-solving it for each.
+    """
+    import jax.numpy as jnp
+
+    entry = registry[handle]
+    try:
+        treated = with_handles(
+            composite, {handle: severity}, registry=registry
+        )
+    except Exception as exc:
+        # A handle that cannot be applied is a finding, not an exception to
+        # propagate: this is the check that is supposed to say so. The total
+        # miss — no mapping naming any process here — already raises a good
+        # message of its own, and it is reported rather than re-raised.
+        return HandleEffect(
+            handle=handle,
+            severity=severity,
+            unmapped=(f"cannot be applied: {type(exc).__name__}: {exc}",),
+        )
+
+    wrote, unmapped = [], []
+    for mapping in getattr(entry, "mappings", ()):
+        label = f"{mapping.process_name}.{mapping.param_name}"
+        base = composite.processes.get(mapping.process_name)
+        after = treated.processes.get(mapping.process_name)
+        if base is None or after is None:
+            unmapped.append(f"{label} (no such process in the composite)")
+            continue
+        was = _read_param(base, mapping.param_name)
+        now = _read_param(after, mapping.param_name)
+        if was is None or now is None:
+            unmapped.append(f"{label} (no such parameter on the process)")
+            continue
+        was, now = float(jnp.asarray(was)), float(jnp.asarray(now))
+        if was != now:
+            wrote.append((label, was, now))
+
+    keys = composite.store_keys()
+    base_rhs, _ = composite.build_rhs()
+    treated_rhs, _ = treated.build_rhs()
+
+    # States the model actually reaches, not the one it starts from: a rate on a
+    # species that begins at zero is invisible at y0 however long you wait.
+    visited = [(0.0, composite.initial_state_vec(keys))]
+    base_run = baseline
+    try:
+        from hallsim.scheduler import Scheduler
+
+        step = float(t_end) / max(samples, 1)
+        run = base_run = base_run or Scheduler().run(
+            composite, t_span=(0.0, float(t_end)), macro_dt=step, save_dt=step
+        )
+        order = {k: i for i, k in enumerate(run.keys)}
+        take = [order[k] for k in keys if k in order]
+        if len(take) == len(keys):
+            visited += [
+                (float(t), jnp.asarray(row)[jnp.asarray(take)])
+                for t, row in zip(run.ts, run.ys)
+            ]
+    except Exception as exc:
+        log.warning(
+            "handle %r: could not integrate the untreated composite (%s), so "
+            "the field is compared at the initial state only and an inert "
+            "verdict here is not trustworthy",
+            handle,
+            str(exc)[:120],
+        )
+
+    peak = None
+    for when, state in visited:
+        delta = jnp.abs(
+            treated_rhs(when, state, None) - base_rhs(when, state, None)
+        )
+        peak = delta if peak is None else jnp.maximum(peak, delta)
+    sampled = tuple(when for when, _ in visited)
+    moved = sorted(
+        ((keys[i], float(d)) for i, d in enumerate(peak) if float(d) > atol),
+        key=lambda item: -item[1],
+    )
+    diverged = _trajectory_divergence(
+        base_run, treated, float(t_end), samples, atol
+    )
+    owners = _owners(
+        composite, {p for p, _ in diverged} | {p for p, _ in moved}
+    )
+    return HandleEffect(
+        handle=handle,
+        severity=severity,
+        wrote=tuple(wrote),
+        moved=tuple(moved),
+        diverged=diverged,
+        unmapped=tuple(unmapped),
+        times=sampled,
+        processes=owners,
+        imported=tuple(
+            n
+            for n in owners
+            if isinstance(composite.processes.get(n), ImportedODEProcess)
+        ),
+    )
+
+
+def _owners(composite, paths) -> tuple[str, ...]:
+    """Processes with a port on any of ``paths``, read from the topology."""
+    from hallsim.store import as_paths
+
+    wanted = set(paths)
+    found = set()
+    for name, proc in composite.processes.items():
+        topo = (composite.topology or {}).get(name, {})
+        for port in proc.ports_schema():
+            target = topo.get(port, f"{name}/{port}")
+            if any(path in wanted for path in as_paths(target)):
+                found.add(name)
+                break
+    return tuple(sorted(found))
+
+
+def _trajectory_divergence(base_run, treated, t_end, samples, atol):
+    """Signed, scale-relative divergence of the treated trajectory.
+
+    Relative to each state's own excursion, so a micromolar deposit and an
+    arbitrary-unit one are not ranked by which chose bigger numbers; signed, so
+    the direction of an effect does not need a second run to recover.
+    """
+    if base_run is None:
+        return ()
+    import numpy as np
+
+    from hallsim.scheduler import Scheduler
+
+    try:
+        step = t_end / max(samples, 1)
+        treated_run = Scheduler().run(
+            treated, t_span=(0.0, t_end), macro_dt=step, save_dt=step
+        )
+    except Exception as exc:
+        log.warning("treated arm did not solve (%s)", str(exc)[:120])
+        return ()
+    a, b = np.asarray(base_run.ys), np.asarray(treated_run.ys)
+    ta, tb = np.asarray(base_run.ts), np.asarray(treated_run.ts)
+    if list(base_run.keys) != list(treated_run.keys):
+        log.warning(
+            "the two arms report different store keys, so their trajectories "
+            "cannot be compared; divergence is not measured and an inert "
+            "verdict here is not trustworthy"
+        )
+        return ()
+    if a.shape != b.shape or not np.allclose(ta, tb):
+        # The two arms need not land on the same save grid — the scheduler is
+        # free to save differently once the dynamics differ — so align the
+        # treated arm onto the baseline's own times. Returning empty here
+        # instead, as this first did, reads as a handle that changes nothing.
+        try:
+            b = np.column_stack(
+                [np.interp(ta, tb, b[:, j]) for j in range(b.shape[1])]
+            )
+        except Exception as exc:
+            log.warning(
+                "could not align the two arms' save grids (%s); divergence is "
+                "not measured and an inert verdict is not trustworthy",
+                str(exc)[:120],
+            )
+            return ()
+    delta = b - a
+    at = np.argmax(np.abs(delta), axis=0)
+    cols = np.arange(delta.shape[1])
+    # Against the larger of the two arms' own excursions, so the number is a
+    # bounded fraction of what the state does rather than an unbounded ratio
+    # against a baseline that sits near zero.
+    scale = np.maximum(
+        np.maximum(np.abs(a).max(axis=0), np.abs(b).max(axis=0)),
+        np.finfo(float).tiny,
+    )
+    rel = delta[at, cols] / scale
+    # Two independent solves take different adaptive steps once their dynamics
+    # differ, so every state's saved value shifts a little even where the handle
+    # cannot reach — and aligning the arms onto one grid interpolates on top of
+    # that. Without a floor those shifts read as reach, and a handle confined to
+    # one process reports two. Measured on an independent pair: the real effect
+    # -2.5e-1, the artifact -4.7e-9. 1e-6 sits three orders above the noise and
+    # far below any trajectory change worth calling an effect.
+    floor = max(float(atol), 1e-6)
+    return tuple(
+        sorted(
+            (
+                (base_run.keys[i], float(r))
+                for i, r in enumerate(rel)
+                if abs(float(r)) > floor
+            ),
+            key=lambda item: -abs(item[1]),
+        )
+    )
+
+
+def inert_handles(
+    composite,
+    registry: dict,
+    *,
+    severity: float = 1.0,
+    t_end: float,
+    samples: int = 8,
+) -> dict:
+    """Every handle in ``registry`` that moves nothing on ``composite``.
+
+    ``{name: HandleEffect}``, empty when the registry is sound. Worth asserting
+    in a test over any registry that ships.
+    """
+    found = {}
+    for name in registry:
+        try:
+            effect = handle_effect(
+                composite,
+                name,
+                registry,
+                severity=severity,
+                t_end=t_end,
+                samples=samples,
+            )
+        except Exception as exc:  # a handle that raises is not a working one
+            log.warning("handle %r could not be applied: %s", name, exc)
+            continue
+        if effect.inert:
+            found[name] = effect
+    return found

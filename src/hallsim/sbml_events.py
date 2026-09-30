@@ -430,7 +430,11 @@ class SBMLEvent(Process):
 
 
 def translate_events(
-    xml_path: str, species_names, consts: dict, model_name: str
+    xml_path: str,
+    species_names,
+    consts: dict,
+    model_name: str,
+    sbml_model=None,
 ) -> list[SBMLEvent]:
     """Read the SBML at ``xml_path`` and return one SBMLEvent per event.
 
@@ -441,8 +445,9 @@ def translate_events(
     is kept and recorded in ``_param_targets``; :func:`expand_events` promotes
     it on the owning process.
     """
-    doc = libsbml.SBMLReader().readSBMLFromFile(str(xml_path))
-    model = doc.getModel()
+    model = sbml_model
+    if model is None:
+        model = libsbml.SBMLReader().readSBMLFromFile(str(xml_path)).getModel()
     if model is None:
         return []
     species = set(species_names)

@@ -592,12 +592,44 @@ def triage_process(
             _extract_native_time_seconds,
             _extract_species_ontology,
         )
+        from hallsim.sbml_read import read_sbml
 
         unsupported = unsupported_features(xml_path)
         if unsupported:
             blockers.append(
                 f"unsupported constructs: {'; '.join(unsupported)}"
             )
+
+        # What the author wrote about their own numbers, reported and not
+        # judged. BIOMD0000000105 ships `k69 = 0` and says in the note on that
+        # parameter that zero is its proteasome-inhibited condition — so a
+        # stock import runs a blocked proteasome, and the file says so. Whether
+        # a value is the one to use is the modeller's call; not being told is
+        # not.
+        try:
+            deposit = read_sbml(xml_path, label)
+        except Exception:
+            deposit = None
+        if deposit is not None:
+            for note_on, text in deposit.annotated_notes:
+                if note_on != "model":
+                    flags.append(f"the file says, on {note_on}: {text}")
+            zeros = deposit.zero_parameters
+            if zeros:
+                flags.append(
+                    "set to exactly zero in the deposit: "
+                    + ", ".join(p.id for p in zeros[:12])
+                    + (", …" if len(zeros) > 12 else "")
+                    + " — a term at zero was put there by someone, and a "
+                    "relative handle on one cannot move it"
+                )
+            if deposit.constraints:
+                for constraint in deposit.constraints:
+                    flags.append(
+                        "the author declares a validity range: "
+                        + (constraint.message or constraint.math)
+                    )
+
         _, time_declared = _extract_native_time_seconds(xml_path)
         if not time_declared:
             flags.append(

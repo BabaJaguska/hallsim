@@ -176,9 +176,19 @@ class ImportedODEProcess(Process):
                 default=deposited(d.param_name),
                 units="dimensionless",
                 description=f"drives {self._param_label} {d.param_name!r}",
+                ontology=self.identity_of(d.param_name),
             )
             for d in self._param_drivers
         }
+
+    def identity_of(self, name: str) -> dict:
+        """Ontology ids the source file attaches to ``name``, or ``{}``.
+
+        Identity belongs to the quantity, not to whichever vector or port is
+        addressing it today, so a promotion has something to carry. Formats
+        that read annotations override this.
+        """
+        return {}
 
     def _driven_param_values(self, state) -> dict:
         """``{param_name: value}`` per live driver, which each format's
