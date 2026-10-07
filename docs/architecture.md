@@ -218,9 +218,11 @@ through `hallsim.sbml_core` (libsbml → sympy → JAX), and:
 
 **A repository is not a format.** SBML comes from BioModels, from
 BioSimulations' COMBINE archives, and from paper supplements; XPP `.ode` comes
-from ModelDB and from supplements — both have importers
-(`process_from_sbml`, `process_from_xpp`). CellML/Physiome serves CellML and
-ModelDB also serves NEURON, neither of which has an importer, so
+from ModelDB and from supplements; CellML comes from the Physiome Model
+Repository. All three import: `process_from_sbml` and `process_from_xpp`,
+with a `.cps` or `.cellml` path converted to SBML on the way in
+(`hallsim.cps_import`, `hallsim.cellml_import`) so the rest of the pipeline
+sees one format. ModelDB also serves NEURON, which has no importer, so
 `hallsim.search.models` returns those as pointers rather than imports. SED-ML,
 which curated deposits ship alongside the model, is a different kind of
 artefact again — it describes a *simulation experiment over* a model, not the

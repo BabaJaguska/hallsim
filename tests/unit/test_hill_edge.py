@@ -5,6 +5,8 @@ to is not a property of the framework."""
 
 import jax
 import jax.numpy as jnp
+import logging
+
 import pytest
 
 from hallsim.models.hill_edge import HillEdge
@@ -237,11 +239,19 @@ class TestModes:
         assert flux["target"].role is PortRole.EVOLVED
         assert level["signal"].role is PortRole.ASSIGNED
 
-    def test_level_rejects_a_constant_edge_and_flux_allows_ablation(self):
+    def test_a_constant_edge_warns_in_both_modes_rather_than_raising(
+        self, caplog
+    ):
+        """An edge pinned to a constant is the ablation control, and cutting an
+        edge in place is how a design shows its edge is load-bearing. Refusing
+        to construct one blocked exactly the zero-gain arm a gain sweep is
+        about, so it warns: deliberate ablation reads the same as a dead edge,
+        and only the caller knows which it is."""
         from hallsim.models.hill_edge import HillEdge
 
-        with pytest.raises(ValueError, match="carries no signal"):
+        with caplog.at_level(logging.WARNING):
             HillEdge(mode="level", basal=1.0, hi=1.0)
+        assert "carries no signal" in caplog.text
         # basal == hi == 0 in flux mode is the documented ablation.
         HillEdge(mode="flux", basal=0.0, hi=0.0)
 

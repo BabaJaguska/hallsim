@@ -39,7 +39,9 @@ BioSimulations, Physiome and Europe PMC supplements from one call, filtered by
 what a deposit *emits* rather than what it mentions — `--produces` takes a
 regex matched against species id and display name. A module imported to supply
 an output it only ever consumes contributes nothing, which is the most common
-way a candidate fails. Importers: SBML, COPASI `.cps`, XPPAUT `.ode`.
+way a candidate fails. Importers: SBML, COPASI `.cps`, XPPAUT `.ode`, and
+CellML `.cellml`, which is read through Myokit and written as SBML on the way
+in, the same route `.cps` takes.
 
 Data readers cover GEO and GeneLab expression, MetaboLights and Metabolomics
 Workbench metabolomics, and PRIDE proteomics, and every one returns a single

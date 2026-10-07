@@ -35,6 +35,9 @@ dependencies    = [
   "networkx",
   "sympy",
   "python-libsbml",
+  # CellML reading: components, connections, encapsulation and units are
+  # resolved by the format's own tooling, then written as SBML on the way in.
+  "myokit",
   # NCBI E-utilities (GEO search and enumeration) through Biopython's
   # client, which paces requests to NCBI's limit and parses the XML.
   "biopython",

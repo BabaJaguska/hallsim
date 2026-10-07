@@ -58,7 +58,8 @@ print(result.get("pool/x").shape)
    time course to calibrate against.
 2. **Screen** — `simulate screen <id-or-path>` triages one model on its own.
    Nothing joins a composite unscreened.
-3. **Import** — `process_from_sbml` / `process_from_xpp`, then `reconciled_to`
+3. **Import** — `process_from_sbml` (SBML, COPASI, CellML) /
+   `process_from_xpp`, then `reconciled_to`
    to put the model on the composite's clock.
 4. **Compose** — `Composite` with a topology; `analyze_composability` where
    two models overlap.

@@ -281,8 +281,16 @@ import it.
 
 ### CellML
 
-* [ ] **Importer queued.** `discovery.search_physiome` finds CellML models
-  and returns a pointer; an importer follows the first model that needs one.
+* [x] **Importer landed 2026-10-07.** `hallsim.cellml_import` reads a
+  `.cellml` through Myokit and writes it as SBML on the way in, the route
+  `.cps` takes; a `search_physiome` hit fetches its exposure's file through
+  `model_files`. Validated on Luo-Rudy 1991 against the SBML copy BioModels
+  converted from the same file.
+* [ ] **Modular models.** A CellML 1.1/2.0 `<import>` is refused, as Myokit
+  does not resolve imports; libcellml's `Importer` flattens them and is the
+  route when the first such model is needed. Component-level annotations
+  (the GO terms a channel component carries) are not yet carried onto the
+  parameters it defines.
 
 ## Model discovery: which repositories are worth adding
 

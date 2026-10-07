@@ -96,6 +96,18 @@ class ParameterMapping:
     slope: "float | FittableCoeff | None" = None
     description: str = ""
 
+    def __post_init__(self):
+        # Half a mapping constructs happily and then fails deep inside a fit,
+        # so a registry with one hole in it passes every import-time check.
+        missing = [n for n in ("floor", "slope") if getattr(self, n) is None]
+        if missing:
+            raise ValueError(
+                f"ParameterMapping({self.process_name}.{self.param_name}) "
+                f"needs {' and '.join(missing)}: a mapping is "
+                "floor + slope * severity, and a missing term has no "
+                "neutral value to fall back on."
+            )
+
     @property
     def floor_value(self):
         f = self.floor

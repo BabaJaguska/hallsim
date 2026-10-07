@@ -391,6 +391,7 @@ IMPORTABLE_SUFFIXES = {
     ".sbml": "sbml",
     ".cps": "copasi",
     ".ode": "xpp",
+    ".cellml": "cellml",
 }
 #: Source a model would have to be translated from, by suffix.
 SOURCE_SUFFIXES = {

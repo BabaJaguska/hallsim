@@ -18,11 +18,14 @@ import sympy
 from hallsim.kinetics import hill_gate_sympy
 from hallsim.process import ReactionChannel
 
+import logging
 import math
 from dataclasses import dataclass
 
 import equinox as eqx
 import jax.numpy as jnp
+
+log = logging.getLogger(__name__)
 
 from hallsim.kinetics import hill_gate
 from hallsim.process import Port, PortRole, Process, calibratable
@@ -81,10 +84,12 @@ class HillEdge(Process):
             and not is_traced(self.basal, self.hi)
             and float(self.basal) == float(self.hi)
         ):
-            raise ValueError(
-                f"HillEdge(mode='level'): basal == hi == {float(self.hi):g}, "
-                "so the edge assigns a constant and carries no signal. "
-                "Separate them; hi below basal is a valid inhibitory edge."
+            log.warning(
+                "HillEdge(mode='level'): basal == hi == %g, so this edge "
+                "assigns a constant and carries no signal. That is the "
+                "ablation control if you meant it, and a dead edge if you "
+                "did not. hi below basal is a valid inhibitory edge.",
+                float(self.hi),
             )
 
     def ports_schema(self):

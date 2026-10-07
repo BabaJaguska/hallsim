@@ -1522,7 +1522,8 @@ class Composite(eqx.Module):
             if not ports:
                 continue
             ks = tuple(float(k) for k in np.atleast_1d(np.asarray(K)))
-            out[name] = ([wiring[p] for p in ports], ks)
+            sources = [path for p in ports for path in as_paths(wiring[p])]
+            out[name] = (sources, ks)
         return out
 
     def calibration_targets(

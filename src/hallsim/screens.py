@@ -75,21 +75,25 @@ def _screen_xpp(model_id: str, path, pattern: str) -> "OutputScreen":
 
 
 def _readable_model_files(paths):
-    """``paths`` with any COPASI file converted to SBML.
+    """``paths`` with any COPASI or CellML file converted to SBML.
 
     A deposit's supplement often ships the ``.cps`` and no SBML at all, and
-    a deposit is screened on its content, not skipped for its format.
+    the Physiome repository ships CellML only; a deposit is screened on its
+    content, not skipped for its format.
     """
-    from hallsim.cps_import import CopasiUnavailableError, cps_to_sbml, is_cps
+    from hallsim.cellml_import import cellml_to_sbml, is_cellml
+    from hallsim.cps_import import cps_to_sbml, is_cps
 
+    converters = ((is_cps, cps_to_sbml), (is_cellml, cellml_to_sbml))
     out = []
     for path in paths:
-        if not is_cps(path):
+        convert = next((c for test, c in converters if test(path)), None)
+        if convert is None:
             out.append(path)
             continue
         try:
-            out.append(cps_to_sbml(path))
-        except (CopasiUnavailableError, Exception) as exc:
+            out.append(convert(path))
+        except Exception as exc:
             log.warning("could not convert %s: %s", path, exc)
     return out
 
@@ -166,9 +170,9 @@ def screen_produced_species(
         try:
             paths = model_files(model_id, source, timeout)
         except LookupError as exc:
-            # CellML and XPP deposits need their own parser. Reported, never
-            # dropped — an unscreened hit is still a hit, and silently losing
-            # it looks like the repository had none.
+            # A source without a fetcher is reported, never dropped — an
+            # unscreened hit is still a hit, and silently losing it looks
+            # like the repository had none.
             out.append(
                 OutputScreen(
                     str(model_id),

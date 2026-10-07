@@ -1121,20 +1121,32 @@ def _resolve_source(model_id, name):
     Online; ``PMC1234567`` is a paper whose supplement holds the model, the
     id a Europe PMC search hit carries. All cache to disk, so a repeated
     import is a local read. A local path ending ``.cps`` is a COPASI model
-    and is converted to SBML first.
+    and one ending ``.cellml`` a CellML model; both are converted to SBML
+    first.
     """
     import os
     import re
 
+    # A Path is a local path; without this it falls through to the downloader
+    # and dies on the JSON it gets back.
+    if isinstance(model_id, os.PathLike):
+        model_id = os.fspath(model_id)
+
     if isinstance(model_id, str) and os.path.isfile(model_id):
         name = name or os.path.splitext(os.path.basename(model_id))[0]
-        # A COPASI file is converted to SBML here, at the boundary, so every
-        # downstream check sees an ordinary SBML import (hallsim.cps_import).
+        # COPASI and CellML files are converted to SBML here, at the
+        # boundary, so every downstream check sees an ordinary SBML import
+        # (hallsim.cps_import, hallsim.cellml_import).
         if model_id.lower().endswith(".cps"):
             from hallsim.cps_import import cps_to_sbml
 
             log.info(f"Converting COPASI file '{model_id}' as '{name}'...")
             return cps_to_sbml(model_id), name
+        if model_id.lower().endswith(".cellml"):
+            from hallsim.cellml_import import cellml_to_sbml
+
+            log.info(f"Converting CellML file '{model_id}' as '{name}'...")
+            return cellml_to_sbml(model_id), name
         log.info(f"Loading local SBML file '{model_id}' as '{name}'...")
         return model_id, name
     if isinstance(model_id, str) and model_id.lower().startswith("jws:"):
@@ -1150,12 +1162,12 @@ def _resolve_source(model_id, name):
         files = [
             str(p)
             for p in supplementary_model_files(model_id)
-            if str(p).lower().endswith((".xml", ".sbml", ".cps"))
+            if str(p).lower().endswith((".xml", ".sbml", ".cps", ".cellml"))
         ]
         if not files:
             raise LookupError(
-                f"{model_id} deposited no SBML or COPASI file in its "
-                "supplement; hallsim.search.literature."
+                f"{model_id} deposited no SBML, COPASI or CellML file in "
+                "its supplement; hallsim.search.literature."
                 "supplementary_model_files "
                 "lists what it holds."
             )

@@ -609,8 +609,9 @@ def search_physiome(
 
     The exposure listing carries titles, so the index is one request. Only the
     title is searchable; there is no abstract in the listing, which makes this
-    the shallowest of the four searches. CellML has no importer here yet, so a
-    hit is a pointer.
+    the shallowest of the four searches. A hit imports: ``model_files``
+    fetches the exposure's CellML and ``process_from_sbml`` converts it on
+    the way in.
     """
     index = cached_index("physiome", _build_physiome_index, refresh=refresh)
     scored = []
@@ -634,6 +635,52 @@ def search_physiome(
         )
     log.info("physiome '%s': %d candidates", query, len(scored))
     return _ranked(scored, limit)
+
+
+def _physiome_exposure_url(exposure_id: str) -> str:
+    for rec in cached_index("physiome", _build_physiome_index):
+        if rec["id"] == exposure_id:
+            return rec["url"]
+    return f"{PHYSIOME_EXPOSURES}/{exposure_id}"
+
+
+def download_physiome_models(
+    exposure_id: str, timeout: float = 60.0
+) -> list[Path]:
+    """CellML files of a Physiome exposure, cached on disk.
+
+    An exposure lists its files as bookmarks, and a file's page without its
+    ``/view`` suffix is the file itself. Only ``.cellml`` files come back, so
+    an exposure publishing something else is reported unscreenable rather
+    than silently dropped.
+    """
+    dest = cache_dir("physiome") / str(exposure_id)
+    if dest.exists():
+        return sorted(dest.iterdir())
+    payload = get_json(_physiome_exposure_url(exposure_id), {}, timeout)
+    links = (payload.get("collection") or {}).get("links") or []
+    pages = [
+        link["href"][: -len("/view")]
+        for link in links
+        if link.get("rel") == "bookmark"
+        and (link.get("href") or "").endswith(".cellml/view")
+    ]
+    if not pages:
+        raise LookupError(
+            f"physiome {exposure_id}: no CellML file among its exposure files"
+        )
+    dest.mkdir(parents=True, exist_ok=True)
+    out = []
+    for url in pages:
+        request = urllib.request.Request(
+            url, headers={"User-Agent": USER_AGENT}
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            blob = response.read()
+        target = dest / url.rsplit("/", 1)[-1]
+        target.write_bytes(blob)
+        out.append(target)
+    return out
 
 
 JWS_MODELS = "https://jjj.bio.vu.nl/rest/models/"
@@ -884,7 +931,7 @@ def download_modeldb_models(model_id, timeout: float = 120.0) -> list:
         name = Path(info.filename).name
         if info.is_dir() or is_junk_archive_entry(info.filename):
             continue
-        if not name.lower().endswith((".ode", ".cps")):
+        if not name.lower().endswith((".ode", ".cps", ".cellml")):
             continue
         target = dest / name
         target.write_bytes(archive.read(info))
@@ -978,6 +1025,8 @@ def model_files(model_id: str, source: str, timeout: float) -> list:
         return [download_jws_model(model_id)]
     if source == "modeldb":
         return download_modeldb_models(model_id, timeout=timeout)
+    if source == "physiome":
+        return download_physiome_models(model_id, timeout=timeout)
     if source == "europepmc":
         from hallsim.search.literature import supplementary_model_files
 

@@ -441,7 +441,7 @@ def test_a_pmc_id_imports_from_the_paper_supplement(tmp_path, monkeypatch):
     )
     import pytest
 
-    with pytest.raises(LookupError, match="no SBML or COPASI file"):
+    with pytest.raises(LookupError, match="no SBML, COPASI or CellML file"):
         sbml_import.process_from_sbml("PMC1234567")
 
 
