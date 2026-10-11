@@ -298,6 +298,13 @@ def test_the_report_reproduces_from_the_rows(tmp_path):
     pairs = (run / "pairs.csv").read_text().splitlines()
     assert len(pairs) == 2 and "MTBLS1" in pairs[1] and "BIOMD1" in pairs[1]
     assert (run / "funnel.png").exists()
+    # Every matched row here has a reader, so there is no gap to draw.
+    assert [k for k, _ in summary["narrowing"]] == [
+        "a control and a time course",
+        "model, data and mapping shipped",
+    ]
+    assert summary["reader_gap"] == []
+    assert not (run / "reader_gap.png").exists()
     failures = (run / "failures.csv").read_text()
     assert "S-BIAD1" in failures and "GSE1" not in failures
 

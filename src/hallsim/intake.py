@@ -20,6 +20,7 @@ state, or blows up. Those never reach a reviewer.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 import jax.numpy as jnp
@@ -554,10 +555,11 @@ def triage_process(
 ) -> TriageVerdict:
     """Screen one already-imported process. ``xml_path`` adds SBML metadata.
 
-    ``produces`` is a regex the deposit must *emit* — not mention. A module
-    imported to supply an output it only ever consumes contributes nothing,
-    and that is the single most common way a candidate fails, so failing it
-    **blocks**.
+    ``produces`` is a regex for the quantity the deposit is being considered
+    for. Emitting it is flagged as such. Carrying it without emitting it is
+    flagged too: the deposit is downstream of the quantity, and a producer
+    is an edge to attach. Only a deposit carrying no matching species at all
+    **blocks**, since it is about the quantity by name alone.
 
     ``sweep`` is ``(param, readout)`` or ``(param, readout, plausible)``: drive
     the parameter a coupling edge would drive across its plausible range and
@@ -705,12 +707,29 @@ def triage_process(
 
     if produces is not None:
         emitted = emitted_species(process, produces)
+        rx = re.compile(produces, re.I)
+        labels = dict(getattr(process, "_species_labels", ()) or ())
+        present = [
+            sid
+            for sid in (
+                getattr(process, "_species_names", ())
+                or process.ports_with_role(PortRole.EVOLVED)
+            )
+            if rx.search(sid) or rx.search(labels.get(sid, ""))
+        ]
         if emitted:
             flags.append(f"emits {', '.join(emitted)}")
+        elif present:
+            flags.append(
+                f"takes part in /{produces}/ without producing it "
+                f"({', '.join(labels.get(s) or s for s in present[:4])}): "
+                "downstream of the quantity, so a producer is an edge to "
+                "attach"
+            )
         else:
             blockers.append(
-                f"emits nothing matching /{produces}/ — it may consume or "
-                f"merely mention the quantity, which composes to nothing"
+                f"carries no species matching /{produces}/ — the model is "
+                "about the quantity only by name"
             )
 
     if xml_path is not None:

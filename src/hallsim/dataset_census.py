@@ -68,6 +68,15 @@ from hallsim.search.datasets import (
 log = logging.getLogger(__name__)
 
 GATES = ("contrast", "measured", "matched", "loadable")
+
+#: What each gate asks of a deposit, as the funnel figure labels it.
+GATE_LABEL = {
+    "listed": "listed by a repository",
+    "contrast": "two or more sample groups, or a time course",
+    "measured": "nameable measured quantities",
+    "matched": "a screened model carries one",
+    "loadable": "a reader opens the file",
+}
 #: In the order they run. The curated views (``gds`` over GEO series,
 #: ``atlas`` over ArrayExpress and GEO deposits) come after the
 #: repositories they curate, and the report keeps whichever row of a
@@ -1424,6 +1433,34 @@ def summarize(df, run: Path) -> dict:
         ).most_common(25),
         "papers": _papers_summary(run),
     }
+    # What is left after the gates: the rows a calibration can use as
+    # deposited, and the rows that also state which model quantity each
+    # measurement is.
+    loadable = df["loadable"].astype(bool)
+    s["narrowing"] = [
+        (
+            "a control and a time course",
+            int(
+                (
+                    loadable & (df["control"] != "") & (df["n_timepoints"] > 1)
+                ).sum()
+            ),
+        ),
+        (
+            "model, data and mapping shipped",
+            int((loadable & (df["loader"] == "petab")).sum()),
+        ),
+    ]
+    # Matched rows no reader opens, by modality: the reader work that would
+    # grow the loadable set, largest first.
+    gap = {
+        modality: dict(f)["matched"] - dict(f)["loadable"]
+        for modality, f in s["by_modality"].items()
+    }
+    s["reader_gap"] = sorted(
+        ((m, int(n)) for m, n in gap.items() if n > 0),
+        key=lambda item: -item[1],
+    )
     return s
 
 
@@ -1495,16 +1532,26 @@ def write_report(run_dir) -> Path:
     ].to_csv(run / "failures.csv", index=False)
     pairs = _pairs(df)
     pairs.to_csv(run / "pairs.csv", index=False)
-    labels = [g for g, _ in s["funnel"]]
-    series = {r: [n for _, n in f] for r, f in s["by_route"].items()}
+    steps = s["funnel"] + s["narrowing"]
     _bar_figure(
-        labels,
-        series,
-        "Datasets through the gates",
+        [GATE_LABEL.get(g, g) for g, _ in steps],
+        {"datasets": [n for _, n in steps]},
+        "Datasets at each census gate",
         "",
         run / "funnel.png",
         xlabel="datasets",
+        transparent=True,
     )
+    if s["reader_gap"]:
+        _bar_figure(
+            [m for m, _ in s["reader_gap"]],
+            {"datasets": [n for _, n in s["reader_gap"]]},
+            "Matched datasets without a reader, by modality",
+            "",
+            run / "reader_gap.png",
+            xlabel="datasets",
+            transparent=True,
+        )
 
     lines = ["# Dataset census", ""]
     cfg = (
@@ -1520,13 +1567,22 @@ def write_report(run_dir) -> Path:
         "",
         "## Funnel",
         "",
-        _md_table(["gate", "datasets"], s["funnel"]),
+        _md_table(["gate", "datasets"], s["funnel"] + s["narrowing"]),
         "",
     ]
     for route, f in s["by_route"].items():
         lines += [_md_funnel(f"route: {route}", f), ""]
     for mod, f in sorted(s["by_modality"].items()):
         lines += [_md_funnel(f"modality: {mod}", f), ""]
+    if s["reader_gap"]:
+        lines += [
+            "## Reader gap",
+            "",
+            "Matched datasets no reader opens, by modality.",
+            "",
+            _md_table(["modality", "datasets"], s["reader_gap"]),
+            "",
+        ]
     lines += [
         "## Design",
         "",
@@ -1622,6 +1678,7 @@ def write_report(run_dir) -> Path:
         "## Files",
         "",
         "`rows.jsonl`, `census-data.csv`, `failures.csv`, `pairs.csv`, `summary.json`, `funnel.png`"
+        + (", `reader_gap.png`" if s["reader_gap"] else "")
         + (", `papers.jsonl`" if p else ""),
     ]
     (run / "report.md").write_text("\n".join(lines) + "\n")

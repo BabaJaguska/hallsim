@@ -18,9 +18,9 @@ mechanical:
    before it is worth anything.
 
     from hallsim.search.literature import search_europepmc
-    from hallsim.screens import screen_produced_species
+    from hallsim.screens import screen_species_roles
     hits = search_europepmc("senescence SASP kinetic model")
-    screen_produced_species(hits, r"IL6|CXCL8|MMP1")
+    screen_species_roles(hits, r"IL6|CXCL8|MMP1")
 """
 
 from __future__ import annotations

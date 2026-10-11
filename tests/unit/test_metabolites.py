@@ -146,7 +146,7 @@ def test_samples_naming_no_column_is_refused(study):
 
 
 def test_the_design_comes_from_declared_factors(study):
-    design, groups = isa_design(read_isa_samples(study / "s_study.txt"))
+    design, groups, _ = isa_design(read_isa_samples(study / "s_study.txt"))
 
     assert design.arms == ("control", "rapamycin")
     assert design.control == "control"
@@ -167,7 +167,7 @@ def test_a_factor_that_identifies_one_sample_is_not_an_arm():
         "d3\tSample3\trapamycin\tS-003\n"
         "d4\tSample4\trapamycin\tS-004\n"
     )
-    design, groups = isa_design(
+    design, groups, _ = isa_design(
         pd.DataFrame(
             [r.split("\t") for r in samples.strip("\n").split("\n")[1:]],
             columns=samples.split("\n")[0].split("\t"),
@@ -359,7 +359,7 @@ def test_a_workbench_contrast_reaches_a_model_species(
 
 def test_a_time_factor_value_is_read_with_the_title_parser():
     """``24 h`` inside a factor value needs no separate unit field."""
-    design, groups = metabolites.factor_design(
+    design, groups, _ = metabolites.factor_design(
         ["S1", "S2", "S3"],
         [
             {"Treatment": "ctrl", "Time": "0 h"},
@@ -377,7 +377,7 @@ def test_a_mislabelled_time_factor_is_found_by_its_values():
     """MTBLS15393 declares 6h to 72h under a factor named ``Treatment``, and
     its seventh level is the marker ``not applicable``. Read by name alone
     that is a seven-arm study; read by value it is one arm over six times."""
-    design, _ = metabolites.factor_design(
+    design, _, _ = metabolites.factor_design(
         [f"S{i}" for i in range(7)],
         [
             {"Treatment": v}
@@ -392,7 +392,7 @@ def test_a_mislabelled_time_factor_is_found_by_its_values():
 def test_a_mixed_factor_is_not_taken_for_a_time_axis():
     """One unparseable value reads as a missing marker; several are levels,
     so a treatment factor naming a duration keeps its arms."""
-    design, _ = metabolites.factor_design(
+    design, _, _ = metabolites.factor_design(
         [f"S{i}" for i in range(4)],
         [
             {"Treatment": v}
@@ -438,3 +438,124 @@ def test_a_failed_lookup_is_not_cached_as_no_compound(monkeypatch, tmp_path):
     monkeypatch.setattr(urllib.request, "urlopen", down)
     assert metabolites.chebi_for("602", "pubchem") == ()
     assert list(tmp_path.rglob("*.json")) == []
+
+
+# ── Per-subject contrasts ───────────────────────────────────────────
+
+
+def test_an_isa_source_name_is_the_subject_of_its_sample(dataset):
+    assert dataset.sample_members == {
+        "Sample1": "donor1",
+        "Sample2": "donor2",
+        "Sample3": "donor3",
+        "Sample4": "donor4",
+    }
+
+
+def test_a_workbench_dash_subject_is_unstated(offline_unichem, mwtab_file):
+    ds = metabolites.MetaboliteDataset.from_workbench(mwtab_file)
+    assert ds.sample_members == {}
+    with pytest.raises(ValueError, match="only group contrasts exist"):
+        ds.member_delta("rapamycin @ 24h", "control @ 24h")
+
+
+def test_unpaired_groups_have_no_per_subject_contrast(dataset):
+    with pytest.raises(ValueError, match="unpaired"):
+        dataset.member_delta("rapamycin @ 24h", "control @ 24h")
+
+
+#: Three people sampled before and after; p2 missed the 60-minute draw.
+COURSE = pd.DataFrame(
+    {
+        "glucose": [100, 200, 50, 150, 80, 160, 120, 80],
+        "valine": [40, 20, 30, 30, 10, 40, 40, 5],
+        "mystery": [7, 7, 7, 7, 7, 7, 7, 7],
+    },
+    index=["a0", "a15", "b0", "b15", "c0", "c15", "c60", "a60"],
+)
+COURSE_FACTORS = pd.DataFrame(
+    {
+        "person": ["p1", "p1", "p2", "p2", "p3", "p3", "p3", "p1"],
+        "Time": [
+            "0 min",
+            "15 min",
+            "0 min",
+            "15 min",
+            "0 min",
+            "15 min",
+            "60 min",
+            "60 min",
+        ],
+    },
+    index=COURSE.index,
+)
+COURSE_IDS = {"glucose": ("5793", "pubchem"), "valine": ("6287", "pubchem")}
+
+
+@pytest.fixture
+def course(offline_unichem):
+    return metabolites.MetaboliteDataset.from_samples(
+        COURSE, COURSE_FACTORS, COURSE_IDS, member="person"
+    )
+
+
+def test_a_sample_table_carries_its_subjects_and_drops_unkeyed_features(
+    course,
+):
+    assert course.sample_members["c60"] == "p3"
+    assert course.design.timepoints == (0.0, 15.0, 60.0)
+    assert course.design.n_subjects == 3
+    assert "mystery" not in set(course.names.values())
+    # Both accessions of valine are kept, as for a repository table.
+    assert {"chebi:16414", "chebi:57762"} <= set(course.quantities.index)
+
+
+def test_each_subject_is_read_against_its_own_baseline(course):
+    per = course.member_delta("all @ 15min", "all @ 0min")
+    assert list(per.index) == ["p1", "p2", "p3"]
+    assert per.loc["p1", "chebi:17234"] == pytest.approx(1.0)
+    assert per.loc["p2", "chebi:17234"] == pytest.approx(np.log2(3))
+    assert per.loc["p3", "chebi:16414"] == pytest.approx(2.0)
+
+
+def test_the_mean_of_paired_contrasts_is_the_group_contrast(course):
+    """Balanced and complete, the two forms agree on the mean; the paired
+    one keeps the spread between people that the group form discards."""
+    per = course.member_delta("all @ 15min", "all @ 0min")
+    group = course.delta("all @ 15min", "all @ 0min")
+    assert per.mean().to_dict() == pytest.approx(group.to_dict())
+    assert per["chebi:17234"].std() > 0
+
+
+def test_a_paired_course_keeps_one_row_per_subject_at_every_time(course):
+    @dataclass
+    class Arm:
+        condition: str
+        reference: str | None
+
+    out = course.arm_deltas(
+        {
+            "bout": {
+                0.0: "all @ 0min",
+                15.0: "all @ 15min",
+                60.0: "all @ 60min",
+            }
+        },
+        {"bout": Arm("bout", "t0")},
+        members=True,
+    )
+    assert list(out["bout"]) == [15.0, 60.0]
+    at60 = out["bout"][60.0]
+    assert list(at60.index) == ["p1", "p2", "p3"]
+    # p2 has no 60-minute sample: a missing row, not a shifted batch.
+    assert at60.loc["p2"].isna().all()
+    assert at60.loc["p1", "chebi:17234"] == pytest.approx(-np.log2(1.25))
+    assert at60.loc["p3", "chebi:16414"] == pytest.approx(2.0)
+
+
+def test_an_explicit_member_order_is_the_row_order(course):
+    per = course.member_delta(
+        "all @ 15min", "all @ 0min", members=["p3", "p1", "p9"]
+    )
+    assert list(per.index) == ["p3", "p1", "p9"]
+    assert per.loc["p9"].isna().all()

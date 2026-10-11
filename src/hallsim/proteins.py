@@ -220,6 +220,7 @@ class ProteinDataset(MeasuredDataset):
     stdev: pd.DataFrame | None = None
     design: Design | None = None
     descriptions: dict[str, str] = field(default_factory=dict)
+    sample_members: dict[str, str] = field(default_factory=dict)
 
     measures = "uniprot"
 

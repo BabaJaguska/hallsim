@@ -1189,13 +1189,22 @@ def summarize(df) -> dict:
     return out
 
 
-def _bar_figure(labels, series, title, subtitle, path, xlabel="deposits"):
+def _bar_figure(
+    labels,
+    series,
+    title,
+    subtitle,
+    path,
+    xlabel="deposits",
+    transparent=False,
+):
     """Horizontal bars per label; ``series`` maps a legend entry to its
     values. One series draws no legend; two draw grouped bars."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
 
     names = list(series)
     k = max(len(names), 1)
@@ -1217,16 +1226,26 @@ def _bar_figure(labels, series, title, subtitle, path, xlabel="deposits"):
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     ax.tick_params(axis="x", labelsize=8)
+    ax.xaxis.set_major_formatter(
+        FuncFormatter(lambda value, _: f"{int(value):,}")
+    )
     ax.grid(axis="x", color="0.9", linewidth=0.6)
     ax.set_axisbelow(True)
     if len(names) > 1:
         ax.legend(frameon=False, fontsize=8, loc="lower right")
     fig.suptitle(title, fontsize=11, x=0.01, ha="left", y=0.995, wrap=True)
-    fig.text(
-        0.01, 0.935, subtitle, fontsize=8, color="0.35", ha="left", wrap=True
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
-    fig.savefig(path, dpi=160)
+    if subtitle:
+        fig.text(
+            0.01,
+            0.935,
+            subtitle,
+            fontsize=8,
+            color="0.35",
+            ha="left",
+            wrap=True,
+        )
+    fig.tight_layout(rect=(0, 0, 1, 0.92 if subtitle else 0.96))
+    fig.savefig(path, dpi=160, transparent=transparent)
     plt.close(fig)
     return path
 

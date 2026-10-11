@@ -2,16 +2,18 @@
 
 :mod:`hallsim.search` says what a repository holds. Whether the framework
 can use it is a different question, answered here by reading the thing
-itself. A model candidate is opened and asked which species it *produces*
-(:func:`screen_produced_species`): annotation search answers "is this
-model about IL6", composing needs "does this model emit IL6", and a
-module imported to supply an output it only consumes contributes
-nothing. A dataset candidate is read against a composite's annotated
-store paths (:func:`coverage`): a deposit is a calibration target only if
-it measures something the composite carries. :func:`search_producing`
-and :func:`search_measuring` are the two searches with their screen
-applied, and :func:`loader_route` says how the expression loader would
-read a platform, or why it cannot.
+itself. A model candidate is opened and asked what role a quantity plays
+in it (:func:`screen_species_roles`): annotation search answers "is this
+model about IL6", composing needs to know whether the model produces IL6,
+consumes it, reads it in a rate law, or holds it as a fixed input. Each
+is a different use. A producer supplies the quantity; a consumer or a
+reader is downstream biology waiting for a producer to be attached by an
+edge. A dataset candidate is read against a composite's annotated store
+paths (:func:`coverage`): a deposit is a calibration target only if it
+measures something the composite carries. :func:`search_species` and
+:func:`search_measuring` are the two searches with their screen applied,
+and :func:`loader_route` says how the expression loader would read a
+platform, or why it cannot.
 """
 
 from __future__ import annotations
@@ -29,19 +31,30 @@ from hallsim.search.models import model_files, search_for_model
 log = logging.getLogger(__name__)
 
 
-# ── A model that emits the quantity ─────────────────────────────────
+# ── The role a quantity plays in a model ────────────────────────────
+
+#: What a deposit can do with a species, each a different use when
+#: composing. ``produces``: a product of some reaction, so the deposit can
+#: supply it. ``consumes``: a reactant, so the deposit removes it and a
+#: producer attached upstream drives it. ``reads``: a modifier or a symbol
+#: in a rate law, so it regulates without being used up. ``input``: a
+#: boundary or constant species the deposit takes as given, the plainest
+#: place to attach a producer.
+ROLES = ("produces", "consumes", "reads", "input")
 
 
 @dataclass(frozen=True)
-class OutputScreen:
-    """Whether a deposit *produces* a quantity, not merely mentions it."""
+class SpeciesScreen:
+    """Which roles the species matching a pattern play in one deposit."""
 
     model_id: str
-    #: ``produces`` | ``no-match`` | ``qualitative`` (SBML-qual, a logical
+    #: ``match`` | ``no-match`` | ``qualitative`` (SBML-qual, a logical
     #: model) | ``constraint-based`` (SBML-fbc) | ``no-reactions`` |
-    #: ``no-rate-laws`` | ``no-sbml`` | ``unreadable`` | ``fetch-failed``
+    #: ``no-rate-laws`` | ``no-sbml`` | ``unreadable`` | ``fetch-failed`` |
+    #: ``unscreenable``
     status: str
-    produced: tuple[str, ...] = ()
+    #: ``((species label, (role, ...)), ...)`` for every matching species.
+    roles: tuple[tuple[str, tuple[str, ...]], ...] = ()
     n_species: int = 0
     n_reactions: int = 0
     #: Why, when the deposit could not be screened.
@@ -49,29 +62,119 @@ class OutputScreen:
 
     @property
     def ok(self) -> bool:
-        return self.status == "produces"
+        return self.status == "match"
+
+    def having(self, role: str) -> tuple[str, ...]:
+        """The matching species that play ``role``."""
+        return tuple(s for s, rs in self.roles if role in rs)
+
+    @property
+    def produced(self) -> tuple[str, ...]:
+        return self.having("produces")
 
 
-def _screen_xpp(model_id: str, path, pattern: str) -> "OutputScreen":
-    """Screen an XPPAUT model, which declares dynamics and no reactions."""
+def _screen_xpp(
+    model_id: str, path, pattern: str, wanted: tuple[str, ...]
+) -> "SpeciesScreen":
+    """Screen an XPPAUT model, which declares dynamics and no reactions.
+
+    Without reactions the only roles readable off the derivative are
+    whether a state has a source term (``produces``) or only loses mass
+    (``consumes``)."""
     from hallsim.intake import emitted_species
+    from hallsim.process import PortRole
     from hallsim.xpp_import import process_from_xpp
 
     try:
         proc = process_from_xpp(str(path), name="m")
     except Exception as exc:
-        return OutputScreen(
+        return SpeciesScreen(
             model_id, "unreadable", note=f"{type(exc).__name__}: {exc}"
         )
-    produced = emitted_species(proc, pattern)
-    schema = proc.ports_schema()
-    return OutputScreen(
+    rx = re.compile(pattern, re.I)
+    produced = set(emitted_species(proc, pattern))
+    states = [
+        s for s in proc.ports_with_role(PortRole.EVOLVED) if rx.search(s)
+    ]
+    roles = tuple(
+        (s, ("produces",) if s in produced else ("consumes",))
+        for s in sorted(states)
+    )
+    return SpeciesScreen(
         model_id,
-        "produces" if produced else "no-match",
-        produced,
-        n_species=len(schema),
+        "match" if any(set(r) & set(wanted) for _, r in roles) else "no-match",
+        roles,
+        n_species=len(proc.ports_schema()),
         note="XPPAUT; screened on the derivative, not on reactions",
     )
+
+
+def _math_names(node) -> set[str]:
+    """Every symbol a libsbml formula reads."""
+    if node is None:
+        return set()
+    out = {node.getName()} if node.isName() else set()
+    for i in range(node.getNumChildren()):
+        out |= _math_names(node.getChild(i))
+    return out
+
+
+def sbml_species_roles(model, pattern: str) -> dict[str, tuple[str, ...]]:
+    """``{species label: roles}`` for the species of a libsbml model
+    whose id or display name matches ``pattern``.
+
+    The label is the display name where one is declared: a CellDesigner
+    export gives every species a UUID id and the gene symbol as its name.
+    Only reactions carrying a kinetic law count; an arrow in a drawn map
+    produces and consumes nothing.
+    """
+    rx = re.compile(pattern, re.I)
+    label, fixed = {}, set()
+    for i in range(model.getNumSpecies()):
+        s = model.getSpecies(i)
+        sid = s.getId()
+        if rx.search(sid) or rx.search(s.getName() or ""):
+            label[sid] = s.getName() or sid
+            if s.getBoundaryCondition() or s.getConstant():
+                fixed.add(sid)
+    found: dict[str, set[str]] = {sid: set() for sid in label}
+    for i in range(model.getNumReactions()):
+        reaction = model.getReaction(i)
+        if not reaction.isSetKineticLaw():
+            continue
+        products = {
+            reaction.getProduct(j).getSpecies()
+            for j in range(reaction.getNumProducts())
+        }
+        reactants = {
+            reaction.getReactant(j).getSpecies()
+            for j in range(reaction.getNumReactants())
+        }
+        modifiers = {
+            reaction.getModifier(j).getSpecies()
+            for j in range(reaction.getNumModifiers())
+        }
+        law = _math_names(reaction.getKineticLaw().getMath())
+        for sid in found:
+            if sid in products:
+                found[sid].add("produces")
+            if sid in reactants:
+                found[sid].add("consumes")
+            if sid in modifiers or (
+                sid in law and sid not in products | reactants
+            ):
+                found[sid].add("reads")
+    for sid in fixed:
+        if found[sid]:
+            found[sid].add("input")
+    out: dict[str, set[str]] = {}
+    for sid, rs in found.items():
+        if rs:
+            out.setdefault(label[sid], set()).update(rs)
+    return {
+        name: tuple(r for r in ROLES if r in rs)
+        for name, rs in sorted(out.items())
+    }
 
 
 def _readable_model_files(paths):
@@ -144,20 +247,30 @@ def _reactionless_formalism(model) -> tuple[str, str]:
     )
 
 
-def screen_produced_species(
-    candidates, pattern: str, *, timeout: float = 60.0
-) -> list[OutputScreen]:
-    """Which of ``candidates`` synthesise a species matching ``pattern``.
+def screen_species_roles(
+    candidates,
+    pattern: str,
+    *,
+    roles: tuple[str, ...] = ROLES,
+    timeout: float = 60.0,
+) -> list[SpeciesScreen]:
+    """What role each species matching ``pattern`` plays in each of
+    ``candidates``, with ``match`` where one plays any of ``roles``.
 
-    ``pattern`` is a case-insensitive regex matched against species ids. A
-    species counts as produced when it is a *product* of some reaction;
-    appearing only as a reactant means the deposit consumes it.
+    ``pattern`` is a case-insensitive regex matched against species ids and
+    display names. A deposit that consumes or reads a quantity it never
+    produces is not a failure: it is the downstream half of a composite,
+    and the producer is the edge to attach. Narrow ``roles`` to
+    ``("produces",)`` when the deposit itself must supply the quantity.
 
     Every input yields a row, including the ones that could not be read — a
     silent skip hides an unreadable deposit as an uninteresting one.
     """
-    rx = re.compile(pattern, re.I)
-    out: list[OutputScreen] = []
+    unknown = set(roles) - set(ROLES)
+    if unknown:
+        raise ValueError(f"unknown roles {sorted(unknown)}; choose {ROLES}")
+    wanted = tuple(roles)
+    out: list[SpeciesScreen] = []
     for cand in candidates:
         model_id = getattr(cand, "id", cand)
         source = getattr(cand, "source", "biomodels")
@@ -174,7 +287,7 @@ def screen_produced_species(
             # unscreened hit is still a hit, and silently losing it looks
             # like the repository had none.
             out.append(
-                OutputScreen(
+                SpeciesScreen(
                     str(model_id),
                     "unscreenable",
                     note=f"{exc} (format {getattr(cand, 'format', '?')})",
@@ -183,7 +296,7 @@ def screen_produced_species(
             continue
         except Exception as exc:  # network, 404, malformed accession
             out.append(
-                OutputScreen(
+                SpeciesScreen(
                     str(model_id),
                     "fetch-failed",
                     note=f"{type(exc).__name__}: {exc}",
@@ -198,16 +311,16 @@ def screen_produced_species(
         if ode and not [
             q for q in paths if str(q).lower().endswith((".xml", ".sbml"))
         ]:
-            out.append(_screen_xpp(str(model_id), ode[0], pattern))
+            out.append(_screen_xpp(str(model_id), ode[0], pattern, wanted))
             continue
         try:
             model, note = _first_readable_sbml(paths)
         except ImportError as exc:
-            out.append(OutputScreen(str(model_id), "no-sbml", note=str(exc)))
+            out.append(SpeciesScreen(str(model_id), "no-sbml", note=str(exc)))
             continue
         if model is None:
             status = "no-sbml" if "no .xml" in note else "unreadable"
-            out.append(OutputScreen(str(model_id), status, note=note))
+            out.append(SpeciesScreen(str(model_id), status, note=note))
             continue
         n_rx = model.getNumReactions()
         if n_rx and not any(
@@ -217,7 +330,7 @@ def screen_produced_species(
             # Nothing is produced by an arrow, so counting one as production
             # promotes a diagram to a model (Wu2010 has 254 such reactions).
             out.append(
-                OutputScreen(
+                SpeciesScreen(
                     str(model_id),
                     "no-rate-laws",
                     n_species=model.getNumSpecies(),
@@ -235,7 +348,7 @@ def screen_produced_species(
             # package the file carries says which formalism it is.
             status, note = _reactionless_formalism(model)
             out.append(
-                OutputScreen(
+                SpeciesScreen(
                     str(model_id),
                     status,
                     n_species=model.getNumSpecies(),
@@ -243,27 +356,13 @@ def screen_produced_species(
                 )
             )
             continue
-        # Match id *or* display name. A CellDesigner export — a large part of
-        # BioModels — gives every species a UUID id and puts the gene symbol in
-        # the name, so an id-only screen cannot see it (Dwivedi2014 produces
-        # IL6 in three compartments under ids like `mwf626e95e_543f_...`).
-        label = {}
-        for i in range(model.getNumSpecies()):
-            s = model.getSpecies(i)
-            label[s.getId()] = s.getName() or s.getId()
-        produced = {
-            label.get(sid, sid)
-            for i in range(model.getNumReactions())
-            for reaction in (model.getReaction(i),)
-            for j in range(reaction.getNumProducts())
-            for sid in (reaction.getProduct(j).getSpecies(),)
-            if rx.search(sid) or rx.search(label.get(sid, ""))
-        }
+        found = sbml_species_roles(model, pattern)
+        hit = any(set(rs) & set(wanted) for rs in found.values())
         out.append(
-            OutputScreen(
+            SpeciesScreen(
                 str(model_id),
-                "produces" if produced else "no-match",
-                tuple(sorted(produced)),
+                "match" if hit else "no-match",
+                tuple(found.items()),
                 model.getNumSpecies(),
                 model.getNumReactions(),
             )
@@ -271,19 +370,26 @@ def screen_produced_species(
     return out
 
 
-def search_producing(
-    query: str, pattern: str, *, limit: int = 40, sources=None, **kwargs
-) -> list[OutputScreen]:
-    """Search **every** repository for ``query``, keep what *produces*
-    ``pattern``.
+def search_species(
+    query: str,
+    pattern: str,
+    *,
+    roles: tuple[str, ...] = ROLES,
+    limit: int = 40,
+    sources=None,
+    **kwargs,
+) -> list[SpeciesScreen]:
+    """Search **every** repository for ``query`` and say what role
+    ``pattern`` plays in each hit.
 
-    The composable version of a text search: a hit is only useful if the
-    quantity you need is something it emits. Defaults to all sources —
+    The composable version of a text search: a hit is useful when the
+    quantity takes part in its dynamics, whether the deposit supplies it or
+    is what a supplied quantity would drive. Defaults to all sources —
     searching one repository and concluding the model does not exist is how
     a candidate gets missed.
     """
     hits = search_for_model(query, limit=limit, sources=sources, **kwargs)
-    return screen_produced_species(hits, pattern)
+    return screen_species_roles(hits, pattern, roles=roles)
 
 
 # ── A dataset that measures what a composite carries ────────────────

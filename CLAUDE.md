@@ -35,11 +35,13 @@ simulate demo stiffness
 The README stays short on this; the detail lives here.
 
 `supply find <query>` searches BioModels, JWS Online, ModelDB,
-BioSimulations, Physiome and Europe PMC supplements from one call, filtered by
-what a deposit *emits* rather than what it mentions — `--produces` takes a
-regex matched against species id and display name. A module imported to supply
-an output it only ever consumes contributes nothing, which is the most common
-way a candidate fails. Importers: SBML, COPASI `.cps`, XPPAUT `.ode`, and
+BioSimulations, Physiome and Europe PMC supplements from one call, and lists
+each hit by the role a quantity plays in its rate laws rather than by what it
+mentions — `--species` takes a regex matched against species id and display
+name, `--role` narrows to produces, consumes, reads or input. A deposit that
+consumes or reads a quantity without producing it is the downstream half of a
+composite, and the producer is an edge to attach; narrow to `--role produces`
+only when the deposit itself must supply the quantity. Importers: SBML, COPASI `.cps`, XPPAUT `.ode`, and
 CellML `.cellml`, which is read through Myokit and written as SBML on the way
 in, the same route `.cps` takes.
 

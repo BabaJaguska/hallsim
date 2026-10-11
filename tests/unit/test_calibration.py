@@ -1082,6 +1082,50 @@ class TestConditionStartAndWindow:
         assert at_truth < 1e-6
         assert off > 1e-2
 
+    def test_paired_measurements_fit_one_member_per_subject(self):
+        """Per-subject fold changes from a measured table drive a batched
+        condition row for row, and a subject's missing sample is masked
+        rather than shifting the batch."""
+        import numpy as np
+        import pandas as pd
+
+        from hallsim.metabolites import MetaboliteDataset
+
+        x0 = np.array([1.0, 2.0, 4.0])
+        times = (2.0, 3.0, 4.0)
+        samples, groups, members, values = [], {}, {}, []
+        for i, start in enumerate(x0):
+            for t in times:
+                if i == 2 and t == 4.0:
+                    continue
+                name = f"m{i}_t{t:g}"
+                samples.append(name)
+                groups.setdefault(f"t{t:g}", []).append(name)
+                members[name] = f"m{i}"
+                values.append(start * np.exp(-self.RATE * (t - 2.0)))
+        ds = MetaboliteDataset(
+            quantities=pd.DataFrame(
+                [values], index=["pool/x"], columns=samples
+            ),
+            sample_groups=groups,
+            sample_members=members,
+        )
+        data = ds.arm_deltas(
+            {"obs": {0.0: "t2", 1.0: "t3", 2.0: "t4"}},
+            {"obs": type("A", (), {"condition": "obs", "reference": "t0"})()},
+            members=["m0", "m1", "m2"],
+        )["obs"]
+        assert data[2.0].loc["m2"].isna().all()
+        data = {t + 2.0: frame for t, frame in data.items()}
+
+        problem = self._problem(
+            {"pool/x": x0}, (2.0, 4.0), data, reference="t0"
+        )
+        at_truth = float(problem.loss({"rate": jnp.asarray(self.RATE)}))
+        off = float(problem.loss({"rate": jnp.asarray(0.5)}))
+        assert np.isfinite(at_truth) and at_truth < 1e-6
+        assert off > 1e-2
+
     def test_forward_fit_recovers_the_rate(self):
         from hallsim.calibration import Calibrator
 

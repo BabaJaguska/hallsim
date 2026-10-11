@@ -1056,10 +1056,14 @@ class GeneExpressionDataset(MeasuredDataset):
     sample_groups:
         ``{group_name: [sample_column_name, ...]}``. Looked up by
         ``delta``.
+    sample_members:
+        ``{sample_column_name: subject}``, for the per-subject contrast
+        ``member_delta``.
     """
 
     gene_expr: pd.DataFrame
     sample_groups: dict[str, list]
+    sample_members: dict[str, str] = field(default_factory=dict)
 
     measures = "hgnc.symbol"
 

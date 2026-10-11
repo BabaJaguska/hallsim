@@ -298,8 +298,10 @@ def factor_design(
     time_factor: str | None = None,
     units: dict[str, str] | None = None,
     subjects: list[str] | None = None,
-) -> tuple[Design, dict[str, list[str]]]:
-    """The :class:`Design` a set of per-sample declared factors implies.
+) -> tuple[Design, dict[str, list[str]], dict[str, str]]:
+    """The :class:`Design` a set of per-sample declared factors implies,
+    the sample groups, and ``{sample: subject}`` where ``subjects`` names
+    them.
 
     ``samples[i]`` is a sample's name and ``factors[i]`` its
     ``{factor name: value}``, which is what both repositories that ship
@@ -378,13 +380,19 @@ def factor_design(
         n_titles=len(samples),
         n_subjects=len({s for s in subjects if s}) if subjects else 0,
     )
-    return design, groups
+    members = {
+        str(sample): s
+        for sample, s in zip(samples, subjects or ())
+        if s and s != "-"
+    }
+    return design, groups, members
 
 
 def isa_design(
     frame: pd.DataFrame, *, time_factor: str | None = None
-) -> tuple[Design, dict[str, list[str]]]:
-    """The :class:`Design` an ISA-Tab sample file declares, and its groups.
+) -> tuple[Design, dict[str, list[str]], dict[str, str]]:
+    """The :class:`Design` an ISA-Tab sample file declares, its groups, and
+    each sample's ``Source Name`` as its subject.
 
     Reads the ``Factor Value[...]`` columns and the ``Unit`` column that
     qualifies each, then hands them to :func:`factor_design`.
@@ -453,6 +461,7 @@ class MetaboliteDataset(MeasuredDataset):
     sample_groups: dict[str, list]
     names: dict[str, str] = field(default_factory=dict)
     design: Design | None = None
+    sample_members: dict[str, str] = field(default_factory=dict)
 
     measures = "chebi"
 
@@ -495,7 +504,9 @@ class MetaboliteDataset(MeasuredDataset):
                 assignments[assay],
             )
         samples_frame = isa_frame(next(iter(model.samples.values())).table)
-        design, groups = isa_design(samples_frame, time_factor=time_factor)
+        design, groups, members = isa_design(
+            samples_frame, time_factor=time_factor
+        )
         declared = assay_samples(model) or [
             s for g in groups.values() for s in g
         ]
@@ -509,6 +520,7 @@ class MetaboliteDataset(MeasuredDataset):
             sample_groups={k: v for k, v in groups.items() if v},
             names=table.names,
             design=design,
+            sample_members={k: v for k, v in members.items() if k in present},
         )
 
     @classmethod
@@ -562,7 +574,7 @@ class MetaboliteDataset(MeasuredDataset):
         of them are kept and only the one a model annotates will match.
         """
         table = read_mwtab(study, timeout=timeout)
-        design, groups = mwtab_design(study, time_factor=time_factor)
+        design, groups, members = mwtab_design(study, time_factor=time_factor)
         present = set(table.quantities.columns)
         groups = {k: [s for s in v if s in present] for k, v in groups.items()}
         return cls(
@@ -570,6 +582,7 @@ class MetaboliteDataset(MeasuredDataset):
             sample_groups={k: v for k, v in groups.items() if v},
             names=table.names,
             design=design,
+            sample_members={k: v for k, v in members.items() if k in present},
         )
 
     @classmethod
@@ -590,6 +603,88 @@ class MetaboliteDataset(MeasuredDataset):
             quantities=table.quantities,
             sample_groups=sample_groups,
             names=table.names,
+        )
+
+    @classmethod
+    def from_samples(
+        cls,
+        values: pd.DataFrame,
+        factors: pd.DataFrame,
+        identifiers: dict[str, tuple[str, str]],
+        *,
+        member: str | None = None,
+        time_factor: str | None = None,
+        units: dict[str, str] | None = None,
+        timeout: float = 30.0,
+    ) -> "MetaboliteDataset":
+        """Build from a ``sample × feature`` table and what each sample is.
+
+        The layout most supplements and portals ship: one row per sample,
+        one column per measured feature. ``factors`` is indexed by the same
+        sample names, one column per declared factor; the column named
+        ``member`` is the subject each sample came from, which is what
+        :meth:`~hallsim.measurements.MeasuredDataset.member_delta` pairs on.
+        ``identifiers`` gives each feature column an ``(id, source)`` that
+        :func:`chebi_for` resolves — ``source`` empty for an InChIKey,
+        otherwise a key of :data:`UNICHEM_SOURCE`. A feature with no
+        identifier or no ChEBI accession is dropped and counted in the log.
+        """
+        samples = [str(s) for s in values.index]
+        frame = factors.reindex(values.index)
+        if frame.isna().all(axis=1).any():
+            missing = frame.index[frame.isna().all(axis=1)][0]
+            raise ValueError(f"sample {missing!r} has no row in `factors`")
+        subjects = (
+            [str(s).strip() for s in frame[member].fillna("")]
+            if member
+            else None
+        )
+        declared = [
+            {
+                str(k): str(v)
+                for k, v in row.items()
+                if k != member and pd.notna(v)
+            }
+            for _, row in frame.iterrows()
+        ]
+        design, groups, members = factor_design(
+            samples,
+            declared,
+            time_factor=time_factor,
+            units=units,
+            subjects=subjects,
+        )
+
+        numeric = values.apply(pd.to_numeric, errors="coerce")
+        numeric = numeric.where(numeric > 0)
+        rows, index, names = [], [], {}
+        unresolved = 0
+        for feature in numeric.columns:
+            ident, source = identifiers.get(feature, ("", ""))
+            keys = (
+                chebi_for(str(ident), source, timeout=timeout) if ident else ()
+            )
+            if not keys:
+                unresolved += 1
+                continue
+            for key in keys:
+                rows.append(numeric[feature].to_numpy())
+                index.append(key)
+                names.setdefault(key, str(feature))
+        log.info(
+            "%d features, %d keyed to ChEBI, %d samples, %d subjects",
+            numeric.shape[1],
+            numeric.shape[1] - unresolved,
+            len(samples),
+            len(set(members.values())),
+        )
+        quantities = pd.DataFrame(rows, index=index, columns=samples)
+        return cls(
+            quantities=quantities,
+            sample_groups=groups,
+            names=names,
+            design=design,
+            sample_members=members,
         )
 
 
@@ -767,8 +862,9 @@ def _fetch_mwtab(accession: str, *, timeout: float = 30.0) -> Path:
 
 
 def mwtab_design(source, *, time_factor: str | None = None):
-    """The :class:`Design` a Metabolomics Workbench study declares, and its
-    sample groups, from the factor dictionary it carries per sample."""
+    """The :class:`Design` a Metabolomics Workbench study declares, its
+    sample groups, and each sample's subject, from the factor dictionary
+    and the ``Subject ID`` it carries per sample (``-`` means unstated)."""
     import mwtab
 
     path = Path(str(source))
@@ -781,7 +877,10 @@ def mwtab_design(source, *, time_factor: str | None = None):
     rows = [dict(r) for r in records]
     samples = [str(r.get("Sample ID", "")).strip() for r in rows]
     factors = [dict(r.get("Factors") or {}) for r in rows]
-    return factor_design(samples, factors, time_factor=time_factor)
+    subjects = [str(r.get("Subject ID", "")).strip() for r in rows]
+    return factor_design(
+        samples, factors, time_factor=time_factor, subjects=subjects
+    )
 
 
 @functools.lru_cache(maxsize=1)

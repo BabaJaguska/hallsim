@@ -7,15 +7,27 @@ from hallsim import screens
 from hallsim.search.datasets import DatasetCandidate, Measured
 
 
-class TestProducedSpeciesScreen:
+class TestSpeciesRoleScreen:
     class _Model:
-        def __init__(self, n_species=0, reactions=(), names=None, packages=()):
+        def __init__(
+            self,
+            n_species=0,
+            reactions=(),
+            names=None,
+            packages=(),
+            fixed=(),
+        ):
             self._n, self._rx = n_species, reactions
             if names is None:
                 # No display names declared: id is the label, as in a
                 # hand-written or COPASI-exported deposit.
-                names = {p: p for r in reactions for p in getattr(r, "_p", ())}
+                names = {
+                    p: p
+                    for r in reactions
+                    for p in (*r._p, *r._r, *r._m, *r._law)
+                }
             self._names = names
+            self._fixed = set(fixed)
             self._packages = set(packages)
 
         def getPlugin(self, name):
@@ -26,12 +38,15 @@ class TestProducedSpeciesScreen:
 
         def getSpecies(self, i):
             sid = sorted(self._names)[i]
+            fixed = sid in self._fixed
             return type(
                 "_S",
                 (),
                 {
                     "getId": lambda s, v=sid: v,
                     "getName": lambda s, v=self._names[sid]: v,
+                    "getBoundaryCondition": lambda s, v=fixed: v,
+                    "getConstant": lambda s: False,
                 },
             )()
 
@@ -42,25 +57,49 @@ class TestProducedSpeciesScreen:
             return self._rx[i]
 
     class _Reaction:
-        def __init__(self, products, kinetic=True):
-            self._p = products
+        def __init__(
+            self,
+            products=(),
+            reactants=(),
+            modifiers=(),
+            law=(),
+            kinetic=True,
+        ):
+            self._p, self._r, self._m = products, reactants, modifiers
+            self._law = law
             self._kinetic = kinetic
 
         def isSetKineticLaw(self):
             return self._kinetic
 
+        @staticmethod
+        def _ref(sid):
+            return type("_Ref", (), {"getSpecies": lambda s: sid})()
+
         def getNumProducts(self):
             return len(self._p)
 
         def getProduct(self, j):
-            class _P:
-                def __init__(self, s):
-                    self._s = s
+            return self._ref(self._p[j])
 
-                def getSpecies(self):
-                    return self._s
+        def getNumReactants(self):
+            return len(self._r)
 
-            return _P(self._p[j])
+        def getReactant(self, j):
+            return self._ref(self._r[j])
+
+        def getNumModifiers(self):
+            return len(self._m)
+
+        def getModifier(self, j):
+            return self._ref(self._m[j])
+
+        def getKineticLaw(self):
+            import libsbml
+
+            formula = " * ".join(("k", *self._r, *self._m, *self._law))
+            math = libsbml.parseL3Formula(formula)
+            return type("_K", (), {"getMath": lambda s: math})()
 
     def _patch(self, monkeypatch, model):
         monkeypatch.setattr(screens, "model_files", lambda *a: ["/tmp/x.xml"])
@@ -68,12 +107,16 @@ class TestProducedSpeciesScreen:
             screens, "_first_readable_sbml", lambda paths: (model, "")
         )
 
+    def _one(self, monkeypatch, model, pattern, **kw):
+        self._patch(monkeypatch, model)
+        (row,) = screens.screen_species_roles(["MODEL1"], pattern, **kw)
+        return row
+
     def test_a_reactionless_deposit_is_not_a_no_match(self, monkeypatch):
         """SBML-qual parses to an empty core model. Calling that `no-match` says
         the reactions were read and produced nothing — the opposite conclusion,
         and how three Boolean deposits read as screened negatives."""
-        self._patch(monkeypatch, self._Model(n_species=0))
-        (row,) = screens.screen_produced_species(["MODEL1"], "IL6")
+        row = self._one(monkeypatch, self._Model(n_species=0), "IL6")
         assert row.status == "no-reactions"
         assert "no reactions" in row.note
 
@@ -81,33 +124,66 @@ class TestProducedSpeciesScreen:
         """A reactionless deposit carrying the qual package is a logical
         model and one carrying fbc is constraint-based; each is reported as
         what it is, not lumped under an absence."""
-        self._patch(monkeypatch, self._Model(n_species=3, packages=["qual"]))
-        (row,) = screens.screen_produced_species(["MODEL1"], "IL6")
+        model = self._Model(n_species=3, packages=["qual"])
+        row = self._one(monkeypatch, model, "IL6")
         assert row.status == "qualitative"
         assert "SBML-qual" in row.note and row.n_species == 3
-        self._patch(monkeypatch, self._Model(n_species=3, packages=["fbc"]))
-        (row,) = screens.screen_produced_species(["MODEL1"], "IL6")
+        model = self._Model(n_species=3, packages=["fbc"])
+        row = self._one(monkeypatch, model, "IL6")
         assert row.status == "constraint-based"
         assert "SBML-fbc" in row.note
 
     def test_no_match_still_means_read_and_absent(self, monkeypatch):
-        self._patch(
-            monkeypatch,
-            self._Model(n_species=2, reactions=(self._Reaction(["TNFR"]),)),
-        )
-        (row,) = screens.screen_produced_species(["MODEL1"], r"\bIL6\b")
-        assert row.status == "no-match"
+        model = self._Model(reactions=(self._Reaction(["TNFR"]),))
+        row = self._one(monkeypatch, model, r"\bIL6\b")
+        assert row.status == "no-match" and row.roles == ()
 
-    def test_produces_reports_the_matching_products(self, monkeypatch):
-        self._patch(
-            monkeypatch,
-            self._Model(
-                n_species=3,
-                reactions=(self._Reaction(["IL6", "junk"]),),
-            ),
+    def test_a_product_is_produced(self, monkeypatch):
+        model = self._Model(reactions=(self._Reaction(["IL6", "junk"]),))
+        row = self._one(monkeypatch, model, r"IL6")
+        assert row.status == "match" and row.produced == ("IL6",)
+        assert row.roles == (("IL6", ("produces",)),)
+
+    def test_a_consumer_is_a_match_not_a_failure(self, monkeypatch):
+        """A deposit that binds IL6 to its receptor and never makes it is
+        the downstream half of a composite; the producer is the edge."""
+        model = self._Model(
+            reactions=(self._Reaction(["IL6_IL6R"], ["IL6", "IL6R"]),)
         )
-        (row,) = screens.screen_produced_species(["MODEL1"], r"IL6")
-        assert row.status == "produces" and row.produced == ("IL6",)
+        row = self._one(monkeypatch, model, r"\bIL6\b")
+        assert row.status == "match"
+        assert row.having("consumes") == ("IL6",)
+        assert row.produced == ()
+
+    def test_a_modifier_or_rate_law_symbol_is_read(self, monkeypatch):
+        model = self._Model(
+            reactions=(
+                self._Reaction(["STAT3p"], ["STAT3"], modifiers=["IL6"]),
+                self._Reaction(["SOCS3"], law=["IL6R"]),
+            )
+        )
+        row = self._one(monkeypatch, model, r"IL6")
+        assert dict(row.roles) == {"IL6": ("reads",), "IL6R": ("reads",)}
+
+    def test_a_boundary_species_is_an_input(self, monkeypatch):
+        model = self._Model(
+            reactions=(self._Reaction(["pSTAT"], ["IL6"]),), fixed=["IL6"]
+        )
+        row = self._one(monkeypatch, model, r"IL6")
+        assert row.roles == (("IL6", ("consumes", "input")),)
+
+    def test_roles_narrow_what_counts_as_a_match(self, monkeypatch):
+        model = self._Model(reactions=(self._Reaction(["x"], ["IL6"]),))
+        row = self._one(monkeypatch, model, "IL6", roles=("produces",))
+        assert row.status == "no-match"
+        # The role is still reported, so a caller can see why.
+        assert row.having("consumes") == ("IL6",)
+
+    def test_an_unknown_role_is_refused(self, monkeypatch):
+        import pytest
+
+        with pytest.raises(ValueError, match="unknown roles"):
+            self._one(monkeypatch, self._Model(), "IL6", roles=("emits",))
 
     def test_matches_a_display_name_when_the_id_is_a_uuid(self, monkeypatch):
         """CellDesigner exports — a large part of BioModels — put the gene
@@ -117,9 +193,8 @@ class TestProducedSpeciesScreen:
         model = self._Model(
             reactions=(self._Reaction([uuid]),), names={uuid: "IL6"}
         )
-        self._patch(monkeypatch, model)
-        (row,) = screens.screen_produced_species(["MODEL1"], r"\bIL6\b")
-        assert row.status == "produces"
+        row = self._one(monkeypatch, model, r"\bIL6\b")
+        assert row.status == "match"
         assert row.produced == ("IL6",), "report the name, not the UUID"
 
     def test_a_drawn_map_does_not_produce_anything(self, monkeypatch):
@@ -129,8 +204,7 @@ class TestProducedSpeciesScreen:
         model = self._Model(
             reactions=(self._Reaction(["IL6"], kinetic=False),)
         )
-        self._patch(monkeypatch, model)
-        (row,) = screens.screen_produced_species(["MODEL1"], r"\bIL6\b")
+        row = self._one(monkeypatch, model, r"\bIL6\b")
         assert row.status == "no-rate-laws"
         assert row.n_reactions == 1
 
@@ -139,7 +213,7 @@ class TestProducedSpeciesScreen:
             raise LookupError(f"no SBML fetcher for source {source!r}")
 
         monkeypatch.setattr(screens, "model_files", refuse)
-        (row,) = screens.screen_produced_species(["12345"], "IL6")
+        (row,) = screens.screen_species_roles(["12345"], "IL6")
         assert row.status == "unscreenable"
         assert "no SBML fetcher" in row.note
 

@@ -575,11 +575,19 @@ def clamp(level, t1, rel_error, k_clamps):
 @supply.command("find")
 @click.argument("query", nargs=-1, required=True)
 @click.option(
-    "--produces",
+    "--species",
     "pattern",
     required=True,
-    help="Regex a deposit must EMIT, matched against species id and display "
-    "name (e.g. 'IL6|CXCL8|MMP1'). Word-boundary it or TNF matches TNFR.",
+    help="Regex matched against species id and display name (e.g. "
+    "'IL6|CXCL8|MMP1'). Word-boundary it or TNF matches TNFR.",
+)
+@click.option(
+    "--role",
+    "roles",
+    type=click.Choice(["produces", "consumes", "reads", "input"]),
+    multiple=True,
+    help="Keep deposits where a matching species plays this role; repeat "
+    "for several. Default: any role.",
 )
 @click.option(
     "--limit",
@@ -611,15 +619,19 @@ def clamp(level, t1, rel_error, k_clamps):
     help="repositories to classify per run (the forges rate-limit keyless "
     "calls)",
 )
-def find(query, pattern, limit, sources, triage, repos, repo_limit):
-    """Search every repository for a model that EMITS a quantity.
+def find(query, pattern, roles, limit, sources, triage, repos, repo_limit):
+    """Search every repository for models in which a quantity takes part.
 
-    A text search answers "is this deposit about IL6"; composing needs "does
-    it emit IL6". A module imported to supply an output it only ever consumes
-    contributes nothing, which is the single most common way a candidate
-    fails. Each query term is searched separately and the hits are pooled.
+    A text search answers "is this deposit about IL6"; composing needs to
+    know what the deposit does with IL6. Each hit is listed under the roles
+    the quantity plays in it: produced (the deposit supplies it), consumed
+    or read by a rate law (the deposit is the downstream biology, and a
+    producer is the edge you attach), or held as a fixed input (the
+    plainest attachment point). Each query term is searched separately and
+    the hits are pooled.
 
-        supply find NFkB inflammation --produces '\bIL6\b|\bCXCL8\b'
+        supply find NFkB inflammation --species '\bIL6\b|\bCXCL8\b'
+        supply find lactate --species '\blactate\b' --role produces
 
     Every candidate yields a row, including the ones that could not be
     screened: `qualitative` is an SBML-qual logical model,
@@ -629,7 +641,7 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
     import re
     from collections import Counter
 
-    from hallsim.screens import screen_produced_species
+    from hallsim.screens import ROLES, screen_species_roles
     from hallsim.search.models import search_for_model
 
     src = sources.split(",") if sources else None
@@ -643,7 +655,8 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
         f"{len(cands)} distinct candidates from {len(query)} quer"
         f"{'y' if len(query) == 1 else 'ies'}"
     )
-    rows = screen_produced_species(cands, pattern)
+    wanted = tuple(roles) or ROLES
+    rows = screen_species_roles(cands, pattern, roles=wanted)
     # A re-hosted deposit is screened under its BioModels accession, so a
     # row can carry that id rather than the candidate's own; two candidates
     # can also resolve to the same deposit.
@@ -654,26 +667,28 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
         if embedded:
             by.setdefault(embedded.group(0), c)
 
-    producers, listed = [], set()
+    matches, listed = [], set()
     for r in rows:
-        if r.status == "produces" and r.model_id not in listed:
+        if r.ok and r.model_id not in listed:
             listed.add(r.model_id)
-            producers.append(r)
-    click.echo(f"\n=== PRODUCES /{pattern}/ ===")
-    for r in sorted(producers, key=lambda r: -len(r.produced)):
-        c = by.get(r.model_id)
-        mark = "cur" if c is not None and c.curated else "UNC"
-        click.echo(
-            f"  {mark} {r.model_id:20s} n={r.n_species:4d} "
-            f"rx={r.n_reactions:4d} {list(r.produced)[:8]}"
-        )
-        click.echo(f"      {c.name[:96] if c is not None else ''}")
-    if not producers:
-        click.echo("  (none)")
+            matches.append(r)
+    for role in wanted:
+        playing = [r for r in matches if r.having(role)]
+        click.echo(f"\n=== {role.upper()} /{pattern}/ ===")
+        for r in sorted(playing, key=lambda r: -len(r.having(role))):
+            c = by.get(r.model_id)
+            mark = "cur" if c is not None and c.curated else "UNC"
+            click.echo(
+                f"  {mark} {r.model_id:20s} n={r.n_species:4d} "
+                f"rx={r.n_reactions:4d} {list(r.having(role))[:8]}"
+            )
+            click.echo(f"      {c.name[:96] if c is not None else ''}")
+        if not playing:
+            click.echo("  (none)")
 
     click.echo(f"\noutcome: {dict(Counter(r.status for r in rows))}")
     for r in rows:
-        if r.status not in ("produces", "no-match"):
+        if r.status not in ("match", "no-match"):
             click.echo(f"  [{r.status}] {r.model_id}: {r.note[:88]}")
 
     papers = [c for c in cands if c.source == "europepmc"]
@@ -691,11 +706,11 @@ def find(query, pattern, limit, sources, triage, repos, repo_limit):
         if not cited:
             click.echo("  (none)")
 
-    if triage and producers:
+    if triage and matches:
         from hallsim.intake import triage_sbml
 
-        click.echo(f"\n=== TRIAGE of {len(producers)} producer(s) ===")
-        for r in producers:
+        click.echo(f"\n=== TRIAGE of {len(matches)} match(es) ===")
+        for r in matches:
             click.echo(f"\n{by[r.model_id].name[:88]}")
             click.echo(str(triage_sbml(r.model_id)))
 
@@ -828,23 +843,33 @@ def discover(
 @click.option("--port", type=int, default=8000, show_default=True)
 def mcp_server(http, port):
     """Serve the search as MCP tools: find_models, find_data,
-    dataset_design, paper_datasets, sources, and screen_models (which
-    species a deposit produces). Register it in Claude Code with
+    dataset_design, paper_datasets, sources, and screen_models (what role
+    a species plays in a deposit). Register it in Claude Code with
     `claude mcp add hallsim -- supply mcp`."""
     from dataclasses import asdict
 
-    from hallsim.screens import screen_produced_species
+    from hallsim.screens import ROLES, screen_species_roles
     from hallsim.search.server import build_server
 
     mcp = build_server()
 
     @mcp.tool
-    def screen_models(model_ids: list[str], pattern: str) -> list[dict]:
-        """Which of the deposits (BioModels accessions, ``jws:`` slugs or
-        ``PMC`` ids from find_models) produce a species matching
-        ``pattern``, a regex against species ids and names. A deposit that
-        only consumes the quantity contributes nothing when composed."""
-        return [asdict(r) for r in screen_produced_species(model_ids, pattern)]
+    def screen_models(
+        model_ids: list[str], pattern: str, roles: list[str] | None = None
+    ) -> list[dict]:
+        """What role each species matching ``pattern`` (a regex against
+        species ids and names) plays in each deposit (BioModels accessions,
+        ``jws:`` slugs or ``PMC`` ids from find_models): produces, consumes,
+        reads (a modifier or rate-law symbol) or input (boundary or
+        constant). ``status`` is ``match`` where one plays any of ``roles``
+        (default all). A consumer or reader is the downstream half of a
+        composite; the producer is an edge to attach."""
+        return [
+            asdict(r)
+            for r in screen_species_roles(
+                model_ids, pattern, roles=tuple(roles or ROLES)
+            )
+        ]
 
     if http:
         mcp.run(transport="http", port=port)
