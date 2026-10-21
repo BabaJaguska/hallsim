@@ -104,6 +104,7 @@ STRUCTURAL_NUMERIC_FIELDS = {
     # dose is the protocol's magnitude beside its window; the level a handle
     # sets is the traced amplitude.
     "PulseSource": {"t_start", "t_end", "dose"},
+    "ProfileSource": {"dose"},
     "StepSource": {"t_step", "signal_default"},
 }
 

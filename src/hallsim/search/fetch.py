@@ -17,6 +17,7 @@ import os
 import random
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -52,15 +53,29 @@ def get_json(url: str, params: dict, timeout: float) -> dict:
         return json.load(response)
 
 
+#: Client errors that can clear on their own: a timeout and the two ways a
+#: service says it is rate limiting. Any other 4xx answers the same again.
+RETRYABLE_CLIENT_ERRORS = (403, 408, 429)
+
+
+def _settled(exc: Exception) -> bool:
+    return (
+        isinstance(exc, urllib.error.HTTPError)
+        and 400 <= exc.code < 500
+        and exc.code not in RETRYABLE_CLIENT_ERRORS
+    )
+
+
 def retrying(fetch, tries: int = 4, pause: float = 2.0, fatal=()):
     """Call ``fetch`` again after a transient failure, waiting longer each
     time; the keyless services answer 429 under load. An exception of a
-    ``fatal`` type is raised at once."""
+    ``fatal`` type, or a client error such as 404 that a retry would only
+    repeat, is raised at once."""
     for attempt in range(tries):
         try:
             return fetch()
         except Exception as exc:  # noqa: BLE001 - retried, then raised
-            if isinstance(exc, fatal) or attempt == tries - 1:
+            if isinstance(exc, fatal) or _settled(exc) or attempt == tries - 1:
                 raise
             log.info("retrying after %s", str(exc)[:160])
             time.sleep(pause * (2**attempt))
@@ -76,7 +91,7 @@ def cached_json(key: str, fetch):
     if path.exists():
         return json.loads(path.read_text())
     value = fetch()
-    path.write_text(json.dumps(value))
+    atomic_write(path, json.dumps(value).encode())
     return value
 
 

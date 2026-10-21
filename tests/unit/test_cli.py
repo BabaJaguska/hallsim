@@ -237,3 +237,10 @@ def test_the_problem_builds_without_the_dataset(monkeypatch, tmp_path):
     problem = demo.build_problem(fitted=chosen)
     assert set(problem.fittables) == set(chosen)
     assert all(m.shape[1] == 0 for m in problem._arm_data_matrix.values())
+
+
+@pytest.mark.parametrize("seed", ["17111212x", "PMID17111212"])
+def test_a_malformed_seed_is_a_usage_error(seed):
+    result = CliRunner().invoke(supply, ["find-papers", "--seed", seed])
+    assert result.exit_code == 2
+    assert "not a PMID" in result.output

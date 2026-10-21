@@ -44,6 +44,9 @@ class TestRepositoryClassification:
         from hallsim.search import literature
 
         monkeypatch.setattr(literature, "get_json", self._fake_get_json)
+        monkeypatch.setattr(
+            literature, "cached_json", lambda key, fetch: fetch()
+        )
         matlab = literature.classify_repository("cosbi/focm")
         assert (matlab.kind, matlab.format) == ("source:matlab", "matlab")
         assert "FOCM_model.m" in matlab.description
@@ -59,6 +62,9 @@ class TestRepositoryClassification:
         from hallsim.search.models import ModelCandidate
 
         monkeypatch.setattr(literature, "get_json", self._fake_get_json)
+        monkeypatch.setattr(
+            literature, "cached_json", lambda key, fetch: fetch()
+        )
         texts = {
             "PMC1": "code at https://github.com/cosbi/focm",
             "PMC2": "see https://github.com/cosbi/focm and "

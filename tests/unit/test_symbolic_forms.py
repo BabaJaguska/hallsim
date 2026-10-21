@@ -10,7 +10,7 @@ import sympy
 from hallsim.models.bistable_latch import BistableLatch
 from hallsim.models.clamp_edge import ClampEdge
 from hallsim.models.gain_edge import GainEdge
-from hallsim.models.forcing import PulseSource, StepSource
+from hallsim.models.forcing import ProfileSource, PulseSource, StepSource
 from hallsim.models.gated_removal import GatedRemoval
 from hallsim.models.hill_edge import HillEdge
 from hallsim.models.running_integral import RunningIntegral
@@ -38,6 +38,12 @@ EDGES = {
     "pulse_on": PulseSource(amplitude=1.3, t_start=0.2, t_end=1.0),
     "pulse_off": PulseSource(amplitude=1.3, t_start=0.9, t_end=None),
     "step": StepSource(after=2.0, before=0.5, t_step=0.4),
+    "ramp_then_stop": ProfileSource(
+        amplitude=1.3, dose=2.0, times=(0.2, 1.0, 1.0), levels=(0.0, 1.0, 0.0)
+    ),
+    "trace": ProfileSource(
+        times=(0.0, 0.5, 0.6, 0.9), levels=(0.1, 0.8, 0.3, 0.3)
+    ),
     "latch": BistableLatch(
         k_trigger=1.2,
         K_trig=0.7,

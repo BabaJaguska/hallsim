@@ -28,6 +28,9 @@ from __future__ import annotations
 import io
 import logging
 import re
+import threading
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -35,7 +38,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hallsim.search.fetch import cache_dir, get_json, is_junk_archive_entry
+from hallsim.search.fetch import (
+    cache_dir,
+    cached_json,
+    get_json,
+    is_junk_archive_entry,
+    retrying,
+)
 from hallsim.search.models import ModelCandidate
 
 log = logging.getLogger(__name__)
@@ -66,6 +75,15 @@ class Paper:
     open_access: bool
 
     @property
+    def label(self) -> str:
+        """The identifier to cite it by: PMID, else PMC id, else DOI."""
+        if self.pmid:
+            return f"PMID:{self.pmid}"
+        if self.pmcid:
+            return self.pmcid
+        return f"DOI:{self.doi}" if self.doi else self.title[:60]
+
+    @property
     def url(self) -> str:
         if self.pmcid:
             return f"https://europepmc.org/article/PMC/{self.pmcid}"
@@ -91,6 +109,39 @@ class PaperSearch:
 def _year(raw) -> int | None:
     text = str(raw or "")
     return int(text) if text.isdigit() else None
+
+
+def paper_from_record(rec: dict) -> Paper:
+    """A :class:`Paper` from one Europe PMC ``lite`` search record."""
+    return Paper(
+        pmid=rec.get("pmid"),
+        pmcid=rec.get("pmcid"),
+        year=_year(rec.get("pubYear")),
+        journal=(
+            rec.get("journalTitle") or rec.get("journalAbbreviation") or ""
+        ).strip(),
+        title=(rec.get("title") or "").strip().rstrip("."),
+        authors=(rec.get("authorString") or "")[:120],
+        cited_by=int(rec.get("citedByCount") or 0),
+        doi=rec.get("doi"),
+        open_access=rec.get("isOpenAccess") == "Y",
+    )
+
+
+def paper_candidate(paper: Paper, description: str = "") -> ModelCandidate:
+    """``paper`` as a model candidate: a paper in PMC whose supplement or
+    linked code may hold a model."""
+    return ModelCandidate(
+        source="europepmc",
+        id=paper.pmcid,
+        name=paper.title,
+        format="paper",
+        url=paper.url,
+        curated=False,
+        submitter=paper.authors or None,
+        description=description[:2000],
+        publication=paper.journal,
+    )
 
 
 def search_papers(
@@ -133,20 +184,7 @@ def search_papers(
         timeout,
     )
     records = payload.get("resultList", {}).get("result", []) or []
-    papers = tuple(
-        Paper(
-            pmid=rec.get("pmid"),
-            pmcid=rec.get("pmcid"),
-            year=_year(rec.get("pubYear")),
-            journal=(rec.get("journalTitle") or "").strip(),
-            title=(rec.get("title") or "").strip().rstrip("."),
-            authors=(rec.get("authorString") or "")[:120],
-            cited_by=int(rec.get("citedByCount") or 0),
-            doi=rec.get("doi"),
-            open_access=rec.get("isOpenAccess") == "Y",
-        )
-        for rec in records
-    )
+    papers = tuple(paper_from_record(rec) for rec in records)
     hits = int(payload.get("hitCount") or 0)
     log.info("europepmc '%s': %d hits", text, hits)
     return PaperSearch(query=text, hit_count=hits, papers=papers[:limit])
@@ -211,16 +249,8 @@ def search_europepmc(
         if not pmcid:
             continue  # no PMC id means no retrievable supplement
         out.append(
-            ModelCandidate(
-                source="europepmc",
-                id=pmcid,
-                name=rec.get("title", "").strip().rstrip("."),
-                format="paper",
-                url=f"https://europepmc.org/article/PMC/{pmcid}",
-                curated=False,
-                submitter=rec.get("authorString", "")[:120] or None,
-                description=(rec.get("abstractText") or "")[:2000],
-                publication=rec.get("journalTitle", ""),
+            paper_candidate(
+                paper_from_record(rec), rec.get("abstractText") or ""
             )
         )
     log.info(
@@ -360,7 +390,9 @@ def supplementary_model_files(
     dest = cache_dir("europepmc") / pmcid
     marker = dest / ".harvested"
     if marker.exists() and not refresh:
-        return sorted(p for p in dest.iterdir() if p.name != ".harvested")
+        # The directory also holds the cached full text; harvested files
+        # carry the paper's id as their prefix.
+        return sorted(dest.glob(f"{pmcid}*__*"))
 
     url = f"{EUROPEPMC}/{pmcid}/supplementaryFiles"
     try:
@@ -368,8 +400,10 @@ def supplementary_model_files(
             blob = fh.read()
     except Exception as exc:
         log.info("europepmc %s: no supplement (%s)", pmcid, exc)
-        dest.mkdir(parents=True, exist_ok=True)
-        marker.touch()
+        # Only a stated absence is kept; a timeout is retried next run.
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
+            dest.mkdir(parents=True, exist_ok=True)
+            marker.touch()
         return []
     dest.mkdir(parents=True, exist_ok=True)
     found = _harvest(blob, dest, pmcid, depth=0)
@@ -490,7 +524,11 @@ def classify_repository(
     from collections import Counter
     from pathlib import Path
 
-    files = repository_files(pointer, forge, timeout=timeout)
+    # Cached for a month: keyless GitHub allows sixty listings an hour.
+    files = cached_json(
+        f"repository-files|{forge}|{pointer}|{time.strftime('%Y-%m')}",
+        lambda: repository_files(pointer, forge, timeout=timeout),
+    )
     url = FORGE_URL[forge].format(pointer)
     if "/" not in pointer:
         return ModelCandidate(
@@ -539,8 +577,6 @@ def repositories_cited(
     each with the PMC ids that cite it. Stops at ``limit`` repositories
     and records a forge it could not reach (rate limit, private, gone) as
     kind ``unreachable`` rather than dropping it."""
-    import urllib.error
-
     cited: dict[tuple[str, str], list[str]] = {}
     for paper in papers:
         try:
@@ -551,6 +587,21 @@ def repositories_cited(
         for forge in FORGE_URL:
             for pointer in pointers.get(forge, []):
                 cited.setdefault((forge, pointer), []).append(paper.id)
+    return classify_pointers(cited, limit=limit, timeout=timeout)
+
+
+def classify_pointers(
+    cited: dict[tuple[str, str], list[str]],
+    *,
+    limit: int = 10,
+    timeout: float = 30.0,
+) -> list[tuple[ModelCandidate, list[str]]]:
+    """Classify each ``(forge, pointer)`` in ``cited`` with
+    :func:`classify_repository`, keeping the papers that name it. Stops at
+    ``limit`` repositories; one that cannot be read is kind
+    ``unreachable``."""
+    import urllib.error
+
     out = []
     for (forge, pointer), by_papers in list(cited.items())[:limit]:
         try:
@@ -567,4 +618,95 @@ def repositories_cited(
                 description=str(exc)[:120],
             )
         out.append((cand, by_papers))
+    return out
+
+
+#: Keyless GitHub search allows ten requests a minute.
+_SEARCH_GAP = 6.5
+#: GitHub search joins at most five boolean operators, so six phrases.
+_SEARCH_TERMS = 6
+_search_lock = threading.Lock()
+_last_search = [0.0]
+
+
+def _search_github(query: str, timeout: float) -> list[str]:
+    with _search_lock:
+        wait = _last_search[0] + _SEARCH_GAP - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            payload = retrying(
+                lambda: get_json(
+                    "https://api.github.com/search/repositories",
+                    {"q": query, "per_page": 50},
+                    timeout,
+                ),
+                tries=3,
+                pause=20.0,
+            )
+        finally:
+            _last_search[0] = time.monotonic()
+    return [item["full_name"] for item in payload.get("items", [])]
+
+
+def _readme(repo: str, timeout: float) -> str:
+    """``repo``'s README, or ``""`` for a repository that has none."""
+    import base64
+
+    try:
+        payload = retrying(
+            lambda: get_json(
+                f"https://api.github.com/repos/{repo}/readme", {}, timeout
+            )
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return ""
+        raise
+    return base64.b64decode(payload.get("content", "")).decode(
+        "utf-8", "replace"
+    )
+
+
+def _names_doi(text: str, doi: str) -> bool:
+    """Whether ``text`` cites ``doi`` itself, not a longer DOI it is a
+    prefix of; a trailing full stop ends the DOI."""
+    return (
+        re.search(rf"(?<![\w.]){re.escape(doi)}(?![\w/-]|\.\w)", text)
+        is not None
+    )
+
+
+def repositories_naming(
+    dois: Sequence[str], *, timeout: float = 30.0
+) -> dict[str, list[str]]:
+    """``{doi: [owner/repo, ...]}`` for the GitHub repositories whose README
+    names each DOI — where a paper's code lives when its own text cannot be
+    read. A closed-access paper hides its code-availability statement, but
+    the repository usually cites the paper back.
+
+    DOIs are searched six to a query, spaced to the keyless search limit of
+    ten a minute, and a hit is attributed by reading its README. Cached for
+    a month. A batch that cannot be fetched is left out, so its DOIs are
+    absent rather than listed with no repository."""
+    month = time.strftime("%Y-%m")
+    wanted = list(dict.fromkeys(d.lower() for d in dois))
+    out: dict[str, list[str]] = {}
+    for start in range(0, len(wanted), _SEARCH_TERMS):
+        batch = wanted[start : start + _SEARCH_TERMS]
+        query = " OR ".join(f'"{d}"' for d in batch) + " in:readme"
+
+        def fetch(query=query, batch=batch):
+            found: dict[str, list[str]] = {d: [] for d in batch}
+            for repo in _search_github(query, timeout):
+                text = _readme(repo, timeout).lower()
+                for doi in batch:
+                    if _names_doi(text, doi):
+                        found[doi].append(repo)
+            return found
+
+        try:
+            out.update(cached_json(f"github-readme|{query}|{month}", fetch))
+        except Exception as exc:  # noqa: BLE001 - one batch, not the run
+            log.warning("README search for %s failed: %s", batch, exc)
     return out

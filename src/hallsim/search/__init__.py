@@ -7,8 +7,10 @@ PRIDE, MetaboLights, Metabolomics Workbench, ArrayExpress, the BioImage
 Archive, NASA's OSDR) and reads its design from its sample titles;
 :mod:`hallsim.search.literature` reads Europe PMC full text for where a
 paper says its model lives; :mod:`hallsim.search.web` follows those
-pointers across the web. :mod:`hallsim.search.fetch` is the one network
-and cache layer under all four.
+pointers across the web; :mod:`hallsim.search.citations` reaches the
+papers that cite a paper or that it cites, and screens them the same way.
+:mod:`hallsim.search.fetch` is the one network and cache layer under all
+of them.
 
 Nothing here imports the rest of the package, and a test keeps it so. A
 hit is a record of what a repository holds; whether the framework can use

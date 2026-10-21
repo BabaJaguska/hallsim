@@ -289,6 +289,26 @@ def test_a_pulse_on_an_event_set_species_takes_the_protocol_dose(tmp_path):
     assert processes["m"].protocol() == []
 
 
+def test_a_profile_on_an_event_set_species_takes_the_protocol_dose(tmp_path):
+    from hallsim.models.forcing import drive_profile
+    from hallsim.sbml_import import process_from_sbml
+
+    path = tmp_path / "ev.xml"
+    path.write_text(_species_only_event_model())
+    processes = {"m": process_from_sbml(str(path), name="m")}
+    topology = {"m": {"X": "m/X"}}
+    _, _, src = drive_profile(
+        processes,
+        topology,
+        target="m",
+        input_name="X",
+        times=(1.0, 2.0, 3.0),
+        levels=(0.0, 1.0, 0.0),
+    )
+    assert processes[src].dose == 2.0
+    assert topology["m"]["X"] == f"{src}/signal"
+
+
 # --- SBML event delays -----------------------------------------------------
 # COPASI writes <delay>0</delay> on every event it exports, so the presence of
 # a delay element is not evidence of a delay.

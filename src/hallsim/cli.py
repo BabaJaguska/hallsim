@@ -572,6 +572,108 @@ def clamp(level, t1, rel_error, k_clamps):
     run_demo(**overrides)
 
 
+def _parse_seeds(ctx, param, values):
+    from hallsim.search.citations import identifier
+
+    try:
+        return tuple(identifier(v) for v in values)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+
+
+def _citation_options(f):
+    for opt in reversed(
+        [
+            click.option(
+                "--expand",
+                "expand_top",
+                type=click.IntRange(0),
+                default=0,
+                show_default=True,
+                help="Expand the top N papers of this search through the "
+                "citation graph, one hop.",
+            ),
+            click.option(
+                "--seed",
+                "seeds",
+                multiple=True,
+                callback=_parse_seeds,
+                help="A paper to expand by hand: PMID, PMC id or DOI. "
+                "Repeat for several.",
+            ),
+            click.option(
+                "--direction",
+                type=click.Choice(["both", "cited-by", "cites"]),
+                default="both",
+                show_default=True,
+                help="cited-by reaches extensions, code releases and data "
+                "reuse; cites reaches what a model was fitted to.",
+            ),
+            click.option(
+                "--per-seed",
+                type=click.IntRange(1),
+                default=100,
+                show_default=True,
+                help="Neighbours kept per seed and direction, most-cited "
+                "first.",
+            ),
+            click.option(
+                "--graph",
+                type=click.Choice(["both", "europepmc", "openalex"]),
+                default="both",
+                show_default=True,
+                help="Citation graph to walk. Neither holds every edge.",
+            ),
+        ]
+    ):
+        f = opt(f)
+    return f
+
+
+def _expand_citations(seeds, direction, per_seed, graph, repo_limit):
+    """Expand ``seeds`` one hop, screen what is reached, print the counts,
+    and return the neighbours the screen found something in."""
+    from hallsim.search.citations import (
+        DIRECTIONS,
+        GRAPHS,
+        expand,
+        screen_neighbours,
+    )
+
+    found = expand(
+        seeds,
+        directions=DIRECTIONS if direction == "both" else (direction,),
+        graphs=GRAPHS if graph == "both" else (graph,),
+        per_seed=per_seed,
+    )
+    click.echo(f"\n=== CITATION EXPANSION of {len(found.seeds)} seed(s) ===")
+    for (seed, way, source), n in found.reached.items():
+        click.echo(f"  {seed:22s} {way:9s} {source:10s} {n:5d} papers")
+    hits = screen_neighbours(found.neighbours, repo_limit=repo_limit)
+    click.echo(
+        f"  {len(found.neighbours)} distinct after dedup and cap; "
+        f"{len(hits)} with a code repository, model file or deposit"
+    )
+    return hits
+
+
+def _echo_neighbour(hit, roles=None):
+    paper = hit.paper
+    via = ", ".join(f"{way} {seed}" for seed, way in hit.via)
+    click.echo(
+        f"  {paper.year or '????'} {paper.label:22s} {paper.title[:80]}"
+    )
+    click.echo(f"      via {via} [{', '.join(hit.graphs)}]")
+    for repo in hit.repositories:
+        click.echo(f"      {repo.kind:18s} {repo.url}")
+    for path in hit.model_files:
+        click.echo(f"      model file         {path.rsplit('/', 1)[-1]}")
+    for kind, ids in hit.pointers.items():
+        click.echo(f"      {kind:18s} {', '.join(ids[:6])}")
+    if roles:
+        click.echo(f"      species roles      {roles}")
+
+
 @supply.command("find")
 @click.argument("query", nargs=-1, required=True)
 @click.option(
@@ -619,7 +721,22 @@ def clamp(level, t1, rel_error, k_clamps):
     help="repositories to classify per run (the forges rate-limit keyless "
     "calls)",
 )
-def find(query, pattern, roles, limit, sources, triage, repos, repo_limit):
+@_citation_options
+def find(
+    query,
+    pattern,
+    roles,
+    limit,
+    sources,
+    triage,
+    repos,
+    repo_limit,
+    expand_top,
+    seeds,
+    direction,
+    per_seed,
+    graph,
+):
     """Search every repository for models in which a quantity takes part.
 
     A text search answers "is this deposit about IL6"; composing needs to
@@ -632,6 +749,13 @@ def find(query, pattern, roles, limit, sources, triage, repos, repo_limit):
 
         supply find NFkB inflammation --species '\bIL6\b|\bCXCL8\b'
         supply find lactate --species '\blactate\b' --role produces
+
+    `--expand N` takes the first N papers found, and `--seed` any paper by
+    hand, one hop through the citation graph; what that reaches is
+    screened the same way and listed with the seed and direction that
+    reached it.
+
+        supply find exercise glucose --species '\bglucose\b' --expand 3
 
     Every candidate yields a row, including the ones that could not be
     screened: `qualitative` is an SBML-qual logical model,
@@ -705,6 +829,39 @@ def find(query, pattern, roles, limit, sources, triage, repos, repo_limit):
             click.echo(f"      cited by {', '.join(by_papers)}")
         if not cited:
             click.echo("  (none)")
+
+    if expand_top and not papers:
+        click.echo(
+            f"\n--expand {expand_top}: no Europe PMC paper among the "
+            "candidates to expand; include europepmc in --sources, or pass "
+            "a paper with --seed."
+        )
+    if (expand_top and papers) or seeds:
+        from hallsim.search.literature import paper_candidate
+
+        hits = _expand_citations(
+            [c.id for c in papers[:expand_top]] + list(seeds),
+            direction,
+            per_seed,
+            graph,
+            repo_limit,
+        )
+        carrying = [paper_candidate(h.paper) for h in hits if h.model_files]
+        screened = {
+            r.model_id: r
+            for r in screen_species_roles(carrying, pattern, roles=wanted)
+        }
+        for hit in hits:
+            r = screened.get(hit.paper.pmcid) if hit.model_files else None
+            if r is None:
+                verdict = None
+            elif r.ok:
+                verdict = {
+                    w: list(r.having(w))[:6] for w in wanted if r.having(w)
+                }
+            else:
+                verdict = r.status
+            _echo_neighbour(hit, verdict)
 
     if triage and matches:
         from hallsim.intake import triage_sbml
@@ -1139,7 +1296,7 @@ def reactions(model, species, notes):
 
 
 @supply.command("find-papers")
-@click.argument("terms", nargs=-1, required=True)
+@click.argument("terms", nargs=-1)
 @click.option("--limit", default=10, show_default=True, help="Papers to list.")
 @click.option(
     "--anywhere",
@@ -1154,7 +1311,27 @@ def reactions(model, species, notes):
     default=False,
     help="Send TERMS to Europe PMC verbatim, for its own query syntax.",
 )
-def find_papers(terms, limit, anywhere, raw):
+@click.option(
+    "--repo-limit",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Repositories to classify when expanding (the forges rate-limit "
+    "keyless calls).",
+)
+@_citation_options
+def find_papers(
+    terms,
+    limit,
+    anywhere,
+    raw,
+    repo_limit,
+    expand_top,
+    seeds,
+    direction,
+    per_seed,
+    graph,
+):
     """Check a claim against the literature, ranked by citation count.
 
     Every TERM must appear in the title or abstract, so a hit is a paper
@@ -1171,9 +1348,23 @@ def find_papers(terms, limit, anywhere, raw):
         supply find-papers EZH2 senescence
         supply find-papers EZH2 HLA-E
         supply find-papers EZH2 "MHC class I"    # a phrase, on purpose
+
+    `--expand N` follows the first N papers listed one hop through the
+    citation graph, and `--seed` any paper by hand; only what the screen
+    finds a code repository, model file or deposit in is listed.
+
+        supply find-papers --seed PMID:17111212 --direction cited-by
     """
     from hallsim.search.literature import search_papers, term_counts
 
+    if not terms and not seeds:
+        raise click.UsageError("Give TERMS, or a paper to expand with --seed.")
+    if not terms:
+        for hit in _expand_citations(
+            list(seeds), direction, per_seed, graph, repo_limit
+        ):
+            _echo_neighbour(hit)
+        return
     field = "" if anywhere else "TITLE_ABS"
     query = " ".join(terms) if raw else list(terms)
     found = search_papers(query, limit=limit, field=field)
@@ -1197,6 +1388,15 @@ def find_papers(terms, limit, anywhere, raw):
             f"  {paper.year or '????'}  {paper.cited_by:>6} cites  "
             f"{paper.journal[:26]:26s}  PMID:{pmid:<9} {paper.title[:88]}"
         )
+    if expand_top or seeds:
+        for hit in _expand_citations(
+            list(found.papers[:expand_top]) + list(seeds),
+            direction,
+            per_seed,
+            graph,
+            repo_limit,
+        ):
+            _echo_neighbour(hit)
 
 
 @simulate.command("screen")

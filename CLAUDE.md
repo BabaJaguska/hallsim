@@ -41,7 +41,10 @@ mentions — `--species` takes a regex matched against species id and display
 name, `--role` narrows to produces, consumes, reads or input. A deposit that
 consumes or reads a quantity without producing it is the downstream half of a
 composite, and the producer is an edge to attach; narrow to `--role produces`
-only when the deposit itself must supply the quantity. Importers: SBML, COPASI `.cps`, XPPAUT `.ode`, and
+only when the deposit itself must supply the quantity. `--expand N` or
+`--seed PMID` (also on `find-papers`) follows papers one hop through the
+citation graph and lists only what passes the same screens — the seed's
+descendants and the data it was fitted to, which no text query reaches. Importers: SBML, COPASI `.cps`, XPPAUT `.ode`, and
 CellML `.cellml`, which is read through Myokit and written as SBML on the way
 in, the same route `.cps` takes.
 

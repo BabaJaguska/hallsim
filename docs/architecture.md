@@ -197,6 +197,7 @@ arm stops being a condition a culture could be in:
 | a species another model owns | `SBMLProcess.with_species_input` — the port keeps its name and ontology and becomes INPUT; wire it to the owner's pool through a level edge carrying the conversion factor (SBML comp's replaced element). Unwired, it holds the published initial value |
 | a boundary input (`boundaryCondition` species), dosed then withdrawn | `models.forcing.drive_pulse` — a `PulseSource` on `[t_start, t_end)`, or `t_end=None` to sustain |
 | a boundary input held at one level, then another | `models.forcing.drive_step` — a `StepSource`, `before` until `t_step` then `after`; `before == after` is a constant drive |
+| a boundary input following a ramp, a trapezoid or a logged trace | `models.forcing.drive_profile` — a `ProfileSource`, linear between `(times, levels)` knots; a repeated time is a jump, so `times=(0, 10, 10), levels=(0, 1, 0)` is an incremental test that stops at once |
 | a species the model **integrates** | `models.clamp_edge.clamp_species` — a `ClampEdge` holding it at a setpoint |
 
 The third is the one with no obvious workaround: an integrated species is
@@ -295,6 +296,18 @@ paper or repository; `--web` adds Brave Web Search from `BRAVE_SEARCH_API_KEY`,
 and any `provider` with `search(query, *, limit, timeout)` plugs in the same
 way. PDF text needs the `search` extra. A label describes filenames, not the
 model: screen anything selected with `simulate screen`.
+
+A paper's descendants and its fitting data are reached through the citation
+graph rather than the text (`hallsim.search.citations`). `--expand N` on
+`supply find` or `supply find-papers` takes the first N papers found, and
+`--seed` any PMID, PMC id or DOI, one hop through Europe PMC's and
+OpenAlex's citation lists, `cited-by`, `cites` or both, capped per seed and
+most-cited first. What that reaches passes the same screens as a first
+round — the repositories its text links, what each holds, its supplement's
+model files and, in `supply find`, the species roles — and only a paper the
+screen finds something in is listed, with the seed and direction that
+reached it. A paper whose text is closed is matched the other way round:
+the GitHub repositories whose README names its DOI.
 
 `supply find-data` asks OmicsDI first, EBI's one index over 29
 repositories, then the sources the index does not carry — Zenodo, GEO's
@@ -599,6 +612,7 @@ src/hallsim/
     fetch.py           — one JSON getter, retry with backoff, concurrent fetch, the disk cache under ~/.cache/hallsim
     models.py          — search_for_model across BioModels, JWS, ModelDB, BioSimulations, Physiome, Europe PMC; a candidate's files, downloaded and cached
     literature.py      — Europe PMC full text, model pointers, what a cited repository holds
+    citations.py       — one hop through the citation graph (Europe PMC, OpenAlex), screened
     web.py             — supply discover: papers, their PDFs, the repositories they cite
     datasets.py        — search_for_dataset (GEO and its DataSets, Expression Atlas, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench, ArrayExpress, BioImage Archive, OSDR), parse_design and the designs a source states, a paper's own data and supplement tables, resolve_perturbation
     attached.py        — the data a model ships beside itself: PEtab problems (petab), COPASI fitting experiments (basico), a BioModels deposit's own tables
