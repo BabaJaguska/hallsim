@@ -20,7 +20,7 @@ The coupling is bidirectional: fast dynamics depend on slow state, and
 slow dynamics depend on fast state. This makes splitting error visible.
 
 Usage:
-    cd /path/to/HallSim
+    cd /path/to/hallsim
     python demos/multiscale_coupling_demo.py
 """
 

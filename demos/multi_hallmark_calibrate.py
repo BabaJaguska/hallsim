@@ -1337,7 +1337,7 @@ def cmd_export(args) -> None:
         f"# Multi-hallmark composite, calibrated — run {run_dir.name}",
         "",
         "One SBML Level 3 Version 2 document per experimental arm, exported",
-        "from HallSim with the run's fitted parameters. Time is in days;",
+        "from hallsim with the run's fitted parameters. Time is in days;",
         "species are amounts in one unit compartment. Any SBML simulator",
         "(libRoadRunner, COPASI) solves each document as it is; a run to",
         "day 14 reproduces the species levels of the paper's Figure 2A.",
@@ -1351,7 +1351,7 @@ def cmd_export(args) -> None:
         )
         sev = ", ".join(f"{h} {s:g}" for h, s in cond.handles.items())
         notes = (
-            "HallSim multi-hallmark composite: Dalle Pezze 2014 "
+            "hallsim multi-hallmark composite: Dalle Pezze 2014 "
             "(BIOMD0000000582), Geva-Zatorsky 2006 (BIOMD0000000157) and "
             "Proctor 2007 (BIOMD0000000105) joined by four coupling edges, "
             f"in the {cond_name} arm (hallmark severities: {sev or 'none'}). "

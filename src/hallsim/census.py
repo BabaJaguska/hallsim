@@ -2,7 +2,7 @@
 
 Stage 0 of the composition benchmark. ``supply find`` answers "is there a
 deposit for X"; this answers the prior question — of everything the
-repository holds, how much can HallSim use at all, and what stops the rest.
+repository holds, how much can hallsim use at all, and what stops the rest.
 It runs the same mechanical gate as ``simulate screen``
 (:func:`hallsim.intake.triage_sbml`) over every SBML deposit in BioModels,
 curated (``BIOMD…``) and uncurated (``MODEL…``), keeps the deposit's own
@@ -15,7 +15,7 @@ anyone, which is where a mechanical screen is worth most.
     supply census run --branch uncurated
     supply census report                 # tables, figures, write-up
 
-Every row carries the HallSim version and commit it was screened under and
+Every row carries the hallsim version and commit it was screened under and
 when, so a resumed run says which rows the current code produced. When
 the run is the whole census — every listed deposit screened, every row
 stamped — ``report`` also copies the table and the counts to
@@ -121,7 +121,7 @@ SALVAGE_MEANING = {
     "the model only moves when driven, the gradient is non-finite, the "
     "trajectory is still growing at the horizon, the rate laws are "
     "stochastic propensities)",
-    "importer-work": "a legitimate SBML construct HallSim does not compile "
+    "importer-work": "a legitimate SBML construct hallsim does not compile "
     "yet — algebraic rules, a varying compartment, a delayed event, symbolic "
     "stoichiometry",
     "wrong-formalism": "a logical, constraint-based or reaction-only "
@@ -129,7 +129,7 @@ SALVAGE_MEANING = {
     "deposit-defect": "the file is incomplete or inconsistent as deposited: "
     "a reaction with no kinetic law, an unresolved initial value, an "
     "undefined symbol, or a file libsbml cannot read",
-    "framework-defect": "HallSim's own error: an unexpected exception, or a "
+    "framework-defect": "hallsim's own error: an unexpected exception, or a "
     "divergence an independent stepper does not reproduce",
     "timeout": "not screened inside the per-deposit budget",
 }
@@ -829,7 +829,7 @@ def census_one(accession: str, t_end: float | None = None) -> dict:
 
 @functools.lru_cache(maxsize=1)
 def _stamp() -> tuple[str | None, str | None]:
-    """HallSim's version and commit, once per process (each pool worker
+    """hallsim's version and commit, once per process (each pool worker
     reads git once, not once per deposit)."""
     from hallsim.io import versions
 
@@ -1696,7 +1696,7 @@ def write_report(
             f"Every SBML accession the BioModels search lists ({n:,} on "
             f"{stamp}) went through the same gate `simulate screen` applies "
             "to one model: read the file, classify its formalism from the "
-            "SBML packages it carries, compile it with HallSim's native SBML "
+            "SBML packages it carries, compile it with hallsim's native SBML "
             "importer, solve it once on its own clock over "
             f"{t_end:g} native time units at two tolerances, take one "
             "gradient, and read its metadata (declared time unit, ontology "

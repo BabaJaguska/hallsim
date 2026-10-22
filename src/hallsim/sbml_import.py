@@ -1011,7 +1011,7 @@ def _collect_boundary_inputs(xml_path: str, sbml_model=None) -> set[str]:
     by its reactions — i.e. an input port. Those whose assignment rule
     references only ``time`` and constants (or that have no rule) are
     experimental forcing inputs (DallePezze 2014's ``Irradiation``,
-    ``Insulin``, ``Amino_Acids``); HallSim surfaces them as settable
+    ``Insulin``, ``Amino_Acids``); hallsim surfaces them as settable
     ``parameters`` so hallmarks / Calibrator can drive them. Boundary
     species whose rule references other species are observable readouts (the
     ``_obs`` outputs) and are left alone.

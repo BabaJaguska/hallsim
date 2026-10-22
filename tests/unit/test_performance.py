@@ -1,7 +1,7 @@
 """Performance regressions, asserted structurally rather than by wall clock.
 
 Wall-clock thresholds are machine-dependent and flaky; the properties that
-actually decide whether HallSim is fast are deterministic:
+actually decide whether hallsim is fast are deterministic:
 
 - a repeated or parameter-swept run reuses the compiled solve (0 recompiles),
 - ``build_rhs`` returns a structurally stable pytree, so the JIT cache can hit,

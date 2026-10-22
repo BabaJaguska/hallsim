@@ -1,4 +1,4 @@
-"""Local bifurcation analysis for HallSim vector fields.
+"""Local bifurcation analysis for hallsim vector fields.
 
 Given a vector field ``f: R^n -> R^n`` — typically a Process or Composite
 RHS at fixed parameters — this locates equilibria, reads their stability

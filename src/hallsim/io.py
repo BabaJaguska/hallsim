@@ -1,4 +1,4 @@
-"""Filesystem conventions for HallSim outputs.
+"""Filesystem conventions for hallsim outputs.
 
 One predictable place for generated artifacts: ``<repo>/outputs/<name>/``,
 one folder per run/demo, instead of scattering plots across the tree.

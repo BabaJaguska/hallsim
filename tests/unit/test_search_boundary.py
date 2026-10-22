@@ -1,4 +1,4 @@
-"""The search layer is a package of its own inside HallSim: it imports
+"""The search layer is a package of its own inside hallsim: it imports
 nothing from the rest of the framework, so it can be lifted out whole."""
 
 import ast

@@ -10,12 +10,12 @@ engines are not part of the project. Install them by hand to run it::
     python scripts/conformance.py --synthetic     # the three synthetic models
     python scripts/conformance.py --composite     # a two-model, three-edge composite
 
-Each model runs in HallSim, libRoadRunner (CVODE) and COPASI (LSODA) over
+Each model runs in hallsim, libRoadRunner (CVODE) and COPASI (LSODA) over
 two windows the reference engine picks from a log grid — the transient after
 the first 1% motion and the settling time — and every species is scored with
 ``hallsim.diagnostics.trajectory_agreement``, cycle statistics for an
 oscillator, pointwise otherwise. The two reference engines are scored against
-each other as well: HallSim must sit within ``REFERENCE_MARGIN`` of that, and
+each other as well: hallsim must sit within ``REFERENCE_MARGIN`` of that, and
 never below ``LEVEL_TOL`` / ``CYCLE_TOL``. Exit status is the number of
 failing cases.
 """
@@ -44,7 +44,7 @@ RTOL, ATOL = 1e-9, 1e-12
 # alone; the absolute tolerance follows the model's scale.
 ATOL_FRACTION = 1e-9
 LEVEL_TOL, CYCLE_TOL = 1e-4, 1e-3
-# HallSim must sit as close to roadrunner as COPASI does, within this factor.
+# hallsim must sit as close to roadrunner as COPASI does, within this factor.
 REFERENCE_MARGIN = 10.0
 SETTLE_CAP = 1000.0
 # A species is scored against its own peak, floored at this fraction of the
@@ -370,7 +370,7 @@ def build_composite(tmp: Path) -> Composite:
 
 def check_composite(tmp: Path, t_end: float = 6.0) -> int:
     """Export the composite and compare the document's solution, in both
-    reference engines, with HallSim's run of the composite in one group."""
+    reference engines, with hallsim's run of the composite in one group."""
     from hallsim.sbml_export import _sid
 
     comp = build_composite(tmp)
@@ -406,7 +406,7 @@ def check_composite(tmp: Path, t_end: float = 6.0) -> int:
 
 def check_event_composite(tmp: Path, t_end: float = 5.0) -> int:
     """The synthetic event model composed (its event becomes an EVENT
-    process), exported, and compared. HallSim fires an event at the first
+    process), exported, and compared. hallsim fires an event at the first
     macro-step sync point after its trigger, so the grid is chosen to land
     on the trigger time (t = 2 on a 5/1000 grid); off the grid the deviation
     is the step times the post-event rate, 6e-3 at a 6/1000 grid here."""

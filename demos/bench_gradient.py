@@ -1,9 +1,9 @@
-"""Gradient benchmark: HallSim autodiff vs tellurium finite differences.
+"""Gradient benchmark: hallsim autodiff vs tellurium finite differences.
 
 A population-level scalar loss L(theta) = mean over the cell population of a
 readout species at t_end. We need dL/dtheta over P SBML rate constants theta.
 
-- HallSim: one reverse-mode `jax.grad` returns the exact gradient w.r.t. all P
+- hallsim: one reverse-mode `jax.grad` returns the exact gradient w.r.t. all P
   parameters in a single backward pass through the batched-population solve —
   cost ~independent of P.
 - tellurium / libRoadRunner: no native parameter gradients, so the realistic
@@ -144,7 +144,7 @@ def tellurium_fd_grad(theta, pnames, factors):
 
 
 # ----- correctness: hallsim autodiff vs hallsim's OWN finite difference -----
-# Cross-tool numerical agreement is not meaningful here: HallSim's import and
+# Cross-tool numerical agreement is not meaningful here: hallsim's import and
 # roadrunner number reaction rate constants differently, so a given name moves
 # different physical constants in each tool (trajectories still match at the
 # nominal defaults). The rigorous check that the autodiff is exact is therefore
@@ -200,7 +200,7 @@ for P in P_SWEEP:
 # ----- plot -----
 arr = np.array(rows)
 fig, ax = plt.subplots(figsize=(7, 5))
-ax.plot(arr[:, 0], arr[:, 1], "o-", label="HallSim autodiff (reverse-mode)")
+ax.plot(arr[:, 0], arr[:, 1], "o-", label="hallsim autodiff (reverse-mode)")
 ax.plot(arr[:, 0], arr[:, 2], "s-", label="tellurium finite differences")
 ax.set_xlabel("number of parameters P")
 ax.set_ylabel("gradient wall time (s)")

@@ -2,7 +2,7 @@
 XPPAUT .ode file and simulate the inflammatory switch on its own.
 
 Demonstrates the XPP intake path (`hallsim.xpp_import.process_from_xpp`): a
-14-ODE model written for XPP, never for HallSim, imported and integrated as a
+14-ODE model written for XPP, never for hallsim, imported and integrated as a
 plain Composite with no hand-translation. The loop is
 NF-kB -> LIN28 -| let-7 -> IL-6 -> STAT3 -> miR-21 -| PTEN -> NF-kB; a Src
 input switches the system from the low (untransformed) to the high

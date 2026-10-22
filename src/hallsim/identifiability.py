@@ -1,6 +1,6 @@
 """Fisher-information identifiability analysis for a ``CalibrationProblem``.
 
-Because HallSim composites are differentiable end-to-end, the local
+Because hallsim composites are differentiable end-to-end, the local
 identifiability of a fit is one Jacobian away: the sensitivity of every
 reporter prediction to every fitted parameter. This is the autodiff-native
 analogue of the multistart-ensemble identifiability screens in frameworks

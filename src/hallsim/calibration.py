@@ -1,4 +1,4 @@
-"""Differentiable calibration of HallSim composites.
+"""Differentiable calibration of hallsim composites.
 
 Two layers: :class:`Calibrator` is the optimization loop over a user-supplied
 ``loss_fn(params) -> scalar`` (autodiff mode, optax setup, clamping, history);

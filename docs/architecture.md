@@ -1,4 +1,4 @@
-# HallSim architecture
+# hallsim architecture
 
 How the framework fits together: the core objects, how processes are wired
 and run, the validation layer, how models compose, and how SBML models are
@@ -6,11 +6,11 @@ imported, plus the [Scheduler](#scheduler)'s macro-step semantics,
 [formalism coverage](#formalism-coverage) and the [key files](#key-files).
 For the calibration side see [calibration.md](calibration.md).
 
-![HallSim Architecture](assets/hallsim_architecture.png)
+![hallsim Architecture](assets/hallsim_architecture.png)
 
 Built on JAX / Equinox / Diffrax. Composition semantics borrow from Vivarium
 and scheduling concepts from Ptolemy II, implemented natively on JAX for GPU
-acceleration and differentiability. HallSim deliberately covers a narrower
+acceleration and differentiability. hallsim deliberately covers a narrower
 set of modeling formalisms than Vivarium-collective in exchange for
 end-to-end differentiability, JIT, and native batched populations — see
 [Formalism coverage](#formalism-coverage).
@@ -63,7 +63,7 @@ semantics (Process, Port, Topology, Store; Agmon et al. 2022) and Ptolemy
 II's idea of heterogeneous models of computation under one orchestrator,
 and implements both natively on JAX:
 
-| Capability | Vivarium | Ptolemy II | HallSim |
+| Capability | Vivarium | Ptolemy II | hallsim |
 |------------|----------|------------|---------|
 | GPU-accelerated continuous solves | No (CPython) | No (Java) | Yes (JAX/Diffrax) |
 | Differentiability through ODE solves | No | No | Yes (`jax.grad`) |
@@ -331,7 +331,7 @@ concrete action beside it, the per-deposit failure table carrying each
 paper's own account of what it models, two figures, and a write-up with a
 preprint paragraph. It is the numerical gate only: nothing in it reads the
 paper, so its counts are upper bounds on the usable supply. Every row
-carries the HallSim version and commit it was screened under and when.
+carries the hallsim version and commit it was screened under and when.
 When the run is the whole census — every listed deposit screened, every
 row stamped — the report also copies the table and the counts to
 `results/census/`, which is tracked, so a diff between two commits names
@@ -445,7 +445,7 @@ models (a foot-gun the framework deliberately doesn't expose).
 
 ## Example composites
 
-HallSim is a *framework*, not a model library — bring your own Processes
+hallsim is a *framework*, not a model library — bring your own Processes
 (hand-written, SBML-imported, or a `NeuralODE`).
 
 Reusable primitives — no domain content, and the part that is under test —
@@ -527,7 +527,7 @@ Small modules a model author needs early, each importable on its own:
 
 ## Formalism coverage
 
-HallSim covers a chosen subset of the modelling formalisms a "multiscale
+hallsim covers a chosen subset of the modelling formalisms a "multiscale
 model" slide lists, and the choice is the design: the composition contract
 (`derivative` / `update` / `condition` + `handler`, all over JAX arrays) is
 narrower than Vivarium's any-Python-callable `update(t, dt)`, and in
@@ -537,7 +537,7 @@ ODEs, oscillators, stem-cell niches — that is the right trade; for
 genome-scale FBA or molecular dynamics it is not, and those compose at the
 boundary as INPUT ports fed from their own tools.
 
-Of Milner's bigraphs, which the Vivarium papers cite, HallSim keeps the link
+Of Milner's bigraphs, which the Vivarium papers cite, hallsim keeps the link
 graph (`topology = {process: {port: store_path}}`) and drops the place graph:
 state is one flat `dict[str, jnp.ndarray]` with `/`-separated keys, not a
 nested hierarchy. Homogeneous populations are a batched start; paracrine

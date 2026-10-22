@@ -1,6 +1,6 @@
 # Calibration & data validation
 
-How HallSim fits mechanism parameters to data and validates mechanistic
+How hallsim fits mechanism parameters to data and validates mechanistic
 states against measured contrasts — gene reporters, the calibration API,
 held-out splits, priors, and what it takes to differentiate through a stiff
 multi-model composite. Every reader (GEO and GeneLab expression,
@@ -418,7 +418,7 @@ sensitivity check rather than one canonical value.
 ### Optimizer
 
 `method="adam"` (default) or `method="lbfgs"`. **Adam (LR ~0.03 +
-`reduce_on_plateau` + early stopping) is the right choice for HallSim's
+`reduce_on_plateau` + early stopping) is the right choice for hallsim's
 expensive stiff-ODE loss** — one solve per step. L-BFGS converges in far
 fewer *steps* but its line search does many solves per step, so it only wins
 when the loss is cheap. Early stopping returns the *best* params seen, not the
@@ -461,7 +461,7 @@ factor, `∂y(t)/∂θ` through the solver. The solve is a sequence of solver st
 *every* step, the parameter gradient **accumulates over the whole trajectory**.
 
 Storing every intermediate state for that backward pass is `O(n_steps)`
-memory — untenable for a stiff multi-day solve of thousands of steps. HallSim
+memory — untenable for a stiff multi-day solve of thousands of steps. hallsim
 uses Diffrax's **`RecursiveCheckpointAdjoint`** (the `mode="reverse"` /
 `adjoint=None` path): recursive (Griewank–Walther) checkpointing keeps only
 `O(log n_steps)` checkpoints and re-runs forward segments during the backward

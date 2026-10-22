@@ -1,6 +1,6 @@
 # Rejection registry
 
-Every deposit screened for a HallSim slot and rejected, with the class of
+Every deposit screened for a hallsim slot and rejected, with the class of
 failure and one line of reason. Recorded here rather than in prose so it can be
 counted: the distribution of *why* candidate models fail is a finding about the
 field, and it is what the framework's claim rests on — that it rejects fast,

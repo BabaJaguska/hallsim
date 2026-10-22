@@ -112,7 +112,7 @@ class TestVerbosity:
         assert hallsim == logging.WARNING
 
     def test_verbose_lifts_hallsim_only(self):
-        """-v means "what HallSim decided", not JAX's backend probing, so the
+        """-v means "what hallsim decided", not JAX's backend probing, so the
         root stays where it was."""
         import logging
 

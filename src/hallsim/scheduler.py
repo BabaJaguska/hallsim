@@ -29,6 +29,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from collections import OrderedDict
 from functools import cached_property
 from typing import Any
 
@@ -88,6 +89,39 @@ def _inherits_controller_tolerances(root_finder) -> bool:
 #: on. A screen builds a Scheduler per tolerance, a census a Scheduler per
 #: deposit, and a verdict climbed once should not be climbed again.
 _RUNG_MEMORY: dict = {}
+
+#: Per-group spectra for the Nyquist guard, by the same signature.
+_OMEGA_MEMORY: dict = {}
+
+#: Compiled solve cores by scheduler configuration and structural signature,
+#: shared by every Scheduler instance in the process. A calibration builds a
+#: Scheduler per problem, and the core compiled for one is the core the next
+#: needs; keyed per instance, each paid the compile again. Bounded, since a
+#: census builds one per deposit and a core holds an executable.
+CORE_MEMORY_SIZE = 32
+_CORE_MEMORY: OrderedDict = OrderedDict()
+
+
+def _remember_core(key, fn) -> None:
+    _CORE_MEMORY[key] = fn
+    _CORE_MEMORY.move_to_end(key)
+    while len(_CORE_MEMORY) > CORE_MEMORY_SIZE:
+        _CORE_MEMORY.popitem(last=False)
+
+
+def _hashable(value):
+    """``value`` as a dict key: containers become tuples, and anything that
+    still refuses is keyed by identity, which keeps the key valid and only
+    stops two schedulers from sharing a core."""
+    if isinstance(value, dict):
+        return tuple((k, _hashable(v)) for k, v in sorted(value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_hashable(v) for v in value)
+    try:
+        hash(value)
+    except TypeError:
+        return ("id", id(value))
+    return value
 
 
 def _with_own_root_finder(solver, root_finder):
@@ -672,6 +706,13 @@ class Scheduler:
         max_batch_workers: int | None = None,
         batch_chunk: int | None = None,
     ) -> None:
+        # Every constructor argument, so two schedulers built alike share
+        # compiled cores and two built differently never do.
+        args = locals()
+        self._config = (
+            type(self).__qualname__,
+            _hashable({k: v for k, v in args.items() if k != "self"}),
+        )
         if batch_mode not in ("auto", "vectorized", "threaded"):
             raise ValueError(
                 f"batch_mode must be 'auto', 'vectorized' or 'threaded', "
@@ -800,10 +841,8 @@ class Scheduler:
         # structure. A traced run cannot measure its own, so it reads this;
         # an eager run always measures its own and refreshes it.
         self._eager_verdict: dict[Any, dict[str, GroupIntegrator]] = {}
-        self._omega_cache: dict[Any, list] = {}  # antialias spectrum cache
         # Compiled continuous cores by structure. Not an optimization: an
         # unjitted run re-traces its scan of N diffeqsolve bodies every call.
-        self._core_cache: dict[Any, Any] = {}
         self._warned_save_res = False
         # Adjoint method used by every diffeqsolve in this run.
         # Default (None) → diffrax picks RecursiveCheckpointAdjoint, which
@@ -1805,8 +1844,9 @@ class Scheduler:
             (None if jump_ts is None else tuple(float(t) for t in jump_ts)),
             tuple(sorted(stochastic_procs or {})),
         )
-        cached = self._core_cache.get(sig)
+        cached = _CORE_MEMORY.get((self._config, sig))
         if cached is not None:
+            _CORE_MEMORY.move_to_end((self._config, sig))
             return cached
 
         if discrete_procs or event_procs:
@@ -1836,7 +1876,7 @@ class Scheduler:
                 isinstance(leaf, jax.core.Tracer)
                 for leaf in jax.tree_util.tree_leaves((composite, state))
             ):
-                self._core_cache[sig] = fn
+                _remember_core((self._config, sig), fn)
             return fn
 
         if fast:
@@ -1912,7 +1952,7 @@ class Scheduler:
             isinstance(leaf, jax.core.Tracer)
             for leaf in jax.tree_util.tree_leaves((composite, state))
         ):
-            self._core_cache[sig] = fn
+            _remember_core((self._config, sig), fn)
         return fn
 
     def _batch_workers(self) -> int:
@@ -2857,8 +2897,8 @@ class Scheduler:
             self._integrator_signature(composite, groups, state, macro_dt),
             _param_digest(composite),
         )
-        if sig in self._omega_cache:
-            return self._omega_cache[sig]
+        if sig in _OMEGA_MEMORY:
+            return _OMEGA_MEMORY[sig]
         from hallsim.stiffness import analyze_groups
 
         try:
@@ -2872,7 +2912,7 @@ class Scheduler:
             omegas = [v.max_abs_im for v in report.values()]
         except (RuntimeError, np.linalg.LinAlgError):
             omegas = []
-        self._omega_cache[sig] = omegas
+        _OMEGA_MEMORY[sig] = omegas
         return omegas
 
     def _resolve_save_dt(self, omegas, save_dt: float) -> float:

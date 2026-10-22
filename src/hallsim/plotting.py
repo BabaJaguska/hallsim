@@ -1,4 +1,4 @@
-"""Plotting utilities for HallSim simulations.
+"""Plotting utilities for hallsim simulations.
 
 Provides quick visualization for simulation results from Scheduler,
 including trajectory plots, phase portraits, and composite overviews.

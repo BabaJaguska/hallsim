@@ -734,13 +734,13 @@ Moved 2026-09-07. Newest last, in the order they were filed.
 
 - [x] **P0.17 — FIXED 2026-09-06. `atol_scale` froze the tolerance on a
   decaying state, and the solve returned 10⁵⁷ with `ok=True`.** ✓✓ From an off-attractor IC on GZ06,
-  HallSim returns **−1.53e57** where scipy Radau / LSODA / DOP853 at rtol 1e-10
+  hallsim returns **−1.53e57** where scipy Radau / LSODA / DOP853 at rtol 1e-10
   all return **+9.9584e-6**, at every horizon ≥ 100 with `macro_dt ≥ 100`:
 
   ```
-  t_end ≤  50   HallSim  9.98e-06   scipy 9.9584e-06   agree
-  t_end = 100   HallSim -4.749e+03  scipy 9.9584e-06   ok=True
-  t_end = 2000  HallSim -1.530e+57  scipy 9.9584e-06   ok=True
+  t_end ≤  50   hallsim  9.98e-06   scipy 9.9584e-06   agree
+  t_end = 100   hallsim -4.749e+03  scipy 9.9584e-06   ok=True
+  t_end = 2000  hallsim -1.530e+57  scipy 9.9584e-06   ok=True
   macro_dt 10 or 1 → correct;  macro_dt 100+ → diverged, ok=True
   ```
 
@@ -1288,7 +1288,7 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   is deleted and `demos/models/mitochondrial_aging.py` reads the deposit.
 
 - [x] **P2.9 — A composite cannot be exported, so every cross-engine check
-  needs a hand-written SBML merge.** Filed 2026-09-10. HallSim imports SBML and
+  needs a hand-written SBML merge.** Filed 2026-09-10. hallsim imports SBML and
   never emits it. To run the multi-hallmark composite in Tellurium and COPASI
   (P1.17) the three deposits had to be merged offline with libSBML into one
   file, and that merge is 300+ lines of reference surgery: `renameSIdRefs` does
@@ -1322,7 +1322,7 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   `reaction_channels()` / `assignment_rules()` — the mitochondrial demo's
   own modules today.
 
-- [x] **P1.17 — Nothing checks HallSim against an established simulator; the
+- [x] **P1.17 — Nothing checks hallsim against an established simulator; the
   instrument exists and is not a test.** Found 2026-08-31 (external systems
   review). `misc/tellurium_compare.py` builds the same SBML models in
   libRoadRunner/CVODE and compares per-species trajectories, describing
@@ -1331,7 +1331,7 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   docstring points at a wrong path (`demos/tellurium_compare.py`) and leaks a
   venv name into public-facing text against the repo's own rule, and
   `grep -rn "tellurium\|roadrunner\|copasi\|amici" tests/` returns nothing.
-  HallSim re-implements a large amount of SBML semantics on top of
+  hallsim re-implements a large amount of SBML semantics on top of
   `sbmltoodejax` — event translation (`sbml_events.py`, 358 lines),
   assignment-rule ordering (`_order_assignments`), `functionDefinition`
   inlining, port-boundary unit conversion (`units.py`), time-unit reconciliation
@@ -1343,10 +1343,10 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   in COPASI 4.46 via basico, by merging the three deposits into one 82-species /
   142-reaction / 20-rule SBML with the coupling edges compiled in as assignment
   rules and rate-law rescalings, and simulated over 50 days. Both engines
-  reproduce the HallSim trajectory to integration tolerance: max relative
+  reproduce the hallsim trajectory to integration tolerance: max relative
   deviation over 1001 points is 1e-6 to 9e-4 on DNA_damage, CDKN1A, ROS,
   phospho-mTORC1 and AggP in both arms and both engines. So the SBML semantics
-  HallSim re-implements are, on this composite, right. Two caveats keep this
+  hallsim re-implements are, on this composite, right. Two caveats keep this
   entry open. The harness and its artifacts live outside this repo, so nothing
   here re-runs it. And the one outlier — COPASI's etoposide-arm p53 at 3.5e-2 —
   is not a discrepancy but a phase offset in a limit cycle scored with a
@@ -1708,7 +1708,7 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   path.** Filed and fixed 2026-09-12. The compile is superquadratic in the
   path count with a *climbing* exponent (n^1.92 → 2.19 → 2.54), 742 s at
   n=50 000 and unfinished after 40 minutes at n=100 000, at flat memory and
-  with no HallSim-level message — XLA's own `slow_operation_alarm` at 2m43s
+  with no hallsim-level message — XLA's own `slow_operation_alarm` at 2m43s
   was the only diagnostic anywhere. It is slower warm as well:
 
   | paths | value type | before | after |
@@ -1887,7 +1887,7 @@ Moved 2026-09-07. Newest last, in the order they were filed.
   `auto_groups()` returns `{group_0: [a, b], default: [drive, bridge, hold]}`
   because the edges' `timescale` is `None`, and Lie splitting at the default
   `macro_dt = 1.0` leaves the clamped species 54% off the monolithic
-  solution — libRoadRunner and COPASI on the exported document, and HallSim
+  solution — libRoadRunner and COPASI on the exported document, and hallsim
   itself with all five processes in one group, agree to 1e-7. First order
   in the step, as Lie splitting is:
 
@@ -1994,8 +1994,8 @@ Moved 2026-09-07. Newest last, in the order they were filed.
 - [x] **P3.25 — `process_from_sbml(<accession>)` could not fetch 400 of the 1,096 curated BioModels deposits.** Found 2026-09-20 by the corpus census (`simulate census run`): the download helper asked for `<accession>_url.xml`, which is the main file only on older deposits. From BIOMD0000000234 onward the main file often keeps the author's name (`GemcitabineCorrected.xml`, `Philipson2015.xml`, `Csikasz-Nagy2006.xml`) and the conventional name answers HTTP 400, so `simulate find` listed candidates that `.fetch()` and `triage_sbml` could not open. **Fixed 2026-09-20:** `sbml_import._fetch_biomodel_main` tries the convention, and on an HTTP error reads the deposit's record and fetches the file it names as main. Regression: `tests/unit/test_sbml_import.py::test_biomodel_download_falls_back_to_the_records_main_file`.
 - [x] **P3.26 — The importer failed on seventeen deposits with an exception of its own.** Found 2026-09-20/21 by the census (`outputs/2026-09-20_20-45-08/census.csv`). Thirteen raise `TypeError: Cannot convert complex to float` (BIOMD0000000059 BIOMD0000000408 BIOMD0000000490 BIOMD0000000601 BIOMD0000000731 BIOMD0000000925 MODEL1006230100 MODEL1006230112 MODEL1405070000 MODEL1806150001 MODEL1908050003 MODEL2003190006 MODEL2007090001): a constant expression — an initial assignment or a parameter — evaluates to a complex number on the sympy path (a fractional power of a negative base or a square root of a negative intermediate, in every case a quantity the paper integrates as real). Three raise `TypeError: Invalid NaN comparison` (MODEL1807180003 MODEL1808150001 MODEL1910030001) and one `BadSignatureError: Duplicate symbol` (MODEL2003040001). libRoadRunner and COPASI run them. The fix for the first is to evaluate such constants with real-valued semantics (`sympy.re` where the imaginary part is zero, else an error naming the expression); the other two are one-line guards once the offending construct is read. **Fixed 2026-09-21:** the complex number was a stale value — the importer seeded a rule's target from its value attribute, so a later rule read 0/0 at t = 0; targets are no longer seeded, and a genuinely complex constant raises naming the expression. NaN is a symbol that lowers to `jnp.nan` at print time, so a comparison against it is false as IEEE says rather than a sympy error, and a lambda that binds a variable twice binds its first argument. Regressions: `tests/unit/test_sbml_core.py::test_a_rule_targets_value_attribute_is_not_read`, `::test_nan_in_a_comparison_imports_and_reads_false`, `::test_a_bound_variable_named_twice_binds_its_first_argument`.
 - [x] **P3.30 — A species with no initial value and a compartment set by a rule were refused.** Counted by the census 2026-09-21: 118 and 102 deposits. **Fixed 2026-09-21:** an unset species or parameter defaults to zero with a warning, as libRoadRunner and COPASI do; a compartment a rate rule drives is integrated and one an assignment rule sets is assigned, values being amounts throughout, with the dilution term on a rate-ruled concentration. Conformance against libRoadRunner: Schaber 2012 and Zi 2011 to better than 1e-7. Regressions: `tests/unit/test_sbml_core.py::test_unset_initial_value_defaults_to_zero_with_a_warning`, `::test_varying_compartment_by_rate_rule_keeps_amounts`, `::test_varying_compartment_by_assignment_rule`.
-- [x] **P1.31 — Thirty-nine BioModels deposits diverged or raised under the Scheduler's default routing while an independent integrator kept them bounded.** Found 2026-09-20/21 by the corpus census. **Fixed 2026-09-21**, after each of the 39 was run against libRoadRunner and under explicit-only HallSim at both screen tolerances (`outputs/census/2026-09-20_20-45-08/triage_divergences*.jsonl`); they were four things. Twelve had a Jacobian that is not finite at y0 (a square root or fractional power of a state that starts at zero): the stiffness analysis raised, the fallback routed every group implicit, and Newton could not use that Jacobian either — a non-finite Jacobian at y0 now routes explicit (`tests/unit/test_multiscale.py::test_a_non_finite_jacobian_at_y0_routes_explicit_and_runs`). Thirteen were the screen's growth heuristic calling a model that grows past 1000× and is still rising "exploding", then reading the reference's identical peak as a framework fault — agreed growth is now the `growing` advisory (`tests/unit/test_diagnostics.py::test_agreed_growth_is_growth_not_divergence`). One failed only at the loose tolerance, which the screen now reports as a tolerance finding rather than a failed model. Eight turned stiff along their trajectory after a non-stiff verdict at y0 (Eftimie 2017's logistic tumour), and the Scheduler now runs a solver ladder: a group whose explicit solve fails is re-run on the implicit solver, a stiff group runs the fifth-order implicit solver under `LADDER_STEP_BUDGET` and moves to `Kvaerno3` with diffrax's per-step chord if it runs out, and the verdict is remembered (`::test_a_model_that_turns_stiff_is_rerouted_to_the_implicit_solver`). Five the reference could not run either. What the ladder cannot reach is P3.31.
-- [x] **P3.29 — Twenty-three deposits did not finish the screen inside 900 s.** Found 2026-09-21 by the census. Every one simulates its ten native units in libRoadRunner in under 0.13 s, so the cost was HallSim's. **Fixed 2026-09-21** for the mechanisms found: Carbo 2013 and its kind were the non-finite Jacobian of P1.31 sending a Newton to grind; Kerkhoven 2013's set was the fifth-order implicit solver with optimistix's per-stage chord at the screen's loose tolerance rejecting steps in cascade — 500 000 steps and failing where diffrax's per-step chord takes 1 528 — which the ladder's third rung now takes over after a hundred thousand steps (119 s to the right answer, against never). Timeouts that remain after the 2026-09-21 re-screen are the fixed-order limit, P3.31.
+- [x] **P1.31 — Thirty-nine BioModels deposits diverged or raised under the Scheduler's default routing while an independent integrator kept them bounded.** Found 2026-09-20/21 by the corpus census. **Fixed 2026-09-21**, after each of the 39 was run against libRoadRunner and under explicit-only hallsim at both screen tolerances (`outputs/census/2026-09-20_20-45-08/triage_divergences*.jsonl`); they were four things. Twelve had a Jacobian that is not finite at y0 (a square root or fractional power of a state that starts at zero): the stiffness analysis raised, the fallback routed every group implicit, and Newton could not use that Jacobian either — a non-finite Jacobian at y0 now routes explicit (`tests/unit/test_multiscale.py::test_a_non_finite_jacobian_at_y0_routes_explicit_and_runs`). Thirteen were the screen's growth heuristic calling a model that grows past 1000× and is still rising "exploding", then reading the reference's identical peak as a framework fault — agreed growth is now the `growing` advisory (`tests/unit/test_diagnostics.py::test_agreed_growth_is_growth_not_divergence`). One failed only at the loose tolerance, which the screen now reports as a tolerance finding rather than a failed model. Eight turned stiff along their trajectory after a non-stiff verdict at y0 (Eftimie 2017's logistic tumour), and the Scheduler now runs a solver ladder: a group whose explicit solve fails is re-run on the implicit solver, a stiff group runs the fifth-order implicit solver under `LADDER_STEP_BUDGET` and moves to `Kvaerno3` with diffrax's per-step chord if it runs out, and the verdict is remembered (`::test_a_model_that_turns_stiff_is_rerouted_to_the_implicit_solver`). Five the reference could not run either. What the ladder cannot reach is P3.31.
+- [x] **P3.29 — Twenty-three deposits did not finish the screen inside 900 s.** Found 2026-09-21 by the census. Every one simulates its ten native units in libRoadRunner in under 0.13 s, so the cost was hallsim's. **Fixed 2026-09-21** for the mechanisms found: Carbo 2013 and its kind were the non-finite Jacobian of P1.31 sending a Newton to grind; Kerkhoven 2013's set was the fifth-order implicit solver with optimistix's per-stage chord at the screen's loose tolerance rejecting steps in cascade — 500 000 steps and failing where diffrax's per-step chord takes 1 528 — which the ladder's third rung now takes over after a hundred thousand steps (119 s to the right answer, against never). Timeouts that remain after the 2026-09-21 re-screen are the fixed-order limit, P3.31.
 - [x] **P0.111 — The intake screen cost fifty seconds to a quarter of an hour per model where the solve is seconds.** Found 2026-09-21 when a re-screen of 409 deposits paced at three hours against libRoadRunner's milliseconds; the halt condition in CLAUDE.md. Measured: the tunability gradient through the solve was 56 s on Noble 1998 and the growth check's reference integrator (`odeint` at rtol 1e-12, five million steps) ran past thirteen minutes on Heldt 2012, while the Scheduler's warm solve of the same models is 0.1 s. **Fixed 2026-09-21:** the tunability probe differentiates the compiled core's rate function at sampled states (56 s → 0.75 s; the through-the-solve check stays behind `check_tunability="solve"`); the reference is a bounded bare-diffrax implicit solve; routing verdicts are shared across Scheduler instances (`_RUNG_MEMORY`) so a screen's tight and loose runs and a census's per-deposit instances do not each climb the ladder; the explicit rung has a step budget. Full triage: Heldt 13.5 s, Kerkhoven 62 s, Eftimie 79 s to a bounded reject. Regressions: `tests/unit/test_diagnostics.py::test_field_level_tunability_catches_a_non_finite_parameter_derivative`.
 - [x] **P0.112 — A calibration problem could not be built for an arm with no observations.** Found 2026-09-21 by CI on a fresh checkout, which has no series matrix: `CalibrationProblem` stacked an empty column list for each arm's data block and raised, so the multi-hallmark demo's problem could not be constructed before its dataset was fetched. **Fixed 2026-09-21:** an arm without timepoints gets a block with no timepoints, `(n_readouts, 0[, n_batch])`. Regression: `tests/unit/test_cli.py::test_the_problem_builds_without_the_dataset`.
 - [x] **P0.113 — The routing memory shared across Scheduler instances was keyed by structure alone.** Found 2026-09-22 by CI: `verify_plan` reported no moved verdict after a million-fold rate change, and a batched run inherited whichever verdict the previous test left behind. The memory that lets a screen's tight and loose runs and a census's per-deposit instances share one ladder climb had dropped the parameter digest from its key, the mistake `_param_digest`'s own docstring names. **Fixed 2026-09-22:** the memory is keyed by structure and parameter digest, with the structure's latest eager verdict kept separately for a traced run that cannot measure its own; an instance that takes a verdict from the memory records it as its own, so its traced runs follow the arm it was warmed on; the test suite clears the memory between tests. Regressions: `tests/unit/test_multiscale.py::test_verify_plan_reports_a_moved_verdict`, `::test_reused_scheduler_does_not_inherit_a_stiffness_verdict`.

@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -180,14 +181,21 @@ def _restricted_fn(rhs, y0: jnp.ndarray, idxs: np.ndarray, t0: float):
     return g
 
 
+@eqx.filter_jit
+def _dense_jacobian(rhs, y0, idxs, t0):
+    g = _restricted_fn(rhs, y0, idxs, t0)
+    return jax.jacfwd(g)(y0[idxs])
+
+
 def _restricted_jacobian(rhs, y0: jnp.ndarray, idxs: np.ndarray, t0: float):
     """Dense ``(len(idxs), len(idxs))`` Jacobian at ``(t0, y0)``.
 
     Differentiates the restricted function, so the cost scales with the
-    group's dimension rather than the whole store's.
+    group's dimension rather than the whole store's. One compiled program,
+    keyed on the RHS module's structure so a second composite of the same
+    shape reuses it; evaluated op by op it is a few hundred programs.
     """
-    g = _restricted_fn(rhs, y0, idxs, t0)
-    return _concrete(jax.jacfwd(g)(y0[idxs]))
+    return _concrete(_dense_jacobian(rhs, y0, jnp.asarray(idxs), t0))
 
 
 def _extremal_eigenvalues(

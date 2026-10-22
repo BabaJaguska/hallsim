@@ -22,16 +22,16 @@ _LEVELS = [logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG]
     "-q", "--quiet", is_flag=True, help="Errors only; suppress warnings."
 )
 def simulate(verbose, quiet):
-    """HallSim simulation commands."""
+    """hallsim simulation commands."""
     _set_logging(verbose, quiet)
 
 
-def _set_logging(verbose: int, quiet: bool) -> None:
+def _set_logging(verbose: int, quiet: bool) -> int:
     level = _LEVELS[0 if quiet else min(1 + verbose, len(_LEVELS) - 1)]
     # force=True so the level a user asked for wins over any basicConfig a
     # demo module ran at import; without a handler every log.warning arrives
     # through logging.lastResort as bare stderr with no level or logger name.
-    # The root stays at warnings so -v means "what HallSim decided" and not
+    # The root stays at warnings so -v means "what hallsim decided" and not
     # JAX's backend probing; -q quietens everything.
     logging.basicConfig(
         level=logging.ERROR if quiet else logging.WARNING,
@@ -39,6 +39,7 @@ def _set_logging(verbose: int, quiet: bool) -> None:
         force=True,
     )
     logging.getLogger("hallsim").setLevel(level)
+    return level
 
 
 @click.group()
@@ -55,7 +56,12 @@ def _set_logging(verbose: int, quiet: bool) -> None:
 def supply(verbose, quiet):
     """Where models and data come from: the repositories, the literature
     and the census. Nothing here runs a simulation."""
-    _set_logging(verbose, quiet)
+    level = _set_logging(verbose, quiet)
+    # A search is a wait on repositories, and the per-source lines are the
+    # only sign it is moving; a cold index build takes minutes in silence
+    # otherwise.
+    if not quiet:
+        logging.getLogger("hallsim.search").setLevel(min(level, logging.INFO))
 
 
 @supply.command("mechanisms")
@@ -2328,7 +2334,7 @@ def view(
 @simulate.command("info")
 def info():
     """Show info about the composable architecture."""
-    click.echo("HallSim Composable Architecture")
+    click.echo("hallsim Composable Architecture")
     click.echo("================================")
     click.echo()
     click.echo("Core concepts:")

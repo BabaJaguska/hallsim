@@ -26,7 +26,7 @@ exercises the most framework surface. That makes it a *test workload*, not a
 result. It is known-broken as biology — P0.14: its control arm is not a
 control, so its concordance number means nothing and a constant null beats it
 (P1.6). Read every demo number here as a diagnostic of the framework path it
-exercised. Nothing about HallSim's value depends on that model being right,
+exercised. Nothing about hallsim's value depends on that model being right,
 and no entry should be read as if it did.
 
 ## The standing criterion
@@ -990,7 +990,7 @@ The framework returns a plausible number and nothing indicates it is wrong.
   at batch the chord is the commit that recovers 3.4120 → 2.1415.
 
   So the shape of the cost inverted. Against jaxkineticmodel on the same T4
-  and model, HallSim went from 1.22× at one cell and 2.39× at 256, to 1.98×
+  and model, hallsim went from 1.22× at one cell and 2.39× at 256, to 1.98×
   at one cell and 2.02× at 256 — the batch scaling that P0.71 is about is
   largely closed, and what is left is concentrated where the batch dimension
   cannot help.
@@ -1347,7 +1347,7 @@ The check that would catch a mistake does not exist, does not run, or fails open
 - [ ] **P1.23 — Trajectory agreement is scored pointwise, which misreads every
   oscillator the repo cares about.** Filed 2026-09-10. The cross-engine rebuild
   (P1.17) put COPASI's etoposide-arm p53 at 3.5e-2 max relative deviation
-  against HallSim while every other panel sat at 1e-6 to 9e-4. It is not a
+  against hallsim while every other panel sat at 1e-6 to 9e-4. It is not a
   disagreement: it is a sub-pulse phase shift in the p53–Mdm2 limit cycle, where
   two visually identical trajectories differ by the full amplitude wherever the
   spikes do not align. The repo already knows this — the intake protocol says so
@@ -1458,7 +1458,7 @@ The check that would catch a mistake does not exist, does not run, or fails open
 
 - [ ] **P2.10 — Fitting a parameter to a trajectory has no visible path, so an
   agent concluded the framework cannot fit.** Filed 2026-09-10. The cross-engine
-  rebuild report (P1.17) states that "Hallsim has none of these; calibration
+  rebuild report (P1.17) states that "hallsim has none of these; calibration
   currently means hand-rolled JAX loops" and demonstrates a k1 recovery on
   Proctor 2007 in COPASI instead — about ten lines of basico. The capability
   exists here and is not findable: `Calibrator` takes any traceable loss and
@@ -1911,7 +1911,7 @@ The check that would catch a mistake does not exist, does not run, or fails open
   `jax.pmap` over host devices raises "pytree does not match out_structure"
   from lineax's LU `ravel_vector`, reached through the implicit solver's
   Newton step in `_reduced_solve`; every width, horizon and warm-up tried
-  fails the same way. Reproduced without HallSim: a bare `diffrax.Kvaerno5`
+  fails the same way. Reproduced without hallsim: a bare `diffrax.Kvaerno5`
   with `optimistix.Newton` on Robertson runs under `vmap` and fails on the
   identical lineax line under `shard_map`. JAX 0.10.2, diffrax 0.7.2, lineax
   0.1.0, optimistix 0.1.0. So it is not the Scheduler's structure; any

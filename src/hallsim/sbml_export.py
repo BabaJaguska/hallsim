@@ -4,9 +4,9 @@ The wiring a composite holds as data — which processes share a species,
 how each model's clock was reconciled, what every rate constant is now —
 becomes an SBML model that libRoadRunner or COPASI can run, so a cross-engine
 check is a test rather than a hand-merge, and a sub-model can go to an
-engine with a method HallSim lacks.
+engine with a method hallsim lacks.
 
-The document transcribes HallSim's semantics literally. Every species is an
+The document transcribes hallsim's semantics literally. Every species is an
 **amount** in one unit compartment with ``hasOnlySubstanceUnits`` set, and
 where an imported model read a concentration the law divides by that model's
 compartment size explicitly, which is now a parameter. A process's

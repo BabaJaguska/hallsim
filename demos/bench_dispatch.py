@@ -398,7 +398,7 @@ def make_figure(repeat, sweep, routing, batch, cfg, path):
     axes[1, 2].set_visible(False)
 
     fig.suptitle(
-        "HallSim dispatch overhead — host-side cost of reaching the solver",
+        "hallsim dispatch overhead — host-side cost of reaching the solver",
         fontsize=13.5,
         color=INK,
         x=0.008,

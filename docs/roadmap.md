@@ -1,4 +1,4 @@
-# HallSim Roadmap
+# hallsim Roadmap
 
 Planned and queued work, grouped by area. See
 the CrossGen suggestions (working notes, not in the repository) for the cross-domain
@@ -51,7 +51,7 @@ below.
 Fitted outputs are point estimates; a lab needs bands. An optimizer and a
 sampler answer different questions — `Calibrator` returns a MAP point, a
 sampler a distribution — so the choice is which uncertainty method, at what
-cost, measured against one HallSim gradient.
+cost, measured against one hallsim gradient.
 
 **Prerequisite.** The loss is not yet a log density: `gaussian_nll` is a
 mean without the ½, `data_loss` means again over arms, and `prior_weight` is
@@ -168,7 +168,7 @@ full model. The same two-loop split this section removes.
   parameter) and it needs a simulation rather than arithmetic, so it belongs
   next to `place_clamp_rate`, which already measures through the composite.
   The numbers above come from a hand-run probe.
-* [ ] **Lipid-metabolism extension** — Tighanimine et al. 2024 (*Nat Metab*, the paper behind GSE248823) identified a G3P/PEtn homeostatic switch as *causal* for senescence (p53 → glycerol kinase activation drives G3P↑; PCYT2 post-translational inactivation drives PEtn↑; lipid droplet biogenesis is the downstream effect). Adding a `LipidMetabolism` Process (states: G3P, PEtn; inputs: `p53_activity`, a PCYT2-PTM proxy; outputs: a senescence-amplifying signal that feeds back into the SASP axis) would let HallSim test their causal claim *in silico* — and the GSE248824 SuperSeries includes the paired metabolomics needed to validate it. HallSim recapitulates the G3P/PEtn → senescence amplification loop and predicts G3PP/ETNPPL overexpression as senomorphic.
+* [ ] **Lipid-metabolism extension** — Tighanimine et al. 2024 (*Nat Metab*, the paper behind GSE248823) identified a G3P/PEtn homeostatic switch as *causal* for senescence (p53 → glycerol kinase activation drives G3P↑; PCYT2 post-translational inactivation drives PEtn↑; lipid droplet biogenesis is the downstream effect). Adding a `LipidMetabolism` Process (states: G3P, PEtn; inputs: `p53_activity`, a PCYT2-PTM proxy; outputs: a senescence-amplifying signal that feeds back into the SASP axis) would let hallsim test their causal claim *in silico* — and the GSE248824 SuperSeries includes the paired metabolomics needed to validate it. hallsim recapitulates the G3P/PEtn → senescence amplification loop and predicts G3PP/ETNPPL overexpression as senomorphic.
 * [ ] **Trajectory-level validation** — GSE248823 has 3 timepoints per arm (DDIS: D00/D07/D14, OIS: D00/D04/D07). Concordance reads two-endpoint deltas; matching predicted vs. measured pathway-score *trajectories* (rate of change, time-constant ordering across pathways) would add the dynamics to the score.
 * [ ] Validate against scRNA-seq (Tabula Muris Senis, Ma 2020 caloric restriction) — pseudobulk ssGSEA
 * [ ] PINNs: physics-informed loss for NeuralODE training
@@ -217,7 +217,7 @@ plausible architectures:
 Concrete first-cut deliverable: a `PopulationAggregate` Process and a
 SASP-propagation demo where the senescence fraction in a population
 modulates each individual cell's p53 baseline. Demonstrates that
-HallSim's composability extends to inter-cell coupling without leaving
+hallsim's composability extends to inter-cell coupling without leaving
 the JAX-native execution model. Designed as a natural follow-up.
 
 ### Other queued items
@@ -237,7 +237,7 @@ the JAX-native execution model. Designed as a natural follow-up.
 `.ode` and CellML all describe a *model*; SED-ML describes a *simulation
 experiment over* a model — which model, which time span, which parameter
 changes per task, which outputs. Keep the distinction explicit in anything
-user-facing: HallSim imports SBML and XPP, discovers CellML and COMBINE
+user-facing: hallsim imports SBML and XPP, discovers CellML and COMBINE
 archives without importing them, and would *execute* SED-ML rather than
 import it.
 

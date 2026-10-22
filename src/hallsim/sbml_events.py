@@ -1,4 +1,4 @@
-"""Translate SBML ``<event>`` elements into HallSim EVENT processes.
+"""Translate SBML ``<event>`` elements into hallsim EVENT processes.
 
 The compiled ODE core (:mod:`hallsim.sbml_core`) ignores SBML events;
 :func:`process_from_sbml` has this module re-express each event as an
@@ -314,7 +314,7 @@ def _compiled(expr, names: tuple):
 
 
 class SBMLEvent(Process):
-    """One SBML ``<event>`` as a HallSim EVENT process.
+    """One SBML ``<event>`` as a hallsim EVENT process.
 
     Reads referenced species through INPUT ports (named by species id) and
     writes each assignment target through a LATCHED ``__set_<species>``

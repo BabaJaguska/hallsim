@@ -1,4 +1,4 @@
-"""HallSim — composable, multi-scale simulator for aging biology.
+"""hallsim — composable, multi-scale simulator for aging biology.
 
 Public API. Most users only need a handful of names:
 
