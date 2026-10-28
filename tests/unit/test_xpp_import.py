@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -126,7 +128,7 @@ def test_decay_matches_analytic(tmp_path):
     assert isinstance(proc, XPPProcess)
     res = _run(proc, t_span=(0.0, 4.0), macro_dt=0.01)
     x_final = float(res.get("x")[-1])
-    assert x_final == pytest.approx(2.0 * jnp.exp(-0.5 * 4.0), abs=1e-3)
+    assert x_final == pytest.approx(2.0 * math.exp(-0.5 * 4.0), abs=1e-3)
 
 
 def test_harmonic_oscillator_conserves_energy(tmp_path):
