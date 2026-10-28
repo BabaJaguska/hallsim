@@ -475,6 +475,11 @@ The `lax.scan` outer solve keeps this bounded at scale — the whole multi-group
 run compiles to one executable, so reverse-mode checkpoint memory no longer
 grows with the macro-step count.
 
+A lockstep group (`fixed_dt`) knows its step count in advance, so it
+checkpoints every step within `CHECKPOINT_MEMORY_BUDGET` and recomputes
+nothing; the `O(log n)` schedule is for error-controlled solves, whose step
+count is not known until they run.
+
 ### The loop
 
 `Calibrator` builds `vg = jax.jit(jax.value_and_grad(loss))` **once** and

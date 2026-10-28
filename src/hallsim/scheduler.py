@@ -28,7 +28,7 @@ import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections import OrderedDict
 from functools import cached_property
 from typing import Any
@@ -46,6 +46,7 @@ from hallsim.composite import Composite
 from hallsim.store import as_paths, read_write_paths
 from hallsim.tracing import is_traced
 from hallsim.config import (
+    CHECKPOINT_MEMORY_BUDGET,
     DEFAULT_ATOL,
     DEFAULT_BATCH_CHUNK,
     DEFAULT_NEWTON_ATOL,
@@ -58,6 +59,7 @@ from hallsim.config import (
 )
 from hallsim.process import PortRole
 from hallsim.root_finders import Chord
+from hallsim.solvers import unrolled
 from hallsim.stiffness import (
     GroupStiffness,
     StiffnessInconclusive,
@@ -70,6 +72,13 @@ from hallsim.stiffness import (
 # processes). Sized for second-scale ``t_span`` values; runs that span
 # ranges < ~1e-9 should pass an explicit save_dt and not rely on this.
 _TIME_EPS: float = 1e-12
+
+
+def _lockstep_steps(window: float, step: float) -> int:
+    """Steps a constant-step solve takes over ``window``: the whole steps,
+    the clipped last one when ``window`` is not a multiple, and one more
+    for rounding in the summed time."""
+    return int(np.ceil(window / step - 1e-9)) + 1
 
 
 def _inherits_controller_tolerances(root_finder) -> bool:
@@ -203,6 +212,9 @@ class GroupIntegrator:
     #: implicit solver under ``LADDER_STEP_BUDGET`` and moves to the
     #: third-order one, unbudgeted, if it runs out.
     max_steps: int | None = None
+    #: A lockstep group's step count over its window, which is also its
+    #: ``max_steps``; ``None`` for an error-controlled group.
+    lockstep_steps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -625,7 +637,10 @@ class Scheduler:
     and Newton convergence; this keeps a valid stiff solve from failing
     merely because the population mode was selected. Accuracy for
     lockstep groups is not controlled: compare readouts with an adaptive
-    reference first. ``max_steps`` must cover ``macro_dt / fixed_dt``.
+    reference first. A lockstep group's step count over its window is
+    known, so it is the group's step bound in place of ``max_steps``, and
+    under the default adjoint the reverse pass checkpoints every step
+    within ``CHECKPOINT_MEMORY_BUDGET`` instead of recomputing.
     groups:
         Manual group assignment ``{group_name: [proc_name, ...]}``. ``None``
         uses ``composite.auto_groups()``.
@@ -675,8 +690,10 @@ class Scheduler:
         Splitting the leading axis bounds that waste to a chunk. ``None``
         (default) chunks a CPU batch at 64 and never chunks on an
         accelerator, where the batch is already near-flat and more passes
-        would only add launch overhead. ``0`` disables chunking. Per member
-        the result is identical either way — the members are independent.
+        would only add launch overhead, nor a lockstep (``fixed_dt``) run,
+        whose members all take the same steps. ``0`` disables chunking. Per
+        member the result is the same either way — the members are
+        independent.
     """
 
     def __init__(
@@ -780,8 +797,11 @@ class Scheduler:
             rtol=rtol if newton_rtol is None else newton_rtol,
             atol=newton_atol,
         )
-        self.explicit_solver = _with_own_root_finder(
-            explicit_solver or dfx.Tsit5(), newton
+        # Explicit Runge–Kutta solvers run with their stages unrolled: the
+        # same steps and saves as diffrax's stage loop, without its cost on
+        # a small right-hand side under vmap.
+        self.explicit_solver = unrolled(
+            _with_own_root_finder(explicit_solver or dfx.Tsit5(), newton)
         )
         self.implicit_solver = _with_own_root_finder(
             implicit_solver or dfx.Kvaerno5(), newton
@@ -797,7 +817,7 @@ class Scheduler:
             root_finder=dfx.VeryChord(rtol=rtol, atol=atol)
         )
         self.solver = (
-            _with_own_root_finder(solver, newton)
+            unrolled(_with_own_root_finder(solver, newton))
             if solver is not None
             else self.explicit_solver
         )
@@ -1141,6 +1161,11 @@ class Scheduler:
         if state.ndim <= 1:
             return
         blockers = []
+        if composite.member_params and not compiled:
+            blockers.append(
+                "per-member parameters are mapped by the compiled lanes "
+                "only, and this configuration runs eagerly"
+            )
         if composite.stochastic_processes() and not compiled:
             blockers.append(
                 "stochastic reaction processes on an eager (non-scan) "
@@ -1221,6 +1246,15 @@ class Scheduler:
         # (batch, n_vars); the batch axis rides through every group's solve.
         keys = composite.store_keys()
         state = composite.initial_state_vec(keys)
+        members = composite.member_count()
+        if members is not None and (
+            state.ndim != 2 or state.shape[0] != members
+        ):
+            raise ValueError(
+                f"per-member parameters {composite.member_params} carry "
+                f"{members} members, so the start must be batched to "
+                f"({members}, n_vars); got shape {tuple(state.shape)}."
+            )
 
         groups = self.manual_groups or composite.auto_groups()
         stochastic_procs = composite.stochastic_processes()
@@ -1262,6 +1296,11 @@ class Scheduler:
             and self.splitting == "lie"
             and coupling == "frozen"
             and not stochastic_procs
+        )
+        # The fast path's window is the span; every other lane solves one
+        # macro step at a time.
+        integrators = self._lockstep_budget(
+            integrators, (t1 - t0) if fast_path_eligible else macro_dt
         )
         # Scan path: a statically-known macro-step count, so the whole
         # multi-group run is one lax.scan — bounded compile, reverse-mode
@@ -1869,7 +1908,15 @@ class Scheduler:
                 )
 
             if state.ndim > 1:
-                fn = self._per_member(core, bool(stochastic_procs))
+                fn = self._per_member(
+                    core,
+                    bool(stochastic_procs),
+                    composite,
+                    all(
+                        isinstance(i.controller, dfx.ConstantStepSize)
+                        for i in integrators.values()
+                    ),
+                )
             else:
                 fn = eqx.filter_jit(core)
             if not any(
@@ -1943,7 +1990,15 @@ class Scheduler:
                 )
 
         if state.ndim > 1:
-            fn = self._per_member(core, bool(stochastic_procs))
+            fn = self._per_member(
+                core,
+                bool(stochastic_procs),
+                composite,
+                all(
+                    isinstance(i.controller, dfx.ConstantStepSize)
+                    for i in integrators.values()
+                ),
+            )
         else:
             fn = eqx.filter_jit(core)
         # Only cache a core built eagerly. Built under an outer trace it can
@@ -1965,16 +2020,17 @@ class Scheduler:
             return max(1, len(affinity(0)))
         return max(1, os.cpu_count() or 1)
 
-    def _chunk_width(self, y0) -> int | None:
+    def _chunk_width(self, y0, lockstep: bool = False) -> int | None:
         """Members per vectorized pass, or None to run the batch whole.
 
         Chunking trades vectorisation for a tighter trip count, which pays on
         a CPU and costs on an accelerator, where one device runs the batch and
-        extra passes are extra launches.
+        extra passes are extra launches. A lockstep run has one trip count
+        for every member, so it is never chunked unless asked.
         """
         if self.batch_chunk is not None:
             return int(self.batch_chunk) or None
-        if is_traced(*jax.tree_util.tree_leaves(y0)):
+        if lockstep or is_traced(*jax.tree_util.tree_leaves(y0)):
             return None
         return DEFAULT_BATCH_CHUNK if self._platform(y0) == "cpu" else None
 
@@ -2007,8 +2063,11 @@ class Scheduler:
             return True
         return stochastic and self._platform(y0) == "cpu"
 
-    def _per_member(self, core, stochastic: bool = False):
-        """Map a single-member ``core`` over the leading batch axis.
+    def _per_member(
+        self, core, stochastic: bool, composite: Composite, lockstep: bool
+    ):
+        """Map a single-member ``core`` over the leading batch axis of the
+        state and of ``composite``'s declared per-member parameters.
 
         Batch members are independent, and the state layout has to say so: as
         one flat ``(batch, n_vars)`` state an implicit solver treats it as a
@@ -2031,7 +2090,7 @@ class Scheduler:
         mapped = eqx.filter_jit(
             eqx.filter_vmap(
                 core,
-                in_axes=(None, eqx.if_array(0), 0),
+                in_axes=(composite.member_axes(), eqx.if_array(0), 0),
                 out_axes=(eqx.if_array(0), eqx.if_array(1), eqx.if_array(0)),
             )
         )
@@ -2039,14 +2098,18 @@ class Scheduler:
 
         def vectorized(comp, y0, rng_key):
             keys = jax.random.split(rng_key, y0.shape[0])
-            width = self._chunk_width(y0)
+            width = self._chunk_width(y0, lockstep)
             if width is None or y0.shape[0] <= width:
                 ts, ys, stats = mapped(comp, y0, keys)
                 return ts[0], ys, stats
             # Keys are split over the whole population first, so a member
             # draws the same noise whatever the chunking.
             passes = [
-                mapped(comp, y0[i : i + width], keys[i : i + width])
+                mapped(
+                    comp.member(slice(i, i + width)),
+                    y0[i : i + width],
+                    keys[i : i + width],
+                )
                 for i in range(0, y0.shape[0], width)
             ]
             ys = jnp.concatenate([p[1] for p in passes], axis=1)
@@ -2063,7 +2126,9 @@ class Scheduler:
         compiled = threading.Event()
 
         def member(comp, y0, keys, i):
-            return jax.block_until_ready(single(comp, y0[i], keys[i]))
+            return jax.block_until_ready(
+                single(comp.member(i), y0[i], keys[i])
+            )
 
         def threaded(comp, y0, rng_key):
             keys = jax.random.split(rng_key, y0.shape[0])
@@ -2777,6 +2842,28 @@ class Scheduler:
             max_steps=min(self.max_steps, LADDER_STEP_BUDGET),
         )
 
+    def _lockstep_budget(self, integrators: dict, window: float) -> dict:
+        """``integrators`` with each lockstep group's step count over
+        ``window`` as its step bound: a constant step takes a known number
+        of steps, so the safety limit is the count itself."""
+        out = {}
+        for g, integ in integrators.items():
+            if isinstance(integ.controller, dfx.ConstantStepSize):
+                n = _lockstep_steps(float(window), self._fixed_step(g))
+                integ = replace(integ, max_steps=n, lockstep_steps=n)
+            out[g] = integ
+        return out
+
+    @staticmethod
+    def _checkpoints(steps: int, y, saveat: dfx.SaveAt) -> int:
+        """Every step, within ``CHECKPOINT_MEMORY_BUDGET``. A checkpoint
+        holds the solve's loop carry — the state, its stage slopes and the
+        save buffer — taken as eight states plus one per saved time."""
+        ts = saveat.subs.ts
+        n_save = 0 if ts is None else int(jnp.shape(ts)[0])
+        per = (8 + n_save) * int(y.size) * y.dtype.itemsize
+        return max(1, min(steps, CHECKPOINT_MEMORY_BUDGET // max(per, 1)))
+
     @staticmethod
     def _integrator_signature(composite, groups, state, macro_dt):
         """Structural key for the integrator cache: the composite's own
@@ -2903,7 +2990,7 @@ class Scheduler:
 
         try:
             report = analyze_groups(
-                composite.with_initial(state),
+                composite.member(0).with_initial(state),
                 groups=groups,
                 t0=t0,
                 dt=macro_dt,
@@ -3029,7 +3116,7 @@ class Scheduler:
         )
         try:
             report = analyze_groups(
-                composite.with_initial(probe),
+                composite.member(0).with_initial(probe),
                 groups=groups,
                 t0=t0,
                 dt=macro_dt,
@@ -3154,6 +3241,19 @@ class Scheduler:
         """
         if isinstance(integ.controller, dfx.ConstantStepSize):
             dt0_base = self._fixed_step(group_name)
+            # The default adjoint picks a handful of checkpoints from the
+            # step bound and recomputes the forward pass between them; a
+            # lockstep group knows its step count and stores every step.
+            if (
+                integ.lockstep_steps is not None
+                and adjoint is self.adjoint
+                and not self._adjoint_explicit
+            ):
+                adjoint = dfx.RecursiveCheckpointAdjoint(
+                    checkpoints=self._checkpoints(
+                        integ.lockstep_steps, state_vec[..., own], saveat
+                    )
+                )
         else:
             dt0_base = dt0_hint if dt0_hint is not None else self.dt0
         # throw=False so a failed solve returns its RESULTS code rather than

@@ -29,6 +29,11 @@ DEFAULT_MAX_STEPS = 4_000_000
 LADDER_STEP_BUDGET = 100_000
 EXPLICIT_STEP_BUDGET = 500_000
 
+# Memory a lockstep group's reverse pass may spend on checkpoints. Its step
+# count is known, so it checkpoints every step up to this many bytes and
+# recomputes nothing; past it the checkpoints thin out.
+CHECKPOINT_MEMORY_BUDGET = 1 << 30
+
 # First adaptive step; None estimates it from the field (Hairer's rule).
 DEFAULT_DT0 = None
 

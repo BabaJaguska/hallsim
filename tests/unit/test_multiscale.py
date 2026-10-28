@@ -1868,6 +1868,100 @@ class TestFixedStep:
         assert bool(jnp.all(res.ok))
         assert bool(jnp.all(jnp.isfinite(res.get("p/x"))))
 
+    def test_member_parameters_run_each_member_on_its_own_row(self):
+        """A per-member parameter leaf reaches each member's derivative as
+        its own row, the same as running that member alone; the declaration
+        is structural, must match the start, and needs a compiled lane."""
+        from hallsim.composite import single_process_composite
+
+        class Decay(Process):
+            rate: jnp.ndarray = eqx.field(
+                default_factory=lambda: jnp.asarray(1.0)
+            )
+
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"x": -self.rate * state["x"]}
+
+        comp = single_process_composite(Decay(), "p")
+        rates = jnp.array([0.1, 1.0, 3.0])
+        pop = comp.with_initial(
+            jnp.broadcast_to(comp.initial_state_vec(), (3, 1))
+        ).with_member_params({"p.rate": rates})
+        run = lambda c: Scheduler().run(  # noqa: E731
+            c, t_span=(0.0, 2.0), macro_dt=2.0, save_dt=0.5
+        )
+        res = run(pop)
+        for i, rate in enumerate(rates):
+            alone = run(comp.with_params({"p.rate": rate}))
+            assert jnp.allclose(
+                res.get("p/x")[:, i], alone.get("p/x"), atol=1e-10
+            )
+        assert pop.structural_fingerprint() != comp.structural_fingerprint()
+        assert pop.with_params({"p.rate": rates * 2}).member_params == (
+            "p.rate",
+        )
+
+        with pytest.raises(ValueError, match="batched"):
+            run(comp.with_member_params({"p.rate": rates}))
+
+        two = Composite(
+            processes={"p": Decay(), "q": Decay()},
+            topology={"p": {"x": "p/x"}, "q": {"x": "q/x"}},
+            semantic_validation=False,
+        )
+        two = two.with_initial(
+            jnp.broadcast_to(two.initial_state_vec(), (3, 2))
+        ).with_member_params({"p.rate": rates})
+        eager = Scheduler(groups={"a": ["p"], "b": ["q"]}, debug=True)
+        with pytest.raises(ValueError, match="compiled lanes"):
+            eager.run(two, t_span=(0.0, 2.0), macro_dt=1.0, save_dt=0.5)
+
+    def test_lockstep_sets_its_step_bound_and_checkpoints_every_step(
+        self, monkeypatch
+    ):
+        """A fixed step over a known window takes a known number of steps,
+        so that count is the solve's step bound and the default adjoint
+        stores every step instead of recomputing between a few checkpoints;
+        a caller's adjoint is left alone."""
+        import hallsim.scheduler as scheduler_module
+
+        class _LockstepDecay(Process):
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"x": -state["x"]}
+
+        comp = Composite(
+            processes={"d": _LockstepDecay()},
+            topology={"d": {"x": "p/x"}},
+            semantic_validation=False,
+        )
+        seen = []
+        real = scheduler_module.dfx.diffeqsolve
+
+        def spy(*args, **kwargs):
+            seen.append((kwargs["max_steps"], kwargs["adjoint"]))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(scheduler_module.dfx, "diffeqsolve", spy)
+        Scheduler(fixed_dt=0.1).run(
+            comp, t_span=(0.0, 1.0), macro_dt=1.0, save_dt=0.5
+        )
+        max_steps, adjoint = seen[-1]
+        assert max_steps == 11
+        assert isinstance(adjoint, dfx.RecursiveCheckpointAdjoint)
+        assert adjoint.checkpoints == 11
+
+        mine = dfx.RecursiveCheckpointAdjoint(checkpoints=3)
+        Scheduler(fixed_dt=0.1, adjoint=mine).run(
+            comp, t_span=(0.0, 1.0), macro_dt=1.0, save_dt=0.5
+        )
+        assert seen[-1][1] is mine
+
     def test_a_jump_on_the_macro_grid_runs_and_one_inside_a_window_refuses(
         self,
     ):
@@ -2712,19 +2806,48 @@ class TestBatchChunking:
             pop, t_span=(0.0, 50.0), macro_dt=50.0, save_dt=10.0
         )
 
+    def test_chunks_see_their_own_member_parameters(self):
+        from hallsim.composite import single_process_composite
+
+        class Decay(Process):
+            rate: jnp.ndarray = eqx.field(
+                default_factory=lambda: jnp.asarray(1.0)
+            )
+
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"x": -self.rate * state["x"]}
+
+        comp = single_process_composite(Decay(), "p")
+        rates = jnp.linspace(0.1, 2.0, 40)
+        pop = comp.with_initial(
+            jnp.broadcast_to(comp.initial_state_vec(), (40, 1))
+        ).with_member_params({"p.rate": rates})
+        whole = self._run(pop, 0)
+        chunked = self._run(pop, 16)
+        assert jnp.allclose(whole.ys, chunked.ys, rtol=0.0, atol=1e-12)
+        expected = jnp.exp(-rates[None, :] * whole.ts[:, None])
+        assert jnp.allclose(whole.get("p/x"), expected, atol=1e-6)
+
     def test_chunking_changes_no_member(self):
-        """Members are independent, so the split must be exact — not close."""
+        """Members are independent, so the split changes nothing but the
+        last bits: XLA generates each batch width its own code, and an
+        unrolled stage sum may contract its multiply-adds differently."""
         pop = self._population(80)
         whole = self._run(pop, 0)
         chunked = self._run(pop, 16)
-        assert jnp.array_equal(whole.ys, chunked.ys)
+        assert jnp.allclose(whole.ys, chunked.ys, rtol=0.0, atol=1e-12)
         assert jnp.array_equal(whole.ts, chunked.ts)
 
     def test_every_chunk_width_agrees(self):
         pop = self._population(72)
         ref = self._run(pop, 0).ys
         for width in (8, 16, 32, 64, 128):
-            assert jnp.array_equal(self._run(pop, width).ys, ref), width
+            assert jnp.allclose(
+                self._run(pop, width).ys, ref, rtol=0.0, atol=1e-12
+            ), width
 
     def test_stats_come_back_per_member_in_order(self):
         pop = self._population(48)

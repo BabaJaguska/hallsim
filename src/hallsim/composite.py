@@ -652,6 +652,10 @@ class Composite(eqx.Module):
     processes: dict[str, Process]
     topology: dict[str, dict[str, str]]
     initial: jnp.ndarray
+    #: Parameter addresses whose value carries a leading member axis; a
+    #: batched run maps them through the batch lane with the state. See
+    #: :meth:`with_member_params`.
+    member_params: tuple[str, ...] = eqx.field(static=True, default=())
 
     def __init__(
         self,
@@ -730,6 +734,7 @@ class Composite(eqx.Module):
                 log.warning("Semantic validation warnings:\n%s", report)
         self._warn_undriven_param_inputs(flat_processes, flat_topology)
         self.initial = self._resolve_start(declared)
+        self.member_params = ()
 
     @staticmethod
     def _warn_undriven_param_inputs(processes, topology) -> None:
@@ -1186,6 +1191,87 @@ class Composite(eqx.Module):
             lambda c: c.initial, self, self.flatten(_broadcast_values(state))
         )
 
+    def with_member_params(self, overrides: dict[str, Any]) -> "Composite":
+        """A copy with per-member parameters, keyed like :meth:`with_params`,
+        each value carrying a leading member axis::
+
+            comp = comp.with_member_params({"omm.log_params": rows})  # (n, 3)
+
+        A batched run maps a declared parameter through the batch lane with
+        the state, so a member's ``derivative`` sees its own row the way it
+        sees its own state — no gather from a panel, nothing carried as a
+        state. The start must be batched to the same count. The declaration
+        is structural and persists through :meth:`with_params` and
+        ``eqx.tree_at``, so a fit substitutes new rows at the same address.
+        """
+        import copy
+
+        from hallsim.process import split_param_address, write_param
+
+        procs = dict(self.processes)
+        for address, value in overrides.items():
+            value = jnp.asarray(value)
+            if value.ndim == 0:
+                raise ValueError(
+                    f"{address!r}: a per-member parameter needs a leading "
+                    "member axis; got a scalar."
+                )
+            name, field = split_param_address(address, procs)
+            procs[name] = write_param(procs[name], field, value)
+        out = eqx.tree_at(lambda c: c.processes, self, procs)
+        # A static field is structure, which tree_at cannot move.
+        out = copy.copy(out)
+        object.__setattr__(
+            out,
+            "member_params",
+            tuple(sorted(set(self.member_params) | set(overrides))),
+        )
+        out.member_count()
+        return out
+
+    def _member_leaves(self, c) -> list:
+        from hallsim.process import read_param, split_param_address
+
+        return [
+            read_param(c.processes[name], field)
+            for name, field in (
+                split_param_address(a, c.processes) for a in c.member_params
+            )
+        ]
+
+    def member_count(self) -> int | None:
+        """How many members the declared per-member parameters carry, or
+        ``None`` when none is declared."""
+        sizes = {int(jnp.shape(v)[0]) for v in self._member_leaves(self)}
+        if len(sizes) > 1:
+            raise ValueError(
+                f"per-member parameters {self.member_params} disagree on the "
+                f"member count: {sorted(sizes)}."
+            )
+        return sizes.pop() if sizes else None
+
+    def member_axes(self):
+        """``in_axes`` for a ``vmap`` over members: 0 at every declared
+        per-member parameter, ``None`` everywhere else."""
+        if not self.member_params:
+            return None
+        axes = jax.tree_util.tree_map(lambda _: None, self)
+        return eqx.tree_at(
+            self._member_leaves,
+            axes,
+            replace=[0] * len(self.member_params),
+            is_leaf=lambda x: x is None,
+        )
+
+    def member(self, i) -> "Composite":
+        """The composite for member ``i`` (an index or a slice): every
+        declared per-member parameter at its row(s), the rest untouched."""
+        if not self.member_params:
+            return self
+        return eqx.tree_at(
+            self._member_leaves, self, replace_fn=lambda leaf: leaf[i]
+        )
+
     def initial_state(self) -> dict[str, jnp.ndarray]:
         """The starting state as ``{store_path: value}``, with ``(batch,)``
         values for a population."""
@@ -1256,6 +1342,7 @@ class Composite(eqx.Module):
                 for name, proc_topo in sorted(self.topology.items())
                 for port, entry in sorted(proc_topo.items())
             ),
+            self.member_params,
         )
 
     # -----------------------------------------------------------------

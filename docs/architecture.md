@@ -505,10 +505,14 @@ batch axis: a discrete `update` and an event `condition`/`handler` see
 member, and an event fires for exactly the members whose condition just
 turned True — `EventRecord.members` is that mask.
 
-A batched start broadcasts *initial conditions*. Varying a **parameter** across
-a batch — a hallmark severity sweep, for instance — changes the process pytree
-rather than the start, so it is not a batched start; build one composite per
-arm.
+A batched start broadcasts *initial conditions*. A **parameter** that differs
+per member — each person's own rate constants in a cohort fit — is declared
+with `comp.with_member_params({"proc.field": rows})`, one row per member, and
+the batch lane maps the rows with the state, so a member's `derivative` sees
+its own row as it sees its own state. A lockstep run is never chunked, since
+every member takes the same steps. A sweep that changes a parameter for the
+whole population — a hallmark severity, for instance — is one composite per
+arm, since it changes the process pytree rather than the start.
 
 ## Supporting modules
 
