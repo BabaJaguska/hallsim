@@ -197,7 +197,7 @@ arm stops being a condition a culture could be in:
 | a species another model owns | `SBMLProcess.with_species_input` — the port keeps its name and ontology and becomes INPUT; wire it to the owner's pool through a level edge carrying the conversion factor (SBML comp's replaced element). Unwired, it holds the published initial value |
 | a boundary input (`boundaryCondition` species), dosed then withdrawn | `models.forcing.drive_pulse` — a `PulseSource` on `[t_start, t_end)`, or `t_end=None` to sustain |
 | a boundary input held at one level, then another | `models.forcing.drive_step` — a `StepSource`, `before` until `t_step` then `after`; `before == after` is a constant drive |
-| a boundary input following a ramp, a trapezoid or a logged trace | `models.forcing.drive_profile` — a `ProfileSource`, linear between `(times, levels)` knots; a repeated time is a jump, so `times=(0, 10, 10), levels=(0, 1, 0)` is an incremental test that stops at once |
+| a boundary input following a ramp, a trapezoid or a logged trace | `models.forcing.drive_profile` — a `ProfileSource`, linear between `(times, levels)` knots; a repeated time is a jump, so `times=(0, 10, 10), levels=(0, 1, 0)` is an incremental test that stops at once; `levels` is traced, so a trace logged per member (measured insulin on a shared sample grid) is the same source with its levels declared through `Composite.with_member_params` |
 | a species the model **integrates** | `models.clamp_edge.clamp_species` — a `ClampEdge` holding it at a setpoint |
 
 The third is the one with no obvious workaround: an integrated species is

@@ -438,8 +438,8 @@ class Process(eqx.Module):
     def symbol_values(self) -> dict:
         """``{name: value}`` for every parameter symbol the symbolic forms
         may use: by default each non-static numeric field under its own
-        name, and each entry of a numeric tuple field as ``<field>_<i>``; an
-        imported model returns its ``parameters``. Values may be tracers
+        name, and each entry of a numeric tuple or 1-D array field as
+        ``<field>_<i>``; an imported model returns its ``parameters``. Values may be tracers
         under a trace — the forms never need them, only a consumer that
         evaluates them does."""
         out = {}
@@ -451,6 +451,9 @@ class Process(eqx.Module):
                 for i, v in enumerate(value):
                     if _is_scalar(v):
                         out[f"{f.name}_{i}"] = v
+            elif getattr(value, "ndim", None) == 1:
+                for i in range(value.shape[0]):
+                    out[f"{f.name}_{i}"] = value[i]
             elif _is_scalar(value):
                 out[f.name] = value
         return out

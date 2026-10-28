@@ -247,6 +247,10 @@ def drive_pulse(
     return processes, topology, src
 
 
+def _float_array(value):
+    return jnp.asarray(value, dtype=float)
+
+
 class ProfileSource(Process):
     """Piecewise-linear forcing signal through ``(times, levels)`` knots,
     scaled by ``dose * amplitude``, to its ``signal`` ASSIGNED port.
@@ -258,9 +262,13 @@ class ProfileSource(Process):
     shape of an incremental exercise test. A rectangle, a ramp-up and hold,
     or a logged trace sampled on a grid are the same source with other knots.
 
-    The knots are protocol, fixed with the composite: the solver lands on
-    every one of them, which needs their values before tracing. The level a
-    handle or a fit sets is the traced ``amplitude``.
+    The times are protocol, fixed with the composite: the solver lands on
+    every one of them, which needs their values before tracing. The levels
+    are traced values: a fit can move them, and a trace logged per member,
+    such as a visit's measured insulin on a shared sample grid, is declared
+    through :meth:`hallsim.composite.Composite.with_member_params` so the
+    batch lane maps each member's row with its state. The level a handle
+    sets is the traced ``amplitude``, which scales the whole profile.
     """
 
     timescale: float | None = eqx.field(static=True, default=None)
@@ -271,17 +279,22 @@ class ProfileSource(Process):
     )
     dose: float = eqx.field(static=True, default=1.0)
     times: tuple[float, ...] = eqx.field(static=True, default=(0.0, 1.0))
-    levels: tuple[float, ...] = eqx.field(static=True, default=(0.0, 1.0))
+    levels: jnp.ndarray = eqx.field(default=(0.0, 1.0), converter=_float_array)
     signal_units: str = eqx.field(static=True, default="dimensionless")
     signal_ontology: dict | None = eqx.field(static=True, default=None)
     handle: str | None = eqx.field(static=True, default=None)
     description: str | None = eqx.field(static=True, default=None)
 
     def __check_init__(self):
-        if len(self.times) != len(self.levels) or len(self.times) < 1:
+        if self.levels.ndim != 1:
+            raise ValueError(
+                "levels is one value per knot; a panel with a member axis "
+                "is declared through Composite.with_member_params"
+            )
+        if len(self.times) != self.levels.shape[0] or len(self.times) < 1:
             raise ValueError(
                 f"times and levels must be the same non-empty length; got "
-                f"{len(self.times)} and {len(self.levels)}"
+                f"{len(self.times)} and {self.levels.shape[0]}"
             )
         if any(b < a for a, b in zip(self.times, self.times[1:])):
             raise ValueError(f"times must not decrease: {self.times}")
@@ -299,7 +312,7 @@ class ProfileSource(Process):
 
     def _shape(self, t):
         ts = jnp.asarray(self.times, dtype=float)
-        ls = jnp.asarray(self.levels, dtype=float)
+        ls = self.levels
         if len(self.times) == 1:
             return ls[0]
         i = jnp.clip(jnp.searchsorted(ts, t, side="right"), 1, len(ts) - 1)
@@ -313,7 +326,10 @@ class ProfileSource(Process):
         return {"signal": self.dose * self.amplitude * self._shape(t)}
 
     def assignment_rules(self):
-        knots = list(zip(map(float, self.times), map(float, self.levels)))
+        # One symbol per knot level, bound by symbol_values().
+        times = [float(t) for t in self.times]
+        levels = [sympy.Symbol(f"levels_{i}") for i in range(len(times))]
+        knots = list(zip(times, levels))
         pieces = [(knots[0][1], TIME < knots[0][0])]
         for (t0, l0), (t1, l1) in zip(knots, knots[1:]):
             if t1 > t0:
