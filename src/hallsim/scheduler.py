@@ -81,6 +81,14 @@ def _lockstep_steps(window: float, step: float) -> int:
     return int(np.ceil(window / step - 1e-9)) + 1
 
 
+def _on_step_grid(elapsed: float, restart: float, dt: float) -> bool:
+    """Whether a time ``elapsed`` after the start lies on the grid of a
+    constant step ``dt`` that restarts every ``restart``."""
+    offset = elapsed - np.floor(elapsed / restart + 1e-9) * restart
+    tol = 1e-9 * max(1.0, abs(elapsed))
+    return abs(offset - round(offset / dt) * dt) <= tol
+
+
 def _inherits_controller_tolerances(root_finder) -> bool:
     """Whether a root finder is diffrax's default for an implicit solver:
     one carrying a sentinel in place of ``rtol``/``atol`` that copies the
@@ -1226,21 +1234,6 @@ class Scheduler:
         # Discontinuities the solver should land on exactly rather than
         # resolve by adaptive step-rejection.
         jump_ts = self._collect_jump_ts(composite, t0, t1)
-        if self.fixed_dt is not None and jump_ts is not None:
-            # A fixed step cannot be clipped onto a jump, so the macro grid
-            # has to land on every one of them.
-            off = [
-                float(j)
-                for j in jump_ts
-                if abs((j - t0) / macro_dt - round((j - t0) / macro_dt)) > 1e-9
-            ]
-            if off:
-                raise ValueError(
-                    f"fixed_dt cannot step onto discontinuities at {off} "
-                    f"inside a macro step of {macro_dt}: a fixed step is "
-                    "never clipped. Choose macro_dt so every jump falls on "
-                    "its grid, or run adaptively."
-                )
 
         # Flat state layout, pinned for the whole run. Batched y0 is
         # (batch, n_vars); the batch axis rides through every group's solve.
@@ -1297,6 +1290,33 @@ class Scheduler:
             and coupling == "frozen"
             and not stochastic_procs
         )
+        if self.fixed_dt is not None and jump_ts is not None:
+            # A fixed step is never clipped, so every jump has to lie on the
+            # step grid of the lane that runs: the solve restarts at t0 on
+            # the fast path and at every macro step elsewhere.
+            restart = (t1 - t0) if fast_path_eligible else macro_dt
+            steps = (
+                tuple(self.fixed_dt.values())
+                if isinstance(self.fixed_dt, dict)
+                else (self.fixed_dt,)
+            )
+            off = sorted(
+                {
+                    float(j)
+                    for j in jump_ts
+                    for dt in steps
+                    if not _on_step_grid(float(j) - t0, restart, float(dt))
+                }
+            )
+            if off:
+                raise ValueError(
+                    f"fixed_dt cannot step onto discontinuities at {off}: a "
+                    "fixed step is never clipped, so every jump must be a "
+                    "whole number of steps from where the solve restarts "
+                    "(the span's start on the single-group fast path, each "
+                    "macro step otherwise). Choose fixed_dt or macro_dt so "
+                    "it is, or run adaptively."
+                )
         # The fast path's window is the span; every other lane solves one
         # macro step at a time.
         integrators = self._lockstep_budget(
@@ -2941,7 +2961,7 @@ class Scheduler:
         """
         if jump_ts is None or isinstance(controller, dfx.ConstantStepSize):
             # A fixed step is never clipped; plan() has already required the
-            # jumps to lie on the macro grid, where every solve restarts.
+            # jumps to lie on the step grid.
             return controller
         return dfx.ClipStepSizeController(controller, jump_ts=jump_ts)
 

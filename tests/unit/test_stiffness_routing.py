@@ -79,8 +79,10 @@ def _composite(proc, name):
 
 
 def _solvers(result):
+    """The method each group ran; the Scheduler unrolls every explicit
+    solver's stages, which is an implementation of the same method."""
     return {
-        v["solver"]
+        v["solver"].removeprefix("Unrolled")
         for v in result.stats.values()
         if isinstance(v, dict) and "solver" in v
     }
@@ -310,6 +312,7 @@ class TestPinnedImplicitSolverRootFinder:
         sched = Scheduler(implicit_solver=dfx.Kvaerno5(root_finder=chosen))
         assert sched.implicit_solver.root_finder is chosen
 
-    def test_an_explicit_solver_is_untouched(self):
+    def test_an_explicit_solver_gets_no_root_finder(self):
         tsit = dfx.Tsit5()
-        assert Scheduler(solver=tsit, auto_stiffness=False).solver is tsit
+        sched = Scheduler(solver=tsit, auto_stiffness=False)
+        assert sched.solver.inner is tsit

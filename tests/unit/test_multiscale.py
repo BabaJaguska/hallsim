@@ -1962,12 +1962,10 @@ class TestFixedStep:
         )
         assert seen[-1][1] is mine
 
-    def test_a_jump_on_the_macro_grid_runs_and_one_inside_a_window_refuses(
-        self,
-    ):
-        """A fixed step is never clipped onto a discontinuity, so the macro
-        grid must land on every jump; the plan says so instead of the
-        solver stepping across it."""
+    def test_a_jump_on_the_step_grid_runs_and_one_off_it_refuses(self):
+        """A fixed step is never clipped onto a discontinuity, so every jump
+        must lie on the step grid, inside a macro step or not; the plan says
+        so instead of the solver stepping across it."""
         from hallsim.models.forcing import StepSource
 
         class _Fed(Process):
@@ -2000,9 +1998,13 @@ class TestFixedStep:
         # stage that lands exactly on the jump samples the post-jump value,
         # so the last pre-jump step carries a fraction of it; a few percent.
         assert abs(float(on_grid.get("p/x")[-1]) - 1.0) < 0.05
-        with pytest.raises(ValueError, match="inside a macro step"):
+        inside = Scheduler(fixed_dt=0.01).run(
+            composite(0.7), t_span=(0.0, 2.0), macro_dt=0.5, save_dt=0.5
+        )
+        assert abs(float(inside.get("p/x")[-1]) - 1.3) < 0.05
+        with pytest.raises(ValueError, match="whole number of steps"):
             Scheduler(fixed_dt=0.01).run(
-                composite(0.7), t_span=(0.0, 2.0), macro_dt=0.5
+                composite(0.705), t_span=(0.0, 2.0), macro_dt=0.5
             )
 
     def test_a_per_group_dict_must_name_every_group(self):
