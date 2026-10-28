@@ -139,6 +139,12 @@ These decide whether the framework is fast. Violating one is a performance bug, 
 
 **Keep loop-invariant work out of the RHS.** Anything that doesn't depend on `t` or `y` belongs in `build_rhs`, not in `derivative`.
 
+**A static layout is slices, never a constant-index gather or scatter.** XLA on a CPU keeps a gather with constant indices as a gather, and its transpose is a scatter-add, so both run on every stage of every member: in the flat RHS and the reduced wrap they were 16 ms of a 37.7 ms gradient at 2,000 members. Read columns as static slices (`_PortMap.runs`), assemble a single-writer derivative by concatenation, and keep the scatter-add for columns with several writers.
+
+**Decide a static layout outside the trace, from numpy.** Under this JAX any closed-over array of more than 32 bytes (`jax_embedded_constants_max_bytes`) is a tracer inside a jitted core, and so is the result of any array op there, even on constants. A fact about structure — a group's own columns, whether the saves lie on the step grid — is computed in numpy at plan time (`Composite.evolved_columns`) and handed in as a Python value; read the numpy save grid before `SaveAt` wraps it, since that conversion is an array op too.
+
+**A verdict is measured, never inherited from a pinned configuration.** A pinned solver keeps its choice on its own instance and writes nothing to the process-wide routing memory, which a routed Scheduler reads before it measures.
+
 **Preserve JIT-ability everywhere.** Choose data types and design patterns accordingly.
 
 ## Where to add things

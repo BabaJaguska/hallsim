@@ -65,6 +65,48 @@ def _comp(procs, topo):
     )
 
 
+class Scaled(Algebraic):
+    """``s = gain * x``, with the gain a traced value."""
+
+    gain: float = 2.0
+
+    def assign(self, t, state):
+        return {"s": self.gain * state["x"]}
+
+
+def test_the_read_probe_runs_once_per_structure(monkeypatch):
+    """Which assignments the derivatives read is a fact about structure,
+    found by tracing each process once; a rebuild with new values keeps
+    the finding and still computes with the new values."""
+    import hallsim.composite as mod
+
+    calls = []
+    real = mod._columns_read
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_columns_read", counted)
+    monkeypatch.setattr(mod, "_ASSIGNMENT_PLANS", {})
+    comp = _comp(
+        {"a": Scaled(), "r": Reader()},
+        {"a": {"x": "x", "s": "s"}, "r": {"z": "z", "s": "s"}},
+    )
+    rhs, keys = comp.build_rhs()
+    assert len(calls) == 1 and len(rhs.assign_procs) == 1
+    tripled = eqx.tree_at(lambda c: c.processes["a"].gain, comp, 3.0)
+    rhs3, _ = tripled.build_rhs()
+    assert len(calls) == 1 and len(rhs3.assign_procs) == 1
+    y0 = comp.initial_state_vec(keys)
+    z = keys.index("z")
+    assert float(rhs(0.0, y0)[z]) == pytest.approx(2.0 - 0.5)
+    assert float(rhs3(0.0, y0)[z]) == pytest.approx(3.0 - 0.5)
+    alone = _comp({"a": Scaled()}, {"a": {"x": "x", "s": "s"}})
+    assert alone.build_rhs()[0].assign_procs == ()
+    assert len(calls) == 2
+
+
 def test_an_assignment_nobody_reads_leaves_the_rhs():
     comp = _comp({"a": Algebraic()}, {"a": {"x": "x", "s": "s"}})
     rhs, keys = comp.build_rhs()

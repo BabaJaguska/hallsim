@@ -216,6 +216,8 @@ class _PortMap:
         "widths",
         "owner",
         "declared",
+        "runs",
+        "unit",
         "_key",
     )
 
@@ -231,6 +233,13 @@ class _PortMap:
         self.fac = np.asarray(factors, dtype=float)
         self.idx.flags.writeable = False
         self.fac.flags.writeable = False
+        #: The columns as ``(lo, hi)`` runs of consecutive indices, and
+        #: whether every factor is 1. A few runs are read as static slices,
+        #: which XLA fuses into the arithmetic; a constant-index gather
+        #: stays a gather, and transposes to a scatter-add on the reverse
+        #: pass.
+        self.runs = _runs_of(self.idx)
+        self.unit = bool(np.all(self.fac == 1.0))
         # A port occupies one contiguous run of the gather; width is None for
         # a plain port (hands back a scalar) and an int for a block.
         self.starts = (
@@ -329,16 +338,54 @@ def _reject_undeclared(raw, write_map, method):
         )
 
 
+def _runs_of(idx) -> tuple[tuple[int, int], ...]:
+    """``idx`` as ``(lo, hi)`` runs of consecutive columns, in its order, so
+    the slices ``[lo:hi]`` concatenated give exactly ``y[..., idx]``."""
+    idx = [int(i) for i in idx]
+    if not idx:
+        return ()
+    runs, lo, prev = [], idx[0], idx[0]
+    for i in idx[1:]:
+        if i != prev + 1:
+            runs.append((lo, prev + 1))
+            lo = i
+        prev = i
+    runs.append((lo, prev + 1))
+    return tuple(runs)
+
+
+#: Up to this many runs a port map's columns are read as static slices and
+#: one concatenate; past it, as one gather.
+SLICE_RUNS_MAX = 16
+
+
+def _columns(y_vec, port_map):
+    """``y_vec[..., port_map.idx]``, as static slices when the columns fall
+    in few runs. XLA on a CPU keeps a constant-index gather as a gather and
+    transposes it to a scatter-add, and both run on every stage; a slice
+    fuses into the arithmetic that reads it."""
+    runs = port_map.runs
+    if len(runs) > SLICE_RUNS_MAX:
+        return y_vec[..., port_map.idx]
+    if len(runs) == 1:
+        lo, hi = runs[0]
+        return y_vec[..., lo:hi]
+    return jnp.concatenate([y_vec[..., lo:hi] for lo, hi in runs], axis=-1)
+
+
 def _port_view(y_vec, read_map):
     """The ``{port_name: value}`` dict a Process's ``derivative``/``assign``
-    consumes, gathered from the flat state and converted to port units.
+    consumes, read from the flat state and converted to port units.
 
-    One gather and one elementwise multiply for the whole process, rather than
-    a slice and a multiply per port.
+    One read and one elementwise multiply for the whole process, rather than
+    a slice and a multiply per port; the multiply is skipped when every
+    factor is 1.
     """
     if not read_map.ports:
         return {}
-    vals = y_vec[..., read_map.idx] * read_map.fac
+    vals = _columns(y_vec, read_map)
+    if not read_map.unit:
+        vals = vals * read_map.fac
     out = {}
     for port, a, w in zip(read_map.ports, read_map.starts, read_map.widths):
         out[port] = vals[..., a] if w is None else vals[..., a : a + w]
@@ -347,7 +394,11 @@ def _port_view(y_vec, read_map):
 
 def _apply_assignments(assign_pre, t, y_vec):
     """Inject each ASSIGNED path's algebraic value into ``y_vec`` (returns a
-    new array; JAX-functional). Shared by the RHS and materialization."""
+    new array; JAX-functional). Shared by the RHS and materialization.
+
+    A port's columns in few runs are written by slice updates, whose
+    transpose is a slice; a scatter and its scatter-add stay as they are
+    on every stage."""
     for proc, read_map, assign_map in assign_pre:
         raw = proc.assign(t, _port_view(y_vec, read_map))
         _reject_undeclared(raw, assign_map, "assign")
@@ -360,7 +411,21 @@ def _apply_assignments(assign_pre, t, y_vec):
             facs = assign_map.fac[a : a + n]
             value = jnp.asarray(raw[port])
             value = value[..., None] if w is None else value
-            y_vec = y_vec.at[..., cols].set(value * facs)
+            if not np.all(facs == 1.0):
+                value = value * facs
+            value = jnp.broadcast_to(
+                value.astype(y_vec.dtype), y_vec.shape[:-1] + (n,)
+            )
+            runs = _runs_of(cols)
+            if len(runs) > SLICE_RUNS_MAX:
+                y_vec = y_vec.at[..., cols].set(value)
+                continue
+            at = 0
+            for lo, hi in runs:
+                y_vec = jax.lax.dynamic_update_slice_in_dim(
+                    y_vec, value[..., at : at + hi - lo], lo, axis=-1
+                )
+                at += hi - lo
     return y_vec
 
 
@@ -463,6 +528,12 @@ def _assignments_read_by(assign_pre, pre, n_slots: int):
     return keep
 
 
+#: Which assignments each structure's RHS keeps, by structural key; one
+#: entry per structure, oldest dropped past the cap.
+_ASSIGNMENT_PLANS: dict = {}
+ASSIGNMENT_PLAN_MEMORY = 256
+
+
 class _FlatRHS(eqx.Module):
     """Flat-state RHS as a pytree rather than a closure.
 
@@ -516,10 +587,26 @@ class _FlatRHS(eqx.Module):
                 scalar_only &= w is None
         if not pieces:
             return jnp.zeros_like(y_vec)
-        cols = np.concatenate(col_runs)
+        return _assemble(y_vec, pieces, col_runs, fac_runs, lead, scalar_only)
+
+
+def _assemble(y_vec, pieces, col_runs, fac_runs, lead, scalar_only):
+    """The derivative vector from every port's contribution and the columns
+    it writes.
+
+    When each column has one writer, the contributions are laid out in
+    column order by static slices — zeros where nothing writes — and one
+    concatenate. A column with several writers sums them in one scatter-add
+    over every contribution, since EVOLVED is additive; that is the form
+    XLA cannot turn into slices, so it is kept to the composites that need
+    it.
+    """
+    n = y_vec.shape[-1]
+    cols = np.concatenate(col_runs)
+    if len(np.unique(cols)) != len(cols):
         facs = np.concatenate(fac_runs)
-        # One stack beats an expand-dims per port; a block already carries the
-        # axis, so a composite with any block concatenates instead.
+        # One stack beats an expand-dims per port; a block already carries
+        # the axis, so a composite with any block concatenates instead.
         if scalar_only:
             vals = jnp.stack(pieces, axis=-1)
         else:
@@ -528,6 +615,25 @@ class _FlatRHS(eqx.Module):
                 axis=-1,
             )
         return jnp.zeros_like(y_vec).at[..., cols].add(vals * facs)
+    segments = []
+    for piece, run, fac in zip(pieces, col_runs, fac_runs):
+        block = piece[..., None] if piece.ndim == len(lead) else piece
+        if not np.all(fac == 1.0):
+            block = block * fac
+        at = 0
+        for lo, hi in _runs_of(run):
+            segments.append((lo, hi, block[..., at : at + hi - lo]))
+            at += hi - lo
+    segments.sort(key=lambda s: s[0])
+    parts, at = [], 0
+    for lo, hi, block in segments:
+        if lo > at:
+            parts.append(jnp.zeros(lead + (lo - at,), y_vec.dtype))
+        parts.append(block.astype(y_vec.dtype))
+        at = hi
+    if at < n:
+        parts.append(jnp.zeros(lead + (n - at,), y_vec.dtype))
+    return parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=-1)
 
 
 def _broadcast_values(state: dict) -> dict:
@@ -1003,8 +1109,9 @@ class Composite(eqx.Module):
             list(self.continuous_processes().keys()), keys, key_to_idx, canon
         )
         if assign_pre:
-            _check_assignments(assign_pre, len(keys))
-            assign_pre = _assignments_read_by(assign_pre, pre, len(keys))
+            assign_pre = self._assignments_for_rhs(
+                assign_pre, pre, len(keys), tuple(proc_names)
+            )
 
         return (
             _FlatRHS(
@@ -1017,6 +1124,31 @@ class Composite(eqx.Module):
             ),
             keys,
         )
+
+    def _assignments_for_rhs(self, assign_pre, pre, n_slots, proc_names):
+        """``assign_pre`` checked, and pruned to what the derivatives of
+        ``pre`` read. Both are found by tracing each process once on an
+        abstract state and depend on structure alone, so the finding is
+        kept per structure and a rebuild with new parameter values — every
+        eager run of a sweep — skips the traces."""
+        key = (
+            self.structural_fingerprint(),
+            jax.tree_util.tree_structure(self.processes),
+            proc_names,
+        )
+        keep = _ASSIGNMENT_PLANS.get(key)
+        if keep is None:
+            _check_assignments(assign_pre, n_slots)
+            kept = _assignments_read_by(assign_pre, pre, n_slots)
+            keep = tuple(
+                i
+                for i, entry in enumerate(assign_pre)
+                if any(entry is k for k in kept)
+            )
+            if len(_ASSIGNMENT_PLANS) >= ASSIGNMENT_PLAN_MEMORY:
+                _ASSIGNMENT_PLANS.pop(next(iter(_ASSIGNMENT_PLANS)))
+            _ASSIGNMENT_PLANS[key] = keep
+        return [assign_pre[i] for i in keep]
 
     def assigned_paths(self) -> set[str]:
         """Store paths computed by an ASSIGNED port rather than integrated."""
@@ -1040,6 +1172,15 @@ class Composite(eqx.Module):
         Used to restrict a group's Jacobian to its own dynamics and to scope
         coupling splices. Defaults: every CONTINUOUS process, :meth:`store_keys`.
         """
+        return jnp.asarray(self.evolved_columns(proc_names, keys))
+
+    def evolved_columns(
+        self,
+        proc_names: list[str] | None = None,
+        keys: list[str] | None = None,
+    ) -> np.ndarray:
+        """:meth:`evolved_indices` as a numpy array: a fact about structure,
+        concrete inside any trace, which is what decides a static layout."""
         if proc_names is None:
             proc_names = list(self.continuous_processes().keys())
         if keys is None:
@@ -1053,7 +1194,7 @@ class Composite(eqx.Module):
                 if p.role in (PortRole.EVOLVED, PortRole.EXCLUSIVE):
                     for sp in as_paths(proc_topo[port]):
                         written.add(key_to_idx[sp])
-        return jnp.array(sorted(written), dtype=jnp.int32)
+        return np.array(sorted(written), dtype=np.int32)
 
     def unfed_input_indices(
         self,

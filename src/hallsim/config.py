@@ -34,6 +34,15 @@ EXPLICIT_STEP_BUDGET = 500_000
 # recomputes nothing; past it the checkpoints thin out.
 CHECKPOINT_MEMORY_BUDGET = 1 << 30
 
+# Checkpoints an error-controlled group stores; past them diffrax recomputes.
+ADAPTIVE_CHECKPOINTS = 128
+
+# Routing verdicts kept per parameter value before the oldest is dropped.
+VERDICT_MEMORY_SIZE = 256
+
+# Widest group whose explicit solver runs with its stages unrolled.
+UNROLL_MAX_STATES = 64
+
 # First adaptive step; None estimates it from the field (Hairer's rule).
 DEFAULT_DT0 = None
 

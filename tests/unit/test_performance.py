@@ -353,8 +353,8 @@ def test_scalar_port_cost_per_port_does_not_regress():
     assert slope <= 6.0, f"scalar cost regressed to {slope:.2f} eqns/port"
 
 
-def _process_eqns(n):
-    """RHS jaxpr size for a composite of ``n`` single-port processes."""
+def _chain(n):
+    """A ring of ``n`` single-port processes, each reading its neighbour."""
     from hallsim.composite import Composite
 
     class Node(Process):
@@ -370,7 +370,7 @@ def _process_eqns(n):
             return {"x": -0.3 * state["x"] + 0.05 * state["left"]}
 
     paths = tuple(f"r/n{i}" for i in range(n))
-    comp = Composite(
+    return Composite(
         processes={f"p{i}": Node(i_=i) for i in range(n)},
         topology={
             f"p{i}": {"x": paths[i], "left": paths[(i - 1) % n]}
@@ -378,9 +378,26 @@ def _process_eqns(n):
         },
         semantic_validation=False,
     )
+
+
+def _rhs_jaxpr(comp):
     rhs, _ = comp.build_rhs()
     y = comp.initial_state_vec()
-    return len(jax.make_jaxpr(lambda v: rhs(0.0, v))(y).jaxpr.eqns)
+    return jax.make_jaxpr(lambda v: rhs(0.0, v))(y).jaxpr
+
+
+def _process_eqns(n):
+    """RHS jaxpr size for a composite of ``n`` single-port processes."""
+    return len(_rhs_jaxpr(_chain(n)).eqns)
+
+
+def test_a_single_writer_composite_reads_and_writes_by_slices():
+    """XLA on a CPU keeps a constant-index gather as a gather and transposes
+    it to a scatter-add, and both run on every stage of every member. A
+    port map in few runs is read as slices, and a column with one writer
+    is laid out by slices, so the right-hand side has neither."""
+    prims = {e.primitive.name for e in _rhs_jaxpr(_chain(16)).eqns}
+    assert not prims & {"gather", "scatter-add", "scatter"}, prims
 
 
 def test_per_process_cost_does_not_regress():

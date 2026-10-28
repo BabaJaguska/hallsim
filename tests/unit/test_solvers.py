@@ -80,3 +80,43 @@ def test_unrolled_is_differentiable():
 
     grad = jax.grad(loss)(1.5)
     assert abs(float(grad) + jnp.exp(-1.5)) < 1e-5
+
+
+def test_endpoint_dense_output_is_the_dense_solver_on_its_step_grid():
+    """With every save on the step grid the interpolant is read at step
+    ends alone, where the endpoints are exact; off the grid the linear
+    interpolant is a different one."""
+    on_grid = jnp.linspace(0.0, 30.0, 61)  # every ten steps of 0.05
+    dense, steps = _solve(
+        unrolled(dfx.Heun()), dfx.ConstantStepSize(), 0.05, on_grid
+    )
+    ends, steps_e = _solve(
+        unrolled(dfx.Heun(), dense=False),
+        dfx.ConstantStepSize(),
+        0.05,
+        on_grid,
+    )
+    assert int(steps) == int(steps_e)
+    assert float(jnp.max(jnp.abs(dense - ends))) < 1e-12
+    off_grid = on_grid[1:-1] + 0.0137
+    dense_off, _ = _solve(
+        unrolled(dfx.Heun()), dfx.ConstantStepSize(), 0.05, off_grid
+    )
+    ends_off, _ = _solve(
+        unrolled(dfx.Heun(), dense=False),
+        dfx.ConstantStepSize(),
+        0.05,
+        off_grid,
+    )
+    assert float(jnp.max(jnp.abs(dense_off - ends_off))) > 1e-6
+
+
+def test_the_endpoint_variant_is_its_own_class_and_rebuilds_from_the_inner():
+    dense = unrolled(dfx.Tsit5())
+    ends = unrolled(dense, dense=False)
+    assert type(ends).__name__ == "UnrolledTsit5Endpoints"
+    assert ends.interpolation_cls is dfx.LocalLinearInterpolation
+    assert unrolled(ends, dense=False) is ends
+    assert type(unrolled(ends)) is type(dense)
+    implicit = dfx.Kvaerno5()
+    assert unrolled(implicit, dense=False) is implicit

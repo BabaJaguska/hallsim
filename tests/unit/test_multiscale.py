@@ -18,6 +18,7 @@ import diffrax as dfx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from hallsim.composite import Composite
@@ -2885,3 +2886,200 @@ class TestBatchChunking:
     def test_a_negative_width_is_refused(self):
         with pytest.raises(ValueError, match="batch_chunk"):
             Scheduler(batch_chunk=-1)
+
+
+class TestGridSaves:
+    """A lockstep solve whose saves all lie on its step grid carries only the
+    step endpoints as dense output, and saves what the dense solver saves."""
+
+    def _comp(self, two_groups=False):
+        from hallsim.composite import single_process_composite
+
+        class Osc(Process):
+            timescale: float = eqx.field(static=True, default=1.0)
+
+            def ports_schema(self):
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=1.0),
+                    "v": Port(role=PortRole.EVOLVED, default=0.0),
+                }
+
+            def derivative(self, t, state):
+                return {
+                    "x": state["v"],
+                    "v": -jnp.sin(state["x"])
+                    - 0.2 * state["v"]
+                    + 0.5 * jnp.cos(0.7 * t),
+                }
+
+        class Follower(Process):
+            timescale: float = eqx.field(static=True, default=100.0)
+
+            def ports_schema(self):
+                return {
+                    "y": Port(role=PortRole.EVOLVED, default=0.0),
+                    "x": Port(role=PortRole.INPUT, default=0.0),
+                }
+
+            def derivative(self, t, state):
+                return {"y": 0.1 * (state["x"] - state["y"])}
+
+        if not two_groups:
+            return single_process_composite(Osc(), "p")
+        return Composite(
+            processes={"p": Osc(), "f": Follower()},
+            topology={"p": {"x": "x", "v": "v"}, "f": {"y": "y", "x": "x"}},
+            validate=False,
+            semantic_validation=False,
+        )
+
+    def _dense_only(self, monkeypatch):
+        """Record every endpoint request and grant none of it."""
+        import hallsim.scheduler as mod
+        import hallsim.solvers as solvers
+
+        asked = []
+
+        def keep_dense(solver, dense=True):
+            asked.append(dense)
+            return solvers.unrolled(solver, dense=True)
+
+        monkeypatch.setattr(mod, "unrolled", keep_dense)
+        return asked
+
+    def test_saves_on_the_step_grid_are_recognised(self):
+        on = np.linspace(0.0, 10.0, 11)
+        off = np.linspace(0.0, 10.0, 7)
+        assert Scheduler._saves_on_grid(on, 0.0, 10.0, 0.5)
+        assert not Scheduler._saves_on_grid(off, 0.0, 10.0, 0.5)
+        assert not Scheduler._saves_on_grid(None, 0.0, 10.0, 0.5)
+        seen = {}
+
+        def probe(ts):
+            seen["grid"] = Scheduler._saves_on_grid(ts, 0.0, 10.0, 0.5)
+            return ts
+
+        jax.make_jaxpr(probe)(jnp.linspace(0.0, 10.0, 11))
+        assert seen["grid"] is False
+
+    @pytest.mark.parametrize("two_groups", [False, True], ids=["fast", "scan"])
+    def test_on_grid_saves_match_the_dense_solver(
+        self, monkeypatch, two_groups
+    ):
+        comp = self._comp(two_groups)
+        kw = dict(t_span=(0.0, 30.0), macro_dt=10.0, save_dt=0.5)
+        groups = {"a": ["p"], "b": ["f"]} if two_groups else None
+        asked = self._dense_only(monkeypatch)
+        dense = Scheduler(fixed_dt=0.05, groups=groups).run(comp, **kw)
+        assert False in asked
+        monkeypatch.undo()
+        ends = Scheduler(fixed_dt=0.05, groups=groups).run(comp, **kw)
+        assert jnp.array_equal(dense.ts, ends.ts)
+        assert float(jnp.max(jnp.abs(dense.ys - ends.ys))) < 1e-12
+
+    def test_off_grid_saves_keep_the_dense_output(self, monkeypatch):
+        comp = self._comp()
+        asked = self._dense_only(monkeypatch)
+        Scheduler(fixed_dt=0.05).run(
+            comp, t_span=(0.0, 30.0), macro_dt=30.0, save_dt=0.07
+        )
+        assert False not in asked
+
+
+class TestUnrollWidth:
+    """The unrolled stages serve a narrow group; a wide one keeps diffrax's
+    stage loop, which compiles several times faster at the same speed."""
+
+    @pytest.mark.parametrize("cap, unrolled_used", [(1, False), (64, True)])
+    def test_the_width_cap_picks_the_stage_form(
+        self, monkeypatch, cap, unrolled_used
+    ):
+        import hallsim.scheduler as mod
+        from hallsim.composite import single_process_composite
+
+        class Pair(Process):
+            def ports_schema(self):
+                return {
+                    "x": Port(role=PortRole.EVOLVED, default=1.0),
+                    "y": Port(role=PortRole.EVOLVED, default=0.0),
+                }
+
+            def derivative(self, t, state):
+                return {"x": -state["x"], "y": state["x"] - state["y"]}
+
+        used = []
+        real = dfx.diffeqsolve
+
+        def spy(terms, solver, *args, **kwargs):
+            used.append(type(solver).__name__)
+            return real(terms, solver, *args, **kwargs)
+
+        monkeypatch.setattr(dfx, "diffeqsolve", spy)
+        monkeypatch.setattr(mod, "UNROLL_MAX_STATES", cap)
+        comp = single_process_composite(Pair(), "p")
+        res = Scheduler(fixed_dt=0.1).run(
+            comp, t_span=(0.0, 5.0), macro_dt=5.0, save_dt=1.0
+        )
+        assert used
+        assert all(n.startswith("Unrolled") == unrolled_used for n in used)
+        expected = jnp.exp(-res.ts)
+        assert jnp.allclose(res.get("p/x"), expected, atol=1e-6)
+
+
+class TestReducedRHS:
+    """The group's own columns spliced by slices give the index form."""
+
+    def test_slice_form_matches_the_index_form(self):
+        from hallsim.scheduler import _FrozenFill, _ReducedRHS, _reduced
+
+        def base(t, y, args=None):
+            return jnp.cumsum(y) * (1.0 + jnp.arange(y.shape[-1]))
+
+        full = jnp.arange(10.0) + 1.0
+        for own in ([0, 1, 2], [3, 4, 7, 8], [9], list(range(10))):
+            own = jnp.asarray(own)
+            index = _ReducedRHS(base=base, own=own, fill=_FrozenFill(full))
+            sliced = _reduced(base, own, _FrozenFill(full), 10)
+            y = full[own] * 2.0
+            assert jnp.array_equal(index(0.0, y), sliced(0.0, y)), own
+        whole = _reduced(base, jnp.arange(10), _FrozenFill(full), 10)
+        assert whole.runs == ((0, 10),)
+        seen = {}
+
+        def probe(own):
+            seen["runs"] = _reduced(base, own, _FrozenFill(full), 10).runs
+            return own
+
+        jax.make_jaxpr(probe)(jnp.asarray([1, 2]))
+        assert seen["runs"] == ()
+
+    def test_a_traced_composite_is_never_chunked(self):
+        """A fit traces the parameters and not the start, and each chunk
+        would be inlined into the caller's trace."""
+        from hallsim.composite import single_process_composite
+
+        class Decay(Process):
+            rate: jnp.ndarray = eqx.field(
+                default_factory=lambda: jnp.asarray(1.0)
+            )
+
+            def ports_schema(self):
+                return {"x": Port(role=PortRole.EVOLVED, default=1.0)}
+
+            def derivative(self, t, state):
+                return {"x": -self.rate * state["x"]}
+
+        comp = single_process_composite(Decay(), "p")
+        y0 = jnp.ones((8, 1))
+        seen = {}
+
+        def probe(rate):
+            traced = eqx.tree_at(lambda c: c.processes["p"].rate, comp, rate)
+            seen["width"] = Scheduler()._chunk_width(y0, False, traced)
+            return rate
+
+        jax.make_jaxpr(probe)(jnp.asarray(0.5))
+        assert seen["width"] is None
+        assert Scheduler()._chunk_width(y0, False, comp) == (
+            Scheduler()._chunk_width(y0)
+        )

@@ -510,7 +510,8 @@ per member — each person's own rate constants in a cohort fit — is declared
 with `comp.with_member_params({"proc.field": rows})`, one row per member, and
 the batch lane maps the rows with the state, so a member's `derivative` sees
 its own row as it sees its own state. A lockstep run is never chunked, since
-every member takes the same steps. A sweep that changes a parameter for the
+every member takes the same steps, nor is a traced one, whose chunks would
+each be inlined into the caller's program. A sweep that changes a parameter for the
 whole population — a hallmark severity, for instance — is one composite per
 arm, since it changes the process pytree rather than the start.
 

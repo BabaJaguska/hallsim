@@ -42,10 +42,11 @@ import jax.numpy as jnp
 from jax.interpreters import ad
 import numpy as np
 
-from hallsim.composite import Composite
+from hallsim.composite import SLICE_RUNS_MAX, Composite, _runs_of
 from hallsim.store import as_paths, read_write_paths
 from hallsim.tracing import is_traced
 from hallsim.config import (
+    ADAPTIVE_CHECKPOINTS,
     CHECKPOINT_MEMORY_BUDGET,
     DEFAULT_ATOL,
     DEFAULT_BATCH_CHUNK,
@@ -56,10 +57,12 @@ from hallsim.config import (
     EXPLICIT_STEP_BUDGET,
     LADDER_STEP_BUDGET,
     DEFAULT_RTOL,
+    UNROLL_MAX_STATES,
+    VERDICT_MEMORY_SIZE,
 )
 from hallsim.process import PortRole
 from hallsim.root_finders import Chord
-from hallsim.solvers import unrolled
+from hallsim.solvers import is_unrolled, rolled, unrolled
 from hallsim.stiffness import (
     GroupStiffness,
     StiffnessInconclusive,
@@ -106,6 +109,20 @@ def _inherits_controller_tolerances(root_finder) -> bool:
 #: on. A screen builds a Scheduler per tolerance, a census a Scheduler per
 #: deposit, and a verdict climbed once should not be climbed again.
 _RUNG_MEMORY: dict = {}
+
+
+def _bounded_put(memory: dict, key, value) -> None:
+    """``memory[key] = value``, dropping the oldest value-keyed entries past
+    ``VERDICT_MEMORY_SIZE``. A key is ``(structure, digest)``; the entries
+    keyed by structure alone (digest ``None``) are one per structure and
+    stay."""
+    memory[key] = value
+    if len(memory) > VERDICT_MEMORY_SIZE:
+        for old in list(memory):
+            if old[1] is not None:
+                del memory[old]
+                break
+
 
 #: Per-group spectra for the Nyquist guard, by the same signature.
 _OMEGA_MEMORY: dict = {}
@@ -526,10 +543,49 @@ class _ReducedRHS(eqx.Module):
     base: Any
     own: jnp.ndarray
     fill: Any
+    #: ``own`` as static ``(lo, hi)`` runs, with the full width, when
+    #: ``own`` is concrete and ascending: the splice is then slices and one
+    #: concatenate, which XLA fuses, where a scatter and a gather stay as
+    #: they are on every stage. Empty keeps the index form.
+    runs: tuple = eqx.field(static=True, default=())
+    width: int = eqx.field(static=True, default=0)
 
     def __call__(self, t, y_own, args=None):
-        full = self.fill(t).at[..., self.own].set(y_own)
-        return self.base(t, full, args)[..., self.own]
+        if not self.runs:
+            full = self.fill(t).at[..., self.own].set(y_own)
+            return self.base(t, full, args)[..., self.own]
+        if self.runs == ((0, self.width),):
+            return self.base(t, y_own, args)
+        full = self.fill(t)
+        parts, at, k = [], 0, 0
+        for lo, hi in self.runs:
+            if lo > at:
+                parts.append(full[..., at:lo])
+            parts.append(y_own[..., k : k + hi - lo])
+            k += hi - lo
+            at = hi
+        if at < self.width:
+            parts.append(full[..., at:])
+        dy = self.base(t, jnp.concatenate(parts, axis=-1), args)
+        if len(self.runs) == 1:
+            ((lo, hi),) = self.runs
+            return dy[..., lo:hi]
+        return jnp.concatenate(
+            [dy[..., lo:hi] for lo, hi in self.runs], axis=-1
+        )
+
+
+def _reduced(base, own, fill, width: int) -> _ReducedRHS:
+    """A :class:`_ReducedRHS` over ``own``: in slice form when ``own`` is
+    concrete, ascending and falls in few runs, in index form otherwise."""
+    runs = ()
+    if not is_traced(own):
+        idx = np.asarray(own)
+        if idx.size and np.all(np.diff(idx) > 0):
+            runs = _runs_of(idx)
+            if len(runs) > SLICE_RUNS_MAX:
+                runs = ()
+    return _ReducedRHS(base=base, own=own, fill=fill, runs=runs, width=width)
 
 
 def _fingerprint_difference(want, got) -> str:
@@ -1953,7 +2009,12 @@ class Scheduler:
                 t0, t1, save_dt if save_dt is not None else macro_dt
             )
 
-            own = composite.evolved_indices(proc_names, keys)
+            own = composite.evolved_columns(proc_names, keys)
+            # Decided here, where the grid is concrete: inside the core a
+            # closed-over array may already be a tracer.
+            on_grid = integrators[gname].lockstep_steps is not None and (
+                self._saves_on_grid(save_ts, t0, t1, self._fixed_step(gname))
+            )
 
             def core(comp, y0, rng_key=None):
                 integ = integrators[gname]
@@ -1970,6 +2031,7 @@ class Scheduler:
                     group_name=gname,
                     keys=keys,
                     jump_ts=jump_ts,
+                    grid_saves=on_grid,
                 )
                 # ASSIGNED ports aren't integrated, so their saved columns
                 # hold a stale initial value until recomputed per saved state.
@@ -2040,17 +2102,22 @@ class Scheduler:
             return max(1, len(affinity(0)))
         return max(1, os.cpu_count() or 1)
 
-    def _chunk_width(self, y0, lockstep: bool = False) -> int | None:
+    def _chunk_width(
+        self, y0, lockstep: bool = False, comp=None
+    ) -> int | None:
         """Members per vectorized pass, or None to run the batch whole.
 
         Chunking trades vectorisation for a tighter trip count, which pays on
         a CPU and costs on an accelerator, where one device runs the batch and
         extra passes are extra launches. A lockstep run has one trip count
-        for every member, so it is never chunked unless asked.
+        for every member, so it is never chunked unless asked; nor is a
+        traced one — the start, or the composite's parameters under a
+        transformation — since its passes would be inlined into the
+        caller's trace, each with its own copy of the solve.
         """
         if self.batch_chunk is not None:
             return int(self.batch_chunk) or None
-        if lockstep or is_traced(*jax.tree_util.tree_leaves(y0)):
+        if lockstep or is_traced(*jax.tree_util.tree_leaves((comp, y0))):
             return None
         return DEFAULT_BATCH_CHUNK if self._platform(y0) == "cpu" else None
 
@@ -2118,7 +2185,7 @@ class Scheduler:
 
         def vectorized(comp, y0, rng_key):
             keys = jax.random.split(rng_key, y0.shape[0])
-            width = self._chunk_width(y0, lockstep)
+            width = self._chunk_width(y0, lockstep, comp)
             if width is None or y0.shape[0] <= width:
                 ts, ys, stats = mapped(comp, y0, keys)
                 return ts[0], ys, stats
@@ -2252,8 +2319,9 @@ class Scheduler:
             (name, composite.build_rhs(names)[0])
             for name, names in groups.items()
         ]
+        # Concrete, so the reduced form is decided before the trace.
         write_idxs = [
-            composite.evolved_indices(names, keys)
+            composite.evolved_columns(names, keys)
             for _, names in groups.items()
         ]
 
@@ -2480,7 +2548,7 @@ class Scheduler:
         strang = self.splitting == "strang" and n_groups > 1
         interp = coupling == "interpolated" and n_groups > 1
         write_idxs = [
-            composite.evolved_indices(p, keys) for p in groups.values()
+            composite.evolved_columns(p, keys) for p in groups.values()
         ]
         stochastic_info = None
         stochastic_event_count = jnp.asarray(0, dtype=jnp.int32)
@@ -2553,6 +2621,21 @@ class Scheduler:
             n_save = max(n_save, self.coupling_interp_points)
         n_out = 1 if strang else n_save - 1
         save_frac = jnp.linspace(0.0, 1.0, n_save)
+        # Lockstep groups whose saves all fall on their step grid in every
+        # window: a span that is not a whole number of windows ends in a
+        # short one, whose saves move off it.
+        whole = abs(n_macro * macro_dt - (t1 - t0)) <= 1e-9 * max(
+            1.0, abs(t1 - t0)
+        )
+        grid_saves = {
+            g: whole
+            and all(
+                _on_step_grid(f * macro_dt, macro_dt, self._fixed_step(g))
+                for f in np.linspace(0.0, 1.0, n_save)
+            )
+            for g, integ in integrators.items()
+            if integ.lockstep_steps is not None
+        }
 
         dt0_init = self._initial_steps(
             group_rhs, write_idxs, integrators, state, t0
@@ -2579,6 +2662,7 @@ class Scheduler:
                 group_name=g,
                 keys=keys,
                 jump_ts=jump_ts,
+                grid_saves=grid_saves.get(g, False),
             )
             final = saved[-1]
             ld = (t_b - t_a) / jnp.maximum(sol.stats["num_steps"], 1)
@@ -2823,7 +2907,7 @@ class Scheduler:
         measured from concrete parameters — as *the* verdict a later traced
         run of this structure should inherit, in this instance and in every
         other."""
-        self._integrator_cache[sig] = integ
+        _bounded_put(self._integrator_cache, sig, integ)
         if digest is not None:
             self._eager_verdict[base] = integ
             rungs = {g: self._rung_of(i) for g, i in integ.items()}
@@ -2831,7 +2915,7 @@ class Scheduler:
             # 1e6 are the same structure and different problems; and as
             # the structure's latest eager verdict, for a traced run that
             # cannot measure its own.
-            _RUNG_MEMORY[sig] = rungs
+            _bounded_put(_RUNG_MEMORY, sig, rungs)
             _RUNG_MEMORY[(base, None)] = rungs
 
     def _rung_of(self, integ) -> str:
@@ -2883,6 +2967,20 @@ class Scheduler:
         n_save = 0 if ts is None else int(jnp.shape(ts)[0])
         per = (8 + n_save) * int(y.size) * y.dtype.itemsize
         return max(1, min(steps, CHECKPOINT_MEMORY_BUDGET // max(per, 1)))
+
+    @staticmethod
+    def _saves_on_grid(ts, t0, t1, dt) -> bool:
+        """Whether every save time in ``ts`` is a whole number of steps
+        ``dt`` from ``t0``, decided before tracing: a traced time is taken
+        as off the grid. Read the grid before it is wrapped in a ``SaveAt``,
+        whose conversion inside a trace already makes it a tracer."""
+        if ts is None or dt is None or is_traced(ts, t0, t1, dt):
+            return False
+        start, window = float(t0), float(t1) - float(t0)
+        return all(
+            _on_step_grid(float(t) - start, window, float(dt))
+            for t in np.asarray(ts).ravel()
+        )
 
     @staticmethod
     def _integrator_signature(composite, groups, state, macro_dt):
@@ -3101,13 +3199,18 @@ class Scheduler:
             return integ
 
         if not self.auto_solver:
+            # A pinned choice is this instance's own, not a measured
+            # verdict, so it stays out of the process-wide memory that
+            # routed Schedulers built later inherit from.
             integ = {
                 g: GroupIntegrator(
                     self.solver, self.lockstep_controller, stiff=False
                 )
                 for g in groups
             }
-            self._remember_verdict(sig, base, digest, integ)
+            _bounded_put(self._integrator_cache, sig, integ)
+            if digest is not None:
+                self._eager_verdict[base] = integ
             return integ
 
         def _all_explicit():
@@ -3250,6 +3353,7 @@ class Scheduler:
         group_name: str = "",
         keys: list[str] | None = None,
         jump_ts=None,
+        grid_saves: bool | None = None,
     ):
         """Solve one group over ``own`` and scatter the saved states back to
         full width. Returns ``(sol, saved)`` — ``sol.ys`` is the group's own
@@ -3257,40 +3361,67 @@ class Scheduler:
         full-width trajectory.
 
         The single solve site: every path (fast, scan, Strang, eager,
-        interpolated) differs only in ``saveat`` and ``fill``.
+        interpolated) differs only in ``saveat`` and ``fill``. ``grid_saves``
+        says whether every save lies on a lockstep group's step grid; None
+        reads it off a concrete ``saveat``.
         """
+        own_state = state_vec[..., own]
+        # The unrolled stages pay on a narrow right-hand side; from a few
+        # dozen states up they run no faster than diffrax's stage loop and
+        # compile several times slower.
+        solver = integ.solver
+        if own_state.shape[-1] > UNROLL_MAX_STATES:
+            solver = rolled(solver)
         if isinstance(integ.controller, dfx.ConstantStepSize):
             dt0_base = self._fixed_step(group_name)
-            # The default adjoint picks a handful of checkpoints from the
-            # step bound and recomputes the forward pass between them; a
-            # lockstep group knows its step count and stores every step.
-            if (
-                integ.lockstep_steps is not None
-                and adjoint is self.adjoint
-                and not self._adjoint_explicit
-            ):
-                adjoint = dfx.RecursiveCheckpointAdjoint(
-                    checkpoints=self._checkpoints(
-                        integ.lockstep_steps, state_vec[..., own], saveat
+            if integ.lockstep_steps is not None:
+                # The default adjoint picks a handful of checkpoints from
+                # the step bound and recomputes the forward pass between
+                # them; a lockstep group knows its step count and stores
+                # every step.
+                if adjoint is self.adjoint and not self._adjoint_explicit:
+                    adjoint = dfx.RecursiveCheckpointAdjoint(
+                        checkpoints=self._checkpoints(
+                            integ.lockstep_steps, own_state, saveat
+                        )
                     )
-                )
+                # Saves on the step grid read the interpolant at step ends
+                # alone, where its endpoints are exact, so the stage slopes
+                # are not carried.
+                if grid_saves is None:
+                    grid_saves = self._saves_on_grid(
+                        saveat.subs.ts, t0, t1, dt0_base
+                    )
+                if grid_saves and is_unrolled(solver):
+                    solver = unrolled(solver, dense=False)
         else:
             dt0_base = dt0_hint if dt0_hint is not None else self.dt0
+            # An error-controlled group's step count is unknown here, and
+            # a schedule spread over its step bound costs twice on a short
+            # solve; it stores a fixed number of steps and recomputes past
+            # them.
+            if adjoint is self.adjoint and not self._adjoint_explicit:
+                adjoint = dfx.RecursiveCheckpointAdjoint(
+                    checkpoints=self._checkpoints(
+                        ADAPTIVE_CHECKPOINTS, own_state, saveat
+                    )
+                )
         # throw=False so a failed solve returns its RESULTS code rather than
         # crashing opaquely; _guard_result decides what to do with it.
         sol = dfx.diffeqsolve(
             dfx.ODETerm(
-                _ReducedRHS(
-                    base=rhs_fn,
-                    own=own,
-                    fill=fill if fill is not None else _FrozenFill(state_vec),
+                _reduced(
+                    rhs_fn,
+                    own,
+                    fill if fill is not None else _FrozenFill(state_vec),
+                    state_vec.shape[-1],
                 )
             ),
-            integ.solver,
+            solver,
             t0=t0,
             t1=t1,
             dt0=None if dt0_base is None else jnp.minimum(dt0_base, t1 - t0),
-            y0=state_vec[..., own],
+            y0=own_state,
             saveat=saveat,
             stepsize_controller=self._controller_with_jumps(
                 integ.controller, jump_ts
@@ -3318,7 +3449,7 @@ class Scheduler:
         if own.size == 0:  # nothing to integrate: the window in one step
             return jnp.asarray(jnp.inf)
         term = dfx.ODETerm(
-            _ReducedRHS(base=rhs_fn, own=own, fill=_FrozenFill(state_vec))
+            _reduced(rhs_fn, own, _FrozenFill(state_vec), state_vec.shape[-1])
         )
         y0 = state_vec[..., own]
         ctrl = integ.controller

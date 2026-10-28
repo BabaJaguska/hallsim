@@ -32,6 +32,12 @@ class _UnrolledERK(dfx.AbstractSolver):
     inner: dfx.AbstractERK
 
     term_structure: ClassVar = dfx.AbstractTerm
+    #: Whether a step hands the interpolant every stage slope, or only its
+    #: endpoints for a linear one. A solve whose every save lies on its
+    #: step grid evaluates the interpolant at step ends alone, where the
+    #: linear one is exact, and the slopes stacked per step are the
+    #: largest array the loop carries.
+    dense: ClassVar[bool] = True
 
     def order(self, terms):
         return self.inner.order(terms)
@@ -81,26 +87,57 @@ class _UnrolledERK(dfx.AbstractSolver):
         error = combine(np.asarray(tab.b_error), ks)
         y_error = jnp.zeros_like(y0) if error is None else h * error
         # The interpolants take each slope already scaled by the step.
-        dense_info = dict(y0=y0, y1=y1, k=h * jnp.stack(ks))
+        if type(self).dense:
+            dense_info = dict(y0=y0, y1=y1, k=h * jnp.stack(ks))
+        else:
+            dense_info = dict(y0=y0, y1=y1)
         new_state = (jnp.array(False), ks[-1]) if tab.fsal else None
         return y1, y_error, dense_info, new_state, dfx.RESULTS.successful
 
 
 @functools.cache
-def _unrolled_class(inner_cls: type) -> type:
+def _unrolled_class(inner_cls: type, dense: bool) -> type:
     return type(
-        f"Unrolled{inner_cls.__name__}",
+        f"Unrolled{inner_cls.__name__}" + ("" if dense else "Endpoints"),
         (_UnrolledERK,),
-        {"interpolation_cls": inner_cls.interpolation_cls},
+        {
+            "interpolation_cls": (
+                inner_cls.interpolation_cls
+                if dense
+                else dfx.LocalLinearInterpolation
+            ),
+            "dense": dense,
+        },
     )
 
 
-def unrolled(solver: dfx.AbstractSolver) -> dfx.AbstractSolver:
+def unrolled(
+    solver: dfx.AbstractSolver, dense: bool = True
+) -> dfx.AbstractSolver:
     """``solver`` with its stages unrolled when it is an explicit
-    Runge–Kutta method; any other solver, or one already unrolled, is
-    returned as it is."""
-    if isinstance(solver, _UnrolledERK) or not isinstance(
-        solver, dfx.AbstractERK
-    ):
+    Runge–Kutta method; any other solver is returned as it is, and one
+    already unrolled is returned as it is or rebuilt with the other
+    ``dense`` setting.
+
+    ``dense=False`` keeps only the step endpoints as dense output, with
+    linear interpolation between them: exact at the step ends, so it is
+    the solver for a solve whose every save time lies on its step grid, and
+    a wrong one for any other save.
+    """
+    if isinstance(solver, _UnrolledERK):
+        if type(solver).dense == dense:
+            return solver
+        solver = solver.inner
+    if not isinstance(solver, dfx.AbstractERK):
         return solver
-    return _unrolled_class(type(solver))(inner=solver)
+    return _unrolled_class(type(solver), dense)(inner=solver)
+
+
+def is_unrolled(solver: dfx.AbstractSolver) -> bool:
+    return isinstance(solver, _UnrolledERK)
+
+
+def rolled(solver: dfx.AbstractSolver) -> dfx.AbstractSolver:
+    """The solver with diffrax's stage loop back: the inner solver of an
+    unrolled one, any other as it is."""
+    return solver.inner if isinstance(solver, _UnrolledERK) else solver

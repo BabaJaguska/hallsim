@@ -159,6 +159,37 @@ class TestRoutingOptOut:
         )
         assert _solvers(res) == {"Tsit5"}
 
+    def test_a_pinned_scheduler_leaves_routing_memory_alone(self):
+        """A pinned choice is this instance's own, not a measured verdict:
+        a default Scheduler built afterwards still routes the stiff group
+        to the implicit solver."""
+        comp = _composite(StiffPair(), "stiff")
+        Scheduler(auto_stiffness=False, max_steps=_LOOSE_STEPS).warm_up(
+            comp, (0.0, 5.0), macro_dt=1.0
+        )
+        routed = Scheduler().warm_up(comp, (0.0, 5.0), macro_dt=1.0)
+        assert all(integ.stiff for integ in routed.values())
+
+
+class TestVerdictMemoryIsBounded:
+    """One verdict per parameter value, so a sweep drops its oldest."""
+
+    def test_a_sweep_keeps_at_most_the_cap_of_value_verdicts(
+        self, monkeypatch
+    ):
+        import hallsim.scheduler as mod
+
+        monkeypatch.setattr(mod, "VERDICT_MEMORY_SIZE", 4)
+        before = len(mod._RUNG_MEMORY)
+        sched = Scheduler()
+        for k in range(8):
+            comp = _composite(StiffPair(k_slow=0.1 + 0.01 * k), "stiff")
+            sched.warm_up(comp, (0.0, 5.0), macro_dt=1.0)
+        valued = [key for key in sched._integrator_cache if key[1] is not None]
+        assert len(valued) <= 4
+        # The process-wide memory gains the structure's own entry at most.
+        assert len(mod._RUNG_MEMORY) <= max(before, 4) + 1
+
 
 class TestToleranceIsNotStateDerived:
     """``atol`` is a floor near zero, the same for every group and every run.
