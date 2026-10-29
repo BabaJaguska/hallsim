@@ -3053,6 +3053,22 @@ class TestReducedRHS:
         jax.make_jaxpr(probe)(jnp.asarray([1, 2]))
         assert seen["runs"] == ()
 
+    def test_interpolated_fill_slice_form_matches_the_index_form(self):
+        from hallsim.scheduler import _InterpFill, _interp_fill
+
+        full = jnp.arange(8.0)
+        ys = jnp.stack([jnp.arange(3.0), jnp.arange(3.0) + 10.0])
+        for idx in ([1, 2, 3], [5, 1, 6], [0, 7, 4]):
+            idx = np.asarray(idx)
+            index = _InterpFill(
+                full=full, t0=0.0, t1=1.0, ys=ys, idx=jnp.asarray(idx)
+            )
+            sliced = _interp_fill(full, 0.0, 1.0, ys, idx)
+            for t in (0.0, 0.25, 1.0):
+                assert jnp.allclose(index(t), sliced(t)), (idx, t)
+        scattered = _interp_fill(full, 0.0, 1.0, ys, np.asarray([5, 1, 6]))
+        assert scattered.runs == ((1, 2), (5, 7))
+
     def test_a_traced_composite_is_never_chunked(self):
         """A fit traces the parameters and not the start, and each chunk
         would be inlined into the caller's trace."""

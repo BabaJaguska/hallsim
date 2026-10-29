@@ -68,6 +68,10 @@ SNAPSHOT_MAX_SIZE = 1024
 
 ParamPytree = Any  # PyTree of jnp.ndarrays / scalars
 
+#: Parameters up to which the default autodiff mode is forward (one tangent
+#: per parameter); above it, one reverse pass.
+FORWARD_MODE_MAX_PARAMS = 10
+
 
 @dataclass
 class CalibrationHistory:
@@ -147,7 +151,9 @@ class Calibrator:
         Optional ``{leaf_name: (lo, hi)}`` box applied after each step. Only
         top-level dict keys are inspected — nested pytrees aren't clamped.
     mode:
-        ``"forward"`` (default) or ``"reverse"``. See module docstring.
+        ``"forward"`` or ``"reverse"``; ``None`` (default) picks by
+        parameter count, forward up to ``FORWARD_MODE_MAX_PARAMS`` and
+        reverse above. See module docstring.
     optimizer:
         Custom ``optax.GradientTransformation``, overriding the default
         ``optax.adam(learning_rate)``.
@@ -180,7 +186,7 @@ class Calibrator:
         clamps: dict[str, tuple[float, float]] | None = None,
         val_loss_fn: Callable[[ParamPytree], jnp.ndarray] | None = None,
         checkpoint_path: str | Path | None = None,
-        mode: Literal["forward", "reverse"] = "forward",
+        mode: Literal["forward", "reverse"] | None = None,
         method: Literal["adam", "lbfgs"] = "adam",
         optimizer: optax.GradientTransformation | None = None,
         learning_rate: float = 0.05,
@@ -197,6 +203,15 @@ class Calibrator:
         eval_every: int = 1,
         eval_loss_fn: Callable | None = None,
     ) -> None:
+        if mode is None:
+            # One tangent per parameter against one reverse pass.
+            n_params = sum(
+                int(jnp.size(leaf))
+                for leaf in jax.tree_util.tree_leaves(init_params)
+            )
+            mode = (
+                "forward" if n_params <= FORWARD_MODE_MAX_PARAMS else "reverse"
+            )
         if mode not in ("forward", "reverse"):
             raise ValueError(
                 f"mode must be 'forward' or 'reverse', got {mode!r}"
@@ -266,6 +281,27 @@ class Calibrator:
         self._vg = None
 
     # ── Autodiff: forward or reverse ───────────────────────────
+
+    def _adam_step(self, value_and_grad):
+        """One optimiser step as one executable: the loss and gradient,
+        the update, the clamp and the gradient norm, so a step is one
+        dispatch and one host sync rather than four and three."""
+
+        def step(params, opt_state, key):
+            if key is None:
+                loss, grad = value_and_grad(params)
+            else:
+                loss, grad = value_and_grad(params, key)
+            if self._uses_plateau:
+                updates, opt_state = self.optimizer.update(
+                    grad, opt_state, params, value=loss
+                )
+            else:
+                updates, opt_state = self.optimizer.update(grad, opt_state)
+            params = self._clamp(optax.apply_updates(params, updates))
+            return params, opt_state, loss, grad, optax.global_norm(grad)
+
+        return eqx.filter_jit(step)
 
     def _value_and_grad_fn(self):
         """Return the jitted ``params -> (loss, grad)`` transform.
@@ -427,12 +463,15 @@ class Calibrator:
         best_params = self._to_model(params)
         no_improve = 0
         t0 = time.time()
+        step = self._adam_step(value_and_grad)
         for s in range(steps):
-            if key is None:
-                loss, grad = value_and_grad(params)
-            else:
+            sub = None
+            if key is not None:
                 key, sub = jax.random.split(key)
-                loss, grad = value_and_grad(params, sub)
+            # The step evaluates at `evaluated` and returns the updated
+            # point; what is recorded and ranked is the evaluated one.
+            evaluated, state_before = params, opt_state
+            params, opt_state, loss, grad, gnorm = step(params, opt_state, sub)
             lf = float(loss)
             # `loss`/`grad` are evaluated at `params` (before this step's
             # update), so `params` is the point that achieved `lf`. Record and
@@ -440,11 +479,11 @@ class Calibrator:
             # the step. With a validation loss, that held-out score, not the
             # training loss, is the selection criterion.
             if val_fn:
-                monitored = float(val_fn(params))
+                monitored = float(val_fn(evaluated))
                 history.val_losses.append(monitored)
             elif exact_fn is not None:
                 due = s % self.eval_every == 0 or s == steps - 1
-                monitored = float(exact_fn(params)) if due else None
+                monitored = float(exact_fn(evaluated)) if due else None
             else:
                 monitored = lf
             # Relative improvement: patience accumulates once the loss stops
@@ -455,14 +494,14 @@ class Calibrator:
                 pass  # between evaluations of the whole objective
             elif monitored < best_loss * (1.0 - self.early_stop_tol):
                 best_loss, no_improve = monitored, 0
-                best_params = self._to_model(params)
+                best_params = self._to_model(evaluated)
                 self._save_checkpoint(best_params, best_loss, s)
             else:
                 no_improve += 1
             history.losses.append(lf)
-            history.param_history.append(self._snapshot(params))
-            gnorm = float(optax.global_norm(grad))
-            scale = self._plateau_scale(opt_state)
+            history.param_history.append(self._snapshot(evaluated))
+            gnorm = float(gnorm)
+            scale = self._plateau_scale(state_before)
             lr_base = (
                 float(self.learning_rate(s))
                 if callable(self.learning_rate)
@@ -479,7 +518,7 @@ class Calibrator:
                 )
                 if val_fn:
                     msg += f"  val = {monitored:.4g}"
-                shown = self._to_model(params)
+                shown = self._to_model(evaluated)
                 if isinstance(shown, dict):
                     # Show the first 4 scalar keys for compactness.
                     pieces = [
@@ -490,14 +529,6 @@ class Calibrator:
                     if pieces:
                         msg += "  " + "  ".join(pieces)
                 log.info(msg)
-            if self._uses_plateau:
-                updates, opt_state = self.optimizer.update(
-                    grad, opt_state, params, value=loss
-                )
-            else:
-                updates, opt_state = self.optimizer.update(grad, opt_state)
-            params = optax.apply_updates(params, updates)
-            params = self._clamp(params)
             if (
                 self.early_stop_patience
                 and no_improve >= self.early_stop_patience

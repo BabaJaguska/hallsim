@@ -107,6 +107,29 @@ def test_the_read_probe_runs_once_per_structure(monkeypatch):
     assert len(calls) == 2
 
 
+def test_an_assigned_value_reaches_its_reader_without_a_state_write():
+    """Inside the right-hand side an algebraic value goes straight to the
+    ports that read it; writing it into the state and reading it back on
+    every stage cost 1.5× on a two-process fit at 2,000 members."""
+    import jax
+
+    comp = _comp(
+        {"a": Scaled(), "r": Reader()},
+        {"a": {"x": "x", "s": "s"}, "r": {"z": "z", "s": "s"}},
+    )
+    rhs, keys = comp.build_rhs()
+    y0 = comp.initial_state_vec(keys)
+    prims = {
+        e.primitive.name
+        for e in jax.make_jaxpr(lambda y: rhs(0.0, y))(y0).jaxpr.eqns
+    }
+    assert not prims & {"dynamic_update_slice", "scatter", "gather"}, prims
+    assert float(rhs(0.0, y0)[keys.index("z")]) == pytest.approx(2.0 - 0.5)
+    # the saved trajectory still carries the value
+    ys = comp.materialize_assigned(np.array([0.0]), y0[None])
+    assert float(ys[0, keys.index("s")]) == pytest.approx(2.0)
+
+
 def test_an_assignment_nobody_reads_leaves_the_rhs():
     comp = _comp({"a": Algebraic()}, {"a": {"x": "x", "s": "s"}})
     rhs, keys = comp.build_rhs()

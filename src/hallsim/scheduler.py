@@ -518,11 +518,66 @@ class _InterpFill(eqx.Module):
     t1: jnp.ndarray
     ys: jnp.ndarray
     idx: jnp.ndarray
+    #: ``idx`` as static runs, as in :class:`_ReducedRHS`; empty keeps the
+    #: index form.
+    runs: tuple = eqx.field(static=True, default=())
+    width: int = eqx.field(static=True, default=0)
 
     def __call__(self, t):
-        return self.full.at[..., self.idx].set(
-            _interp_uniform(t, self.t0, self.t1, self.ys)
-        )
+        value = _interp_uniform(t, self.t0, self.t1, self.ys)
+        if self.runs:
+            return _splice(self.full, value, self.runs, self.width)
+        return self.full.at[..., self.idx].set(value)
+
+
+def _interp_fill(full, t0, t1, ys, idx) -> _InterpFill:
+    """An :class:`_InterpFill` in slice form when ``idx`` is concrete and
+    falls in few runs; the columns are put in ascending order, with the
+    dense output's columns alongside, so the splice is slices."""
+    runs = ()
+    if not is_traced(idx):
+        cols = np.asarray(idx)
+        order = np.argsort(cols, kind="stable")
+        if cols.size and np.any(order != np.arange(cols.size)):
+            cols, ys = cols[order], ys[..., order]
+            idx = cols
+        runs = _static_runs(cols)
+    return _InterpFill(
+        full=full,
+        t0=t0,
+        t1=t1,
+        ys=ys,
+        idx=idx,
+        runs=runs,
+        width=full.shape[-1],
+    )
+
+
+def _static_runs(idx) -> tuple:
+    """``idx`` as ``(lo, hi)`` runs when it is concrete, strictly ascending
+    and falls in at most ``SLICE_RUNS_MAX`` of them; ``()`` otherwise."""
+    if is_traced(idx):
+        return ()
+    cols = np.asarray(idx)
+    if not cols.size or not np.all(np.diff(cols) > 0):
+        return ()
+    runs = _runs_of(cols)
+    return runs if len(runs) <= SLICE_RUNS_MAX else ()
+
+
+def _splice(full, value, runs, width: int):
+    """``full`` with ``value`` in the columns ``runs`` cover, by slices and
+    one concatenate."""
+    parts, at, k = [], 0, 0
+    for lo, hi in runs:
+        if lo > at:
+            parts.append(full[..., at:lo])
+        parts.append(value[..., k : k + hi - lo])
+        k += hi - lo
+        at = hi
+    if at < width:
+        parts.append(full[..., at:])
+    return parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=-1)
 
 
 class _ReducedRHS(eqx.Module):
@@ -556,17 +611,8 @@ class _ReducedRHS(eqx.Module):
             return self.base(t, full, args)[..., self.own]
         if self.runs == ((0, self.width),):
             return self.base(t, y_own, args)
-        full = self.fill(t)
-        parts, at, k = [], 0, 0
-        for lo, hi in self.runs:
-            if lo > at:
-                parts.append(full[..., at:lo])
-            parts.append(y_own[..., k : k + hi - lo])
-            k += hi - lo
-            at = hi
-        if at < self.width:
-            parts.append(full[..., at:])
-        dy = self.base(t, jnp.concatenate(parts, axis=-1), args)
+        full = _splice(self.fill(t), y_own, self.runs, self.width)
+        dy = self.base(t, full, args)
         if len(self.runs) == 1:
             ((lo, hi),) = self.runs
             return dy[..., lo:hi]
@@ -578,14 +624,9 @@ class _ReducedRHS(eqx.Module):
 def _reduced(base, own, fill, width: int) -> _ReducedRHS:
     """A :class:`_ReducedRHS` over ``own``: in slice form when ``own`` is
     concrete, ascending and falls in few runs, in index form otherwise."""
-    runs = ()
-    if not is_traced(own):
-        idx = np.asarray(own)
-        if idx.size and np.all(np.diff(idx) > 0):
-            runs = _runs_of(idx)
-            if len(runs) > SLICE_RUNS_MAX:
-                runs = ()
-    return _ReducedRHS(base=base, own=own, fill=fill, runs=runs, width=width)
+    return _ReducedRHS(
+        base=base, own=own, fill=fill, runs=_static_runs(own), width=width
+    )
 
 
 def _fingerprint_difference(want, got) -> str:
@@ -1585,7 +1626,7 @@ class Scheduler:
         for gname, proc_names in groups.items():
             fn, _ = composite.build_rhs(proc_names)
             group_rhs[gname] = fn
-            group_write_idxs[gname] = composite.evolved_indices(
+            group_write_idxs[gname] = composite.evolved_columns(
                 proc_names, keys
             )
         stochastic_idxs = {
@@ -2745,14 +2786,14 @@ class Scheduler:
                         if last is not None:
                             segs += last[gi + 1 :]
                         if interp and segs:
-                            fill = _InterpFill(
-                                full=st,
-                                t0=t_start,
-                                t1=t_next,
-                                ys=jnp.concatenate(
+                            fill = _interp_fill(
+                                st,
+                                t_start,
+                                t_next,
+                                jnp.concatenate(
                                     [gy_s for _, gy_s in segs], axis=-1
                                 ),
-                                idx=jnp.concatenate([ix for ix, _ in segs]),
+                                np.concatenate([ix for ix, _ in segs]),
                             )
                         else:
                             fill = _FrozenFill(full=st)
@@ -2915,8 +2956,11 @@ class Scheduler:
             # 1e6 are the same structure and different problems; and as
             # the structure's latest eager verdict, for a traced run that
             # cannot measure its own.
-            _bounded_put(_RUNG_MEMORY, sig, rungs)
-            _RUNG_MEMORY[(base, None)] = rungs
+            # Keyed by the tolerances too: a rung a group was promoted to
+            # at one tolerance is no evidence at a tighter one.
+            tols = (self.rtol, self.atol)
+            _bounded_put(_RUNG_MEMORY, sig + (tols,), rungs)
+            _RUNG_MEMORY[(base, None, tols)] = rungs
 
     def _rung_of(self, integ) -> str:
         if not integ.stiff:
@@ -3190,7 +3234,11 @@ class Scheduler:
             cached = self._eager_verdict.get(base)
         if cached is not None:
             return cached
-        rungs = _RUNG_MEMORY.get(sig) if self.auto_solver else None
+        rungs = (
+            _RUNG_MEMORY.get(sig + ((self.rtol, self.atol),))
+            if self.auto_solver
+            else None
+        )
         if rungs is not None and set(rungs) == set(groups):
             integ = {g: self._integrator_on(rungs[g]) for g in groups}
             # Recorded as this instance's own verdict too, so its traced
@@ -3712,9 +3760,7 @@ class Scheduler:
 
         if prev_interpolant is not None and prev_idxs is not None:
             p_t0, p_t1, p_ys = prev_interpolant
-            fill = _InterpFill(
-                full=state_vec, t0=p_t0, t1=p_t1, ys=p_ys, idx=prev_idxs
-            )
+            fill = _interp_fill(state_vec, p_t0, p_t1, p_ys, prev_idxs)
         else:
             fill = _FrozenFill(full=state_vec)
 

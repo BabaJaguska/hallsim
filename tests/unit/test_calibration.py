@@ -139,6 +139,45 @@ class TestCustomOptimizer:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+class TestDefaultModeByParameterCount:
+    """One tangent per parameter against one reverse pass."""
+
+    def _loss(self, p):
+        return sum(jnp.sum(jnp.asarray(v) ** 2) for v in p.values())
+
+    def test_few_parameters_take_forward_and_many_reverse(self):
+        few = Calibrator(
+            loss_fn=self._loss, init_params={"a": 1.0, "b": 2.0}, verbose=False
+        )
+        many = Calibrator(
+            loss_fn=self._loss, init_params={"w": jnp.ones(60)}, verbose=False
+        )
+        pinned = Calibrator(
+            loss_fn=self._loss,
+            init_params={"w": jnp.ones(60)},
+            mode="forward",
+            verbose=False,
+        )
+        assert few.mode == "forward"
+        assert many.mode == "reverse"
+        assert pinned.mode == "forward"
+
+    def test_one_jitted_step_keeps_clamps_and_the_plateau_scale(self):
+        cal = Calibrator(
+            loss_fn=self._loss,
+            init_params={"a": 3.0, "b": -2.0},
+            clamps={"a": (1.0, 10.0)},
+            reduce_on_plateau=True,
+            learning_rate=0.5,
+            verbose=False,
+        )
+        hist = cal.fit(8)
+        assert len(hist.losses) == 8 and len(hist.lr_scales) == 8
+        assert hist.losses[-1] < hist.losses[0]
+        assert all(1.0 <= float(p["a"]) <= 10.0 for p in hist.param_history)
+        assert all(0.0 < s <= 1.0 for s in hist.lr_scales)
+
+
 class TestInvalidConfig:
 
     def test_invalid_mode_raises(self):

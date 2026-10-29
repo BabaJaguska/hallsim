@@ -710,9 +710,9 @@ class SBMLProcess(ImportedODEProcess):
         # input stuck at t=0.
         w_batched = False
         if is_batched:
-            w = jax.vmap(boundaryfunc, in_axes=(0, None, None, None))(
-                y, self._w0, c, t_native
-            )
+            w = jax.vmap(
+                boundaryfunc, in_axes=(0, None, 0 if c_batched else None, None)
+            )(y, self._w0, c, t_native)
             w_batched = True
         else:
             w = boundaryfunc(y, self._w0, c, t_native)

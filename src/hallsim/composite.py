@@ -218,6 +218,7 @@ class _PortMap:
         "declared",
         "runs",
         "unit",
+        "columns",
         "_key",
     )
 
@@ -239,6 +240,7 @@ class _PortMap:
         #: stays a gather, and transposes to a scatter-add on the reverse
         #: pass.
         self.runs = _runs_of(self.idx)
+        self.columns = frozenset(int(c) for c in self.idx)
         self.unit = bool(np.all(self.fac == 1.0))
         # A port occupies one contiguous run of the gather; width is None for
         # a plain port (hands back a scalar) and an int for a block.
@@ -373,23 +375,79 @@ def _columns(y_vec, port_map):
     return jnp.concatenate([y_vec[..., lo:hi] for lo, hi in runs], axis=-1)
 
 
-def _port_view(y_vec, read_map):
+def _port_view(y_vec, read_map, assigned=None):
     """The ``{port_name: value}`` dict a Process's ``derivative``/``assign``
     consumes, read from the flat state and converted to port units.
 
     One read and one elementwise multiply for the whole process, rather than
     a slice and a multiply per port; the multiply is skipped when every
-    factor is 1.
+    factor is 1. ``assigned`` maps a column to the value an assignment
+    computed this call: a port fed by it takes the value as it is, so an
+    algebraic value reaches its readers without a write into the state and
+    a read back out of it on every stage.
     """
     if not read_map.ports:
         return {}
-    vals = _columns(y_vec, read_map)
-    if not read_map.unit:
-        vals = vals * read_map.fac
-    out = {}
+    if not assigned or not (read_map.columns & assigned.keys()):
+        vals = _columns(y_vec, read_map)
+        if not read_map.unit:
+            vals = vals * read_map.fac
+        out = {}
+        for port, a, w in zip(
+            read_map.ports, read_map.starts, read_map.widths
+        ):
+            out[port] = vals[..., a] if w is None else vals[..., a : a + w]
+        return out
+    out, base = {}, None
     for port, a, w in zip(read_map.ports, read_map.starts, read_map.widths):
-        out[port] = vals[..., a] if w is None else vals[..., a : a + w]
+        n = 1 if w is None else w
+        cols = [int(c) for c in read_map.idx[a : a + n]]
+        facs = read_map.fac[a : a + n]
+        hit = [c in assigned for c in cols]
+        if all(hit):
+            vals = [assigned[c] for c in cols]
+            value = vals[0] if w is None else jnp.stack(vals, axis=-1)
+            if not np.all(facs == 1.0):
+                value = value * (facs[0] if w is None else facs)
+            out[port] = value
+            continue
+        if base is None:
+            base = _columns(y_vec, read_map)
+            if not read_map.unit:
+                base = base * read_map.fac
+        value = base[..., a] if w is None else base[..., a : a + w]
+        for j, c in enumerate(cols):
+            if hit[j]:
+                value = value.at[..., j].set(assigned[c] * facs[j])
+        out[port] = value
     return out
+
+
+def _assigned_values(assign_pre, t, y_vec):
+    """Each ASSIGNED port's value this call, by store column, in dependency
+    order, so a later assignment reads an earlier one. The values go to
+    their readers through :func:`_port_view`; the state is not written."""
+    assigned: dict = {}
+    for proc, read_map, assign_map in assign_pre:
+        raw = proc.assign(t, _port_view(y_vec, read_map, assigned))
+        _reject_undeclared(raw, assign_map, "assign")
+        for i, port in enumerate(assign_map.ports):
+            if port not in raw:
+                continue
+            a, w = assign_map.starts[i], assign_map.widths[i]
+            n = 1 if w is None else w
+            cols = assign_map.idx[a : a + n]
+            facs = assign_map.fac[a : a + n]
+            value = jnp.asarray(raw[port])
+            value = jnp.broadcast_to(
+                value[..., None] if w is None else value,
+                y_vec.shape[:-1] + (n,),
+            )
+            if not np.all(facs == 1.0):
+                value = value * facs
+            for j, c in enumerate(cols):
+                assigned[int(c)] = value[..., j]
+    return assigned
 
 
 def _apply_assignments(assign_pre, t, y_vec):
@@ -553,7 +611,7 @@ class _FlatRHS(eqx.Module):
         # Assignments run first so the derivative pass reads fresh algebraic
         # values; they are not integrated, so a saved trajectory needs
         # Composite.materialize_assigned to see them.
-        y_vec = _apply_assignments(
+        assigned = _assigned_values(
             zip(
                 self.assign_procs,
                 self.assign_read_maps,
@@ -573,7 +631,7 @@ class _FlatRHS(eqx.Module):
         for proc, read_map, write_map in zip(
             self.procs, self.read_maps, self.write_maps
         ):
-            raw = proc.derivative(t, _port_view(y_vec, read_map))
+            raw = proc.derivative(t, _port_view(y_vec, read_map, assigned))
             _reject_undeclared(raw, write_map, "derivative")
             for i, port in enumerate(write_map.ports):
                 if port not in raw:

@@ -85,6 +85,23 @@ class TestWithParamInput:
         with pytest.raises(KeyError, match="not a constant"):
             _gz06(0.9).with_param_input("not_a_param", "p_in")
 
+    def test_a_batched_state_with_a_driven_constant_evaluates(self):
+        """A parameter driver gives the constants a member axis; the field
+        maps them with the state rather than raising."""
+        from hallsim.composite import single_process_composite
+
+        comp = single_process_composite(self._pin(), "g")
+        rhs, keys = comp.build_rhs()
+        y0 = comp.initial_state_vec(keys)
+        batch = jnp.stack([y0, y0, y0])
+        (psi,) = [i for i, k in enumerate(keys) if k.endswith("/psi_in")]
+        batch = batch.at[:, psi].set(jnp.asarray([0.2, 0.5, 0.9]))
+        out = rhs(0.0, batch)
+        assert out.shape == batch.shape
+        for i in range(3):
+            assert jnp.allclose(out[i], rhs(0.0, batch[i]))
+        assert not jnp.allclose(out[0], out[2])
+
     def test_exposes_input_port(self):
         from hallsim.process import PortRole
 

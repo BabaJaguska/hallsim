@@ -190,6 +190,15 @@ class TestVerdictMemoryIsBounded:
         # The process-wide memory gains the structure's own entry at most.
         assert len(mod._RUNG_MEMORY) <= max(before, 4) + 1
 
+    def test_verdicts_are_kept_per_tolerance(self):
+        """A rung reached at one tolerance is no evidence at another."""
+        import hallsim.scheduler as mod
+
+        comp = _composite(StiffPair(k_slow=0.123), "stiff")
+        Scheduler(rtol=1e-3, atol=1e-6).warm_up(comp, (0.0, 5.0), macro_dt=1.0)
+        assert all(len(key) == 3 for key in mod._RUNG_MEMORY)
+        assert any(key[2] == (1e-3, 1e-6) for key in mod._RUNG_MEMORY)
+
 
 class TestToleranceIsNotStateDerived:
     """``atol`` is a floor near zero, the same for every group and every run.
