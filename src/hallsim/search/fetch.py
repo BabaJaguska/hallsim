@@ -44,7 +44,7 @@ def cache_dir(name: str) -> Path:
     return path
 
 
-def get_json(url: str, params: dict, timeout: float) -> dict:
+def get_json(url: str, params: dict | list, timeout: float) -> dict:
     request = urllib.request.Request(
         f"{url}?{urllib.parse.urlencode(params)}",
         headers={"Accept": "application/json", "User-Agent": USER_AGENT},

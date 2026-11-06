@@ -1072,7 +1072,7 @@ def find_data(query, limit, organism, sources, composite, paper, check):
     """Search the data repositories for a time course to calibrate against.
 
     Asks GEO, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench,
-    ArrayExpress and the BioImage Archive. Every hit says what it
+    ArrayExpress, the BioImage Archive and ENCODE. Every hit says what it
     measured, and how its samples are arranged as read from their titles:
     arms, a control arm when one is named, timepoints. With --composite the
     list is narrowed to what that composite carries, by ontology. With
@@ -1082,6 +1082,7 @@ def find_data(query, limit, organism, sources, composite, paper, check):
     from hallsim.search.datasets import (
         SOURCES,
         datasets_of,
+        distinct,
         platform_head,
         search_for_dataset,
     )
@@ -1103,25 +1104,15 @@ def find_data(query, limit, organism, sources, composite, paper, check):
         comp = _import_target(composite)
         if isinstance(comp, Page):
             comp = comp.composite
-    seen, hits = set(), []
-
-    def add(found):
-        for d in found:
-            if d.accession not in seen:
-                seen.add(d.accession)
-                hits.append(d)
-
-    if paper:
-        add(datasets_of(paper, with_files=True))
+    hits = list(datasets_of(paper, with_files=True)) if paper else []
     for term in query:
-        add(
-            search_for_dataset(
-                term,
-                limit=limit,
-                sources=list(sources) or None,
-                organism=organism,
-            )
+        hits += search_for_dataset(
+            term,
+            limit=limit,
+            sources=list(sources) or None,
+            organism=organism,
         )
+    hits = distinct(hits)
     covered = {}
     if comp is not None:
         covered = {d.accession: coverage(d, comp) for d in hits}

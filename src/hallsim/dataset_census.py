@@ -51,7 +51,9 @@ from hallsim.search.datasets import (
     Design,
     Measured,
     biostudies_factors,
+    copy_index,
     geo_by_accession,
+    identity,
     iter_bioimages,
     iter_ebi,
     iter_expression_atlas,
@@ -405,33 +407,6 @@ FILE_DECIDED = {
 }
 
 
-_MIRRORED = re.compile(r"^E-GEOD-(\d+)$", re.I)
-
-
-def original_of(
-    source: str, accession: str, mirrors: str = ""
-) -> tuple[str, str]:
-    """``(source, accession)`` of the deposit a row really describes.
-
-    Two repositories re-host other people's studies. ArrayExpress mirrors
-    about half of its holdings from GEO and encodes the origin in the
-    accession, so ``E-GEOD-12345`` is ``GSE12345`` listed twice; OSDR
-    re-hosts from both and states the original outright in ``mirrors``.
-    Returning the original collapses the copies without a title comparison,
-    and resolves a chain — an OSDR row mirroring ``E-GEOD-12345`` lands on
-    the GEO series, not on the ArrayExpress copy of it.
-    """
-    for candidate in (mirrors.strip(), accession):
-        if m := _MIRRORED.match(candidate):
-            return "geo", f"GSE{m.group(1)}"
-    declared = mirrors.strip().upper()
-    if declared.startswith("GSE"):
-        return "geo", declared
-    if declared.startswith("E-MTAB-"):
-        return "biostudies-arrayexpress", declared
-    return source, accession
-
-
 def shared_subjects(designs: dict[str, tuple]) -> list[tuple[str, ...]]:
     """Groups of deposits that assayed the same subjects.
 
@@ -624,6 +599,7 @@ def screen_dataset(
         "source": cand.source,
         "accession": cand.accession,
         "mirrors": cand.mirrors,
+        "copies": list(cand.copies),
         "title": cand.title[:200],
         "organism": cand.organism,
         "modality": m.modality,
@@ -733,6 +709,7 @@ def candidate_of(row: dict) -> DatasetCandidate:
         pubmed=row.get("pubmed", ""),
         factors=tuple(raw.get("factors", ())),
         mirrors=str(row.get("mirrors") or ""),
+        copies=tuple(row.get("copies") or ()),
         stated=(
             Design.from_dict(raw["design"]) if raw.get("design") else None
         ),
@@ -839,13 +816,14 @@ def rescreen(
         # row that fails an earlier gate would not use it, and a mirror's
         # original is the row that is kept.
         present = {(r["source"], r["accession"]) for r in rows}
+        copied = copy_index(cands.values())
         need = []
         for i, c in cands.items():
             if out[i]["stage"] != "loadable":
                 continue
             if out[i]["loader"] != "unchecked":
                 continue
-            origin = original_of(c.source, c.accession, c.mirrors)
+            origin = identity(c.source, c.accession, c.mirrors, copied)
             # A mirror is skipped only when its original is here to be
             # kept instead; a mirror of a series the run never listed is
             # the only copy there is.
@@ -1313,16 +1291,22 @@ def load_rows(run_dir):
         if line.strip():
             rows.append(json.loads(line))
     df = pd.DataFrame(rows)
-    # An ArrayExpress mirror and its GEO original are one deposit, and the
-    # GEO row is the one a reader can open.
+    # A copy and its original are one deposit: an ArrayExpress mirror of a
+    # GEO series, a GEO series ENCODE names as the copy of an experiment.
+    copied = {
+        str(copy).upper(): (r["source"], r["accession"])
+        for r in rows
+        for copy in r.get("copies") or ()
+    }
     origin = []
     for r in df.itertuples(index=False):
         mirrors = getattr(r, "mirrors", "")
         origin.append(
-            original_of(
+            identity(
                 r.source,
                 r.accession,
                 mirrors if isinstance(mirrors, str) else "",
+                copied,
             )
         )
     df["_origin"] = [f"{s}/{a}" for s, a in origin]

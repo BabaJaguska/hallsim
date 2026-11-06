@@ -7,7 +7,12 @@ tested in test_datasets.
 import json
 
 from hallsim import dataset_census as dc
-from hallsim.search.datasets import DatasetCandidate, Design, Measured
+from hallsim.search.datasets import (
+    DatasetCandidate,
+    Design,
+    Measured,
+    original_of,
+)
 
 TITLES = [
     "WI38_ETOPOSIDE_D00_REP1",
@@ -398,11 +403,11 @@ def test_an_arrayexpress_mirror_collapses_onto_its_geo_original(tmp_path):
     assert len(df) == 1
     # The GEO row survives, because that is the one a reader can open.
     assert df.iloc[0]["source"] == "geo"
-    assert dc.original_of("biostudies-arrayexpress", "E-GEOD-777") == (
+    assert original_of("biostudies-arrayexpress", "E-GEOD-777") == (
         "geo",
         "GSE777",
     )
-    assert dc.original_of("geo", "GSE777") == ("geo", "GSE777")
+    assert original_of("geo", "GSE777") == ("geo", "GSE777")
 
 
 def test_the_file_list_decides_the_loader_where_a_modality_cannot():
@@ -703,11 +708,11 @@ def test_a_mirror_survives_a_rescreen(tmp_path):
     assert dc.rescreen(run, _models()) == 1
     again = json.loads((run / "rows.jsonl").read_text())
     assert again["mirrors"] == "E-GEOD-12647"
-    assert dc.original_of("osdr", "OSD-115", "E-GEOD-12647") == (
+    assert original_of("osdr", "OSD-115", "E-GEOD-12647") == (
         "geo",
         "GSE12647",
     )
-    assert dc.original_of("osdr", "OSD-9", "E-MTAB-77") == (
+    assert original_of("osdr", "OSD-9", "E-MTAB-77") == (
         "biostudies-arrayexpress",
         "E-MTAB-77",
     )
@@ -1026,3 +1031,39 @@ def test_a_targeted_panel_is_nameable():
         )
         == "table"
     )
+
+
+def test_a_geo_copy_of_an_encode_experiment_collapses_onto_it(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    encode = dc.screen_dataset(
+        _cand(
+            "encode",
+            Measured("expression", True),
+            accession="ENCSR134JRE",
+            stated=Design(
+                arms=("TARDBP", "control"), control="control", n_titles=4
+            ),
+            copies=("GSE80859",),
+        ),
+        _models(),
+        route="encode",
+    )
+    geo = dc.screen_dataset(
+        _cand(
+            "geo",
+            Measured("expression", True),
+            accession="GSE80859",
+            samples=("shRNA RNA-seq rep1", "shRNA RNA-seq rep2"),
+        ),
+        _models(),
+        route="geo",
+    )
+    assert encode["copies"] == ["GSE80859"]
+    assert dc.candidate_of(encode).copies == ("GSE80859",)
+    # Listed after its copy, so it is the rule and not the order that wins.
+    (run / "rows.jsonl").write_text(
+        json.dumps(geo) + "\n" + json.dumps(encode) + "\n"
+    )
+    df = dc.load_rows(run)
+    assert list(df["accession"]) == ["ENCSR134JRE"]

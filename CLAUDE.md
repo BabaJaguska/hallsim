@@ -57,10 +57,13 @@ regulon head for a transcriptome; the two readout layers score separately, as
 **Validation methodology** below sets out.
 
 `supply find-data <query>` searches OmicsDI — one index over 29 repositories
-— plus Zenodo, GEO's curated DataSets and the PEtab benchmark collection.
-`--source all` asks every repository directly: GEO, Expression Atlas,
-ArrayExpress, PRIDE, MetaboLights, Metabolomics Workbench, the BioImage
-Archive. Each hit's arms and timepoints come from its sample titles, or from
+— plus what it does not carry: Zenodo, GEO's curated DataSets, the PEtab
+benchmark collection and ENCODE. `--source all` asks every repository
+directly: GEO, Expression Atlas, ArrayExpress, PRIDE, MetaboLights,
+Metabolomics Workbench, the BioImage Archive. A deposit several sources list
+comes back once, as its original: `search.datasets.identity` follows a copy
+to its original (`mirrors`) and an original to its copies (`copies`), and the
+census report collapses rows by the same rule. Each hit's arms and timepoints come from its sample titles, or from
 the design the source states. `--composite` keeps hits measuring something a
 given composite carries; `--paper` lists a paper's own data. `simulate view
 module:name` takes `--bake DIR` to write the levers page as a static site.

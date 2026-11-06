@@ -798,6 +798,7 @@ def test_every_data_source_is_registered():
         "metabolomics-workbench",
         "arrayexpress",
         "bioimages",
+        "encode",
     }
 
 
@@ -841,3 +842,89 @@ def test_a_factor_that_only_labels_its_groups_is_not_the_design():
         (["hepatocyte", "carcinoma"], [], 2),
     ]
     assert len({a for a, _, _ in _factored_arms(conditions)}) == 3
+
+
+def test_an_encode_knockdown_states_its_control_as_the_other_arm(monkeypatch):
+    knockdown = {
+        "accession": "ENCSR134JRE",
+        "assay_title": "shRNA RNA-seq",
+        "assay_slims": ["Transcription"],
+        "description": "shRNA knockdown against TARDBP in K562 cells.",
+        "perturbed": True,
+        "target": {"label": "TARDBP"},
+        "biosample_ontology": {"term_name": "K562"},
+        "replicates": [
+            {
+                "biological_replicate_number": n,
+                "library": {
+                    "biosample": {
+                        "organism": {"scientific_name": "Homo sapiens"}
+                    }
+                },
+            }
+            for n in (1, 2)
+        ],
+        "possible_controls": [{"accession": "ENCSR129RWD"}],
+        "references": [{"identifiers": ["doi:10.1/x", "PMID:32728046"]}],
+    }
+    binding = {
+        "accession": "ENCSR033VAZ",
+        "assay_title": "TF ChIP-seq",
+        "assay_slims": ["DNA binding"],
+        "perturbed": False,
+        "target": {"label": "TARDBP"},
+        "possible_controls": [{"accession": "ENCSR173USI"}],
+    }
+    control = {
+        "accession": "ENCSR129RWD",
+        "replicates": [{"biological_replicate_number": n} for n in (1, 2)],
+    }
+    asked = []
+
+    def fake(url, params, timeout):
+        asked.append(params)
+        if ("accession", "ENCSR129RWD") in params:
+            return {"@graph": [control]}
+        return {"@graph": [knockdown, binding]}
+
+    monkeypatch.setattr(datasets, "get_json", fake)
+    kd, chip = datasets.search_for_dataset(
+        "TARDBP", organism="Homo sapiens", sources=["encode"]
+    )
+    assert kd.source == "encode" and kd.measured.modality == "expression"
+    assert kd.design.arms == ("TARDBP", "control")
+    assert kd.design.control == "control" and kd.design.n_titles == 4
+    assert "control:ENCSR129RWD" in kd.factors and kd.pubmed == "32728046"
+    assert kd.mirrors == ""
+    # Only a perturbed experiment's control is fetched, and it is no arm.
+    assert len(asked) == 2 and ("accession", "ENCSR173USI") not in asked[1]
+    assert chip.measured.modality == "binding" and chip.stated is None
+
+
+def test_a_deposit_listed_by_several_sources_comes_back_once():
+    def cand(source, accession, **kw):
+        return datasets.DatasetCandidate(
+            source=source,
+            accession=accession,
+            title="",
+            kind="",
+            organism="",
+            n_samples=0,
+            platform="",
+            url="",
+            **kw,
+        )
+
+    found = [
+        cand("geo", "GSE80859"),
+        cand("biostudies-arrayexpress", "E-GEOD-80859"),
+        cand("encode", "ENCSR134JRE", copies=("GSE80859",)),
+        cand("geo", "GSE1"),
+    ]
+    kept = datasets.distinct(found)
+    assert [(c.source, c.accession) for c in kept] == [
+        ("encode", "ENCSR134JRE"),
+        ("geo", "GSE1"),
+    ]
+    # Without the original, the first copy stands in for it.
+    assert [c.accession for c in datasets.distinct(found[:2])] == ["GSE80859"]

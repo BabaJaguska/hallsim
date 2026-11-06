@@ -77,8 +77,9 @@ def build_server(name: str = "hallsim-search"):
         """Datasets matching a query, each with its design: arms, control
         arm, timepoints, and whether the source states the design or it was
         read from sample titles. Default sources: OmicsDI (one index over
-        29 repositories), Zenodo, GEO DataSets and the PEtab benchmark
-        collection; ``sources=["all"]`` asks every repository directly."""
+        29 repositories), Zenodo, GEO DataSets, the PEtab benchmark
+        collection and ENCODE; ``sources=["all"]`` asks every repository
+        directly. A deposit several sources list comes back once."""
         names = list(SOURCES) if sources == ["all"] else sources
         return [
             dataset_record(c)

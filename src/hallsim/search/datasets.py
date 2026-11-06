@@ -533,6 +533,73 @@ def table_design(paths) -> Design | None:
 # ── Candidates ──────────────────────────────────────────────────────
 
 
+_MIRRORED = re.compile(r"^E-GEOD-(\d+)$", re.I)
+
+
+def original_of(
+    source: str, accession: str, mirrors: str = ""
+) -> tuple[str, str]:
+    """``(source, accession)`` of the deposit a row really describes.
+
+    Two repositories re-host other people's studies. ArrayExpress mirrors
+    about half of its holdings from GEO and encodes the origin in the
+    accession, so ``E-GEOD-12345`` is ``GSE12345`` listed twice; OSDR
+    re-hosts from both and states the original outright in ``mirrors``.
+    Returning the original collapses the copies without a title comparison,
+    and resolves a chain — an OSDR row mirroring ``E-GEOD-12345`` lands on
+    the GEO series, not on the ArrayExpress copy of it.
+    """
+    for candidate in (mirrors.strip(), accession):
+        if m := _MIRRORED.match(candidate):
+            return "geo", f"GSE{m.group(1)}"
+    declared = mirrors.strip().upper()
+    if declared.startswith("GSE"):
+        return "geo", declared
+    if declared.startswith("E-MTAB-"):
+        return "biostudies-arrayexpress", declared
+    return source, accession
+
+
+def copy_index(cands) -> dict[str, tuple[str, str]]:
+    """Each declared copy's accession, upper-cased, against the deposit
+    that names it in ``copies``."""
+    return {
+        copy.strip().upper(): (c.source, c.accession)
+        for c in cands
+        for copy in c.copies
+    }
+
+
+def identity(
+    source: str,
+    accession: str,
+    mirrors: str = "",
+    copied: dict[str, tuple[str, str]] | None = None,
+) -> tuple[str, str]:
+    """``(source, accession)`` of the deposit a record is a copy of,
+    following both directions a link is declared in: a copy naming its
+    original (:func:`original_of`) and an original naming its copies
+    (``copied``, from :func:`copy_index`). A chain resolves to its root —
+    an ArrayExpress copy of a GEO copy of an ENCODE experiment is the
+    ENCODE experiment."""
+    origin = original_of(source, accession, mirrors)
+    if copied:
+        return copied.get(origin[1].upper(), origin)
+    return origin
+
+
+def distinct(cands) -> list["DatasetCandidate"]:
+    """One candidate per deposit, in first-seen order: the original where
+    it was listed, otherwise the first copy."""
+    copied = copy_index(cands)
+    kept: dict[tuple[str, str], DatasetCandidate] = {}
+    for c in cands:
+        key = identity(c.source, c.accession, c.mirrors, copied)
+        if key not in kept or (c.source, c.accession) == key:
+            kept[key] = c
+    return list(kept.values())
+
+
 @dataclass(frozen=True)
 class DatasetCandidate:
     """One deposit, enough to decide whether to fetch it."""
@@ -556,6 +623,9 @@ class DatasetCandidate:
     #: The accession this deposit mirrors, where it declares one. OSDR
     #: re-hosts studies from GEO and ArrayExpress and names the original.
     mirrors: str = ""
+    #: Accessions elsewhere that re-host this deposit, where it names them.
+    #: ENCODE lists the GEO series each experiment was copied to.
+    copies: tuple[str, ...] = ()
     measured: Measured = field(default_factory=Measured)
     #: The paper the deposit belongs to, when the repository says.
     pubmed: str = ""
@@ -1791,6 +1861,177 @@ def search_omicsdi(
     return out
 
 
+ENCODE = "https://www.encodeproject.org"
+#: ENCODE's assay categories by the quantity they measure.
+ENCODE_MODALITY = {
+    "Transcription": ("expression", True),
+    "DNA binding": ("binding", True),
+    "DNA accessibility": ("accessibility", True),
+    "DNA methylation": ("methylation", True),
+    "RNA binding": ("rna-binding", True),
+    "3D chromatin structure": ("chromatin-structure", True),
+}
+ENCODE_FIELDS = (
+    "accession",
+    "assay_title",
+    "assay_slims",
+    "description",
+    "perturbed",
+    "target.label",
+    "biosample_ontology.term_name",
+    "biosample_summary",
+    "replicates.biological_replicate_number",
+    "replicates.library.biosample.organism.scientific_name",
+    "possible_controls.accession",
+    "dbxrefs",
+    "references.identifiers",
+)
+
+
+def _encode_search(params: list[tuple], timeout: float) -> list[dict]:
+    """The ``@graph`` of an ENCODE search, whose filters repeat keys so
+    ``params`` is a list of pairs; a search with no hits answers 404, which
+    is an empty list here."""
+    import urllib.error
+
+    try:
+        return get_json(f"{ENCODE}/search/", params, timeout).get("@graph", [])
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return []
+        raise
+
+
+def _bio_replicates(entry: dict) -> int:
+    return len(
+        {
+            r.get("biological_replicate_number")
+            for r in entry.get("replicates") or []
+        }
+    )
+
+
+def _encode_candidate(entry: dict, n_controls: dict) -> DatasetCandidate:
+    accession = str(entry.get("accession") or "")
+    assay = str(entry.get("assay_title") or "")
+    target = str((entry.get("target") or {}).get("label") or "")
+    cell = str((entry.get("biosample_ontology") or {}).get("term_name") or "")
+    reps = entry.get("replicates") or []
+    organisms = {
+        str(
+            ((r.get("library") or {}).get("biosample") or {})
+            .get("organism", {})
+            .get("scientific_name")
+            or ""
+        )
+        for r in reps
+    } - {""}
+    slim = next(
+        (s for s in entry.get("assay_slims") or [] if s in ENCODE_MODALITY),
+        "",
+    )
+    measured = Measured(*ENCODE_MODALITY[slim]) if slim else Measured()
+    n_treated = _bio_replicates(entry)
+    controls = [
+        str(c.get("accession") or "")
+        for c in entry.get("possible_controls") or []
+    ]
+    stated = None
+    factors: tuple[str, ...] = ()
+    if entry.get("perturbed") and target and controls:
+        n_ctrl = sum(n_controls.get(c, 0) for c in controls)
+        stated = Design(
+            arms=(target, "control"),
+            control="control",
+            n_titles=n_treated + n_ctrl,
+        )
+        factors = (f"perturbation:{target}", f"method:{assay}") + tuple(
+            f"control:{c}" for c in controls
+        )
+    pmids = [
+        i.removeprefix("PMID:")
+        for ref in entry.get("references") or []
+        for i in ref.get("identifiers") or []
+        if i.startswith("PMID:")
+    ]
+    return DatasetCandidate(
+        source="encode",
+        accession=accession,
+        title=str(entry.get("description") or "")
+        or " ".join(p for p in (assay, target, cell) if p),
+        kind=assay,
+        organism="; ".join(sorted(organisms)),
+        n_samples=n_treated,
+        platform="",
+        url=f"{ENCODE}/experiments/{accession}/",
+        summary=str(entry.get("biosample_summary") or ""),
+        measured=measured,
+        pubmed=pmids[0] if pmids else "",
+        factors=factors + ((f"cell line:{cell}",) if cell else ()),
+        stated=stated,
+        copies=tuple(
+            x.removeprefix("GEO:")
+            for x in entry.get("dbxrefs") or []
+            if x.startswith("GEO:")
+        ),
+    )
+
+
+def search_encode(
+    query: str,
+    limit: int = 25,
+    *,
+    organism: str | None = None,
+    timeout: float = 30.0,
+) -> list[DatasetCandidate]:
+    """ENCODE experiments matching ``query``. A perturbed experiment — an
+    shRNA, CRISPRi or CRISPR knockdown followed by RNA-seq — states its
+    design: the target as one arm, the matched control experiment ENCODE
+    names as the other, with both experiments' biological replicates
+    counted, and the control's accession as a ``control:`` factor. GEO mirrors
+    most of these, one series per experiment, so the mirror of a knockdown
+    holds neither its control nor its target; each hit lists those series
+    in ``copies``, so a search or census keeps the ENCODE record."""
+    params = [
+        ("type", "Experiment"),
+        ("status", "released"),
+        ("searchTerm", query),
+        ("limit", limit),
+        ("format", "json"),
+    ]
+    if organism:
+        params.append(
+            ("replicates.library.biosample.organism.scientific_name", organism)
+        )
+    params += [("field", f) for f in ENCODE_FIELDS]
+    entries = _encode_search(params, timeout)
+    log.info("encode '%s': %d hits", query, len(entries))
+    controls = sorted(
+        {
+            str(c.get("accession") or "")
+            for e in entries
+            if e.get("perturbed")
+            for c in e.get("possible_controls") or []
+        }
+        - {""}
+    )
+    n_controls = {}
+    if controls:
+        found = _encode_search(
+            [("type", "Experiment"), ("limit", "all"), ("format", "json")]
+            + [("accession", c) for c in controls]
+            + [
+                ("field", "accession"),
+                ("field", "replicates.biological_replicate_number"),
+            ],
+            timeout,
+        )
+        n_controls = {
+            str(e.get("accession")): _bio_replicates(e) for e in found
+        }
+    return [_encode_candidate(e, n_controls) for e in entries]
+
+
 def _search_petab(*a, **kw):
     """Late import: `attached` builds on the candidates defined here."""
     from hallsim.search.attached import search_petab
@@ -1810,14 +2051,15 @@ SOURCES = {
     "metabolomics-workbench": _ebi_source("metabolomics-workbench"),
     "arrayexpress": _ebi_source("arrayexpress"),
     "bioimages": search_bioimages,
+    "encode": search_encode,
 }
 
 
 #: What a search asks when no source is named: the one index over the
 #: repositories, then the sources it does not carry — Zenodo, GEO's
-#: curated DataSets, the PEtab collection. ``list(SOURCES)`` asks every
-#: repository directly.
-DEFAULT_SOURCES = ("omicsdi", "zenodo", "geo-datasets", "petab")
+#: curated DataSets, the PEtab collection, ENCODE. ``list(SOURCES)`` asks
+#: every repository directly.
+DEFAULT_SOURCES = ("omicsdi", "zenodo", "geo-datasets", "petab", "encode")
 
 
 def search_for_dataset(
@@ -1828,7 +2070,7 @@ def search_for_dataset(
 ) -> list[DatasetCandidate]:
     """Search the data repositories for ``query``: :data:`DEFAULT_SOURCES`
     unless ``sources`` names others. A source that errors is logged and
-    skipped."""
+    skipped; a deposit listed by several sources comes back once."""
     names = sources if sources is not None else list(DEFAULT_SOURCES)
     found: list[DatasetCandidate] = []
     for name in names:
@@ -1839,7 +2081,7 @@ def search_for_dataset(
             found.extend(search(query, limit=limit, **kwargs))
         except Exception as exc:  # noqa: BLE001 - a dead repository
             log.warning("source %r failed for '%s': %s", name, query, exc)
-    return found
+    return distinct(found)
 
 
 # ── A paper's own data, through Europe PMC ──────────────────────────

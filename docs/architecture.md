@@ -619,7 +619,7 @@ src/hallsim/
     literature.py      — Europe PMC full text, model pointers, what a cited repository holds
     citations.py       — one hop through the citation graph (Europe PMC, OpenAlex), screened
     web.py             — supply discover: papers, their PDFs, the repositories they cite
-    datasets.py        — search_for_dataset (GEO and its DataSets, Expression Atlas, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench, ArrayExpress, BioImage Archive, OSDR), parse_design and the designs a source states, a paper's own data and supplement tables, resolve_perturbation
+    datasets.py        — search_for_dataset (GEO and its DataSets, Expression Atlas, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench, ArrayExpress, BioImage Archive, OSDR, ENCODE), parse_design and the designs a source states, a paper's own data and supplement tables, resolve_perturbation
     attached.py        — the data a model ships beside itself: PEtab problems (petab), COPASI fitting experiments (basico), a BioModels deposit's own tables
     server.py          — the search as MCP tools: find_models, find_data, dataset_design, paper_datasets, sources (`supply mcp`)
   screens.py           — where a hit meets the framework: what a model produces, what a dataset measures of a composite, how a platform loads
