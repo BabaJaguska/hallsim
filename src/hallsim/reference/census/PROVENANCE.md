@@ -130,9 +130,12 @@ study model downloads its data files too, which over these 3,415 deposits is
 
 ```
 supply census                   # models
-simulate dataset-census         # datasets
+supply census-data run          # datasets
 ```
 
 Both are multi-hour runs against live repositories. Nothing in the package
 requires these files; they are a starting shelf, and code that reads them
 should degrade to a search rather than fail when they are absent or stale.
+`hallsim.census_snapshots` reads the two tables (`find_shipped_models`,
+`find_shipped_datasets`) and `supply mcp` serves them as `census_models` and
+`census_datasets`.

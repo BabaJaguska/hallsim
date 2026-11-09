@@ -1067,3 +1067,39 @@ def test_a_geo_copy_of_an_encode_experiment_collapses_onto_it(tmp_path):
     )
     df = dc.load_rows(run)
     assert list(df["accession"]) == ["ENCSR134JRE"]
+
+
+def test_the_encode_route_streams_each_experiment_once(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    cand = _cand(
+        "encode",
+        Measured("expression", True),
+        accession="ENCSR134JRE",
+        stated=Design(
+            arms=("TARDBP", "control"), control="control", n_titles=4
+        ),
+        copies=("GSE80859",),
+    )
+    monkeypatch.setattr(
+        dc, "iter_encode", lambda organisms: iter([cand, cand])
+    )
+    sink = dc._Sink(run)
+    dc._run_stream(
+        run,
+        _models(),
+        sink,
+        route="encode",
+        cands=dc.STREAMS["encode"](None, ("Homo sapiens",)),
+    )
+    rows = [
+        json.loads(line)
+        for line in (run / "rows.jsonl").read_text().splitlines()
+    ]
+    assert [(r["route"], r["accession"]) for r in rows] == [
+        ("encode", "ENCSR134JRE")
+    ]
+    assert rows[0]["control"] == "control" and rows[0]["n_arms"] == 2
+    assert (run / "route.encode.done").exists()
+    # Listed before GEO, which copies these experiments without their design.
+    assert dc.ROUTES.index("encode") < dc.ROUTES.index("geo")

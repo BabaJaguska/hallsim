@@ -114,3 +114,72 @@ def test_a_dataset_design_is_read_by_accession_kind(monkeypatch):
     assert d["accession"] == "GDS6010" and d["arms"] == ["drug"]
     assert d["per_arm"] == [["drug", [6.0, 24.0]]]
     assert "error" in _call(mcp, "dataset_design", accession="GSE0")
+
+
+def test_the_framework_tools_open_a_deposit(monkeypatch):
+    import pandas as pd
+
+    from hallsim import census_snapshots, intake
+
+    asked = {}
+
+    def triage(model_id, source="biomodels", **kw):
+        asked.update(model_id=model_id, source=source, **kw)
+        return intake.TriageVerdict(
+            name=f"{source}:{model_id}",
+            status="unscreenable",
+            blockers=("no fetcher",),
+        )
+
+    monkeypatch.setattr(intake, "triage_model", triage)
+    table = pd.DataFrame(
+        [
+            {
+                "accession": "BIOMD1",
+                "name": "p53 oscillator",
+                "stage": "pass",
+                "how": "",
+                "taxon": "Homo sapiens",
+                "kind": "ode",
+            },
+            {
+                "accession": "BIOMD2",
+                "name": "p53 Mdm2",
+                "stage": "clock",
+                "how": "declare the time unit",
+                "taxon": "Mus musculus",
+                "kind": "ode",
+            },
+            {
+                "accession": "BIOMD3",
+                "name": "glycolysis",
+                "stage": "clock",
+                "how": "declare the time unit",
+                "taxon": "Homo sapiens",
+                "kind": "ode",
+            },
+        ]
+    )
+    table.attrs["snapshot"] = "2026-09-28"
+    monkeypatch.setattr(census_snapshots, "shipped_table", lambda p: table)
+
+    mcp = server.framework_tools(server.build_server())
+    v = _call(
+        mcp, "triage_model", model_id="x", source="biosimulations", t_end=3
+    )
+    assert asked == {
+        "model_id": "x",
+        "source": "biosimulations",
+        "t_end": 3,
+        "produces": None,
+    }
+    assert v["status"] == "unscreenable" and v["escalate"] is False
+    # NaN is not JSON; the unset numbers arrive as null.
+    assert v["rest_residual"] is None and v["screen"] is None
+
+    found = _call(mcp, "census_models", pattern="p53")
+    assert found["snapshot"] == "2026-09-28" and found["n_matching"] == 2
+    gated = _call(mcp, "census_models", pattern="p53", stage="clock")
+    assert [r["accession"] for r in gated["rows"]] == ["BIOMD2"]
+    by_taxon = _call(mcp, "census_models", pattern=".", taxon="mus")
+    assert [r["accession"] for r in by_taxon["rows"]] == ["BIOMD2"]

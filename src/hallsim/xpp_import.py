@@ -34,6 +34,7 @@ mistranslated.
 from __future__ import annotations
 
 import logging
+import keyword
 import re
 from typing import Any
 
@@ -251,8 +252,8 @@ class _XPPExprParser:
                         self._next()
                         args.append(self._parse_expr(0))
                 self._expect_op(")")
-                return f"{name}({', '.join(args)})"
-            return name
+                return f"{_py_name(name)}({', '.join(args)})"
+            return _py_name(name)
         raise XPPParseError(f"unexpected token {val!r} in {self.src!r}")
 
     def _parse_if(self) -> str:
@@ -269,6 +270,16 @@ class _XPPExprParser:
         else_e = self._parse_expr(0)
         self._expect_op(")")
         return f"where(({cond}), ({then_e}), ({else_e}))"
+
+
+def _py_name(name: str) -> str:
+    """The identifier an XPP name is evaluated under: itself, unless the
+    lower-cased name is a Python keyword, which takes a trailing underscore.
+    ``Is``, the injected current in ModelDB's neuron files, lower-cases to
+    ``is`` and otherwise leaves the derivative uncompilable. Public names —
+    ports, ``parameters`` — keep the XPP spelling; only the generated source
+    and its namespace see the suffix."""
+    return name + "_" if keyword.iskeyword(name) else name
 
 
 def _xpp_expr_to_python(expr: str) -> str:
@@ -544,21 +555,21 @@ class XPPProcess(ImportedODEProcess):
         ns = dict(_XPP_MATH)
         ns["t"] = t * self.time_scale
         for name in self._state_names:
-            ns[name] = state[name]
+            ns[_py_name(name)] = state[name]
         for name in self._param_names:
-            ns[name] = jnp.asarray(self.parameters[name])
+            ns[_py_name(name)] = jnp.asarray(self.parameters[name])
         # Live parameter drivers override their constant by name, before the
         # functions/intermediates (which close over ns) are evaluated.
         for name, val in self._driven_param_values(state).items():
-            ns[name] = val
+            ns[_py_name(name)] = val
         for name, args, src in zip(
             self._func_names, self._func_args, self._func_py
         ):
-            ns[name] = eval(
-                f"lambda {','.join(args)}: ({src})", ns
+            ns[_py_name(name)] = eval(
+                f"lambda {','.join(_py_name(a) for a in args)}: ({src})", ns
             )  # noqa: S307
         for name, src in zip(self._inter_names, self._inter_py):
-            ns[name] = eval(src, ns)  # noqa: S307
+            ns[_py_name(name)] = eval(src, ns)  # noqa: S307
         return ns
 
     def derivative(self, t, state):

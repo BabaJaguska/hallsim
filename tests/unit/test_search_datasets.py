@@ -858,13 +858,23 @@ def test_an_encode_knockdown_states_its_control_as_the_other_arm(monkeypatch):
                 "biological_replicate_number": n,
                 "library": {
                     "biosample": {
-                        "organism": {"scientific_name": "Homo sapiens"}
+                        "organism": {"scientific_name": "Homo sapiens"},
+                        "applied_modifications": [
+                            {
+                                "purpose": "repression",
+                                "modified_site_by_target_id": {
+                                    "label": "TARDBP"
+                                },
+                            }
+                        ],
                     }
                 },
             }
             for n in (1, 2)
         ],
-        "possible_controls": [{"accession": "ENCSR129RWD"}],
+        "possible_controls": [
+            {"accession": "ENCSR129RWD", "perturbed": False}
+        ],
         "references": [{"identifiers": ["doi:10.1/x", "PMID:32728046"]}],
     }
     binding = {
@@ -873,7 +883,39 @@ def test_an_encode_knockdown_states_its_control_as_the_other_arm(monkeypatch):
         "assay_slims": ["DNA binding"],
         "perturbed": False,
         "target": {"label": "TARDBP"},
-        "possible_controls": [{"accession": "ENCSR173USI"}],
+        "possible_controls": [
+            {"accession": "ENCSR173USI", "perturbed": False}
+        ],
+    }
+    # A ChIP of a treated sample: the antibody target is not what was
+    # perturbed, and its input library shares the treatment.
+    treated = {
+        "accession": "ENCSR895JMI",
+        "assay_title": "TF ChIP-seq",
+        "assay_slims": ["DNA binding"],
+        "perturbed": True,
+        "target": {"label": "RAD21"},
+        "replicates": [
+            {
+                "biological_replicate_number": 1,
+                "library": {
+                    "biosample": {
+                        "treatments": [
+                            {"treatment_term_name": "dexamethasone"}
+                        ],
+                        "applied_modifications": [
+                            {
+                                "purpose": "tagging",
+                                "modified_site_by_target_id": {
+                                    "label": "RAD21"
+                                },
+                            }
+                        ],
+                    }
+                },
+            }
+        ],
+        "possible_controls": [{"accession": "ENCSR216DMN", "perturbed": True}],
     }
     control = {
         "accession": "ENCSR129RWD",
@@ -885,10 +927,10 @@ def test_an_encode_knockdown_states_its_control_as_the_other_arm(monkeypatch):
         asked.append(params)
         if ("accession", "ENCSR129RWD") in params:
             return {"@graph": [control]}
-        return {"@graph": [knockdown, binding]}
+        return {"@graph": [knockdown, binding, treated]}
 
     monkeypatch.setattr(datasets, "get_json", fake)
-    kd, chip = datasets.search_for_dataset(
+    kd, chip, dex = datasets.search_for_dataset(
         "TARDBP", organism="Homo sapiens", sources=["encode"]
     )
     assert kd.source == "encode" and kd.measured.modality == "expression"
@@ -896,9 +938,106 @@ def test_an_encode_knockdown_states_its_control_as_the_other_arm(monkeypatch):
     assert kd.design.control == "control" and kd.design.n_titles == 4
     assert "control:ENCSR129RWD" in kd.factors and kd.pubmed == "32728046"
     assert kd.mirrors == ""
-    # Only a perturbed experiment's control is fetched, and it is no arm.
-    assert len(asked) == 2 and ("accession", "ENCSR173USI") not in asked[1]
+    # Only the control that is an arm is fetched: not an unperturbed
+    # experiment's input, not the input that shares a treatment.
+    assert len(asked) == 2
+    assert ("accession", "ENCSR173USI") not in asked[1]
+    assert ("accession", "ENCSR216DMN") not in asked[1]
     assert chip.measured.modality == "binding" and chip.stated is None
+    assert dex.stated is None and "perturbation:dexamethasone" in dex.factors
+    assert "perturbation:RAD21" not in dex.factors
+    assert "modification:tagging RAD21" in dex.factors
+
+
+def test_encode_enumeration_slices_the_listing_by_assay_category(
+    monkeypatch,
+):
+    """The search refuses an offset past 10,000, so the listing is fetched
+    whole one assay category at a time; an experiment in two categories is
+    listed once, and only a category with a knockdown asks for controls."""
+    shared = {
+        "accession": "ENCSR000SHR",
+        "assay_slims": ["Transcription", "DNA binding"],
+        "perturbed": False,
+    }
+    knockdown = {
+        "accession": "ENCSR134JRE",
+        "assay_slims": ["Transcription"],
+        "perturbed": True,
+        "target": {"label": "TARDBP"},
+        "possible_controls": [
+            {"accession": "ENCSR129RWD", "perturbed": False}
+        ],
+        "replicates": [
+            {
+                "biological_replicate_number": 1,
+                "library": {
+                    "biosample": {
+                        "applied_modifications": [
+                            {
+                                "purpose": "repression",
+                                "modified_site_by_target_id": {
+                                    "label": "TARDBP"
+                                },
+                            }
+                        ]
+                    }
+                },
+            }
+        ],
+    }
+    binding = {
+        "accession": "ENCSR033VAZ",
+        "assay_slims": ["DNA binding"],
+        "perturbed": False,
+    }
+    by_slim = {
+        "Transcription": [knockdown, shared],
+        "DNA binding": [shared, binding],
+    }
+    asked = []
+
+    def fake(url, params, timeout):
+        asked.append(params)
+        assert (datasets.ENCODE_ORGANISM, "Homo sapiens") in params or (
+            "accession",
+            "ENCSR129RWD",
+        ) in params
+        if ("limit", 0) in params:
+            return {
+                "total": 3,
+                "facets": [
+                    {
+                        "field": "assay_slims",
+                        "terms": [{"key": k} for k in by_slim],
+                    }
+                ],
+            }
+        if ("accession", "ENCSR129RWD") in params:
+            return {
+                "@graph": [
+                    {
+                        "accession": "ENCSR129RWD",
+                        "replicates": [
+                            {"biological_replicate_number": n} for n in (1, 2)
+                        ],
+                    }
+                ]
+            }
+        assert ("limit", "all") in params
+        return {"@graph": by_slim[dict(params)["assay_slims"]]}
+
+    monkeypatch.setattr(datasets, "get_json", fake)
+    hits = list(datasets.iter_encode(("Homo sapiens",)))
+    assert [h.accession for h in hits] == [
+        "ENCSR134JRE",
+        "ENCSR000SHR",
+        "ENCSR033VAZ",
+    ]
+    assert hits[0].design.control == "control"
+    assert hits[0].design.n_titles == 3
+    # The facet, one request per category, and one for the controls.
+    assert len(asked) == 4
 
 
 def test_a_deposit_listed_by_several_sources_comes_back_once():

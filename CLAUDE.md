@@ -46,7 +46,11 @@ only when the deposit itself must supply the quantity. `--expand N` or
 citation graph and lists only what passes the same screens — the seed's
 descendants and the data it was fitted to, which no text query reaches. Importers: SBML, COPASI `.cps`, XPPAUT `.ode`, and
 CellML `.cellml`, which is read through Myokit and written as SBML on the way
-in, the same route `.cps` takes.
+in, the same route `.cps` takes. `simulate screen MODEL --source REPO` triages
+a hit from any repository the search lists (`intake.triage_model`: ModelDB's
+XPPAUT files go through `xpp_import`, a re-hosted BioModels deposit is
+screened as the original); a repository with no fetcher reports
+`unscreenable`, which says nothing about the model.
 
 Data readers cover GEO and GeneLab expression, MetaboLights and Metabolomics
 Workbench metabolomics, and PRIDE proteomics, and every one returns a single
@@ -73,6 +77,10 @@ both are multi-hour runs against live repositories. Dated snapshots ship under
 `src/hallsim/reference/census/` so a deposit can be chosen offline — read that
 folder's `PROVENANCE.md` first, and prefer these over a live search when the
 question is "which deposits exist and what is wrong with them".
+`hallsim.census_snapshots` reads them (`find_shipped_models`,
+`find_shipped_datasets`). `supply mcp` serves the search plus `screen_models`,
+`triage_model`, `census_models` and `census_datasets` to any MCP client;
+composing and simulating stay in Python.
 
 **Five traps in those tables, each of which has cost someone real time:**
 

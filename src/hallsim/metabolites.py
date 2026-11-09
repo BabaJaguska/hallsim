@@ -888,9 +888,10 @@ def shipped_designs() -> dict[str, dict]:
     """Declared designs already read from the repositories, by accession: the
     dated snapshots under ``hallsim/reference/census``, empty where none
     ships."""
-    folder = Path(__file__).resolve().parent / "reference/census"
+    from hallsim.census_snapshots import CENSUS_DIR
+
     out: dict[str, dict] = {}
-    for path in sorted(folder.glob("*_designs_*.json.gz")):
+    for path in sorted(CENSUS_DIR.glob("*_designs_*.json.gz")):
         try:
             with gzip.open(path, "rt") as fh:
                 out.update(json.load(fh))

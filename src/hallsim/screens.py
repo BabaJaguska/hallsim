@@ -26,7 +26,11 @@ from pathlib import Path
 import pandas as pd
 
 from hallsim.search.datasets import DatasetCandidate, search_for_dataset
-from hallsim.search.models import model_files, search_for_model
+from hallsim.search.models import (
+    canonical_deposit,
+    model_files,
+    search_for_model,
+)
 
 log = logging.getLogger(__name__)
 
@@ -272,14 +276,9 @@ def screen_species_roles(
     wanted = tuple(roles)
     out: list[SpeciesScreen] = []
     for cand in candidates:
-        model_id = getattr(cand, "id", cand)
-        source = getattr(cand, "source", "biomodels")
-        # A repository that re-hosts BioModels embeds the accession in its own
-        # id (BioSimulations: "BIOMD0000000582_tellurium_..."). Screening the
-        # underlying deposit beats reporting a duplicate as unreadable.
-        embedded = re.search(r"BIOMD\d{10}", str(model_id))
-        if source != "biomodels" and embedded:
-            model_id, source = embedded.group(0), "biomodels"
+        model_id, source = canonical_deposit(
+            getattr(cand, "id", cand), getattr(cand, "source", "biomodels")
+        )
         try:
             paths = model_files(model_id, source, timeout)
         except LookupError as exc:

@@ -870,12 +870,13 @@ def find(
             _echo_neighbour(hit, verdict)
 
     if triage and matches:
-        from hallsim.intake import triage_sbml
+        from hallsim.intake import triage_model
 
         click.echo(f"\n=== TRIAGE of {len(matches)} match(es) ===")
         for r in matches:
-            click.echo(f"\n{by[r.model_id].name[:88]}")
-            click.echo(str(triage_sbml(r.model_id)))
+            c = by[r.model_id]
+            click.echo(f"\n{c.name[:88]}")
+            click.echo(str(triage_model(r.model_id, c.source)))
 
 
 @supply.command("discover")
@@ -1005,34 +1006,15 @@ def discover(
 @click.option("--http", is_flag=True, help="serve over HTTP instead of stdio")
 @click.option("--port", type=int, default=8000, show_default=True)
 def mcp_server(http, port):
-    """Serve the search as MCP tools: find_models, find_data,
-    dataset_design, paper_datasets, sources, and screen_models (what role
-    a species plays in a deposit). Register it in Claude Code with
+    """Serve the search and the intake gate as MCP tools: find_models,
+    find_data, dataset_design, paper_datasets, sources; screen_models (what
+    role a species plays in a deposit), triage_model (import and screen a
+    hit from any repository), census_models and census_datasets (the
+    shipped census tables, offline). Register it in Claude Code with
     `claude mcp add hallsim -- supply mcp`."""
-    from dataclasses import asdict
+    from hallsim.search.server import build_server, framework_tools
 
-    from hallsim.screens import ROLES, screen_species_roles
-    from hallsim.search.server import build_server
-
-    mcp = build_server()
-
-    @mcp.tool
-    def screen_models(
-        model_ids: list[str], pattern: str, roles: list[str] | None = None
-    ) -> list[dict]:
-        """What role each species matching ``pattern`` (a regex against
-        species ids and names) plays in each deposit (BioModels accessions,
-        ``jws:`` slugs or ``PMC`` ids from find_models): produces, consumes,
-        reads (a modifier or rate-law symbol) or input (boundary or
-        constant). ``status`` is ``match`` where one plays any of ``roles``
-        (default all). A consumer or reader is the downstream half of a
-        composite; the producer is an edge to attach."""
-        return [
-            asdict(r)
-            for r in screen_species_roles(
-                model_ids, pattern, roles=tuple(roles or ROLES)
-            )
-        ]
+    mcp = framework_tools(build_server())
 
     if http:
         mcp.run(transport="http", port=port)
@@ -1405,23 +1387,31 @@ def find_papers(
     help="solo solve window, in the model's native time unit; the default is "
     "the deposit's own authored SED-ML horizon, or 10 if it states none",
 )
-def screen(model, t_end):
+@click.option(
+    "--source",
+    default="biomodels",
+    show_default=True,
+    help="the repository MODEL is an id in, as `supply find` lists it: "
+    "biomodels, jws, modeldb, physiome, biosimulations, europepmc",
+)
+def screen(model, t_end, source):
     """Screen one model on its own before it joins a composite.
 
-    Imports MODEL (a BioModels id, or a path to an SBML or COPASI file),
-    triages it, and runs the numerical screen: exploding, vanishing,
+    Imports MODEL — a BioModels id, a path to an SBML, COPASI, CellML or
+    XPPAUT file, or with --source an id in another repository — triages
+    it, and runs the numerical screen: exploding, vanishing,
     tolerance-sensitive, not at rest, non-tunable. Nothing should be
     composed unscreened.
     """
     from pathlib import Path
 
-    from hallsim.intake import triage_sbml
+    from hallsim.intake import triage_model
 
-    if model.isdigit():
+    if source == "biomodels" and model.isdigit():
         target, name = int(model), f"biomodel_{model}"
     else:
         target, name = model, Path(model).stem
-    verdict = triage_sbml(target, t_end=t_end, name=name)
+    verdict = triage_model(target, source, t_end=t_end, name=name)
     click.echo(str(verdict))
     if verdict.screen is not None:
         click.echo(str(verdict.screen))
@@ -1664,9 +1654,10 @@ def census_data():
     what a screened model could be scored on.
 
     The data side of `supply census`. `run` enumerates the routes (the
-    model papers through Europe PMC, every GEO series for the organisms,
-    every PRIDE, MetaboLights, Metabolomics Workbench and ArrayExpress
-    entry, the BioImage Archive) and streams one row per dataset through
+    model papers through Europe PMC, every ENCODE experiment and every GEO
+    series for the organisms, every PRIDE, MetaboLights, Metabolomics
+    Workbench and ArrayExpress entry, the BioImage Archive) and streams one
+    row per dataset through
     the gates timed, measured, matched, loadable to
     `outputs/census-data/<stamp>/rows.jsonl`, resumable. Arms, a control
     and the perturbation labels are recorded, not gated. `report` writes
@@ -1690,6 +1681,7 @@ def census_data():
     type=click.Choice(
         [
             "papers",
+            "encode",
             "geo",
             "ebi",
             "osdr",
@@ -1701,15 +1693,17 @@ def census_data():
         ]
     ),
     help="a route to enumerate (default: all, in this order); repeatable. "
-    "gds and atlas are the curated views of GEO and ArrayExpress deposits, "
-    "petab the benchmark collection of models with their data, models the "
-    "data each screened BioModels deposit ships beside itself",
+    "encode lists every released experiment, its knockdowns with the "
+    "control ENCODE names and the GEO series copying them; gds and atlas "
+    "are the curated views of GEO and ArrayExpress deposits, petab the "
+    "benchmark collection of models with their data, models the data each "
+    "screened BioModels deposit ships beside itself",
 )
 @click.option(
     "--organism",
     "organisms",
     multiple=True,
-    help='GEO organisms (default: "Homo sapiens", "Mus musculus")',
+    help='ENCODE and GEO organisms (default: "Homo sapiens", "Mus musculus")',
 )
 @click.option(
     "--limit",

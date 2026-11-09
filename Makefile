@@ -18,10 +18,13 @@ install:
 install-dev:
 	$(PIP_INSTALL) -e ".[dev]"
 
+# The trees the pre-commit hooks format and lint. Run through $(PYTHON) so
+# the release is this project's: the 2025 and 2026 stable styles disagree
+# on string concatenations, and a bare `black` is whichever venv is active.
+FORMATTED = src/ tests/ demos/ scripts/
+
 format:
-	black --line-length 79 src/
-	black --line-length 79 tests/
-	black --line-length 79 demos/
+	$(PYTHON) -m black --line-length 79 $(FORMATTED)
 
 # black skips gitignored files when walking a directory; flake8 does not.
 # Without the exclusion, lint gates on the scratch probes (demos/_*.py, in
@@ -30,13 +33,11 @@ format:
 LINT_EXCLUDE = demos/_*.py
 
 lint:
-	flake8 --ignore E501,E402,W504,W503,E226,E203 src/
-	flake8 --ignore E501,E402,W504,W503,E226,E203 tests/
-	flake8 --ignore E501,E402,W504,W503,E226,E203 \
-		--extend-exclude '$(LINT_EXCLUDE)' demos/
+	$(PYTHON) -m flake8 --ignore E501,E402,W504,W503,E226,E203 \
+		--extend-exclude '$(LINT_EXCLUDE)' $(FORMATTED)
 
 check:
-	black --check --line-length 79 src/ tests/ demos/
+	$(PYTHON) -m black --check --line-length 79 $(FORMATTED)
 	$(MAKE) lint
 	$(PYTHON) scripts/check_prose_ratio.py src/hallsim
 

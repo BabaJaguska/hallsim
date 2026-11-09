@@ -338,10 +338,14 @@ row stamped — the report also copies the table and the counts to
 the deposits a change lifted or broke; a probe or a partial run leaves
 that table alone.
 
-**The data side.** `supply census-data run` enumerates GEO, PRIDE,
+**The data side.** `supply census-data run` enumerates ENCODE, GEO, PRIDE,
 MetaboLights, Metabolomics Workbench, ArrayExpress, NASA's OSDR, the
 BioImage Archive and each screened model's own paper, then the sources
-that state a design outright: GEO's curated DataSets (a curator typed
+that state a design outright: ENCODE's perturbed experiments (what was
+done to the biosample as one arm, the unperturbed control experiment
+ENCODE names as the other, and the GEO series copying the experiment
+listed so the report keeps one record), GEO's
+curated DataSets (a curator typed
 each subset, so a time course is declared and its sample membership
 known), Expression Atlas (factor values per assay group or contrast), the
 PEtab benchmark collection (each model with the measurement table it was
@@ -611,8 +615,9 @@ src/hallsim/
   bifurcation.py       — equilibrium, spectrum, codim-1 continuation
   validation.py        — unit / semantic / graph / coupling checks, analyze_composability
   diagnostics.py       — screen, coupling-source verdicts
-  intake.py            — triage_sbml, published_fit_chi2
+  intake.py            — triage_sbml, triage_model (a hit from any repository the search lists; XPPAUT through xpp_import), published_fit_chi2
   census.py            — the corpus census: every deposit through the gate, and the report
+  census_snapshots.py  — the dated census tables shipped under reference/census, queried offline
   search/              — the repository layer; imports nothing from the rest of the package, and tests/unit/test_search_boundary.py keeps it so
     fetch.py           — one JSON getter, retry with backoff, concurrent fetch, the disk cache under ~/.cache/hallsim
     models.py          — search_for_model across BioModels, JWS, ModelDB, BioSimulations, Physiome, Europe PMC; a candidate's files, downloaded and cached
@@ -621,7 +626,7 @@ src/hallsim/
     web.py             — supply discover: papers, their PDFs, the repositories they cite
     datasets.py        — search_for_dataset (GEO and its DataSets, Expression Atlas, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench, ArrayExpress, BioImage Archive, OSDR, ENCODE), parse_design and the designs a source states, a paper's own data and supplement tables, resolve_perturbation
     attached.py        — the data a model ships beside itself: PEtab problems (petab), COPASI fitting experiments (basico), a BioModels deposit's own tables
-    server.py          — the search as MCP tools: find_models, find_data, dataset_design, paper_datasets, sources (`supply mcp`)
+    server.py          — the search as MCP tools: find_models, find_data, dataset_design, paper_datasets, sources; framework_tools adds screen_models, triage_model, census_models, census_datasets (`supply mcp`)
   screens.py           — where a hit meets the framework: what a model produces, what a dataset measures of a composite, how a platform loads
   dataset_census.py    — the data census: every deposit through contrast → measured → matched → loadable
   measurements.py      — MeasuredDataset: the one contrast interface every reader returns

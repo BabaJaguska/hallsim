@@ -40,7 +40,10 @@ class TriageVerdict:
     """Mechanical screen of one model. ``escalate`` gates the review panel."""
 
     name: str
-    status: str  # "pass" | "flag" | "reject"
+    #: ``pass`` | ``flag`` | ``reject`` | ``unscreenable`` — the last when
+    #: the deposit could not be fetched or holds no file an importer reads,
+    #: which says nothing about the model.
+    status: str
     blockers: tuple[str, ...] = ()
     flags: tuple[str, ...] = ()
     n_species: int = 0
@@ -53,7 +56,7 @@ class TriageVerdict:
     @property
     def escalate(self) -> bool:
         """True when a reviewer's time is worth spending on this model."""
-        return self.status != "reject"
+        return self.status in ("pass", "flag")
 
     def __str__(self) -> str:
         parts = [f"[{self.status.upper()}] {self.name}"]
@@ -633,11 +636,6 @@ def triage_process(
                     )
 
         _, time_declared = _extract_native_time_seconds(xml_path)
-        if not time_declared:
-            flags.append(
-                "no declared time unit — its clock is a guess, and "
-                "reconciling it onto a shared axis may be silently wrong"
-            )
         if getattr(process, "_events", ()):
             from hallsim.sbml_events import (
                 PLAUSIBLE_PROTOCOL_SECONDS,
@@ -676,6 +674,11 @@ def triage_process(
                 "no species to annotate: the state is carried by rule-driven "
                 "parameters, so semantic composition checks cannot see it"
             )
+    if not time_declared:
+        flags.append(
+            "no declared time unit — its clock is a guess, and "
+            "reconciling it onto a shared axis may be silently wrong"
+        )
 
     residual = float("nan")
     try:
@@ -887,6 +890,98 @@ def triage_sbml(
         produces=produces,
         sweep=sweep,
         reporters=reporters,
+    )
+
+
+#: What an importer reads, in the order one is preferred among a deposit's
+#: files: SBML first, the formats converted to SBML on the way in, then
+#: XPPAUT, which has its own importer.
+_SBML_ROUTE = (".xml", ".sbml", ".cps", ".cellml")
+_XPP_ROUTE = (".ode",)
+
+
+def _unscreenable(label: str, why: str) -> TriageVerdict:
+    return TriageVerdict(name=label, status="unscreenable", blockers=(why,))
+
+
+def triage_model(
+    model_id,
+    source: str = "biomodels",
+    t_end: float | None = None,
+    name: str | None = None,
+    *,
+    timeout: float = 120.0,
+    **screening,
+) -> TriageVerdict:
+    """Triage a deposit from any repository the model search lists, fetched
+    through that repository's own fetcher: BioModels and the ids
+    :func:`triage_sbml` takes, JWS Online, Physiome (CellML), ModelDB
+    (XPPAUT ``.ode``, imported through :mod:`hallsim.xpp_import`), a paper's
+    supplement. A local path to any of those formats is read directly. A
+    re-hosted BioModels deposit is screened as the original.
+
+    A repository with no fetcher, a deposit holding no file an importer
+    reads, or a fetch that fails is ``unscreenable``: reported, never
+    raised, since an unscreened hit is still a hit. ``screening`` goes to
+    :func:`triage_process` (``produces``, ``sweep``, ``reporters``).
+    """
+    import os
+    from dataclasses import replace
+
+    from hallsim.search.models import canonical_deposit, model_files
+
+    model_id, source = canonical_deposit(model_id, source)
+    local = isinstance(model_id, (str, os.PathLike)) and os.path.isfile(
+        model_id
+    )
+    if source == "biomodels" and not local:
+        return triage_sbml(
+            model_id, t_end=t_end, name=name or "m", **screening
+        )
+    if local:
+        label, paths = str(model_id), [os.fspath(model_id)]
+    else:
+        label = f"{source}:{model_id}"
+        try:
+            paths = [
+                os.fspath(p) for p in model_files(model_id, source, timeout)
+            ]
+        except LookupError as exc:
+            return _unscreenable(label, str(exc))
+        except Exception as exc:  # noqa: BLE001 - a dead repository
+            return _unscreenable(
+                label, f"fetch failed: {type(exc).__name__}: {exc}"
+            )
+    by_route = {
+        route: next((p for p in paths if p.lower().endswith(route)), None)
+        for route in (_SBML_ROUTE, _XPP_ROUTE)
+    }
+    if by_route[_SBML_ROUTE] is not None:
+        verdict = triage_sbml(
+            by_route[_SBML_ROUTE], t_end=t_end, name=name or "m", **screening
+        )
+        return replace(verdict, name=label)
+    path = by_route[_XPP_ROUTE]
+    if path is None:
+        held = ", ".join(os.path.basename(p) for p in paths) or "nothing"
+        return _unscreenable(
+            label, f"no SBML, COPASI, CellML or XPPAUT file; holds {held}"
+        )
+    from hallsim.xpp_import import process_from_xpp
+
+    try:
+        process = process_from_xpp(path, name=name or "m")
+    except Exception as exc:  # noqa: BLE001 - an import that raises rejects
+        return TriageVerdict(
+            name=label,
+            status="reject",
+            blockers=(f"import failed: {type(exc).__name__}: {exc}",),
+        )
+    return triage_process(
+        process,
+        DEFAULT_TRIAGE_T_END if t_end is None else t_end,
+        name=label,
+        **screening,
     )
 
 

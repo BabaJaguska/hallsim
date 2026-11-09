@@ -1006,6 +1006,20 @@ def download_jws_model(slug: str) -> Path:
     return path
 
 
+_EMBEDDED_BIOMODEL = re.compile(r"BIOMD\d{10}")
+
+
+def canonical_deposit(model_id, source: str) -> tuple:
+    """``(model_id, source)`` of the deposit a hit really is. A repository
+    that re-hosts BioModels embeds the accession in its own id
+    (BioSimulations: ``BIOMD0000000582_tellurium_...``), and screening the
+    underlying deposit beats reporting a copy as unreadable."""
+    embedded = _EMBEDDED_BIOMODEL.search(str(model_id))
+    if source != "biomodels" and embedded:
+        return embedded.group(0), "biomodels"
+    return model_id, source
+
+
 def model_files(model_id: str, source: str, timeout: float) -> list:
     """Local model files for one candidate, dispatched on its repository.
 

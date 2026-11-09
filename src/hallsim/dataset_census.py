@@ -2,13 +2,15 @@
 for what a screened model could be scored on. The data-side mirror of
 :mod:`hallsim.census`, and the supply count for a composition benchmark.
 
-Five routes enumerate: ``papers`` (the model census's PubMed ids through
-Europe PMC: what each model's own paper deposited), ``geo`` (every series
-for the organisms), ``ebi`` (every entry of PRIDE, MetaboLights,
-Metabolomics Workbench and ArrayExpress through EBI Search), ``osdr``
-(NASA's Open Science Data Repository, where a study's ground-against-flight
-contrast is a declared factor) and ``bioimages``. Every row then meets the
-same gates, cheapest first and nested:
+Six routes enumerate: ``papers`` (the model census's PubMed ids through
+Europe PMC: what each model's own paper deposited), ``encode`` (every
+released ENCODE experiment for the organisms; a knockdown states its
+design and names the GEO series copying it), ``geo`` (every series for
+the organisms), ``ebi`` (every entry of PRIDE, MetaboLights, Metabolomics
+Workbench and ArrayExpress through EBI Search), ``osdr`` (NASA's Open
+Science Data Repository, where a study's ground-against-flight contrast is
+a declared factor) and ``bioimages``. Every row then meets the same gates,
+cheapest first and nested:
 
 1. ``contrast``: two sample groups, so a fold change exists — two
    timepoints in an arm, or a perturbed arm beside a control. Three or
@@ -56,6 +58,7 @@ from hallsim.search.datasets import (
     identity,
     iter_bioimages,
     iter_ebi,
+    iter_encode,
     iter_expression_atlas,
     iter_geo,
     iter_osdr,
@@ -79,12 +82,15 @@ GATE_LABEL = {
     "matched": "a screened model carries one",
     "loadable": "a reader opens the file",
 }
-#: In the order they run. The curated views (``gds`` over GEO series,
-#: ``atlas`` over ArrayExpress and GEO deposits) come after the
-#: repositories they curate, and the report keeps whichever row of a
+#: In the order they run. ENCODE comes before GEO, which copies its
+#: experiments one series apiece without their design, so a run cut short
+#: still holds the record that states it; the curated views (``gds`` over
+#: GEO series, ``atlas`` over ArrayExpress and GEO deposits) come after
+#: the repositories they curate. The report keeps whichever row of a
 #: deposit saw the most of its design.
 ROUTES = (
     "papers",
+    "encode",
     "geo",
     "ebi",
     "osdr",
@@ -1170,6 +1176,7 @@ def iter_biomodels_data(models_run):
 
 #: Routes that are a stream of candidates, by what they enumerate.
 STREAMS = {
+    "encode": lambda models_run, organisms: iter_encode(organisms),
     "bioimages": lambda models_run, organisms: iter_bioimages(),
     "gds": lambda models_run, organisms: iter_geo(organisms, entry="gds"),
     "atlas": lambda models_run, organisms: iter_expression_atlas(),

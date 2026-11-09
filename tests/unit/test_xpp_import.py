@@ -228,3 +228,13 @@ class TestWithParamInput:
         proc = process_from_xpp(_write(tmp_path, "par k=1.0\nx'=-k*x\ndone\n"))
         with pytest.raises(KeyError, match="not a constant"):
             proc.with_param_input("nope", "p_in")
+
+
+def test_a_name_that_is_a_python_keyword_still_evaluates(tmp_path):
+    # `Is`, the injected current in ModelDB's neuron files, lower-cases to
+    # the keyword `is`; the public parameter keeps that name.
+    src = "par Is=2\nf(Is)=2*Is\nx'=Is-x+f(Is)\ndone\n"
+    proc = process_from_xpp(_write(tmp_path, src))
+    assert "is" in proc.parameters
+    d = proc.derivative(0.0, {"x": jnp.asarray(0.5)})
+    assert float(d["x"]) == 5.5

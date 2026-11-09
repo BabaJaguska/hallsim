@@ -1871,6 +1871,11 @@ ENCODE_MODALITY = {
     "RNA binding": ("rna-binding", True),
     "3D chromatin structure": ("chromatin-structure", True),
 }
+#: The biosample each replicate's library came from, which carries the
+#: organism and everything done to the sample before the assay.
+_BIOSAMPLE = "replicates.library.biosample"
+#: The organism filter.
+ENCODE_ORGANISM = f"{_BIOSAMPLE}.organism.scientific_name"
 ENCODE_FIELDS = (
     "accession",
     "assay_title",
@@ -1881,25 +1886,34 @@ ENCODE_FIELDS = (
     "biosample_ontology.term_name",
     "biosample_summary",
     "replicates.biological_replicate_number",
-    "replicates.library.biosample.organism.scientific_name",
+    ENCODE_ORGANISM,
+    f"{_BIOSAMPLE}.treatments.treatment_term_name",
+    f"{_BIOSAMPLE}.applied_modifications.purpose",
+    f"{_BIOSAMPLE}.applied_modifications.modified_site_by_target_id.label",
     "possible_controls.accession",
+    "possible_controls.perturbed",
     "dbxrefs",
     "references.identifiers",
 )
 
 
-def _encode_search(params: list[tuple], timeout: float) -> list[dict]:
-    """The ``@graph`` of an ENCODE search, whose filters repeat keys so
-    ``params`` is a list of pairs; a search with no hits answers 404, which
-    is an empty list here."""
+def _encode_get(params: list[tuple], timeout: float) -> dict:
+    """One ENCODE search response, whose filters repeat keys so ``params``
+    is a list of pairs; a search with no hits answers 404, which is an
+    empty response here."""
     import urllib.error
 
     try:
-        return get_json(f"{ENCODE}/search/", params, timeout).get("@graph", [])
+        return get_json(f"{ENCODE}/search/", params, timeout)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            return []
+            return {}
         raise
+
+
+def _encode_search(params: list[tuple], timeout: float) -> list[dict]:
+    """The ``@graph`` of an ENCODE search."""
+    return _encode_get(params, timeout).get("@graph", [])
 
 
 def _bio_replicates(entry: dict) -> int:
@@ -1911,20 +1925,81 @@ def _bio_replicates(entry: dict) -> int:
     )
 
 
+def _biosamples(entry: dict) -> list[dict]:
+    return [
+        (r.get("library") or {}).get("biosample") or {}
+        for r in entry.get("replicates") or []
+    ]
+
+
+def _arm_controls(entry: dict) -> list[str]:
+    """The control experiments that are the other arm of a perturbed
+    experiment: those whose biosample was left alone. The non-targeting
+    shRNA beside a knockdown is one; the input library beside a ChIP of a
+    treated sample shares the treatment and is not."""
+    return [
+        str(c.get("accession"))
+        for c in entry.get("possible_controls") or []
+        if c.get("accession") and not c.get("perturbed")
+    ]
+
+
+def _encode_perturbation(entry: dict) -> tuple[list[str], list[str]]:
+    """What was done to an experiment's biosamples, as ENCODE states it:
+    the perturbations — a gene repressed or expressed, a treatment — and
+    the other modifications (an epitope tag, a reporter construct), which
+    change what the assay sees and not the biology it measures."""
+    perturbations: list[str] = []
+    modifications: list[str] = []
+    for b in _biosamples(entry):
+        for m in b.get("applied_modifications") or []:
+            purpose = str(m.get("purpose") or "")
+            gene = str(
+                (m.get("modified_site_by_target_id") or {}).get("label") or ""
+            )
+            if purpose in ("repression", "expression") and gene:
+                perturbations.append(gene)
+            elif purpose or gene:
+                modifications.append(" ".join(p for p in (purpose, gene) if p))
+        for t in b.get("treatments") or []:
+            perturbations.append(str(t.get("treatment_term_name") or ""))
+    return (
+        list(dict.fromkeys(filter(None, perturbations))),
+        list(dict.fromkeys(modifications)),
+    )
+
+
+def _encode_controls(entries: list[dict], timeout: float) -> dict[str, int]:
+    """Biological replicates of every control experiment that is an arm of
+    one of the perturbed ``entries``, a hundred accessions a request."""
+    controls = sorted(
+        {c for e in entries if e.get("perturbed") for c in _arm_controls(e)}
+    )
+    n_controls: dict[str, int] = {}
+    for i in range(0, len(controls), 100):
+        found = _encode_search(
+            [("type", "Experiment"), ("limit", "all"), ("format", "json")]
+            + [("accession", c) for c in controls[i : i + 100]]
+            + [
+                ("field", "accession"),
+                ("field", "replicates.biological_replicate_number"),
+            ],
+            timeout,
+        )
+        n_controls.update(
+            {str(e.get("accession")): _bio_replicates(e) for e in found}
+        )
+    return n_controls
+
+
 def _encode_candidate(entry: dict, n_controls: dict) -> DatasetCandidate:
     accession = str(entry.get("accession") or "")
     assay = str(entry.get("assay_title") or "")
     target = str((entry.get("target") or {}).get("label") or "")
     cell = str((entry.get("biosample_ontology") or {}).get("term_name") or "")
-    reps = entry.get("replicates") or []
     organisms = {
-        str(
-            ((r.get("library") or {}).get("biosample") or {})
-            .get("organism", {})
-            .get("scientific_name")
-            or ""
-        )
-        for r in reps
+        str((b.get("organism") or {}).get("scientific_name") or "")
+        for b in _biosamples(entry)
     } - {""}
     slim = next(
         (s for s in entry.get("assay_slims") or [] if s in ENCODE_MODALITY),
@@ -1932,20 +2007,20 @@ def _encode_candidate(entry: dict, n_controls: dict) -> DatasetCandidate:
     )
     measured = Measured(*ENCODE_MODALITY[slim]) if slim else Measured()
     n_treated = _bio_replicates(entry)
-    controls = [
-        str(c.get("accession") or "")
-        for c in entry.get("possible_controls") or []
-    ]
+    perturbations, modifications = _encode_perturbation(entry)
+    controls = _arm_controls(entry) if entry.get("perturbed") else []
     stated = None
-    factors: tuple[str, ...] = ()
-    if entry.get("perturbed") and target and controls:
+    factors = tuple(f"perturbation:{p}" for p in perturbations) + tuple(
+        f"modification:{m}" for m in modifications
+    )
+    if perturbations and controls:
         n_ctrl = sum(n_controls.get(c, 0) for c in controls)
         stated = Design(
-            arms=(target, "control"),
+            arms=(" + ".join(perturbations), "control"),
             control="control",
             n_titles=n_treated + n_ctrl,
         )
-        factors = (f"perturbation:{target}", f"method:{assay}") + tuple(
+        factors += (f"method:{assay}",) + tuple(
             f"control:{c}" for c in controls
         )
     pmids = [
@@ -1984,14 +2059,18 @@ def search_encode(
     organism: str | None = None,
     timeout: float = 30.0,
 ) -> list[DatasetCandidate]:
-    """ENCODE experiments matching ``query``. A perturbed experiment — an
-    shRNA, CRISPRi or CRISPR knockdown followed by RNA-seq — states its
-    design: the target as one arm, the matched control experiment ENCODE
-    names as the other, with both experiments' biological replicates
-    counted, and the control's accession as a ``control:`` factor. GEO mirrors
-    most of these, one series per experiment, so the mirror of a knockdown
-    holds neither its control nor its target; each hit lists those series
-    in ``copies``, so a search or census keeps the ENCODE record."""
+    """ENCODE experiments matching ``query``. A perturbed experiment
+    states what was done to its biosample — a gene repressed or expressed,
+    a treatment — as ``perturbation:`` factors, never the antibody target
+    of the assay; and where a control experiment it names has an
+    unperturbed biosample (the non-targeting shRNA beside a knockdown, not
+    the input library beside a ChIP of a treated sample) it states its
+    design: that perturbation as one arm, the control as the other, both
+    experiments' biological replicates counted, the control's accession a
+    ``control:`` factor. GEO mirrors most experiments, one series apiece,
+    so the mirror of a knockdown holds neither its control nor its target;
+    each hit lists those series in ``copies``, so a search or census keeps
+    the ENCODE record."""
     params = [
         ("type", "Experiment"),
         ("status", "released"),
@@ -2000,36 +2079,70 @@ def search_encode(
         ("format", "json"),
     ]
     if organism:
-        params.append(
-            ("replicates.library.biosample.organism.scientific_name", organism)
-        )
+        params.append((ENCODE_ORGANISM, organism))
     params += [("field", f) for f in ENCODE_FIELDS]
     entries = _encode_search(params, timeout)
     log.info("encode '%s': %d hits", query, len(entries))
-    controls = sorted(
-        {
-            str(c.get("accession") or "")
-            for e in entries
-            if e.get("perturbed")
-            for c in e.get("possible_controls") or []
-        }
-        - {""}
-    )
-    n_controls = {}
-    if controls:
-        found = _encode_search(
-            [("type", "Experiment"), ("limit", "all"), ("format", "json")]
-            + [("accession", c) for c in controls]
-            + [
-                ("field", "accession"),
-                ("field", "replicates.biological_replicate_number"),
-            ],
-            timeout,
-        )
-        n_controls = {
-            str(e.get("accession")): _bio_replicates(e) for e in found
-        }
+    n_controls = _encode_controls(entries, timeout)
     return [_encode_candidate(e, n_controls) for e in entries]
+
+
+def iter_encode(
+    organisms=("Homo sapiens", "Mus musculus"), *, timeout: float = 180.0
+):
+    """Every released ENCODE experiment for ``organisms``, one assay
+    category of one organism at a time. The search refuses an offset past
+    10,000 and honours ``limit=all``, so the listing is sliced by its own
+    ``assay_slims`` facet and each slice fetched whole — the largest,
+    human DNA binding, is 9,400 experiments and 8 MB in twenty seconds.
+    Every released experiment carries a category; one in two categories
+    is yielded once."""
+    seen: set[str] = set()
+    for organism in organisms:
+        base = [
+            ("type", "Experiment"),
+            ("status", "released"),
+            (ENCODE_ORGANISM, organism),
+        ]
+        facets = _encode_get(
+            base + [("limit", 0), ("format", "json")], timeout
+        )
+        total = int(facets.get("total") or 0)
+        slims = [
+            str(t.get("key"))
+            for f in facets.get("facets") or []
+            if f.get("field") == "assay_slims"
+            for t in f.get("terms") or []
+        ]
+        log.info(
+            "encode: %d experiments for %s in %d categories",
+            total,
+            organism,
+            len(slims),
+        )
+        n = 0
+        for slim in slims:
+            entries = _encode_search(
+                base
+                + [("assay_slims", slim), ("limit", "all"), ("format", "json")]
+                + [("field", f) for f in ENCODE_FIELDS],
+                timeout,
+            )
+            n_controls = _encode_controls(entries, timeout)
+            for e in entries:
+                accession = str(e.get("accession") or "")
+                if accession in seen:
+                    continue
+                seen.add(accession)
+                n += 1
+                yield _encode_candidate(e, n_controls)
+            log.info(
+                "encode %s / %s: %d experiments", organism, slim, len(entries)
+            )
+        if n != total:
+            log.info(
+                "encode: %d of %d %s experiments listed", n, total, organism
+            )
 
 
 def _search_petab(*a, **kw):
