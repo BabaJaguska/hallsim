@@ -163,7 +163,9 @@ def test_the_framework_tools_open_a_deposit(monkeypatch):
     table.attrs["snapshot"] = "2026-09-28"
     monkeypatch.setattr(census_snapshots, "shipped_table", lambda p: table)
 
-    mcp = server.framework_tools(server.build_server())
+    from hallsim.agent_tools import framework_tools
+
+    mcp = framework_tools(server.build_server())
     v = _call(
         mcp, "triage_model", model_id="x", source="biosimulations", t_end=3
     )

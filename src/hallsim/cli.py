@@ -1012,7 +1012,8 @@ def mcp_server(http, port):
     hit from any repository), census_models and census_datasets (the
     shipped census tables, offline). Register it in Claude Code with
     `claude mcp add hallsim -- supply mcp`."""
-    from hallsim.search.server import build_server, framework_tools
+    from hallsim.agent_tools import framework_tools
+    from hallsim.search.server import build_server
 
     mcp = framework_tools(build_server())
 

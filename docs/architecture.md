@@ -618,6 +618,7 @@ src/hallsim/
   intake.py            — triage_sbml, triage_model (a hit from any repository the search lists; XPPAUT through xpp_import), published_fit_chi2
   census.py            — the corpus census: every deposit through the gate, and the report
   census_snapshots.py  — the dated census tables shipped under reference/census, queried offline
+  agent_tools.py       — framework_tools: screen_models, triage_model and the census tables as MCP tools, added to the search server by `supply mcp`
   search/              — the repository layer; imports nothing from the rest of the package, and tests/unit/test_search_boundary.py keeps it so
     fetch.py           — one JSON getter, retry with backoff, concurrent fetch, the disk cache under ~/.cache/hallsim
     models.py          — search_for_model across BioModels, JWS, ModelDB, BioSimulations, Physiome, Europe PMC; a candidate's files, downloaded and cached
@@ -626,7 +627,7 @@ src/hallsim/
     web.py             — supply discover: papers, their PDFs, the repositories they cite
     datasets.py        — search_for_dataset (GEO and its DataSets, Expression Atlas, Zenodo, PRIDE, MetaboLights, Metabolomics Workbench, ArrayExpress, BioImage Archive, OSDR, ENCODE), parse_design and the designs a source states, a paper's own data and supplement tables, resolve_perturbation
     attached.py        — the data a model ships beside itself: PEtab problems (petab), COPASI fitting experiments (basico), a BioModels deposit's own tables
-    server.py          — the search as MCP tools: find_models, find_data, dataset_design, paper_datasets, sources; framework_tools adds screen_models, triage_model, census_models, census_datasets (`supply mcp`)
+    server.py          — the search as MCP tools: find_models, find_data, dataset_design, paper_datasets, sources; `hallsim.agent_tools.framework_tools` adds screen_models, triage_model, census_models, census_datasets (`supply mcp`)
   screens.py           — where a hit meets the framework: what a model produces, what a dataset measures of a composite, how a platform loads
   dataset_census.py    — the data census: every deposit through contrast → measured → matched → loadable
   measurements.py      — MeasuredDataset: the one contrast interface every reader returns
