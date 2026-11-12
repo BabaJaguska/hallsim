@@ -180,6 +180,19 @@ def _with_own_root_finder(solver, root_finder):
 #: that reaches it stops short and the run reports it.
 SSA_MAX_EVENTS_PER_WINDOW: int = 10_000_000
 
+#: The raised error carries this, and the solver ladder reads it there.
+STEP_COLLAPSE = "step size collapsed"
+#: Rejected share of an exhausted budget past which the step size collapsed.
+STEP_COLLAPSE_REJECTED_SHARE = 0.9
+
+
+def _step_collapsed(result, num_steps, num_rejected):
+    """Did a solve spend its budget on rejected steps, as one that blows up
+    in finite time does? Traced-safe, elementwise over a batch."""
+    return (result == dfx.RESULTS.max_steps_reached) & (
+        num_rejected > STEP_COLLAPSE_REJECTED_SHARE * num_steps
+    )
+
 
 def _worst_state(ys: jnp.ndarray):
     """``(index, magnitude, any_nonfinite)`` for the largest ``|state|``,
@@ -1098,7 +1111,9 @@ class Scheduler:
                 head = str(exc).splitlines()[0]
                 match = re.search(r"group '([^']+)'", str(exc))
                 failed = [match.group(1)] if match else None
-                if not self._promote_failed(
+                # A collapsed step size is a singularity, not stiffness: the
+                # next rung would step across it and call that a solve.
+                if STEP_COLLAPSE in str(exc) or not self._promote_failed(
                     plan, composite, macro_dt, head, failed
                 ):
                     raise
@@ -1116,6 +1131,7 @@ class Scheduler:
                         jnp.all(st["result"] == dfx.RESULTS.successful)
                     )
                 ]
+                failed = self._without_collapsed(plan, result, failed)
                 if not self._promote_failed(
                     plan, composite, macro_dt, "result.ok is False", failed
                 ):
@@ -1124,6 +1140,46 @@ class Scheduler:
                 composite, t_span, macro_dt, y0, save_dt, adjoint, antialias
             )
         return self._execute(plan, params_from=composite, rng_key=rng_key)
+
+    def _without_collapsed(self, plan: RunPlan, result, failed: list) -> list:
+        """``failed`` less the explicit groups whose every failed member
+        collapsed its step size, each reported with the last time its
+        trajectory was finite. Those stay failed: the next rung would step
+        across the singularity and return a trajectory that means nothing."""
+        keep = []
+        for g in failed:
+            st = result.stats[g]
+            bad = st["result"] != dfx.RESULTS.successful
+            collapsed = _step_collapsed(
+                st["result"], st["num_solver_steps"], st["num_rejected_steps"]
+            )
+            if plan.integrators[g].stiff or not bool(
+                jnp.all(~bad | collapsed)
+            ):
+                keep.append(g)
+                continue
+            finite = jnp.all(
+                jnp.isfinite(result.ys),
+                axis=tuple(range(1, jnp.ndim(result.ys))),
+            )
+            reached = (
+                float(result.ts[finite][-1]) if bool(finite.any()) else None
+            )
+            log.error(
+                "group %r did not solve: %s on the explicit solver (%s of %s "
+                "steps rejected), so the solution blows up in finite time "
+                "— last finite saved time %s. Not re-running on %s, which "
+                "can step across a singularity and return a finite "
+                "trajectory that means nothing; read result.ys up to that "
+                "time for the state that diverges.",
+                g,
+                STEP_COLLAPSE,
+                int(jnp.max(st["num_rejected_steps"])),
+                int(jnp.max(st["num_solver_steps"])),
+                reached,
+                type(self.implicit_solver).__name__,
+            )
+        return keep
 
     def _promote_failed(
         self, plan: RunPlan, composite, macro_dt, why: str, failed=None
@@ -3486,7 +3542,7 @@ class Scheduler:
             .set(sol.ys)
         )
         return sol, self._guard_result(
-            saved, sol.result, group_name, integ, keys
+            saved, sol.result, group_name, integ, keys, sol.stats
         )
 
     def _initial_step(self, rhs_fn, state_vec, own, t0, integ):
@@ -3659,22 +3715,33 @@ class Scheduler:
 
         return final_vec, last_dt, diag
 
-    def _guard_result(self, value, result, group_name: str, integ, keys=None):
+    def _guard_result(
+        self, value, result, group_name: str, integ, keys=None, stats=None
+    ):
         """On a failed solve (when ``self.throw``) raise a labelled error
         naming the failure kind and worst state.
 
-        ``eqx.error_if`` bakes the check into ``value``, so the raise fires
-        eagerly and under JIT/grad alike; ``throw=False`` sends the ``RESULTS``
-        code to stats instead. The detailed report is eager-path only — an
-        in-graph callback cannot pay for itself, since ``vmap`` turns the
-        gating ``lax.cond`` into a select that fires once per batch member
-        regardless. Traced runs read :attr:`SchedulerResult.ok`.
+        ``eqx.branched_error_if`` bakes the check into ``value``, so the
+        raise fires eagerly and under JIT/grad alike, and a step-size
+        collapse is named as one in both; ``throw=False`` sends the
+        ``RESULTS`` code to stats instead. The detailed report is eager-path
+        only — an in-graph callback cannot pay for itself, since ``vmap``
+        turns the gating ``lax.cond`` into a select that fires once per batch
+        member regardless. Traced runs read :attr:`SchedulerResult.ok`.
         """
         if not self.throw:
             return value
         solver = type(integ.solver).__name__
         stiff = bool(integ.stiff)
         failed = result != dfx.RESULTS.successful
+        stats = stats or {}
+        # Measured on the explicit rung only; an implicit solve also counts
+        # failed Newton iterations as rejections.
+        collapsed = (not stiff) & _step_collapsed(
+            result,
+            stats.get("num_steps", 0),
+            stats.get("num_rejected_steps", 0),
+        )
 
         if not isinstance(failed, jax.core.Tracer) and bool(failed):
             idx, mag, nonfinite = _worst_state(value)
@@ -3685,12 +3752,19 @@ class Scheduler:
                 else f"state#{i}"
             )
             kind = (
-                "max_steps_reached — the stiff solve ran out of steps; raise "
-                "Scheduler(max_steps=…) or reduce the group's stiffness"
-                if bool(result == dfx.RESULTS.max_steps_reached)
-                else "stiff/implicit-Newton divergence — the state got too "
-                "stiff for the implicit step (a fast mode; find the parameter "
-                "driving it)"
+                f"{STEP_COLLAPSE} — nearly every step was rejected, so the "
+                "solution blows up in finite time (a pole in a rate law, a "
+                "runaway feedback); find the state that diverges, no solver "
+                "setting integrates past it"
+                if bool(collapsed)
+                else (
+                    "max_steps_reached — the stiff solve ran out of steps; "
+                    "raise Scheduler(max_steps=…) or reduce the group's stiffness"
+                    if bool(result == dfx.RESULTS.max_steps_reached)
+                    else "stiff/implicit-Newton divergence — the state got too "
+                    "stiff for the implicit step (a fast mode; find the parameter "
+                    "driving it)"
+                )
             )
             log.error(
                 "Scheduler SOLVE FAILED — group=%r solver=%s stiff=%s: %s. "
@@ -3704,12 +3778,22 @@ class Scheduler:
                 bool(nonfinite),
             )
 
-        reason = (
+        head = (
             f"Scheduler: group {group_name!r} did not solve (solver={solver}, "
-            f"stiff={stiff}) — inspect result.ok / result.stats['diagnosis'] "
-            f"(run with throw=False) for the RESULTS kind and worst state."
+            f"stiff={stiff})"
         )
-        return eqx.error_if(value, failed, reason)
+        reasons = [
+            f"{head} — inspect result.ok / result.stats['diagnosis'] "
+            "(run with throw=False) for the RESULTS kind and worst state.",
+            f"{head}: {STEP_COLLAPSE}, nearly every step was rejected. The "
+            "solution blows up in finite time at these parameter values (a "
+            "pole in a rate law, a runaway feedback), which no solver "
+            "integrates past — run with throw=False and read the saved "
+            "trajectory for the state that diverges.",
+        ]
+        return eqx.branched_error_if(
+            value, failed, jnp.where(collapsed, 1, 0), reasons
+        )
 
     def _solve_group_interpolated(
         self,

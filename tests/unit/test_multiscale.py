@@ -2715,6 +2715,67 @@ def test_a_model_that_turns_stiff_is_rerouted_to_the_implicit_solver(caplog):
     assert abs(float(np.asarray(res2.get("p/y"))[-1]) - np.cos(T)) < 1e-3
 
 
+def _pole_composite():
+    """``x`` decays at ``h / (1 - h)`` while ``h`` climbs through 1: the rate
+    has a pole at t = 10, the shape of a saturating fraction written as
+    ``f / (1 - f)`` once a perturbation pushes ``f`` past 1."""
+    from hallsim.composite import Composite
+    from hallsim.process import Port, PortRole, Process
+
+    class Pole(Process):
+        def ports_schema(self):
+            return {
+                "x": Port(role=PortRole.EVOLVED, default=1.0),
+                "h": Port(role=PortRole.EVOLVED, default=0.0),
+            }
+
+        def derivative(self, t, state):
+            h = state["h"]
+            return {"x": -state["x"] * h / (1.0 - h), "h": 0.1 + 0.0 * h}
+
+    return Composite(
+        {"s": Pole()}, {"s": {"x": "p/x", "h": "p/h"}}, validate=False
+    )
+
+
+def test_a_finite_time_singularity_is_not_rerouted_as_stiffness(caplog):
+    """The explicit solver cannot pass a pole and spends its budget on
+    rejected steps. That is not stiffness: an implicit solver steps across
+    the pole and returns a finite, meaningless trajectory, so the Scheduler
+    reports the failure instead of re-running."""
+    from hallsim.scheduler import Scheduler
+
+    comp = _pole_composite()
+    sched = Scheduler(max_steps=20_000, throw=False)
+    with caplog.at_level("WARNING"):
+        res = sched.run(comp, t_span=(0.0, 20.0), macro_dt=20.0, save_dt=1.0)
+    assert not bool(res.ok)
+    assert res.stats["default"]["solver"] == "UnrolledTsit5"
+    assert "step size collapsed" in caplog.text
+    assert "did not solve on the explicit solver" not in caplog.text
+
+
+def test_a_finite_time_singularity_raises_under_its_own_name():
+    """Eagerly and inside a trace, the raised error says the step size
+    collapsed, so the reader looks for a singularity and not a solver knob."""
+    import equinox as eqx
+
+    from hallsim.scheduler import Scheduler
+
+    comp = _pole_composite()
+
+    def final_x(comp):
+        res = Scheduler(max_steps=20_000).run(
+            comp, t_span=(0.0, 20.0), macro_dt=20.0, save_dt=1.0
+        )
+        return res.get("p/x")[-1]
+
+    with pytest.raises(Exception, match="step size collapsed"):
+        final_x(comp)
+    with pytest.raises(Exception, match="step size collapsed"):
+        eqx.filter_jit(final_x)(comp)
+
+
 def test_each_composite_runs_from_its_own_initial_state():
     """Two composites of one structure that differ only in their start,
     through one Scheduler, start where each says: the plan memo is shared
